@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { creations } from '../../../data/creations';
+import { ContactModal } from '../ContactModal';
 
 const STATUS_BADGE: Record<string, { glyph: string; cls: string }> = {
   live: { glyph: '●', cls: 'text-[var(--tech-green)]' },
@@ -7,15 +9,24 @@ const STATUS_BADGE: Record<string, { glyph: string; cls: string }> = {
   strategic: { glyph: '◇', cls: 'text-[var(--tech-blue)]' },
 };
 
+const LINKEDIN_URL = 'https://www.linkedin.com/in/neco-goode';
+const GITHUB_URL = 'https://github.com/BackpackNecoG';
+
 /**
  * Left sidebar: file-explorer tree of creations + meta files.
- * Active state highlights the current /TechTour/creations/:slug.
+ *
+ * - creation rows route to /TechTour/creations/:slug
+ * - email.txt opens a contact modal that drafts a mailto: to me@necogoode.com
+ * - linkedin.url + github.url open the live profiles in a popup window
+ *   (window.open with sized features; fallback to a normal tab if blocked)
  */
 export function FileExplorer({ activeFile = 'README.md' }: { activeFile?: string }) {
   const { pathname } = useLocation();
   const activeSlug = pathname.startsWith('/TechTour/creations/')
     ? pathname.split('/').pop()
     : null;
+
+  const [contactOpen, setContactOpen] = useState(false);
 
   return (
     <div className="row-span-2 bg-[var(--tech-bg-soft)] border-r border-[var(--tech-bg-line)] overflow-y-auto font-mono text-[0.78rem]">
@@ -54,14 +65,19 @@ export function FileExplorer({ activeFile = 'README.md' }: { activeFile?: string
           <TreeFolder>about</TreeFolder>
           <TreeLink to="/TechTour" indent={1}><FileIcon /> bio.md</TreeLink>
           <TreeLink to="/TechTour" indent={1}><FileIcon /> stack.md</TreeLink>
-          <TreeLink to="/TechTour" indent={1}><FileIcon /> resume.pdf</TreeLink>
         </div>
 
         <div className="mt-2">
           <TreeFolder>contact</TreeFolder>
-          <TreeLink to="/TechTour" indent={1}><FileIcon /> email.txt</TreeLink>
-          <TreeLink to="/TechTour" indent={1}><FileIcon /> linkedin.url</TreeLink>
-          <TreeLink to="/TechTour" indent={1}><FileIcon /> github.url</TreeLink>
+          <TreeAction indent={1} onClick={() => setContactOpen(true)}>
+            <FileIcon /> email.txt
+          </TreeAction>
+          <TreeAction indent={1} onClick={() => openInPopup(LINKEDIN_URL, 'LinkedIn')}>
+            <FileIcon /> linkedin.url
+          </TreeAction>
+          <TreeAction indent={1} onClick={() => openInPopup(GITHUB_URL, 'GitHub')}>
+            <FileIcon /> github.url
+          </TreeAction>
         </div>
 
         <div className="mt-2">
@@ -73,8 +89,23 @@ export function FileExplorer({ activeFile = 'README.md' }: { activeFile?: string
           <TreeRow indent={0}><FileIcon /> package.json</TreeRow>
         </div>
       </div>
+
+      <ContactModal open={contactOpen} onClose={() => setContactOpen(false)} />
     </div>
   );
+}
+
+/**
+ * Open a URL in a popup window. Falls back to a new tab if the browser blocks
+ * the popup (most do unless the call is in a direct user gesture, which it is here).
+ */
+function openInPopup(url: string, name: string): void {
+  const features = 'noopener,noreferrer,width=900,height=720,menubar=no,toolbar=no';
+  const w = window.open(url, name, features);
+  if (!w) {
+    // Popup was blocked — fall back to standard new-tab navigation.
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
 }
 
 function FileIcon() {
@@ -121,5 +152,27 @@ function TreeLink({
     <Link to={to} className={`${pad} pr-3.5 py-0.5 flex items-center gap-1.5 no-underline transition-colors ${activeCls}`}>
       {children}
     </Link>
+  );
+}
+
+/** Same look as TreeLink but invokes a callback (modal open / popup open) instead of routing. */
+function TreeAction({
+  indent = 0,
+  onClick,
+  children,
+}: {
+  indent?: number;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const pad = indent === 0 ? 'pl-3.5' : indent === 1 ? 'pl-7' : 'pl-11';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`${pad} pr-3.5 py-0.5 flex items-center gap-1.5 w-full text-left bg-transparent border-l-2 border-transparent text-[var(--tech-text-soft)] hover:bg-[var(--tech-bg-elev)] hover:text-[var(--tech-text)] transition-colors`}
+    >
+      {children}
+    </button>
   );
 }
