@@ -31,26 +31,20 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      # Backend deps install at deploy-time inside Oryx; we don't pre-build it.
-      - name: Install (backend)
-        working-directory: api
-        run: npm ci --no-audit --no-fund
-
       - name: Deploy to Azure Static Web Apps
         id: swa-deploy
         uses: Azure/static-web-apps-deploy@v1
         with:
-          # AZURE_STATIC_WEB_APPS_API_TOKEN is provisioned by `az staticwebapp create`
-          # and stored as a GitHub repo secret automatically when Azure connects to the repo.
+          # AZURE_STATIC_WEB_APPS_API_TOKEN is the SWA deployment token stored as a GitHub repo secret.
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: 'upload'
-          # Where the SWA action looks for built output / functions
+          # We pre-build the frontend to web/dist (skip_app_build: true).
+          # The API runs through Oryx so SWA can detect Node + install deps + emit Function language metadata.
           app_location: 'web/dist'
           api_location: 'api'
-          output_location: ''           # web/dist is already the built output
-          skip_app_build: true          # we built above; don't double-build
-          skip_api_build: true
+          output_location: ''
+          skip_app_build: true
 
   close_pull_request:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
