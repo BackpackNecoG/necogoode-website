@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neco Goode — Choose a Path</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg: #0A0B0F;
+    --bg-soft: #131520;
+    --line: #232838;
+    --text: #E8EAF0;
+    --text-soft: #8B92A4;
+    --text-faint: #4A5168;
+    --tech: #5EEAD4;
+    --tech-glow: rgba(94, 234, 212, 0.4);
+    --bus: #FBBF77;
+    --bus-glow: rgba(251, 191, 119, 0.4);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    height: 100vh;
+}
+
+/* Subtle grid backdrop */
+body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+        linear-gradient(rgba(94, 234, 212, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(94, 234, 212, 0.04) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+    pointer-events: none;
+}
+
+/* Top brand */
+.top {
+    position: fixed;
+    top: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    z-index: 5;
+}
+.brand {
+    font-family: 'Fraunces', serif;
+    font-size: 1.4rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.4rem;
+}
+.brand em { font-style: italic; color: var(--tech); }
+.brand-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.3em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+}
+
+/* Center container */
+.choose {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 3rem;
+    padding: 0 2rem;
+}
+
+.prompt {
+    text-align: center;
+    max-width: 720px;
+}
+.prompt-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.3em;
+    color: var(--text-soft);
+    text-transform: uppercase;
+    margin-bottom: 1.5rem;
+}
+.prompt-eyebrow::before { content: '— '; color: var(--tech); }
+.prompt-eyebrow::after { content: ' —'; color: var(--bus); }
+.prompt-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(2.5rem, 5.5vw, 4rem);
+    font-weight: 400;
+    line-height: 1.05;
+    letter-spacing: -0.025em;
+    margin-bottom: 1rem;
+}
+.prompt-title em { font-style: italic; }
+.prompt-title em.tech { color: var(--tech); }
+.prompt-title em.bus { color: var(--bus); }
+.prompt-sub {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 1.2rem;
+    color: var(--text-soft);
+    line-height: 1.5;
+    max-width: 540px;
+    margin: 0 auto;
+}
+
+/* Two doors */
+.doors {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    width: 100%;
+    max-width: 920px;
+}
+
+.door {
+    padding: 2.5rem 2rem;
+    border: 1px solid var(--line);
+    background: var(--bg-soft);
+    text-decoration: none;
+    color: var(--text);
+    transition: all 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+}
+.door::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, var(--door-glow), transparent 70%);
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+}
+.door:hover::before { opacity: 0.08; }
+.door:hover { transform: translateY(-4px); border-color: var(--door-color); }
+
+.door.tech { --door-color: var(--tech); --door-glow: var(--tech-glow); }
+.door.bus { --door-color: var(--bus); --door-glow: var(--bus-glow); }
+
+.door-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.2em;
+    color: var(--text-faint);
+    margin-bottom: 0.75rem;
+    text-transform: uppercase;
+}
+.door-title {
+    font-family: 'Fraunces', serif;
+    font-size: 2rem;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
+}
+.door-title em { font-style: italic; color: var(--door-color); }
+.door-sub {
+    font-size: 0.9rem;
+    color: var(--text-soft);
+    line-height: 1.5;
+    margin-bottom: 1.5rem;
+    max-width: 280px;
+}
+.door-features {
+    list-style: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-soft);
+    margin-bottom: 1.5rem;
+    line-height: 2;
+    letter-spacing: 0.04em;
+}
+.door-features li::before { content: '▸ '; color: var(--door-color); }
+.door-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--door-color);
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+}
+.door:hover .door-cta { color: var(--text); }
+.door-cta .arrow { transition: transform 0.3s; }
+.door:hover .door-cta .arrow { transform: translateX(6px); }
+
+/* Bottom hint */
+.bottom-hint {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.2em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+}
+.bottom-hint .floor-link { color: var(--text-soft); text-decoration: none; border-bottom: 1px dotted var(--text-faint); }
+.bottom-hint .floor-link:hover { color: var(--tech); border-color: var(--tech); }
+
+@media (max-width: 700px) {
+    .doors { grid-template-columns: 1fr; }
+    .prompt-title { font-size: 2.5rem; }
+    .top { top: 1rem; }
+    .bottom-hint { font-size: 0.6rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="top">
+    <div class="brand">Neco<em>Goode</em></div>
+    <div class="brand-tag">Builder · Operator · Sr. Director of IT</div>
+</div>
+
+<div class="choose">
+    <div class="prompt">
+        <div class="prompt-eyebrow">Welcome — Choose a Path</div>
+        <h1 class="prompt-title">
+            Take the <em class="tech">Technical Tour</em><br>
+            or the <em class="bus">Business Tour.</em>
+        </h1>
+        <p class="prompt-sub">
+            Same five creations, two different lenses. Don't read it &mdash; run it.
+        </p>
+    </div>
+
+    <div class="doors">
+        <a href="/TechTour" class="door tech" data-path="tech">
+            <div class="door-num">01 &middot; For the Builders</div>
+            <h2 class="door-title">Technical <em>Tour.</em></h2>
+            <p class="door-sub">
+                Stack details, architecture decisions, and the engineering thinking behind every creation.
+            </p>
+            <ul class="door-features">
+                <li>IDE-style navigation</li>
+                <li>Stack &amp; dependency depth</li>
+                <li>Architecture &amp; trade-offs</li>
+                <li>Real production receipts</li>
+            </ul>
+            <span class="door-cta">
+                <span>./enter --tech</span>
+                <span class="arrow">→</span>
+            </span>
+        </a>
+
+        <a href="/BusTour" class="door bus" data-path="bus">
+            <div class="door-num">02 &middot; For Everyone Else</div>
+            <h2 class="door-title">Business <em>Tour.</em></h2>
+            <p class="door-sub">
+                The story behind the work — what each creation is, why I built it, and who it's for.
+            </p>
+            <ul class="door-features">
+                <li>Workshop-style layout</li>
+                <li>Story-form narratives</li>
+                <li>Visual &amp; human</li>
+                <li>No jargon required</li>
+            </ul>
+            <span class="door-cta">
+                <span>step inside</span>
+                <span class="arrow">→</span>
+            </span>
+        </a>
+    </div>
+</div>
+
+<div class="bottom-hint">
+    Stack-curious? Visit <a href="/floor" class="floor-link">the trading floor</a> &middot; live ticker on every creation
+</div>
+
+<script>
+// Remember choice in cookie for 30 days
+document.querySelectorAll('.door').forEach(door => {
+    door.addEventListener('click', (e) => {
+        const path = door.dataset.path;
+        document.cookie = `ng_path=${path}; max-age=${30 * 24 * 60 * 60}; path=/; SameSite=Lax`;
+    });
+});
+
+// Optional: skip splash if returning visitor (commented out by default — most personal sites should let visitors see this)
+// const cookie = document.cookie.split('; ').find(c => c.startsWith('ng_path='));
+// if (cookie) {
+//     const path = cookie.split('=')[1];
+//     window.location.href = path === 'tech' ? '/TechTour' : '/BusTour';
+// }
+</script>
+
+</body>
+</html>

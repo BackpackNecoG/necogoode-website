@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neco Goode — The Floor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg: #0E0F11;
+    --bg-soft: #16181B;
+    --bg-card: #1C1F23;
+    --bg-elevated: #232629;
+    --line: #2C3036;
+    --line-bright: #3D434B;
+    --text: #E8E6E0;
+    --text-soft: #9EA0A4;
+    --text-faint: #5A5D62;
+    --gain: #6FCF97;
+    --gain-bg: rgba(111, 207, 151, 0.12);
+    --loss: #E07060;
+    --loss-bg: rgba(224, 112, 96, 0.12);
+    --amber: #F2B450;
+    --amber-bg: rgba(242, 180, 80, 0.12);
+    --highlight: #6FCF97;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    -webkit-font-smoothing: antialiased;
+}
+body {
+    min-height: 100vh;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* ===== TICKER TAPE (top) ===== */
+.ticker {
+    background: #050608;
+    border-bottom: 1px solid var(--line);
+    padding: 0.5rem 0;
+    overflow: hidden;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+}
+.ticker-track {
+    display: inline-flex;
+    animation: ticker-scroll 40s linear infinite;
+    gap: 2.5rem;
+    padding-left: 100%;
+}
+@keyframes ticker-scroll {
+    from { transform: translateX(0); }
+    to { transform: translateX(-100%); }
+}
+.tick {
+    font-size: 0.78rem;
+    color: var(--text-soft);
+    letter-spacing: 0.05em;
+}
+.tick .sym {
+    color: var(--text);
+    font-weight: 600;
+    margin-right: 0.5rem;
+}
+.tick .val { color: var(--text); }
+.tick .delta { margin-left: 0.5rem; font-weight: 500; }
+.tick .delta.up { color: var(--gain); }
+.tick .delta.dn { color: var(--loss); }
+.tick .delta.fl { color: var(--amber); }
+
+/* ===== TOP BAR ===== */
+.topbar {
+    border-bottom: 1px solid var(--line);
+    padding: 0.6rem 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-soft);
+}
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.85rem;
+}
+.brand-mark {
+    width: 24px; height: 24px;
+    background: var(--amber);
+    color: #0E0F11;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: -0.05em;
+}
+.brand-text { color: var(--text); font-weight: 500; }
+.brand-text .dim { color: var(--text-faint); }
+
+.session-info {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.72rem;
+    color: var(--text-soft);
+    letter-spacing: 0.05em;
+}
+.session-info span strong { color: var(--text); margin-left: 0.25rem; }
+.live-pulse {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--gain);
+    font-weight: 600;
+}
+.live-pulse::before {
+    content: '';
+    width: 8px; height: 8px;
+    background: var(--gain);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--gain);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ===== MAIN GRID ===== */
+.workspace {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    gap: 1px;
+    background: var(--line);
+    min-height: calc(100vh - 84px);
+}
+.panel {
+    background: var(--bg);
+    padding: 1.25rem 1.5rem;
+}
+
+/* ===== LEFT: identity panel ===== */
+.identity-panel {
+    border-right: none;
+}
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 1rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+}
+.panel-header span:last-child { color: var(--amber); }
+.panel-header strong { color: var(--text); }
+
+.identity-name {
+    font-family: 'Inter', sans-serif;
+    font-size: 1.6rem;
+    line-height: 1.05;
+    color: var(--text);
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    margin-bottom: 0.5rem;
+}
+.identity-role {
+    font-size: 0.72rem;
+    color: var(--text-soft);
+    letter-spacing: 0.04em;
+    margin-bottom: 1.25rem;
+    line-height: 1.6;
+}
+.identity-role .amber { color: var(--amber); }
+
+/* Mini KPI list */
+.kpi-list { margin-bottom: 1.25rem; }
+.kpi {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    border-bottom: 1px dashed var(--line);
+    font-size: 0.78rem;
+}
+.kpi:last-child { border: none; }
+.kpi-label { color: var(--text-soft); }
+.kpi-value { color: var(--text); font-weight: 500; }
+.kpi-value.up { color: var(--gain); }
+
+/* About blurb */
+.about-blurb {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: var(--text-soft);
+    padding: 1rem;
+    background: var(--bg-soft);
+    border-left: 2px solid var(--amber);
+    margin-bottom: 1rem;
+}
+.about-blurb strong { color: var(--text); font-weight: 500; }
+.about-blurb em { color: var(--gain); font-style: normal; }
+
+/* CTA buttons */
+.action-btns {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.action-btn {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.78rem;
+    letter-spacing: 0.05em;
+    transition: all 0.15s;
+}
+.action-btn:hover {
+    background: var(--bg-card);
+    border-color: var(--amber);
+    color: var(--amber);
+}
+.action-btn .key {
+    background: var(--bg-card);
+    color: var(--text-faint);
+    font-size: 0.65rem;
+    padding: 0.15rem 0.4rem;
+    letter-spacing: 0.1em;
+}
+
+/* ===== CENTER: main feed ===== */
+.feed-panel { padding: 0; }
+.feed-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-soft);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+}
+.feed-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--line);
+}
+.feed-tab {
+    padding: 0.7rem 1.25rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    color: var(--text-soft);
+    text-transform: uppercase;
+    cursor: pointer;
+    border-right: 1px solid var(--line);
+    transition: all 0.15s;
+    background: transparent;
+    border-top: none;
+    border-left: none;
+    border-bottom: none;
+    font-family: inherit;
+}
+.feed-tab.active {
+    background: var(--bg);
+    color: var(--amber);
+    box-shadow: inset 0 -2px 0 var(--amber);
+}
+.feed-tab:hover { color: var(--text); }
+
+/* Watchlist table */
+.watchlist {
+    display: grid;
+    grid-template-columns: 60px 1fr 90px 110px 100px 80px;
+    align-items: center;
+    padding: 0.85rem 1.5rem;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    text-decoration: none;
+    color: var(--text);
+    transition: background 0.15s;
+    gap: 1rem;
+}
+.watchlist.head {
+    background: var(--bg-soft);
+    cursor: default;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+}
+.watchlist.head:hover { background: var(--bg-soft); }
+.watchlist:hover { background: var(--bg-soft); }
+.watchlist:hover .sym-cell { color: var(--amber); }
+
+.sym-cell { font-weight: 600; font-size: 0.85rem; transition: color 0.15s; }
+.name-cell {
+    line-height: 1.2;
+}
+.name-cell .name { color: var(--text); font-size: 0.85rem; font-weight: 500; }
+.name-cell .desc { color: var(--text-soft); font-size: 0.72rem; font-family: 'Inter', sans-serif; margin-top: 0.15rem; }
+
+.metric { font-size: 0.85rem; color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.delta-cell { text-align: right; font-size: 0.78rem; font-weight: 500; }
+.delta-cell.up { color: var(--gain); }
+.delta-cell.dn { color: var(--loss); }
+.delta-cell.fl { color: var(--amber); }
+
+/* Sparkline cell */
+.spark-cell {
+    height: 30px;
+    display: flex;
+    align-items: center;
+}
+.spark-cell svg { width: 100%; height: 100%; }
+
+.status-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    color: var(--gain);
+    text-transform: uppercase;
+    justify-content: flex-end;
+}
+.status-cell.dev { color: var(--amber); }
+.status-cell.future { color: var(--text-soft); }
+.status-cell .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 6px currentColor;
+}
+
+/* News strip below table */
+.news-strip {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+}
+.news-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    margin-bottom: 0.6rem;
+}
+.news-item {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.4rem 0;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.news-time {
+    color: var(--text-faint);
+    font-size: 0.7rem;
+    flex-shrink: 0;
+    width: 50px;
+}
+.news-text { color: var(--text-soft); font-family: 'Inter', sans-serif; }
+.news-text strong { color: var(--text); }
+.news-text .gain { color: var(--gain); }
+.news-text .amber { color: var(--amber); }
+
+/* ===== RIGHT: details / contact ===== */
+.right-panel {
+    border-left: none;
+}
+.detail-block {
+    padding: 1rem 0;
+    border-bottom: 1px solid var(--line);
+}
+.detail-block:last-child { border: none; }
+
+.contact-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.45rem 0;
+    font-size: 0.78rem;
+}
+.contact-item .label { color: var(--text-soft); letter-spacing: 0.05em; }
+.contact-item .value { color: var(--text); font-weight: 500; }
+.contact-item .value.amber { color: var(--amber); }
+
+.command-prompt {
+    margin-top: 1.25rem;
+    padding: 0.75rem 0.9rem;
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
+}
+.command-prompt .arrow { color: var(--gain); }
+.command-prompt input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: inherit;
+    font-size: inherit;
+    flex: 1;
+}
+.command-prompt .hint { color: var(--text-faint); font-size: 0.7rem; letter-spacing: 0.1em; }
+
+/* Mobile */
+@media (max-width: 1100px) {
+    .workspace { grid-template-columns: 1fr; }
+    .right-panel { display: none; }
+}
+@media (max-width: 700px) {
+    .session-info { display: none; }
+    .watchlist { grid-template-columns: 50px 1fr 70px 70px; gap: 0.5rem; padding: 0.75rem 1rem; }
+    .watchlist .desc, .spark-cell, .status-cell { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Top ticker tape -->
+<div class="ticker">
+    <div class="ticker-track">
+        <span class="tick"><span class="sym">GDGM</span><span class="val">LIVE</span><span class="delta up">▲ rounds logged</span></span>
+        <span class="tick"><span class="sym">SLIFT</span><span class="val">USERS:GROWING</span><span class="delta up">▲ 14.2%</span></span>
+        <span class="tick"><span class="sym">VWPA</span><span class="val">v2 SHIPPED</span><span class="delta up">▲ uptime 99.8</span></span>
+        <span class="tick"><span class="sym">BSA</span><span class="val">EP1:RENDERING</span><span class="delta fl">◆ in production</span></span>
+        <span class="tick"><span class="sym">PIP</span><span class="val">PATENT FILED</span><span class="delta fl">◆ moat: deepening</span></span>
+        <span class="tick"><span class="sym">NECO</span><span class="val">accepting new work</span><span class="delta up">▲ 5 live shipped</span></span>
+        <span class="tick"><span class="sym">GDGM</span><span class="val">LIVE</span><span class="delta up">▲ rounds logged</span></span>
+        <span class="tick"><span class="sym">SLIFT</span><span class="val">USERS:GROWING</span><span class="delta up">▲ 14.2%</span></span>
+        <span class="tick"><span class="sym">VWPA</span><span class="val">v2 SHIPPED</span><span class="delta up">▲ uptime 99.8</span></span>
+        <span class="tick"><span class="sym">BSA</span><span class="val">EP1:RENDERING</span><span class="delta fl">◆ in production</span></span>
+        <span class="tick"><span class="sym">PIP</span><span class="val">PATENT FILED</span><span class="delta fl">◆ moat: deepening</span></span>
+        <span class="tick"><span class="sym">NECO</span><span class="val">accepting new work</span><span class="delta up">▲ 5 live shipped</span></span>
+    </div>
+</div>
+
+<!-- Top bar -->
+<div class="topbar">
+    <div class="brand">
+        <div class="brand-mark">N</div>
+        <div class="brand-text">NECOGOODE<span class="dim">.COM</span> · TERMINAL</div>
+    </div>
+    <div class="session-info">
+        <span class="live-pulse">LIVE</span>
+        <span>SESSION <strong>NG-247</strong></span>
+        <span>EXCHANGE <strong>WORK</strong></span>
+        <span>TIME <strong id="clock">04:30:00 CDT</strong></span>
+    </div>
+</div>
+
+<!-- Main 3-column workspace -->
+<div class="workspace">
+
+    <!-- LEFT: identity panel -->
+    <div class="panel identity-panel">
+        <div class="panel-header">
+            <span><strong>NG</strong> · Issuer Profile</span>
+            <span>VERIFIED</span>
+        </div>
+
+        <h1 class="identity-name">Neco Goode</h1>
+        <p class="identity-role">
+            Sr. Director of IT &nbsp;<span class="amber">·</span>&nbsp; Builder &nbsp;<span class="amber">·</span>&nbsp; Operator
+        </p>
+
+        <div class="kpi-list">
+            <div class="kpi"><span class="kpi-label">live creations</span><span class="kpi-value up">5 <span style="color:var(--gain)">●</span></span></div>
+            <div class="kpi"><span class="kpi-label">years shipping</span><span class="kpi-value">10+</span></div>
+            <div class="kpi"><span class="kpi-label">stack depth</span><span class="kpi-value">full</span></div>
+            <div class="kpi"><span class="kpi-label">rolling status</span><span class="kpi-value up">accepting</span></div>
+            <div class="kpi"><span class="kpi-label">based</span><span class="kpi-value">DFW · TX</span></div>
+        </div>
+
+        <div class="about-blurb">
+            <strong>Most directors don't ship code. Most engineers don't run orgs.</strong> I do both, and the watchlist to your right is the proof. <em>Don't read it — run it.</em>
+        </div>
+
+        <div class="action-btns">
+            <a href="#contact" class="action-btn">
+                <span>get in touch</span><span class="key">⌘ G</span>
+            </a>
+            <a href="#resume" class="action-btn">
+                <span>resume.pdf</span><span class="key">⌘ R</span>
+            </a>
+            <a href="#linkedin" class="action-btn">
+                <span>linkedin / github</span><span class="key">⌘ L</span>
+            </a>
+        </div>
+    </div>
+
+    <!-- CENTER: feed -->
+    <div class="panel feed-panel">
+        <div class="feed-header">
+            <span>WATCHLIST :: NG.WORK</span>
+            <span>5 OF 5 ACTIVE · LAST UPDATE 12s ago</span>
+        </div>
+
+        <div class="feed-tabs">
+            <button class="feed-tab active">Creations</button>
+            <button class="feed-tab">By Stack</button>
+            <button class="feed-tab">By Status</button>
+            <button class="feed-tab">Activity</button>
+        </div>
+
+        <!-- Watchlist header row -->
+        <div class="watchlist head">
+            <div>SYM</div>
+            <div>NAME / DESC</div>
+            <div style="text-align:right;">METRIC</div>
+            <div style="text-align:right;">ACTIVITY</div>
+            <div>TREND</div>
+            <div style="text-align:right;">STATUS</div>
+        </div>
+
+        <a href="/creations/goodegame" class="watchlist">
+            <div class="sym-cell">GDGM</div>
+            <div class="name-cell">
+                <div class="name">GoodeGame</div>
+                <div class="desc">invitation-only golf community · interactive globe · journals</div>
+            </div>
+            <div class="metric">.NET·React</div>
+            <div class="delta-cell up">▲ 18 commits / wk</div>
+            <div class="spark-cell">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="0,22 10,20 20,17 30,18 40,12 50,14 60,8 70,10 80,5 90,6 100,3" fill="none" stroke="#6FCF97" stroke-width="1.5"/></svg>
+            </div>
+            <div class="status-cell"><span class="dot"></span> LIVE</div>
+        </a>
+
+        <a href="/creations/sololift" class="watchlist">
+            <div class="sym-cell">SLIFT</div>
+            <div class="name-cell">
+                <div class="name">SoloLift</div>
+                <div class="desc">production saas · real users · active feedback loops</div>
+            </div>
+            <div class="metric">SaaS · MT</div>
+            <div class="delta-cell up">▲ 14.2% MoM</div>
+            <div class="spark-cell">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="0,25 10,23 20,24 30,18 40,17 50,14 60,11 70,12 80,8 90,5 100,4" fill="none" stroke="#6FCF97" stroke-width="1.5"/></svg>
+            </div>
+            <div class="status-cell"><span class="dot"></span> LIVE</div>
+        </a>
+
+        <a href="/creations/vibing-with-primitive-ai" class="watchlist">
+            <div class="sym-cell">VWPA</div>
+            <div class="name-cell">
+                <div class="name">VibingWithPrimitiveAI</div>
+                <div class="desc">ai platform · navigation wheel · primitive-driven ux</div>
+            </div>
+            <div class="metric">AI · React</div>
+            <div class="delta-cell up">▲ v2 shipped</div>
+            <div class="spark-cell">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="0,18 10,20 20,15 30,17 40,10 50,12 60,7 70,9 80,5 90,7 100,3" fill="none" stroke="#6FCF97" stroke-width="1.5"/></svg>
+            </div>
+            <div class="status-cell"><span class="dot"></span> LIVE</div>
+        </a>
+
+        <a href="/creations/byte-sized-adventures" class="watchlist">
+            <div class="sym-cell">BSA</div>
+            <div class="name-cell">
+                <div class="name">Byte-Sized Adventures</div>
+                <div class="desc">animated educational series · characters from family</div>
+            </div>
+            <div class="metric">Animation</div>
+            <div class="delta-cell fl">◆ ep1 rendering</div>
+            <div class="spark-cell">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="0,28 10,28 20,26 30,25 40,22 50,20 60,18 70,15 80,12 90,10 100,8" fill="none" stroke="#F2B450" stroke-width="1.5"/></svg>
+            </div>
+            <div class="status-cell dev"><span class="dot"></span> IN-PROD</div>
+        </a>
+
+        <a href="/creations/pip" class="watchlist">
+            <div class="sym-cell">PIP</div>
+            <div class="name-cell">
+                <div class="name">Primitive Infrastructure Protocol</div>
+                <div class="desc">the moat · metered ai-native service bus · patent-stage</div>
+            </div>
+            <div class="metric">Protocol</div>
+            <div class="delta-cell fl">◆ filings: active</div>
+            <div class="spark-cell">
+                <svg viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="0,28 10,27 20,27 30,24 40,23 50,20 60,16 70,12 80,7 90,4 100,2" fill="none" stroke="#F2B450" stroke-width="1.5"/></svg>
+            </div>
+            <div class="status-cell future"><span class="dot"></span> STRATEGIC</div>
+        </a>
+
+        <!-- News strip -->
+        <div class="news-strip">
+            <div class="news-label">▸ Recent Activity · Filings</div>
+            <div class="news-item">
+                <span class="news-time">04:12</span>
+                <span class="news-text"><strong>GDGM</strong> shipped new dossier feature — globe lights now persist across sessions <span class="gain">▲</span></span>
+            </div>
+            <div class="news-item">
+                <span class="news-time">02:30</span>
+                <span class="news-text"><strong>SLIFT</strong> processed user feedback batch — 6 patches deployed to production <span class="gain">▲</span></span>
+            </div>
+            <div class="news-item">
+                <span class="news-time">YDA</span>
+                <span class="news-text"><strong>BSA</strong> family character LoRAs entering training run 4 <span class="amber">◆</span></span>
+            </div>
+            <div class="news-item">
+                <span class="news-time">3d</span>
+                <span class="news-text"><strong>PIP</strong> 13 patent concepts written, 5 flagged urgent (5/5 score) <span class="amber">◆</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- RIGHT: details / contact -->
+    <div class="panel right-panel">
+        <div class="panel-header">
+            <span>CONTACT · <strong>NG</strong></span>
+            <span>OPEN</span>
+        </div>
+
+        <div class="detail-block">
+            <div class="contact-item"><span class="label">EMAIL</span><span class="value amber">hello@necogoode.com</span></div>
+            <div class="contact-item"><span class="label">LINKEDIN</span><span class="value">/in/necogoode</span></div>
+            <div class="contact-item"><span class="label">GITHUB</span><span class="value">@necogoode</span></div>
+            <div class="contact-item"><span class="label">LOCATION</span><span class="value">Dallas–Fort Worth, TX</span></div>
+            <div class="contact-item"><span class="label">TIMEZONE</span><span class="value">America/Chicago</span></div>
+        </div>
+
+        <div class="panel-header" style="margin-top:0.5rem;">
+            <span>STACK · <strong>EXPERTISE</strong></span>
+            <span>FULL</span>
+        </div>
+        <div class="detail-block">
+            <div class="contact-item"><span class="label">backend</span><span class="value">.NET · Node</span></div>
+            <div class="contact-item"><span class="label">frontend</span><span class="value">React · TS · Vite</span></div>
+            <div class="contact-item"><span class="label">data</span><span class="value">PG · Snowflake · BI</span></div>
+            <div class="contact-item"><span class="label">cloud</span><span class="value">Azure · AWS</span></div>
+            <div class="contact-item"><span class="label">ai</span><span class="value">Claude · agentic systems</span></div>
+        </div>
+
+        <div class="command-prompt">
+            <span class="arrow">▸</span>
+            <input type="text" placeholder="enter symbol, eg. GDGM..." />
+        </div>
+        <div style="margin-top: 0.5rem; font-size: 0.7rem; color: var(--text-faint); letter-spacing: 0.08em;">
+            type a ticker · or click the watchlist
+        </div>
+    </div>
+</div>
+
+<script>
+function clock() {
+    const now = new Date();
+    const t = now.toLocaleTimeString('en-US', { hour12: false, timeZone: 'America/Chicago' });
+    const el = document.getElementById('clock');
+    if (el) el.textContent = t + ' CDT';
+}
+clock();
+setInterval(clock, 1000);
+</script>
+
+</body>
+</html>

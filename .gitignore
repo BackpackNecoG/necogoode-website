@@ -1,0 +1,40 @@
+# --- Secrets (NEVER COMMIT) ---
+AlphaVantage.txt
+Alphavantage.txt
+api/local.settings.json
+.env
+.env.*
+!.env.example
+
+# --- Node / Vite ---
+node_modules/
+dist/
+build/
+.vite/
+.cache/
+
+# --- Logs ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- TypeScript build output ---
+*.tsbuildinfo
+
+# --- Coverage ---
+coverage/
+
+# --- Azure Functions local artifacts ---
+api/bin/
+api/obj/
+.azure/

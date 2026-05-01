@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neco Goode — The Workshop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Inter:wght@400;500;600&family=Caveat:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --wood-light: #C49B6A;
+    --wood: #A07845;
+    --wood-dark: #6B4F2A;
+    --wood-deep: #3E2A14;
+    --wood-grain: rgba(62, 42, 20, 0.12);
+    --paper: #F4ECD8;
+    --paper-dark: #DDD0AC;
+    --ink: #2A1F12;
+    --ink-soft: #5A4632;
+    --brass: #C9A455;
+    --brass-bright: #E8C170;
+    --green: #4A6B3F;
+    --rust: #B05A2C;
+    --pencil: #4A3A28;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    background: var(--wood-deep);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+}
+body {
+    min-height: 100vh;
+}
+
+/* Fixed nav */
+nav {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    padding: 1.25rem 2.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: linear-gradient(to bottom, rgba(62, 42, 20, 0.95), rgba(62, 42, 20, 0.7));
+    backdrop-filter: blur(8px);
+}
+.logo {
+    font-family: 'Fraunces', serif;
+    color: var(--paper);
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.logo-mark {
+    width: 28px; height: 28px;
+    background: var(--brass-bright);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Caveat', cursive;
+    color: var(--wood-deep);
+    font-size: 1.1rem;
+    transform: rotate(-3deg);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+.logo em { font-style: italic; color: var(--brass-bright); }
+.nav-links {
+    display: flex; gap: 2.5rem;
+    font-size: 0.85rem;
+    color: var(--paper-dark);
+}
+.nav-links a {
+    color: inherit;
+    text-decoration: none;
+    transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--brass-bright); }
+
+/* Workbench container — horizontal scroll */
+.workbench {
+    height: 100vh;
+    min-height: 700px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-behavior: smooth;
+    position: relative;
+    /* Wood surface */
+    background: var(--wood);
+    background-image:
+        /* Wood grain — vertical streaks */
+        repeating-linear-gradient(
+            87deg,
+            transparent 0,
+            transparent 80px,
+            var(--wood-grain) 80px,
+            var(--wood-grain) 81px,
+            transparent 81px,
+            transparent 200px,
+            var(--wood-grain) 200px,
+            var(--wood-grain) 201px,
+            transparent 201px,
+            transparent 350px
+        ),
+        /* Knots and variation */
+        radial-gradient(ellipse 200px 80px at 15% 60%, rgba(62, 42, 20, 0.25), transparent 70%),
+        radial-gradient(ellipse 150px 60px at 45% 30%, rgba(62, 42, 20, 0.18), transparent 70%),
+        radial-gradient(ellipse 180px 70px at 75% 70%, rgba(62, 42, 20, 0.22), transparent 70%),
+        radial-gradient(ellipse 120px 50px at 92% 25%, rgba(62, 42, 20, 0.2), transparent 70%),
+        /* Base color */
+        linear-gradient(135deg, var(--wood-light), var(--wood) 50%, var(--wood-dark));
+}
+/* Vignette for depth */
+.workbench::after {
+    content: '';
+    position: sticky;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    pointer-events: none;
+    background:
+        linear-gradient(to bottom, rgba(62, 42, 20, 0.5) 0%, transparent 15%, transparent 85%, rgba(62, 42, 20, 0.6) 100%),
+        radial-gradient(ellipse at center, transparent 40%, rgba(62, 42, 20, 0.35) 100%);
+    z-index: 5;
+    display: block;
+}
+
+.workbench::-webkit-scrollbar { height: 8px; }
+.workbench::-webkit-scrollbar-track { background: var(--wood-deep); }
+.workbench::-webkit-scrollbar-thumb { background: var(--brass); border-radius: 4px; }
+
+/* Inner row — wide enough to scroll */
+.bench-row {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    padding: 0 6vw;
+    gap: 4rem;
+    width: max-content;
+    position: relative;
+    z-index: 1;
+}
+
+/* Identity panel — first thing on bench */
+.identity-card {
+    flex-shrink: 0;
+    width: 540px;
+    padding: 3rem 2.5rem;
+    background: var(--paper);
+    background-image: repeating-linear-gradient(0deg, transparent 0px, transparent 28px, rgba(74, 58, 40, 0.12) 28px, rgba(74, 58, 40, 0.12) 29px);
+    box-shadow:
+        0 1px 0 rgba(255, 250, 230, 0.4) inset,
+        4px 8px 16px rgba(0,0,0,0.3),
+        0 0 0 1px rgba(74, 58, 40, 0.1);
+    transform: rotate(-1.2deg);
+    position: relative;
+    border-radius: 2px;
+}
+/* Punch holes */
+.identity-card::before {
+    content: '';
+    position: absolute;
+    left: 16px; top: 60px;
+    width: 12px; height: 12px;
+    background: var(--wood);
+    border-radius: 50%;
+    box-shadow:
+        0 100px 0 var(--wood),
+        0 200px 0 var(--wood),
+        inset 1px 1px 2px rgba(0,0,0,0.4);
+}
+/* Tape at top */
+.identity-card::after {
+    content: '';
+    position: absolute;
+    top: -12px; left: 50%;
+    transform: translateX(-50%) rotate(2deg);
+    width: 100px; height: 24px;
+    background: rgba(220, 200, 150, 0.7);
+    border-left: 1px solid rgba(0,0,0,0.08);
+    border-right: 1px solid rgba(0,0,0,0.08);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+}
+.id-eyebrow {
+    font-family: 'Caveat', cursive;
+    font-size: 1.4rem;
+    color: var(--rust);
+    margin-bottom: 0.5rem;
+    transform: rotate(-0.5deg);
+}
+.id-eyebrow::before { content: '✦  '; color: var(--green); }
+.id-name {
+    font-family: 'Fraunces', serif;
+    font-size: 3.5rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    margin-bottom: 1rem;
+}
+.id-name em {
+    font-style: italic;
+    color: var(--rust);
+    display: block;
+    font-weight: 400;
+    font-size: 2.6rem;
+    margin-top: 0.25rem;
+}
+.id-tag {
+    font-family: 'Fraunces', serif;
+    font-size: 1.2rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    margin-bottom: 1.5rem;
+    font-style: italic;
+}
+.id-bullets {
+    list-style: none;
+    font-size: 0.95rem;
+    line-height: 1.85;
+    color: var(--ink);
+}
+.id-bullets li::before {
+    content: '✓ ';
+    color: var(--green);
+    font-weight: bold;
+}
+
+/* Margin doodle on identity card */
+.id-doodle {
+    position: absolute;
+    right: -100px;
+    top: 30px;
+    font-family: 'Caveat', cursive;
+    color: var(--rust);
+    font-size: 1.1rem;
+    transform: rotate(8deg);
+    width: 130px;
+    line-height: 1.3;
+}
+.id-doodle::before {
+    content: '';
+    position: absolute;
+    left: -30px; top: 50%;
+    width: 30px; height: 1.5px;
+    background: var(--rust);
+    transform-origin: left;
+    transform: rotate(-15deg);
+}
+
+/* Scroll hint */
+.scroll-hint {
+    flex-shrink: 0;
+    align-self: center;
+    color: var(--paper);
+    font-family: 'Caveat', cursive;
+    font-size: 1.4rem;
+    transform: rotate(-2deg);
+    text-shadow: 1px 2px 4px rgba(0,0,0,0.4);
+    padding: 0 2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.scroll-hint .arrow {
+    font-size: 2rem;
+    animation: nudge 2s ease-in-out infinite;
+}
+@keyframes nudge {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(8px); }
+}
+
+/* Creation cards — physical objects on the bench */
+.creation {
+    flex-shrink: 0;
+    width: 360px;
+    background: var(--paper);
+    box-shadow:
+        4px 8px 20px rgba(0,0,0,0.35),
+        0 0 0 1px rgba(74, 58, 40, 0.08);
+    cursor: pointer;
+    transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.4s;
+    position: relative;
+    text-decoration: none;
+    color: var(--ink);
+}
+.creation:hover {
+    transform: translateY(-12px) rotate(0deg) !important;
+    box-shadow:
+        6px 14px 30px rgba(0,0,0,0.5),
+        0 0 0 1px rgba(74, 58, 40, 0.12);
+}
+
+/* Each creation tilts slightly differently like real objects */
+.creation:nth-of-type(1) { transform: rotate(1.5deg); }
+.creation:nth-of-type(2) { transform: rotate(-2deg); }
+.creation:nth-of-type(3) { transform: rotate(0.8deg); }
+.creation:nth-of-type(4) { transform: rotate(-1.2deg); }
+.creation:nth-of-type(5) { transform: rotate(2deg); }
+
+/* Creation: visual area */
+.cr-visual {
+    height: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Each creation has its OWN visual style — it's a different "object" */
+
+/* GoodeGame: a small globe sketch */
+.cr-goodegame .cr-visual {
+    background: radial-gradient(circle at 30% 30%, #1a4d32, #0a1f14 75%);
+}
+.cr-goodegame .cr-visual::before {
+    content: '';
+    width: 160px; height: 160px;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 25% 25%, rgba(232, 201, 118, 0.3), transparent 60%),
+        repeating-radial-gradient(circle at center, transparent 0, transparent 4px, rgba(232, 201, 118, 0.15) 4px, rgba(232, 201, 118, 0.15) 5px),
+        radial-gradient(circle at center, #1a4d32, #0a1f14);
+    box-shadow: inset -10px -10px 30px rgba(0,0,0,0.6), 0 0 30px rgba(232, 201, 118, 0.2);
+    position: relative;
+}
+.cr-goodegame .cr-visual::after {
+    content: 'globe.svg';
+    position: absolute;
+    bottom: 12px; left: 12px;
+    font-family: 'Caveat', cursive;
+    color: rgba(232, 201, 118, 0.6);
+    font-size: 0.95rem;
+    transform: rotate(-3deg);
+}
+
+/* SoloLift: dashboard sketch */
+.cr-sololift .cr-visual {
+    background: var(--paper-dark);
+    background-image:
+        linear-gradient(to bottom, transparent 22px, rgba(74, 58, 40, 0.15) 23px),
+        repeating-linear-gradient(0deg, transparent 0px, transparent 22px, rgba(74, 58, 40, 0.08) 22px, rgba(74, 58, 40, 0.08) 23px);
+    padding: 1.25rem;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.dash-bar {
+    height: 18px;
+    background: var(--ink-soft);
+    border-radius: 1px;
+    opacity: 0.6;
+}
+.dash-bar.short { width: 50%; background: var(--rust); }
+.dash-bar.medium { width: 75%; background: var(--green); }
+.dash-bar.full { background: var(--brass); height: 28px; }
+.dash-row {
+    display: flex; gap: 0.5rem;
+    align-items: flex-end;
+    height: 60px;
+}
+.dash-col {
+    flex: 1;
+    background: var(--ink-soft);
+    opacity: 0.7;
+    border-radius: 1px 1px 0 0;
+}
+.dash-col:nth-child(1) { height: 40%; }
+.dash-col:nth-child(2) { height: 70%; background: var(--rust); }
+.dash-col:nth-child(3) { height: 55%; }
+.dash-col:nth-child(4) { height: 90%; background: var(--green); }
+.dash-col:nth-child(5) { height: 60%; }
+
+/* VibingWithPrimitiveAI: navigation wheel */
+.cr-vibing .cr-visual {
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+}
+.cr-vibing .wheel {
+    width: 180px; height: 180px;
+    border-radius: 50%;
+    border: 2px solid rgba(232, 193, 112, 0.4);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.cr-vibing .wheel::before {
+    content: '';
+    width: 60%; height: 60%;
+    border-radius: 50%;
+    border: 1px dashed rgba(232, 193, 112, 0.5);
+}
+.cr-vibing .wheel-spoke {
+    position: absolute;
+    width: 12px; height: 12px;
+    background: var(--brass-bright);
+    border-radius: 50%;
+    box-shadow: 0 0 12px var(--brass-bright);
+}
+.cr-vibing .ws-1 { top: 8px; left: 50%; transform: translateX(-50%); }
+.cr-vibing .ws-2 { right: 8px; top: 50%; transform: translateY(-50%); }
+.cr-vibing .ws-3 { bottom: 8px; left: 50%; transform: translateX(-50%); }
+.cr-vibing .ws-4 { left: 8px; top: 50%; transform: translateY(-50%); }
+.cr-vibing .ws-5 { top: 22%; right: 22%; }
+.cr-vibing .ws-6 { bottom: 22%; left: 22%; }
+
+/* Byte-Sized Adventures: family character cels */
+.cr-bsa .cr-visual {
+    background: linear-gradient(180deg, #FFE5B4 0%, #FFC5A2 60%, #F4A582 100%);
+    align-items: flex-end;
+    padding-bottom: 1rem;
+    gap: 0.5rem;
+    overflow: visible;
+}
+.cr-bsa .character {
+    width: 60px; height: 80px;
+    background: var(--rust);
+    border-radius: 30px 30px 8px 8px;
+    position: relative;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+.cr-bsa .character::before {
+    content: '';
+    position: absolute;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    width: 8px; height: 8px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 14px 0 0 white;
+}
+.cr-bsa .character.c2 { background: var(--green); height: 60px; width: 50px; border-radius: 25px 25px 6px 6px; }
+.cr-bsa .character.c3 { background: var(--brass); height: 45px; width: 40px; border-radius: 20px 20px 4px 4px; }
+.cr-bsa .character.c2::before { top: 8px; width: 6px; height: 6px; box-shadow: 12px 0 0 white; }
+.cr-bsa .character.c3::before { top: 6px; width: 5px; height: 5px; box-shadow: 10px 0 0 white; }
+
+/* PIP: blueprint */
+.cr-pip .cr-visual {
+    background: #1A3858;
+    background-image:
+        linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size: 24px 24px;
+    color: rgba(255,255,255,0.85);
+}
+.cr-pip .blueprint {
+    text-align: center;
+    font-family: 'Caveat', cursive;
+}
+.cr-pip .blueprint-shape {
+    width: 100px; height: 100px;
+    border: 2px solid rgba(255,255,255,0.85);
+    border-radius: 50%;
+    position: relative;
+    margin: 0 auto 0.75rem;
+}
+.cr-pip .blueprint-shape::before,
+.cr-pip .blueprint-shape::after {
+    content: '';
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 140px; height: 1.5px;
+    background: rgba(255,255,255,0.85);
+    transform-origin: left;
+}
+.cr-pip .blueprint-shape::before { transform: translate(0, -50%) rotate(35deg); }
+.cr-pip .blueprint-shape::after { transform: translate(0, -50%) rotate(-35deg); }
+.cr-pip .blueprint-label {
+    font-size: 1.1rem;
+    color: rgba(255,255,255,0.85);
+    letter-spacing: 0.2em;
+}
+
+/* Card body */
+.cr-body {
+    padding: 1.5rem 1.5rem 1.75rem;
+    border-top: 1px dashed rgba(74, 58, 40, 0.3);
+}
+.cr-tag {
+    font-family: 'Caveat', cursive;
+    font-size: 1.05rem;
+    color: var(--rust);
+    margin-bottom: 0.4rem;
+}
+.cr-tag::before { content: '— '; }
+.cr-name {
+    font-family: 'Fraunces', serif;
+    font-size: 1.7rem;
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: -0.015em;
+    margin-bottom: 0.6rem;
+    color: var(--ink);
+}
+.cr-desc {
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    margin-bottom: 1rem;
+}
+.cr-link {
+    font-size: 0.78rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ink);
+    font-weight: 600;
+    border-bottom: 1.5px solid var(--rust);
+    padding-bottom: 1px;
+    transition: color 0.2s;
+}
+.creation:hover .cr-link { color: var(--rust); }
+
+/* Status pin */
+.cr-pin {
+    position: absolute;
+    top: -10px; right: 20px;
+    width: 24px; height: 24px;
+    background: radial-gradient(circle at 30% 30%, var(--rust), #6B2C12);
+    border-radius: 50%;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.4), inset -2px -2px 4px rgba(0,0,0,0.4);
+    z-index: 5;
+}
+.cr-pin::after {
+    content: '';
+    position: absolute;
+    top: 7px; left: 7px;
+    width: 6px; height: 6px;
+    background: rgba(255,255,255,0.5);
+    border-radius: 50%;
+    filter: blur(1px);
+}
+
+/* End of bench — contact card */
+.contact-card {
+    flex-shrink: 0;
+    width: 380px;
+    padding: 2.5rem;
+    background: var(--paper);
+    transform: rotate(0.8deg);
+    box-shadow: 4px 8px 20px rgba(0,0,0,0.35);
+    border-radius: 2px;
+}
+.contact-card h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 2rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin-bottom: 0.75rem;
+    color: var(--ink);
+}
+.contact-card h3 em { font-style: italic; color: var(--rust); }
+.contact-card p {
+    font-family: 'Fraunces', serif;
+    font-size: 1.1rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    font-style: italic;
+    margin-bottom: 1.5rem;
+}
+.contact-btn {
+    display: inline-block;
+    padding: 0.9rem 1.75rem;
+    background: var(--ink);
+    color: var(--paper);
+    text-decoration: none;
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+.contact-btn:hover { background: var(--rust); }
+
+/* End spacer */
+.end-spacer { flex-shrink: 0; width: 4vw; }
+
+/* Mobile message */
+.mobile-fallback {
+    display: none;
+    padding: 4rem 1.5rem;
+    color: var(--paper);
+    text-align: center;
+}
+.mobile-fallback h2 {
+    font-family: 'Fraunces', serif;
+    font-size: 1.8rem;
+    margin-bottom: 1rem;
+}
+
+@media (max-width: 800px) {
+    .bench-row { padding: 0 1rem; gap: 1.5rem; }
+    .identity-card { width: 85vw; padding: 2rem 1.5rem; transform: rotate(0); }
+    .id-name { font-size: 2.5rem; }
+    .id-doodle { display: none; }
+    .creation { width: 80vw; transform: rotate(0) !important; }
+    .nav-links { display: none; }
+    nav { padding: 1rem 1.25rem; }
+    .contact-card { width: 80vw; transform: rotate(0); }
+    .scroll-hint { font-size: 1rem; padding: 0 0.5rem; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+    <div class="logo">
+        <span class="logo-mark">N</span>
+        <span>Neco<em>Goode</em></span>
+    </div>
+    <div class="nav-links">
+        <a href="#">Creations</a>
+        <a href="#">About</a>
+        <a href="#">Contact</a>
+    </div>
+</nav>
+
+<div class="workbench" id="workbench">
+    <div class="bench-row">
+
+        <!-- Identity card -->
+        <div class="identity-card">
+            <div class="id-doodle">
+                everything here is real, live & shipped ↙
+            </div>
+            <div class="id-eyebrow">Welcome to my workshop.</div>
+            <h1 class="id-name">
+                Neco Goode
+                <em>builds across.</em>
+            </h1>
+            <p class="id-tag">
+                Cloud, AI, data, product. Every claim on the resume has a working URL.
+            </p>
+            <ul class="id-bullets">
+                <li>Senior Director of IT, by day</li>
+                <li>Builder & operator, by night</li>
+                <li>5 live creations on the bench →</li>
+            </ul>
+        </div>
+
+        <div class="scroll-hint">
+            scroll right
+            <span class="arrow">→</span>
+        </div>
+
+        <!-- GoodeGame -->
+        <a href="/creations/goodegame" class="creation cr-goodegame">
+            <div class="cr-pin"></div>
+            <div class="cr-visual"></div>
+            <div class="cr-body">
+                <div class="cr-tag">community platform</div>
+                <h3 class="cr-name">GoodeGame</h3>
+                <p class="cr-desc">
+                    An invitation-only golf community. Member dossiers, an interactive globe of courses played, photo journals from every round.
+                </p>
+                <span class="cr-link">Read the story →</span>
+            </div>
+        </a>
+
+        <!-- SoloLift -->
+        <a href="/creations/sololift" class="creation cr-sololift">
+            <div class="cr-pin"></div>
+            <div class="cr-visual">
+                <div class="dash-bar full"></div>
+                <div class="dash-bar"></div>
+                <div class="dash-bar short"></div>
+                <div class="dash-bar medium"></div>
+                <div class="dash-row">
+                    <div class="dash-col"></div>
+                    <div class="dash-col"></div>
+                    <div class="dash-col"></div>
+                    <div class="dash-col"></div>
+                    <div class="dash-col"></div>
+                </div>
+            </div>
+            <div class="cr-body">
+                <div class="cr-tag">production saas</div>
+                <h3 class="cr-name">SoloLift</h3>
+                <p class="cr-desc">
+                    Production SaaS with real users and active feedback loops. The full lifecycle — build, ship, instrument, iterate.
+                </p>
+                <span class="cr-link">Read the story →</span>
+            </div>
+        </a>
+
+        <!-- VibingWithPrimitiveAI -->
+        <a href="/creations/vibing-with-primitive-ai" class="creation cr-vibing">
+            <div class="cr-pin"></div>
+            <div class="cr-visual">
+                <div class="wheel">
+                    <div class="wheel-spoke ws-1"></div>
+                    <div class="wheel-spoke ws-2"></div>
+                    <div class="wheel-spoke ws-3"></div>
+                    <div class="wheel-spoke ws-4"></div>
+                    <div class="wheel-spoke ws-5"></div>
+                    <div class="wheel-spoke ws-6"></div>
+                </div>
+            </div>
+            <div class="cr-body">
+                <div class="cr-tag">ai platform</div>
+                <h3 class="cr-name">VibingWithPrimitiveAI</h3>
+                <p class="cr-desc">
+                    The public-facing platform for PrimitiveAI. Distinctive interaction patterns: a navigation wheel, primitive-driven UX.
+                </p>
+                <span class="cr-link">Read the story →</span>
+            </div>
+        </a>
+
+        <!-- Byte-Sized Adventures -->
+        <a href="/creations/byte-sized-adventures" class="creation cr-bsa">
+            <div class="cr-pin"></div>
+            <div class="cr-visual">
+                <div class="character c1"></div>
+                <div class="character c2"></div>
+                <div class="character c3"></div>
+            </div>
+            <div class="cr-body">
+                <div class="cr-tag">animated series · personal</div>
+                <h3 class="cr-name">Byte-Sized Adventures</h3>
+                <p class="cr-desc">
+                    Educational animated series for kids. Original characters modeled on my own family. In production now.
+                </p>
+                <span class="cr-link">Read the story →</span>
+            </div>
+        </a>
+
+        <!-- PIP -->
+        <a href="/creations/pip" class="creation cr-pip">
+            <div class="cr-pin"></div>
+            <div class="cr-visual">
+                <div class="blueprint">
+                    <div class="blueprint-shape"></div>
+                    <div class="blueprint-label">PIP</div>
+                </div>
+            </div>
+            <div class="cr-body">
+                <div class="cr-tag">protocol · the moat</div>
+                <h3 class="cr-name">Primitive Infrastructure Protocol</h3>
+                <p class="cr-desc">
+                    A hosted, metered, AI-native service bus. Pre-verified primitives delivered as live API calls. The long-term moat.
+                </p>
+                <span class="cr-link">Read the story →</span>
+            </div>
+        </a>
+
+        <!-- Contact -->
+        <div class="contact-card">
+            <h3>End of the <em>bench.</em></h3>
+            <p>
+                If any of this is interesting — for hiring, partnership, or just to talk shop — let's talk.
+            </p>
+            <a href="#" class="contact-btn">Get in touch →</a>
+        </div>
+
+        <div class="end-spacer"></div>
+    </div>
+</div>
+
+<script>
+// Convert vertical scroll to horizontal scroll on the workbench
+const bench = document.getElementById('workbench');
+bench.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        bench.scrollLeft += e.deltaY;
+    }
+}, { passive: false });
+</script>
+
+</body>
+</html>
