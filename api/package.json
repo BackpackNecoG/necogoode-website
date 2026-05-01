@@ -1,0 +1,16 @@
+{
+  "name": "necogoode-api",
+  "version": "0.1.0",
+  "description": "Azure Functions backend for necogoode.com — Alpha Vantage proxy + counter.",
+  "main": "alphavantage/index.js",
+  "scripts": {
+    "start": "func start",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
