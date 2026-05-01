@@ -1,7 +1,9 @@
+import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useRouteScope } from '../lib/useRouteScope';
 import { getCreationBySlug } from '../data/creations';
 import { Tag } from '../components/ui/Tag';
+import { VibingVisual } from '../components/domain/workshop/visuals';
 import NotFound from './NotFound';
 
 /**
@@ -16,19 +18,29 @@ import NotFound from './NotFound';
  *
  * Falls back to the sepia <PhotoSlot /> for BSA + PIP (no live URL yet).
  */
-type ScreenshotEntry = { src: string; caption: string };
+type ScreenshotEntry =
+  | { kind: 'image'; src: string; caption: string }
+  | { kind: 'visual'; render: () => ReactNode; caption: string };
+
 const SCREENSHOTS: Record<string, ScreenshotEntry | undefined> = {
   goodegame: {
+    kind: 'image',
     src: '/screenshots/goodegame/home.png',
     caption: 'the clubhouse door · members enter from here',
   },
   sololift: {
+    kind: 'image',
     src: '/screenshots/sololift/home.png',
     caption: 'the public landing · sign in to use',
   },
+  // VWPA's sign-in screenshot is a stark dark form. The signature primitive-driven
+  // navigation wheel sits behind that gate — show the wheel visual itself instead,
+  // reusing the same component as the BusTour bench card so the workshop language
+  // stays consistent.
   'vibing-with-primitive-ai': {
-    src: '/screenshots/vibing-with-primitive-ai/home.png',
-    caption: 'sign-in surface · public app behind it',
+    kind: 'visual',
+    render: () => <VibingVisual />,
+    caption: 'the navigation wheel · primitives, not chat',
   },
 };
 
@@ -126,18 +138,21 @@ export default function BusCreation() {
         <h2 className="font-serif text-[1.5rem] font-semibold text-[var(--bus-ink)] mb-4">
           From the workshop
         </h2>
-        {SCREENSHOTS[c.slug] ? (
-          <PhotoImage
-            src={SCREENSHOTS[c.slug]!.src}
-            alt={`${c.name} — landing`}
-            caption={SCREENSHOTS[c.slug]!.caption}
-          />
-        ) : (
-          <div className="grid grid-cols-2 gap-4 mb-10">
-            <PhotoSlot caption="screenshot · home" />
-            <PhotoSlot caption="screenshot · in use" />
-          </div>
-        )}
+        {(() => {
+          const entry = SCREENSHOTS[c.slug];
+          if (!entry) {
+            return (
+              <div className="grid grid-cols-2 gap-4 mb-10">
+                <PhotoSlot caption="screenshot · home" />
+                <PhotoSlot caption="screenshot · in use" />
+              </div>
+            );
+          }
+          if (entry.kind === 'image') {
+            return <PhotoImage src={entry.src} alt={`${c.name} — landing`} caption={entry.caption} />;
+          }
+          return <PhotoVisual caption={entry.caption}>{entry.render()}</PhotoVisual>;
+        })()}
 
         {/* Call-to-action footer */}
         <hr className="my-10" style={{ borderColor: 'rgba(74,58,40,0.3)' }} />
@@ -200,6 +215,32 @@ function PhotoImage({ src, alt, caption }: { src: string; alt: string; caption: 
           loading="lazy"
           className="w-full h-full object-cover object-top"
         />
+      </div>
+      <figcaption
+        className="font-hand text-[1.05rem] mt-2 text-center"
+        style={{ color: 'var(--bus-rust)' }}
+      >
+        — {caption}
+      </figcaption>
+    </figure>
+  );
+}
+
+/**
+ * Renders an arbitrary visual node (e.g. a hand-drawn wheel) inside the same
+ * paper frame the screenshot version uses, so the layout stays consistent.
+ */
+function PhotoVisual({ caption, children }: { caption: string; children: ReactNode }) {
+  return (
+    <figure className="mb-10">
+      <div
+        className="aspect-[16/10] overflow-hidden relative flex items-center justify-center"
+        style={{
+          boxShadow: 'inset 0 0 0 1px rgba(74,58,40,0.15), 4px 8px 20px rgba(0,0,0,0.25)',
+          background: 'var(--bus-paper-dark)',
+        }}
+      >
+        {children}
       </div>
       <figcaption
         className="font-hand text-[1.05rem] mt-2 text-center"
