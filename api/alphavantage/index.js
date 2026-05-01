@@ -28,14 +28,14 @@ module.exports = async function (context, req) {
   }
 
   // Counter check BEFORE network call so we never get stuck mid-decrement
-  if (counter.getRemaining() <= 0) {
+  if (counter.getRemaining('alphavantage') <= 0) {
     context.res = {
       status: 429,
       headers: { 'Content-Type': 'application/json' },
       body: {
         error: 'Daily Alpha Vantage limit reached — resets at midnight UTC',
         callsRemaining: 0,
-        dailyLimit: counter.getDailyLimit(),
+        dailyLimit: counter.getDailyLimit('alphavantage'),
       },
     };
     return;
@@ -59,7 +59,7 @@ module.exports = async function (context, req) {
 
     // Always increment after the upstream call, regardless of result —
     // Alpha Vantage counts failed lookups against the quota too.
-    counter.incrementCounter();
+    counter.incrementCounter('alphavantage');
 
     const quote = (data && data['Global Quote']) || {};
 
@@ -73,8 +73,8 @@ module.exports = async function (context, req) {
           error: note
             ? 'Alpha Vantage upstream rate-limited this request — try again in a moment'
             : `No quote found for ${symbol}`,
-          callsRemaining: counter.getRemaining(),
-          dailyLimit: counter.getDailyLimit(),
+          callsRemaining: counter.getRemaining('alphavantage'),
+          dailyLimit: counter.getDailyLimit('alphavantage'),
         },
       };
       return;
@@ -89,8 +89,8 @@ module.exports = async function (context, req) {
         change: parseFloat(quote['09. change']),
         percentChange: quote['10. change percent'],
         latestTradingDay: quote['07. latest trading day'],
-        callsRemaining: counter.getRemaining(),
-        dailyLimit: counter.getDailyLimit(),
+        callsRemaining: counter.getRemaining('alphavantage'),
+        dailyLimit: counter.getDailyLimit('alphavantage'),
         attribution: 'Alpha Vantage (free tier)',
       },
     };

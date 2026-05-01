@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neco Goode — Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Berkeley+Mono:wght@400;500&family=IBM+Plex+Mono:wght@400;500;600&family=Fraunces:ital,opsz,wght@0,9..144,400;1,9..144,400&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg: #1A1814;
+    --bg-soft: #221F1A;
+    --bg-line: #2A2620;
+    --paper: #E8DEC8;
+    --paper-soft: #BFB6A2;
+    --paper-faint: #807866;
+    --amber: #E8A04A;
+    --amber-bright: #FFC577;
+    --rust: #C25A2C;
+    --olive: #8FA055;
+    --selection: #4A3F2C;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+::selection { background: var(--selection); color: var(--paper); }
+html, body {
+    background: var(--bg);
+    color: var(--paper);
+    font-family: 'IBM Plex Mono', 'Berkeley Mono', monospace;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+}
+body {
+    min-height: 100vh;
+    font-size: 14px;
+    line-height: 1.6;
+    position: relative;
+}
+
+/* CRT-style horizontal scanlines, very subtle */
+body::before {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none; z-index: 50;
+    background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 2px,
+        rgba(0, 0, 0, 0.04) 2px,
+        rgba(0, 0, 0, 0.04) 3px
+    );
+}
+/* Vignette */
+body::after {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none; z-index: 49;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.3) 100%);
+}
+
+/* Window chrome */
+.window {
+    max-width: 1080px;
+    margin: 4rem auto;
+    background: var(--bg-soft);
+    border: 1px solid var(--bg-line);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+    z-index: 1;
+}
+.titlebar {
+    background: var(--bg-line);
+    padding: 0.7rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    border-bottom: 1px solid #16140F;
+}
+.dot { width: 12px; height: 12px; border-radius: 50%; }
+.dot.r { background: #E06C5A; }
+.dot.y { background: #E8A04A; }
+.dot.g { background: #8FA055; }
+.titlebar-title {
+    flex: 1;
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--paper-faint);
+    letter-spacing: 0.08em;
+}
+.titlebar-meta {
+    font-size: 0.72rem;
+    color: var(--paper-faint);
+    letter-spacing: 0.05em;
+}
+
+/* Console body */
+.console {
+    padding: 2rem 2.5rem 2.5rem;
+    min-height: 600px;
+    font-size: 14px;
+    position: relative;
+}
+.console-output {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.line { display: block; margin-bottom: 0.15rem; }
+.muted { color: var(--paper-faint); }
+.amber { color: var(--amber); }
+.amber-b { color: var(--amber-bright); font-weight: 500; }
+.rust { color: var(--rust); }
+.olive { color: var(--olive); }
+.paper { color: var(--paper); }
+.dim { opacity: 0.55; }
+.serif { font-family: 'Fraunces', serif; font-style: italic; }
+.section-rule {
+    color: var(--bg-line);
+    margin: 0.5rem 0;
+    user-select: none;
+}
+
+/* Banner ASCII */
+.banner {
+    color: var(--amber);
+    font-size: 0.78rem;
+    line-height: 1.15;
+    margin: 0.5rem 0 1.5rem;
+    letter-spacing: 0;
+    white-space: pre;
+    overflow-x: auto;
+}
+
+/* Prompt line */
+.prompt-line {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 1rem;
+}
+.prompt-prefix {
+    color: var(--olive);
+    flex-shrink: 0;
+    font-weight: 500;
+}
+.prompt-prefix .arrow { color: var(--amber-bright); }
+.prompt-input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--paper);
+    font-family: inherit;
+    font-size: inherit;
+    width: 100%;
+    caret-color: var(--amber-bright);
+}
+.cursor {
+    display: inline-block;
+    width: 9px;
+    height: 16px;
+    background: var(--amber-bright);
+    vertical-align: text-bottom;
+    animation: blink 1.05s steps(2, start) infinite;
+    margin-left: 1px;
+}
+@keyframes blink {
+    to { visibility: hidden; }
+}
+
+/* Quick action chips */
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1.25rem 0 0.5rem;
+}
+.chip {
+    background: transparent;
+    border: 1px solid var(--bg-line);
+    color: var(--paper-soft);
+    padding: 0.4rem 0.85rem;
+    font-family: inherit;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.15s;
+}
+.chip:hover {
+    border-color: var(--amber);
+    color: var(--amber-bright);
+    background: rgba(232, 160, 74, 0.06);
+}
+.chip kbd {
+    color: var(--paper-faint);
+    font-size: 0.65rem;
+    margin-left: 0.5rem;
+}
+
+/* Tables in output */
+.creation-row {
+    display: grid;
+    grid-template-columns: 24px 200px 1fr 100px;
+    gap: 1rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px dashed var(--bg-line);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin: 0 -0.5rem;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+    border-radius: 2px;
+}
+.creation-row:hover {
+    background: rgba(232, 160, 74, 0.07);
+    border-bottom-color: var(--amber);
+}
+.creation-row:hover .cr-name { color: var(--amber-bright); }
+.cr-num { color: var(--amber); }
+.cr-name { color: var(--paper); font-weight: 500; transition: color 0.2s; }
+.cr-desc { color: var(--paper-soft); font-size: 0.85rem; }
+.cr-status {
+    color: var(--olive);
+    font-size: 0.75rem;
+    text-align: right;
+    letter-spacing: 0.05em;
+}
+
+/* Subtle below the fold */
+.below {
+    max-width: 1080px;
+    margin: 0 auto 4rem;
+    padding: 0 1rem;
+    color: var(--paper-faint);
+    font-size: 0.78rem;
+    text-align: center;
+    letter-spacing: 0.1em;
+}
+.below kbd {
+    background: var(--bg-soft);
+    color: var(--paper-soft);
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    border: 1px solid var(--bg-line);
+    font-family: inherit;
+    font-size: 0.72rem;
+}
+
+/* Mobile */
+@media (max-width: 700px) {
+    .window { margin: 1rem; border-radius: 4px; }
+    .console { padding: 1.25rem 1rem 1.5rem; font-size: 12.5px; }
+    .banner { font-size: 0.55rem; }
+    .creation-row { grid-template-columns: 20px 1fr; }
+    .cr-desc, .cr-status { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="window">
+    <div class="titlebar">
+        <span class="dot r"></span>
+        <span class="dot y"></span>
+        <span class="dot g"></span>
+        <span class="titlebar-title">necogoode.com — bash — 80×24</span>
+        <span class="titlebar-meta">⌘ home</span>
+    </div>
+
+    <div class="console">
+        <div class="console-output" id="output"></div>
+
+        <div class="prompt-line">
+            <span class="prompt-prefix">neco@home <span class="arrow">▸</span></span>
+            <input type="text" class="prompt-input" id="prompt" autocomplete="off" autofocus spellcheck="false"/>
+        </div>
+
+        <div class="chips" id="chips">
+            <button class="chip" data-cmd="creations">creations <kbd>1</kbd></button>
+            <button class="chip" data-cmd="whoami">whoami <kbd>2</kbd></button>
+            <button class="chip" data-cmd="contact">contact <kbd>3</kbd></button>
+            <button class="chip" data-cmd="help">help <kbd>?</kbd></button>
+        </div>
+    </div>
+</div>
+
+<div class="below">
+    Type a command or press <kbd>?</kbd> for help · The site is the software · Built and shipped from this terminal
+</div>
+
+<script>
+const output = document.getElementById('output');
+const prompt = document.getElementById('prompt');
+const chips = document.getElementById('chips');
+
+function el(html) {
+    const d = document.createElement('div');
+    d.innerHTML = html;
+    return d;
+}
+
+function append(html, delay = 0) {
+    return new Promise(resolve => {
+        setTimeout(() => {
+            output.appendChild(el(html));
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            resolve();
+        }, delay);
+    });
+}
+
+async function bootSequence() {
+    await append('<span class="line muted dim">[boot] initializing portfolio.exe ...</span>', 80);
+    await append('<span class="line muted dim">[ok]   loaded 5 creations from /var/work</span>', 200);
+    await append('<span class="line muted dim">[ok]   azure connection: established</span>', 200);
+    await append('<span class="line muted dim">[ok]   ready</span>', 200);
+
+    await append('<div class="banner amber">' +
+`   ▄    ▄▄▄▄▄ ▄▄▄▄  ▄▄▄▄        ▄▄▄▄▄ ▄▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
+  ▄ ▄   ▄ ▄    ▄  ▄ ▄  ▄        ▄ ▄  ▄ ▄  ▄  ▄  ▄ ▄  ▄ ▄
+  ▄  ▄  ▄▄▄    ▄▄▄  ▄  ▄        ▄▄▄  ▄ ▄  ▄  ▄▄▄  ▄▄▄  ▄▄▄
+  ▄   ▄ ▄      ▄ ▄  ▄  ▄        ▄ ▄  ▄ ▄  ▄  ▄  ▄ ▄  ▄ ▄
+  ▄    ▄▄▄▄▄ ▄▄▄  ▄▄▄▄         ▄▄▄▄▄ ▄▄▄▄▄  ▄▄▄  ▄▄▄  ▄▄▄▄▄</div>`, 400);
+
+    await append(
+        '<div class="line"><span class="amber-b">Welcome.</span> ' +
+        '<span class="serif paper">I build across the stack — and ship the receipts.</span></div>', 200);
+    await append(
+        '<div class="line muted">' +
+        '<span class="rust">Senior Director of IT</span> · <span class="olive">Builder</span> · ' +
+        '<span class="amber">Operator</span> · five live creations behind every claim.' +
+        '</div>', 100);
+    await append('<div class="line section-rule">' + '─'.repeat(72) + '</div>', 200);
+    await append(
+        '<div class="line muted">' +
+        'Quick start: type <span class="amber-b">creations</span> to see the work, ' +
+        '<span class="amber-b">whoami</span> for the bio, ' +
+        '<span class="amber-b">help</span> for everything else.' +
+        '</div>', 100);
+}
+
+const commands = {
+    help: () => {
+        return `
+<div class="line section-rule">─── available commands ───────────────────────────────────────────</div>
+<div class="line"><span class="amber-b">creations</span>      <span class="muted">list all five live creations</span></div>
+<div class="line"><span class="amber-b">whoami</span>         <span class="muted">the short bio</span></div>
+<div class="line"><span class="amber-b">stack</span>          <span class="muted">technical depth across the portfolio</span></div>
+<div class="line"><span class="amber-b">contact</span>        <span class="muted">how to reach me</span></div>
+<div class="line"><span class="amber-b">resume</span>         <span class="muted">download the PDF</span></div>
+<div class="line"><span class="amber-b">clear</span>          <span class="muted">clear the screen</span></div>
+<div class="line section-rule">───────────────────────────────────────────────────────────────────</div>`;
+    },
+    creations: () => {
+        const items = [
+            { num: '01', name: 'GoodeGame', desc: 'Invitation-only golf community · interactive globe, dossiers, journals', status: '● LIVE', href: '/creations/goodegame' },
+            { num: '02', name: 'SoloLift', desc: 'Production SaaS · real users, active feedback loops', status: '● LIVE', href: '/creations/sololift' },
+            { num: '03', name: 'VibingWithPrimitiveAI', desc: 'AI platform · primitive-driven UX, navigation wheel', status: '● LIVE', href: '/creations/vibing' },
+            { num: '04', name: 'Byte-Sized Adventures', desc: 'Animated educational series · characters from my family', status: '◐ in production', href: '/creations/bsa' },
+            { num: '05', name: 'PIP', desc: 'Primitive Infrastructure Protocol · the moat', status: '◯ patent stage', href: '/creations/pip' },
+        ];
+        let html = '<div class="line section-rule">─── creations ─ 5 records ───────────────────────────────────────</div>';
+        items.forEach(i => {
+            html += `<div class="creation-row" data-href="${i.href}">
+                <div class="cr-num">${i.num}</div>
+                <div class="cr-name">${i.name}</div>
+                <div class="cr-desc">${i.desc}</div>
+                <div class="cr-status ${i.status.startsWith('●') ? 'olive' : i.status.startsWith('◐') ? 'amber' : 'muted'}">${i.status}</div>
+            </div>`;
+        });
+        html += '<div class="line muted dim" style="margin-top:0.75rem;">→ click any row for the full story · or type <span class="amber-b">open &lt;name&gt;</span></div>';
+        return html;
+    },
+    whoami: () => {
+        return `
+<div class="line section-rule">─── whoami ──────────────────────────────────────────────────────</div>
+<div class="line serif paper" style="font-size:1.1rem;line-height:1.5;margin:0.5rem 0;">Neco Goode. Senior Director of IT by day, builder of production software by every other waking hour.</div>
+<div class="line muted">Based in Dallas–Fort Worth · married, two kids · runs IT for a personal injury law firm</div>
+<div class="line muted">Most directors don't ship code. Most engineers don't run orgs. I do both, and the work below is the proof.</div>
+<div class="line section-rule">───────────────────────────────────────────────────────────────────</div>`;
+    },
+    stack: () => {
+        return `
+<div class="line section-rule">─── stack ───────────────────────────────────────────────────────</div>
+<div class="line"><span class="amber">backend</span>     .NET 10, ASP.NET Core, Entity Framework, Node</div>
+<div class="line"><span class="amber">frontend</span>    React, Vite, TypeScript, Tailwind</div>
+<div class="line"><span class="amber">data</span>        PostgreSQL, Snowflake, Power BI</div>
+<div class="line"><span class="amber">cloud</span>       Azure (primary), AWS (production), CDK, Bicep</div>
+<div class="line"><span class="amber">ai</span>          Claude API, agentic systems, multi-tenant LLM apps</div>
+<div class="line"><span class="amber">misc</span>        Filevine, Lead Docket, Salesforce, AWS Amplify</div>
+<div class="line section-rule">───────────────────────────────────────────────────────────────────</div>`;
+    },
+    contact: () => {
+        return `
+<div class="line section-rule">─── contact ─────────────────────────────────────────────────────</div>
+<div class="line">email      <span class="amber-b">hello@necogoode.com</span></div>
+<div class="line">linkedin   <span class="amber-b">linkedin.com/in/necogoode</span></div>
+<div class="line">github     <span class="amber-b">github.com/necogoode</span></div>
+<div class="line muted dim" style="margin-top:0.5rem;">→ for hiring, side projects, or just to talk shop</div>
+<div class="line section-rule">───────────────────────────────────────────────────────────────────</div>`;
+    },
+    resume: () => `<div class="line muted">→ resume.pdf · <span class="amber-b">downloading...</span> <span class="dim">(stub — wire to real file)</span></div>`,
+    clear: () => { output.innerHTML = ''; return null; },
+};
+
+function runCommand(raw) {
+    const cmd = raw.trim().toLowerCase();
+    if (!cmd) return;
+
+    output.appendChild(el(`<div class="line"><span class="olive">neco@home</span> <span class="amber-b">▸</span> <span class="paper">${raw}</span></div>`));
+
+    if (cmd.startsWith('open ')) {
+        const target = cmd.substring(5);
+        output.appendChild(el(`<div class="line muted">→ navigating to /creations/${target}... <span class="dim">(stub)</span></div>`));
+        return;
+    }
+
+    const fn = commands[cmd];
+    if (fn) {
+        const html = fn();
+        if (html) output.appendChild(el(html));
+    } else {
+        output.appendChild(el(
+            `<div class="line muted">command not found: <span class="rust">${cmd}</span> · type <span class="amber-b">help</span> for available commands</div>`
+        ));
+    }
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+prompt.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        const value = prompt.value;
+        prompt.value = '';
+        runCommand(value);
+    }
+});
+
+chips.addEventListener('click', (e) => {
+    const btn = e.target.closest('.chip');
+    if (btn) {
+        prompt.value = btn.dataset.cmd;
+        runCommand(btn.dataset.cmd);
+        prompt.value = '';
+        prompt.focus();
+    }
+});
+
+document.addEventListener('keydown', (e) => {
+    if (document.activeElement === prompt) return;
+    const map = { '1': 'creations', '2': 'whoami', '3': 'contact', '?': 'help' };
+    if (map[e.key]) {
+        prompt.value = map[e.key];
+        runCommand(map[e.key]);
+        prompt.value = '';
+        prompt.focus();
+    }
+});
+
+document.addEventListener('click', (e) => {
+    const row = e.target.closest('.creation-row');
+    if (row && row.dataset.href) {
+        // window.location.href = row.dataset.href;
+        console.log('navigate', row.dataset.href);
+    }
+    if (!e.target.closest('.chip') && !e.target.closest('.creation-row')) {
+        prompt.focus();
+    }
+});
+
+bootSequence();
+</script>
+
+</body>
+</html>

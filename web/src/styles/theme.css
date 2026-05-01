@@ -65,6 +65,19 @@
   --bus-rust: #B05A2C;
   --bus-pencil: #4A3A28;
 
+  /* ---- Console (Talk Dangerously — CRT amber on dark roast) ---- */
+  --console-bg: #1A1814;
+  --console-bg-soft: #221F1A;
+  --console-bg-line: #2A2620;
+  --console-paper: #E8DEC8;
+  --console-paper-soft: #BFB6A2;
+  --console-paper-faint: #807866;
+  --console-amber: #E8A04A;
+  --console-amber-bright: #FFC577;
+  --console-rust: #C25A2C;
+  --console-olive: #8FA055;
+  --console-selection: #4A3F2C;
+
   /* ---- Floor (Trading Terminal — Bloomberg-inspired) ---- */
   --floor-bg: #0E0F11;
   --floor-bg-soft: #16181B;
@@ -122,6 +135,15 @@ body.scope-bus {
   color: var(--bus-ink);
   font-family: 'Inter', sans-serif;
 }
+
+/* Console (Talk Dangerously) */
+body.scope-console {
+  background: var(--console-bg);
+  color: var(--console-paper);
+  font-family: 'IBM Plex Mono', monospace;
+  -webkit-font-smoothing: antialiased;
+}
+body.scope-console ::selection { background: var(--console-selection); color: var(--console-paper); }
 
 /* Trading Floor */
 body.scope-floor {

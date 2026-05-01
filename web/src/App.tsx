@@ -6,6 +6,7 @@ import TechCreation from './routes/TechCreation';
 import BusCreation from './routes/BusCreation';
 import Demo from './routes/Demo';
 import Floor from './routes/Floor';
+import Console from './routes/Console';
 import NotFound from './routes/NotFound';
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
       <Route path="/BusTour/creations/:slug" element={<BusCreation />} />
       <Route path="/demo/:slug" element={<Demo />} />
       <Route path="/floor" element={<Floor />} />
+      <Route path="/console" element={<Console />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );

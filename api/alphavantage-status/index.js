@@ -15,8 +15,8 @@ module.exports = async function (context, _req) {
       'Cache-Control': 'no-store',
     },
     body: {
-      callsRemaining: counter.getRemaining(),
-      dailyLimit: counter.getDailyLimit(),
+      callsRemaining: counter.getRemaining('alphavantage'),
+      dailyLimit: counter.getDailyLimit('alphavantage'),
       attribution: 'Alpha Vantage (free tier)',
       attributionUrl: 'https://www.alphavantage.co/',
     },

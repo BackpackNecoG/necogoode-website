@@ -81,7 +81,7 @@ export default function Splash() {
       </div>
 
       {/* Bottom hint */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 font-mono text-[0.68rem] tracking-[0.2em] text-[var(--splash-text-faint)] uppercase whitespace-nowrap">
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 font-mono text-[0.68rem] tracking-[0.2em] text-[var(--splash-text-faint)] uppercase whitespace-nowrap text-center">
         Stack-curious? Visit{' '}
         <Link
           to="/floor"
@@ -89,7 +89,13 @@ export default function Splash() {
         >
           the trading floor
         </Link>
-        {' '}· live ticker on every creation
+        {' '}·{' '}
+        <Link
+          to="/console"
+          className="text-[var(--splash-text-soft)] no-underline border-b border-dotted border-[var(--splash-text-faint)] hover:text-[var(--splash-bus)] hover:border-[var(--splash-bus)]"
+        >
+          let neco talk dangerously
+        </Link>
       </div>
     </>
   );
