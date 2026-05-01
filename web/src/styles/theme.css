@@ -1,0 +1,133 @@
+/* ============================================================
+   theme.css — single source of truth for all three palettes.
+   Each route applies its scope class on the <body> via a hook.
+   Tokens are accessible inside Tailwind via arbitrary values:
+     <div className="bg-[var(--tech-bg)] text-[var(--tech-text)]" />
+   ============================================================ */
+
+:root {
+  /* ---- Splash (shared, always-on for /) ---- */
+  --splash-bg: #0A0B0F;
+  --splash-bg-soft: #131520;
+  --splash-line: #232838;
+  --splash-text: #E8EAF0;
+  --splash-text-soft: #8B92A4;
+  --splash-text-faint: #4A5168;
+  --splash-tech: #5EEAD4;
+  --splash-tech-glow: rgba(94, 234, 212, 0.4);
+  --splash-bus: #FBBF77;
+  --splash-bus-glow: rgba(251, 191, 119, 0.4);
+
+  /* ---- TechTour (IDE — Catppuccin Mocha-inspired) ---- */
+  --tech-bg: #1E1E2E;
+  --tech-bg-soft: #181825;
+  --tech-bg-darker: #11111B;
+  --tech-bg-line: #313244;
+  --tech-bg-elev: #292B3D;
+  --tech-line: #45475A;
+  --tech-line-soft: #313244;
+  --tech-text: #CDD6F4;
+  --tech-text-soft: #A6ADC8;
+  --tech-text-faint: #6C7086;
+  --tech-selection: #45475A;
+
+  /* Syntax-highlight tokens used in IDE pages */
+  --tech-syn-keyword: #CBA6F7;   /* purple */
+  --tech-syn-string: #A6E3A1;    /* green */
+  --tech-syn-comment: #6C7086;   /* gray */
+  --tech-syn-fn: #89B4FA;        /* blue */
+  --tech-syn-prop: #94E2D5;      /* teal */
+  --tech-syn-num: #FAB387;       /* orange */
+  --tech-syn-tag: #F38BA8;       /* pink */
+  --tech-syn-attr: #F9E2AF;      /* yellow */
+
+  --tech-green: #A6E3A1;
+  --tech-yellow: #F9E2AF;
+  --tech-blue: #89B4FA;
+  --tech-pink: #F38BA8;
+  --tech-red: #F38BA8;
+  --tech-purple: #CBA6F7;
+
+  /* ---- BusTour (Workshop — wood + paper) ---- */
+  --bus-wood-light: #C49B6A;
+  --bus-wood: #A07845;
+  --bus-wood-dark: #6B4F2A;
+  --bus-wood-deep: #3E2A14;
+  --bus-wood-grain: rgba(62, 42, 20, 0.12);
+  --bus-paper: #F4ECD8;
+  --bus-paper-dark: #DDD0AC;
+  --bus-paper-warm: #F2EBDB;
+  --bus-ink: #2A1F12;
+  --bus-ink-soft: #5A4632;
+  --bus-brass: #C9A455;
+  --bus-brass-bright: #E8C170;
+  --bus-green: #4A6B3F;
+  --bus-rust: #B05A2C;
+  --bus-pencil: #4A3A28;
+
+  /* ---- Floor (Trading Terminal — Bloomberg-inspired) ---- */
+  --floor-bg: #0E0F11;
+  --floor-bg-soft: #16181B;
+  --floor-bg-card: #1C1F23;
+  --floor-bg-elev: #232629;
+  --floor-line: #2C3036;
+  --floor-line-bright: #3D434B;
+  --floor-text: #E8E6E0;
+  --floor-text-soft: #9EA0A4;
+  --floor-text-faint: #5A5D62;
+  --floor-gain: #6FCF97;
+  --floor-gain-bg: rgba(111, 207, 151, 0.12);
+  --floor-loss: #E07060;
+  --floor-loss-bg: rgba(224, 112, 96, 0.12);
+  --floor-amber: #F2B450;
+  --floor-amber-bg: rgba(242, 180, 80, 0.12);
+}
+
+/* ============================================================
+   Base body styling per route.
+   We add a body class via useRouteScope() in App.tsx so that
+   the wrapper-level background/font reflect the active palette.
+   ============================================================ */
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Splash & default fallback */
+body.scope-splash {
+  background: var(--splash-bg);
+  color: var(--splash-text);
+  font-family: 'Inter', sans-serif;
+  overflow: hidden; /* Splash is single-screen, no scroll */
+}
+
+/* TechTour IDE */
+body.scope-tech {
+  background: var(--tech-bg-darker);
+  color: var(--tech-text);
+  font-family: 'Inter', sans-serif;
+}
+body.scope-tech ::selection { background: var(--tech-selection); }
+
+/* BusTour Workshop */
+body.scope-bus {
+  background: var(--bus-wood-deep);
+  color: var(--bus-ink);
+  font-family: 'Inter', sans-serif;
+}
+
+/* Trading Floor */
+body.scope-floor {
+  background: var(--floor-bg);
+  color: var(--floor-text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}

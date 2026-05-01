@@ -1,0 +1,8 @@
+@import './theme.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reset that complements Tailwind preflight without breaking Tailwind defaults */
+* { box-sizing: border-box; }
