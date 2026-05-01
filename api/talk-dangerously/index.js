@@ -15,9 +15,33 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const counter = require('../shared/counter');
 const { SYSTEM_PROMPT } = require('../shared/system-prompt');
 
-const MAX_INPUT_LENGTH = 1000;       // hard input cap to control upstream tokens
+const MAX_INPUT_LENGTH = 1000;       // hard input cap per single turn
+const MAX_HISTORY_TURNS = 10;        // cap conversation context to keep token cost bounded
+const MAX_HISTORY_CHARS = 8000;      // belt-and-suspenders: ~2k tokens of history max
 const COMPLETION_MAX_TOKENS = 400;   // ~300 words; combined with system prompt ~$0.0005/call
 const COUNTER_NAME = 'talk-dangerously';
+
+/**
+ * Validate + sanitize the conversation history sent from the frontend.
+ * Returns a safe array of {role, content} turns, capped by both turn count
+ * and total characters. Never trusts the frontend's roles or content blindly.
+ */
+function sanitizeHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+  const cleaned = [];
+  let totalChars = 0;
+  for (const turn of raw.slice(-MAX_HISTORY_TURNS)) {
+    if (!turn || typeof turn !== 'object') continue;
+    const role = turn.role === 'user' || turn.role === 'assistant' ? turn.role : null;
+    const content = typeof turn.content === 'string' ? turn.content : null;
+    if (!role || !content) continue;
+    const trimmed = content.length > MAX_INPUT_LENGTH ? content.substring(0, MAX_INPUT_LENGTH) : content;
+    if (totalChars + trimmed.length > MAX_HISTORY_CHARS) break;
+    totalChars += trimmed.length;
+    cleaned.push({ role, content: trimmed });
+  }
+  return cleaned;
+}
 
 module.exports = async function (context, req) {
   const messageRaw = (req.body && req.body.message) || '';
@@ -68,6 +92,14 @@ module.exports = async function (context, req) {
     return;
   }
 
+  // Build the messages array: system prompt → sanitized history → current user turn.
+  const history = sanitizeHistory(req.body && req.body.history);
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...history,
+    { role: 'user', content: message },
+  ];
+
   try {
     const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
 
@@ -78,10 +110,7 @@ module.exports = async function (context, req) {
         'api-key': key,
       },
       body: JSON.stringify({
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: message },
-        ],
+        messages,
         temperature: 0.4,
         max_tokens: COMPLETION_MAX_TOKENS,
       }),

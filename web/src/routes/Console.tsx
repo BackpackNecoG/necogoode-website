@@ -25,11 +25,23 @@ type Line =
   | { kind: 'banner' }
   | { kind: 'creations' };
 
-const BANNER_TEXT = `   ▄    ▄▄▄▄▄ ▄▄▄▄  ▄▄▄▄        ▄▄▄▄▄ ▄▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
-  ▄ ▄   ▄ ▄    ▄  ▄ ▄  ▄        ▄ ▄  ▄ ▄  ▄  ▄  ▄ ▄  ▄ ▄
-  ▄  ▄  ▄▄▄    ▄▄▄  ▄  ▄        ▄▄▄  ▄ ▄  ▄  ▄▄▄  ▄▄▄  ▄▄▄
-  ▄   ▄ ▄      ▄ ▄  ▄  ▄        ▄ ▄  ▄ ▄  ▄  ▄  ▄ ▄  ▄ ▄
-  ▄    ▄▄▄▄▄ ▄▄▄  ▄▄▄▄         ▄▄▄▄▄ ▄▄▄▄▄  ▄▄▄  ▄▄▄  ▄▄▄▄▄`;
+type ChatMessage = { role: 'user' | 'assistant'; content: string };
+
+/**
+ * Cap how much of the running conversation we send back to the model so
+ * a long session doesn't run away on tokens. Last 10 turns is plenty
+ * for context while keeping each call cheap.
+ */
+const HISTORY_TURNS_CAP = 10;
+
+const SESSION_KEY = 'ng_console_session';
+const HISTORY_KEY = 'ng_console_history';
+
+/** 6-char base32 session id, prefixed for visual recognition. */
+function newSessionId(): string {
+  const rand = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+  return `sess-${rand}`;
+}
 
 const RULE = '─'.repeat(72);
 
@@ -43,8 +55,41 @@ export default function Console() {
   const [callsRemaining, setCallsRemaining] = useState<number | null>(null);
   const [dailyLimit, setDailyLimit] = useState(50);
 
+  // Conversation memory — sent to the model with each call so it can follow
+  // a thread, not just respond to the latest line in isolation.
+  // Persisted in sessionStorage so a refresh within the same tab keeps context;
+  // closing the tab or running `clear` starts fresh.
+  const [history, setHistory] = useState<ChatMessage[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const stored = sessionStorage.getItem(HISTORY_KEY);
+      return stored ? (JSON.parse(stored) as ChatMessage[]) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [sessionId] = useState<string>(() => {
+    if (typeof window === 'undefined') return newSessionId();
+    let id = sessionStorage.getItem(SESSION_KEY);
+    if (!id) {
+      id = newSessionId();
+      sessionStorage.setItem(SESSION_KEY, id);
+    }
+    return id;
+  });
+
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+
+  // Persist history on every change so a same-tab refresh resumes the thread.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch {
+      /* storage full or disabled — proceed without persistence */
+    }
+  }, [history]);
 
   // Initial boot sequence + status fetch
   useEffect(() => {
@@ -59,16 +104,22 @@ export default function Console() {
         if (!cancelled) setCallsRemaining(50);
       });
 
-    const seq: Array<[Line, number]> = [
-      [{ kind: 'system', text: '[boot] initializing portfolio.exe ...' }, 80],
-      [{ kind: 'system', text: '[ok]   loaded 5 creations from /var/work' }, 200],
-      [{ kind: 'system', text: '[ok]   azure openai connection: established' }, 200],
-      [{ kind: 'system', text: '[ok]   ready' }, 200],
-      [{ kind: 'banner' }, 400],
-      [{ kind: 'reply', text: 'Let Neco talk dangerously.' }, 200],
-      [{ kind: 'system', text: 'Type anything. I parse it down to its primitive components, challenge each one, and pick a concrete path. Or hit a chip below.' }, 100],
-      [{ kind: 'rule' }, 100],
-    ];
+    const hadHistory = history.length > 0;
+    const seq: Array<[Line, number]> = hadHistory
+      ? [
+          [{ kind: 'system', text: '[ok]   resuming session ' + sessionId + ' · ' + (history.length / 2) + ' previous exchange(s)' }, 80],
+          [{ kind: 'rule' }, 100],
+        ]
+      : [
+          [{ kind: 'system', text: '[boot] initializing portfolio.exe ...' }, 80],
+          [{ kind: 'system', text: '[ok]   loaded 5 creations from /var/work' }, 200],
+          [{ kind: 'system', text: '[ok]   azure openai connection: established' }, 200],
+          [{ kind: 'system', text: '[ok]   session ' + sessionId + ' · ready' }, 200],
+          [{ kind: 'banner' }, 400],
+          [{ kind: 'reply', text: 'Let Neco talk dangerously.' }, 200],
+          [{ kind: 'system', text: 'Type anything. I parse it down to its primitive components, challenge each one, and pick a concrete path. Follow-up questions thread through the same conversation — last ' + HISTORY_TURNS_CAP + ' turns kept as context.' }, 100],
+          [{ kind: 'rule' }, 100],
+        ];
 
     let acc = 0;
     const timers: number[] = [];
@@ -105,8 +156,11 @@ export default function Console() {
     const lower = raw.toLowerCase();
 
     // Canned commands — instant, free
-    if (lower === 'clear') {
+    if (lower === 'clear' || lower === 'reset') {
       setLines([]);
+      setHistory([]);
+      try { sessionStorage.removeItem(HISTORY_KEY); } catch { /* noop */ }
+      append({ kind: 'system', text: '[ok] conversation cleared. fresh session.' });
       return;
     }
     if (lower === 'help') {
@@ -116,9 +170,10 @@ export default function Console() {
       append({ kind: 'system', text: '  whoami          short bio' });
       append({ kind: 'system', text: '  stack           technical depth' });
       append({ kind: 'system', text: '  contact         how to reach me' });
-      append({ kind: 'system', text: '  clear           clear the screen' });
+      append({ kind: 'system', text: '  clear / reset   clear the screen + start a new conversation' });
       append({ kind: 'system', text: '' });
-      append({ kind: 'system', text: 'anything else    sent to Azure OpenAI (gpt-4o-mini), wrapped in my voice' });
+      append({ kind: 'system', text: 'anything else    threaded conversation via Azure OpenAI (gpt-4o-mini)' });
+      append({ kind: 'system', text: `                 last ${HISTORY_TURNS_CAP} turns kept as context for follow-ups` });
       append({ kind: 'rule' });
       return;
     }
@@ -159,12 +214,22 @@ export default function Console() {
       return;
     }
 
+    // Cap what we ship back to the model — keep the most recent N turns.
+    const trimmedHistory = history.slice(-HISTORY_TURNS_CAP);
+
     setBusy(true);
     try {
-      const r = await postMessage(raw);
+      const r = await postMessage(raw, trimmedHistory);
       if (isReply(r)) {
         append({ kind: 'reply', text: r.reply });
         setCallsRemaining(r.callsRemaining);
+        // Append both the user turn and the assistant turn so the next call
+        // has the full thread.
+        setHistory((prev) => [
+          ...prev,
+          { role: 'user', content: raw },
+          { role: 'assistant', content: r.reply },
+        ]);
       } else {
         append({ kind: 'error', text: r.error });
         if (typeof r.callsRemaining === 'number') setCallsRemaining(r.callsRemaining);
@@ -225,7 +290,8 @@ export default function Console() {
             <span className="w-3 h-3 rounded-full bg-[#E8A04A]" />
             <span className="w-3 h-3 rounded-full bg-[#8FA055]" />
             <span className="flex-1 text-center text-[0.78rem] text-[var(--console-paper-faint)] tracking-wider">
-              necogoode.com — bash — 80×24 — gpt-4o-mini
+              necogoode.com — bash — 80×24 — gpt-4o-mini —{' '}
+              <span className="text-[var(--console-amber)]">{sessionId}</span>
             </span>
             <Link to="/" className="text-[0.72rem] text-[var(--console-paper-faint)] tracking-wider no-underline hover:text-[var(--console-amber-bright)]">
               ⌘ home
@@ -334,9 +400,27 @@ function ConsoleLine({
 }) {
   if (line.kind === 'banner') {
     return (
-      <pre className="text-[var(--console-amber)] text-[0.78rem] leading-[1.15] my-2 mb-6 whitespace-pre overflow-x-auto">
-        {BANNER_TEXT}
-      </pre>
+      <div className="my-3 mb-6 select-none">
+        <div
+          className="font-bold leading-none tracking-[0.18em] uppercase"
+          style={{
+            color: 'var(--console-amber)',
+            fontSize: 'clamp(2.4rem, 8vw, 4.2rem)',
+            // CRT-glow: warm amber halo around each glyph
+            textShadow: '0 0 12px rgba(232,160,74,0.45), 0 0 28px rgba(232,160,74,0.18)',
+            fontFamily: '"IBM Plex Mono", "Berkeley Mono", monospace',
+          }}
+        >
+          NERDY{' '}
+          <span style={{ color: 'var(--console-amber-bright)' }}>NECO</span>
+        </div>
+        <div
+          className="text-[0.7rem] tracking-[0.3em] uppercase mt-1.5"
+          style={{ color: 'var(--console-paper-faint)' }}
+        >
+          ── primitive-decomposition console ──
+        </div>
+      </div>
     );
   }
   if (line.kind === 'rule') {

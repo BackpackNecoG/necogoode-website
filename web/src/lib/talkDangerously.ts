@@ -36,11 +36,16 @@ export async function fetchTalkStatus(): Promise<TalkStatus> {
   return resp.json();
 }
 
-export async function postMessage(message: string): Promise<TalkReply | TalkError> {
+export type ChatTurn = { role: 'user' | 'assistant'; content: string };
+
+export async function postMessage(
+  message: string,
+  history: ChatTurn[] = [],
+): Promise<TalkReply | TalkError> {
   const resp = await fetch('/api/talk-dangerously', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, history }),
   });
   const body = (await resp.json()) as TalkReply | TalkError;
   if (resp.status >= 500) {
