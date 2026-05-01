@@ -37,13 +37,13 @@ export default function TechTour() {
           >
             {/* Syntax-highlighted README — keep <span> classes in sync with theme.css token names */}
             <SC c="comment"># Neco Goode</SC>{'\n'}
-            <SC c="comment">&gt; Senior Director of IT · Builder · Operator</SC>{'\n'}
+            <SC c="comment">&gt; Architect · Operator · Leader of People &amp; Process · A Curious and Ambitious Mind</SC>{'\n'}
             {'\n'}
             <SC c="dim">---</SC>{'\n'}
             {'\n'}
             <SC c="comment">## tldr</SC>{'\n'}
             {'\n'}
-            <SC c="text">Most directors don&apos;t ship code. Most engineers don&apos;t run orgs.</SC>{'\n'}
+            <SC c="text">Most IT leaders don&apos;t ship code. Most engineers don&apos;t run orgs.</SC>{'\n'}
             <span className="block bg-[rgba(137,180,250,0.06)] -mx-5 px-5">
               <SC c="text">I do </SC>
               <SC c="keyword">both</SC>

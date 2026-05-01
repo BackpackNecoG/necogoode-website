@@ -31,7 +31,7 @@ export default function Splash() {
           Neco<em className="not-italic italic text-[var(--splash-tech)]">Goode</em>
         </div>
         <div className="font-mono text-[0.7rem] tracking-[0.3em] text-[var(--splash-text-faint)] uppercase">
-          Builder · Operator · Sr. Director of IT
+          Architect · Operator · Leader of People &amp; Process · A Curious and Ambitious Mind
         </div>
       </div>
 

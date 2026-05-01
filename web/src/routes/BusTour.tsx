@@ -189,7 +189,7 @@ function IdentityCard() {
       </p>
 
       <ul className="text-[0.95rem] leading-loose text-[var(--bus-ink)] list-none">
-        {['Senior Director of IT, by day', 'Builder & operator, by night', '5 live creations on the bench →'].map((b) => (
+        {['A curious and ambitious mind', 'Architect, operator & leader of people and process', '5 live creations on the bench →'].map((b) => (
           <li key={b}>
             <span className="font-bold" style={{ color: 'var(--bus-green)' }}>✓ </span>
             {b}

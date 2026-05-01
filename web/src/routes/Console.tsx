@@ -130,7 +130,7 @@ export default function Console() {
     }
     if (lower === 'whoami') {
       append({ kind: 'rule' });
-      append({ kind: 'reply', text: 'Neco Goode. Senior Director of IT by day, builder of production software by every other waking hour. Based in Dallas–Fort Worth. Five live creations behind every claim on my resume — they\'re the proof.' });
+      append({ kind: 'reply', text: 'Neco Goode. Architect, operator, leader of people and process by day; builder of production software by every other waking hour. A curious and ambitious mind based in Dallas–Fort Worth. Five live creations behind every claim on my resume — they\'re the proof.' });
       append({ kind: 'rule' });
       return;
     }

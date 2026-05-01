@@ -48,8 +48,10 @@ export default function Floor() {
             Neco Goode
           </h1>
           <p className="text-[0.72rem] text-[var(--floor-text-soft)] tracking-wide mb-5 leading-relaxed">
-            Sr. Director of IT &nbsp;<span className="text-[var(--floor-amber)]">·</span>&nbsp;
-            Builder &nbsp;<span className="text-[var(--floor-amber)]">·</span>&nbsp; Operator
+            Architect &nbsp;<span className="text-[var(--floor-amber)]">·</span>&nbsp;
+            Operator &nbsp;<span className="text-[var(--floor-amber)]">·</span>&nbsp;
+            Leader of People &amp; Process &nbsp;<span className="text-[var(--floor-amber)]">·</span>&nbsp;
+            A Curious and Ambitious Mind
           </p>
 
           <div className="mb-5">
@@ -61,7 +63,7 @@ export default function Floor() {
           </div>
 
           <div className="font-sans text-[0.85rem] leading-relaxed text-[var(--floor-text-soft)] p-4 bg-[var(--floor-bg-soft)] border-l-2 border-[var(--floor-amber)] mb-4">
-            <strong className="text-[var(--floor-text)] font-medium">Most directors don&apos;t ship code. Most engineers don&apos;t run orgs.</strong>
+            <strong className="text-[var(--floor-text)] font-medium">Most IT leaders don&apos;t ship code. Most engineers don&apos;t run orgs.</strong>
             {' '}I do both, and the watchlist to your right is the proof.{' '}
             <em className="text-[var(--floor-gain)] not-italic">Don&apos;t read it — run it.</em>
           </div>
