@@ -1,213 +1,131 @@
 # Morning Checklist — necogoode.com
 
-> **Status as of 2026-05-01:** Code is complete, locally tested, and ready to deploy. **Azure deploy was deferred** because the cached `az login` token expired before kickoff. Steps below assume a fresh `az login`.
+> **Status:** Site is **LIVE** at https://red-grass-099f84510.7.azurestaticapps.net/
+> Resource group `rg-necogoode-prod` is provisioned. SWA `swa-necogoode-prod` is deployed. `ALPHAVANTAGE_KEY` is in app settings. Local `AlphaVantage.txt` has been deleted.
+> The only remaining work is **GoDaddy DNS records → custom domain bind → SSL verify** (sections 1–4 below).
 
 ---
 
-## 0. Re-authenticate to Azure (REQUIRED — token expired)
+## 1. Verify the live site
 
-```bash
-az login --tenant e342fcda-1af7-45d7-8552-9dc4f05346dd
-az account set --subscription 3ce81091-d3b7-42bd-91dc-3e5fd2f1b127
-az account show --query "{ name: name, id: id }" -o table
-```
+Open: https://red-grass-099f84510.7.azurestaticapps.net
 
-Expected output: `Azure subscription 1` / `3ce81091-d3b7-42bd-91dc-3e5fd2f1b127`.
-
----
-
-## 1. Push the code to GitHub
-
-The local repo has commits but has never been pushed. Verify and push:
-
-```bash
-cd C:\Claude\NecoGoodedotcom
-git status                             # should be clean
-git log --oneline | head -10           # should show ~8 logical commits
-
-# Create the GitHub repo (public)
-gh repo create BackpackNecoG/necogoode-website --public --source=. --remote=origin --description "Personal portfolio at necogoode.com"
-
-# Push main
-git push -u origin main
-```
-
-- [ ] Repo visible at https://github.com/BackpackNecoG/necogoode-website
-- [ ] README renders the project overview
-
----
-
-## 2. Create the Azure resource group + Static Web App
-
-```bash
-# 1) Resource group in Central US (matches SoloLift convention)
-az group create --name rg-necogoode-prod --location centralus
-
-# 2) Static Web App linked to the GitHub repo (this auto-installs the GitHub Actions workflow + secret)
-az staticwebapp create \
-  --name swa-necogoode-prod \
-  --resource-group rg-necogoode-prod \
-  --source https://github.com/BackpackNecoG/necogoode-website \
-  --branch main \
-  --app-location "/web" \
-  --output-location "dist" \
-  --api-location "/api" \
-  --location centralus \
-  --login-with-github
-```
-
-The `--login-with-github` flag opens a browser for the GitHub OAuth handshake — sign in if prompted.
-
-- [ ] First deploy succeeds. Watch progress: https://github.com/BackpackNecoG/necogoode-website/actions
-- [ ] Capture the assigned hostname:
-      ```bash
-      az staticwebapp show --name swa-necogoode-prod --resource-group rg-necogoode-prod --query defaultHostname -o tsv
-      ```
-- [ ] Live URL: `https://________________________.azurestaticapps.net`
-
----
-
-## 3. Set the Alpha Vantage app setting (and delete the local key file)
-
-```bash
-# Read the key from the local file (never echo it)
-$key = Get-Content C:\Claude\NecoGoodedotcom\AlphaVantage.txt -Raw
-$key = $key.Trim()
-
-# Set as app setting on the Static Web App
-az staticwebapp appsettings set `
-  --name swa-necogoode-prod `
-  --resource-group rg-necogoode-prod `
-  --setting-names "ALPHAVANTAGE_KEY=$key"
-
-# VERIFY — the setting must be present (do NOT print value)
-az staticwebapp appsettings list `
-  --name swa-necogoode-prod `
-  --resource-group rg-necogoode-prod `
-  --query "properties | keys(@)" -o tsv
-```
-
-The output of the verify command must include `ALPHAVANTAGE_KEY`.
-
-**Only after that confirmation:**
-
-```powershell
-Remove-Item C:\Claude\NecoGoodedotcom\AlphaVantage.txt
-```
-
-- [ ] App setting `ALPHAVANTAGE_KEY` confirmed present
-- [ ] Local `AlphaVantage.txt` deleted
-- [ ] Local `api/local.settings.json` (separate file) is .gitignored — no action needed
-
----
-
-## 4. Verify the live site
-
-Open `https://<your-swa-hostname>.azurestaticapps.net` and confirm:
-
-- [ ] Splash door loads at `/`
-- [ ] `/TechTour` loads (IDE layout, file tree, syntax-highlighted README)
-- [ ] `/BusTour` loads (workshop with horizontal-scroll cards)
-- [ ] `/floor` loads, counter widget shows `25 / 25 calls` (or whatever's left after testing)
-- [ ] Type `AAPL` into the ticker prompt — see real quote, counter decrements
-- [ ] Hover the counter — attribution tooltip appears
+- [ ] `/` — Splash door loads
+- [ ] `/TechTour` — IDE layout, file tree, syntax-highlighted README
+- [ ] `/BusTour` — Workshop with horizontal-scroll cards
+- [ ] `/floor` — Counter widget shows X/25, ticker prompt accepts a symbol
+- [ ] Type `AAPL` in the ticker — see real quote, counter decrements
+- [ ] Hover the counter — attribution tooltip shows
+- [ ] `/TechTour/creations/sololift` and similar slugs render the deep-dive
 - [ ] Cross-tour links work between TechTour and BusTour creation pages
-- [ ] 404 page exists for unknown routes (try `/foo`)
+- [ ] Random URL like `/foo` shows the 404 page (custom NotFound)
+
+If any of those fail, see `docs/VALIDATION.md` and `docs/HANDOFF.md`.
 
 ---
 
-## 5. Add GoDaddy DNS records
+## 2. Add GoDaddy DNS records
 
-Once the SWA is up, get the validation token + CNAME target:
+In **GoDaddy DNS Manager** for `necogoode.com`, add these records:
+
+| Type | Name | Value | TTL | Purpose |
+|---|---|---|---|---|
+| TXT | `@` | `_z0mpjhzvmo6yoarlmhtohgph6cjwb50` | 1 hour | Apex domain ownership validation |
+| TXT | `www` | `_k1b4dzs0foiw88oclkal9cvfw61v9n3` | 1 hour | www subdomain ownership validation |
+| CNAME | `www` | `red-grass-099f84510.7.azurestaticapps.net.` | 1 hour | Routes www → SWA |
+| A | `@` | (see Azure portal — step 4) | 1 hour | Routes apex → SWA inbound IP |
+
+**About the apex A record IP:** GoDaddy doesn't support ALIAS / ANAME / CNAME-flattening at the apex, so we need a real A record. The IP comes from Azure once apex validation completes (step 3 below). **Currently** `red-grass-099f84510.7.azurestaticapps.net` resolves to `132.220.38.112`, but Azure recommends using the IPs they show in the portal under Custom Domains because they can rotate.
+
+**Alternative (simpler) for the apex:** use GoDaddy's **Domain Forwarding** to redirect `necogoode.com → https://www.necogoode.com` (permanent, with masking off). This sidesteps the apex-A-record-instability concern entirely. Most casual visitors will hit www anyway.
+
+After adding records, verify propagation:
+```bash
+nslookup -type=TXT necogoode.com 8.8.8.8
+nslookup -type=TXT www.necogoode.com 8.8.8.8
+nslookup www.necogoode.com 8.8.8.8
+```
+The TXT lookups should show the tokens above. The www lookup should resolve to the SWA hostname / IP.
+
+- [ ] TXT records added at GoDaddy
+- [ ] CNAME for www added at GoDaddy
+- [ ] DNS propagation verified (~5–15 min)
+
+---
+
+## 3. Wait for Azure to validate ownership
+
+Azure auto-checks the TXT records every few minutes. Verify status:
 
 ```bash
-az staticwebapp hostname add \
+az staticwebapp hostname list \
   --name swa-necogoode-prod \
   --resource-group rg-necogoode-prod \
-  --hostname necogoode.com \
-  --validation-method dns-txt-token
-
-az staticwebapp hostname add \
-  --name swa-necogoode-prod \
-  --resource-group rg-necogoode-prod \
-  --hostname www.necogoode.com \
-  --validation-method cname-delegation
+  --query "[].{domain:domainName, status:status}" \
+  -o table
 ```
 
-Each command prints a **TXT record** (apex) or **CNAME target** (www) that you must add at GoDaddy.
+Watch for `status` to change from `Validating` → `Ready` for both `necogoode.com` and `www.necogoode.com`. Usually within 5–15 min of DNS propagating.
 
-Then in **GoDaddy DNS Manager** for `necogoode.com`:
+- [ ] `necogoode.com` status is `Ready`
+- [ ] `www.necogoode.com` status is `Ready`
+
+---
+
+## 4. Add the apex A record (only after step 3 says Ready)
+
+Once apex validation is `Ready`, open the Azure portal:
+
+```bash
+# Open the Custom Domains pane in the SWA resource
+az staticwebapp show \
+  --name swa-necogoode-prod \
+  --resource-group rg-necogoode-prod \
+  --query "id" -o tsv
+# Paste the returned ID into https://portal.azure.com/#@/resource{paste-ID}/customDomains
+```
+
+Or simpler: portal → Resource groups → `rg-necogoode-prod` → `swa-necogoode-prod` → **Custom domains**. Azure will display the **inbound IP** to use for the apex A record.
+
+Add that IP at GoDaddy:
 
 | Type | Name | Value | TTL |
 |---|---|---|---|
-| TXT | `@` | `<token-from-az-output>` | 1 hour |
-| A | `@` | `<see Azure portal — apex requires A record to SWA's IP>` | 1 hour |
-| CNAME | `www` | `<your-swa-hostname>.azurestaticapps.net.` | 1 hour |
+| A | `@` | `<IP-from-Azure-portal>` | 1 hour |
 
-Wait 5–15 minutes for DNS propagation:
+(If you chose the GoDaddy forwarding alternative in step 2, skip this step entirely.)
 
-```bash
-nslookup necogoode.com 8.8.8.8
-nslookup www.necogoode.com 8.8.8.8
-```
-
-- [ ] DNS records added at GoDaddy
-- [ ] `nslookup` shows the SWA hostname (or its IP)
+- [ ] Apex A record added at GoDaddy (or forwarding configured instead)
 
 ---
 
-## 6. Bind the custom domain
+## 5. Verify SSL + final smoke
 
-**DO NOT run these until DNS resolves** (step 5 must show propagation):
-
-```bash
-az staticwebapp hostname add \
-  --name swa-necogoode-prod \
-  --resource-group rg-necogoode-prod \
-  --hostname necogoode.com
-
-az staticwebapp hostname add \
-  --name swa-necogoode-prod \
-  --resource-group rg-necogoode-prod \
-  --hostname www.necogoode.com
-```
-
-Azure auto-provisions Let's Encrypt SSL once DNS validation succeeds — usually 5 minutes.
+Azure auto-provisions Let's Encrypt SSL once both DNS validation and routing are healthy. Wait ~5–10 min, then:
 
 - [ ] `https://necogoode.com` loads with green lock
-- [ ] `https://www.necogoode.com` loads
-- [ ] (Optional) Set `necogoode.com` as the default hostname in the SWA's Custom domains pane in the Azure portal
+- [ ] `https://www.necogoode.com` loads with green lock
+- [ ] Type a real ticker on prod, see the counter decrement, refresh the page — counter should persist for the rest of the UTC day (best-effort; see VALIDATION major #3 about scale-out drift)
 
 ---
 
-## 7. Spending guardrail (recommended)
+## Reference — what's already done
 
-Set a $30/month budget alert on the resource group:
-
-```bash
-az consumption budget create \
-  --resource-group rg-necogoode-prod \
-  --budget-name necogoode-monthly \
-  --amount 30 \
-  --time-grain Monthly \
-  --start-date 2026-05-01 \
-  --end-date 2027-05-01 \
-  --category Cost
-```
-
-If `az consumption budget create` is unavailable in your CLI version, do it manually in the Azure portal:
-**Cost Management + Billing → Budgets → Add → scope to `rg-necogoode-prod` → $30/mo, alert at 80% and 100%**.
-
-- [ ] Budget alert configured
+| Resource | Name | Region | Notes |
+|---|---|---|---|
+| Resource group | `rg-necogoode-prod` | Central US | Tagged project=necogoode env=prod |
+| Static Web App | `swa-necogoode-prod` | Central US | Free tier · `red-grass-099f84510.7.azurestaticapps.net` |
+| App settings | `ALPHAVANTAGE_KEY` | (in SWA) | Verified present, key file deleted from disk |
+| Custom domains | `necogoode.com` (apex), `www.necogoode.com` | (pending DNS) | TXT validation tokens issued |
+| Budget alert | `necogoode-monthly` | rg-scoped | $30/mo · 80% + 100% emails to rennecog@gmail.com |
+| GitHub repo | `BackpackNecoG/necogoode-website` | Public | CI/CD wired via `AZURE_STATIC_WEB_APPS_API_TOKEN` repo secret |
 
 ---
 
-## 8. Final pass
+## If something is wrong
 
-- [ ] `https://necogoode.com` loads, ticker works end-to-end on the live domain
-- [ ] Type a real ticker on production, see counter decrement, then refresh — counter persists for the rest of the calendar day (UTC)
-- [ ] Open `docs/VALIDATION.md` and read the honest self-assessment
-
----
-
-**If anything goes wrong:** see `docs/HANDOFF.md` for V2 TODOs and known-gap workarounds, and `docs/ARCHITECTURE.md` for the data-flow map.
+- **`/api/*` returns 500 in prod:** check `az staticwebapp appsettings list --name swa-necogoode-prod --resource-group rg-necogoode-prod` — `ALPHAVANTAGE_KEY` must be present.
+- **DNS validation stuck on Validating after >30 min:** TXT token may have rotated. Re-fetch with `az staticwebapp hostname show --name swa-necogoode-prod --resource-group rg-necogoode-prod --hostname necogoode.com --query validationToken -o tsv`.
+- **GH Actions deploy fails:** the most recent run logs are at https://github.com/BackpackNecoG/necogoode-website/actions. Past two flavors of failure:
+  1. *"deployment_token provided was invalid"* — re-fetch SWA secret with `az staticwebapp secrets list --name swa-necogoode-prod --resource-group rg-necogoode-prod --query "properties.apiKey" -o tsv` and update the GH repo secret.
+  2. *"Cannot deploy to the function app because Function language info isn't provided"* — already fixed in commit `f3fa2d0` (workflow now lets Oryx build the API).
