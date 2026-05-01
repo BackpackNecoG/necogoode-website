@@ -1,9 +1,8 @@
-import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useRouteScope } from '../lib/useRouteScope';
 import { getCreationBySlug } from '../data/creations';
 import { Tag } from '../components/ui/Tag';
-import { VibingVisual } from '../components/domain/workshop/visuals';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 import NotFound from './NotFound';
 
 /**
@@ -20,7 +19,7 @@ import NotFound from './NotFound';
  */
 type ScreenshotEntry =
   | { kind: 'image'; src: string; caption: string }
-  | { kind: 'visual'; render: () => ReactNode; caption: string };
+  | { kind: 'pair'; left: { src: string; label: string }; right: { src: string; label: string }; caption: string };
 
 const SCREENSHOTS: Record<string, ScreenshotEntry | undefined> = {
   goodegame: {
@@ -33,14 +32,22 @@ const SCREENSHOTS: Record<string, ScreenshotEntry | undefined> = {
     src: '/screenshots/sololift/home.png',
     caption: 'the public landing · sign in to use',
   },
-  // VWPA's sign-in screenshot is a stark dark form. The signature primitive-driven
-  // navigation wheel sits behind that gate — show the wheel visual itself instead,
-  // reusing the same component as the BusTour bench card so the workshop language
-  // stays consistent.
+  // VWPA: the signature navigation-wheel screenshot Neco supplied. The branding
+  // shows VIBINGAI at the hub, surrounded by labeled primitive spokes — that's
+  // the product's distinctive UX, far more on-brand than a sign-in surface.
   'vibing-with-primitive-ai': {
-    kind: 'visual',
-    render: () => <VibingVisual />,
-    caption: 'the navigation wheel · primitives, not chat',
+    kind: 'image',
+    src: '/screenshots/vibing-with-primitive-ai/wheel.png',
+    caption: 'the navigation wheel · primitives instead of chat',
+  },
+  // BSA: characters modeled on Neco's two kids, Ant and Lena. The character
+  // bibles are the authoritative reference sheets — color identity, hair refs,
+  // proportions — kept locked so animation stays consistent across episodes.
+  'byte-sized-adventures': {
+    kind: 'pair',
+    left: { src: '/screenshots/byte-sized-adventures/ant.png', label: 'Ant — character bible' },
+    right: { src: '/screenshots/byte-sized-adventures/lena.png', label: 'Lena — character bible' },
+    caption: 'the family characters · modeled on my own two kids, Ant and Lena',
   },
 };
 
@@ -151,7 +158,8 @@ export default function BusCreation() {
           if (entry.kind === 'image') {
             return <PhotoImage src={entry.src} alt={`${c.name} — landing`} caption={entry.caption} />;
           }
-          return <PhotoVisual caption={entry.caption}>{entry.render()}</PhotoVisual>;
+          // pair — two stacked tiles with their own labels (BSA: Ant + Lena)
+          return <PhotoPair {...entry} />;
         })()}
 
         {/* Call-to-action footer */}
@@ -191,6 +199,8 @@ export default function BusCreation() {
           ← back to the bench
         </Link>
       </div>
+
+      <NavigationWheel active="bus" />
     </div>
   );
 }
@@ -227,28 +237,53 @@ function PhotoImage({ src, alt, caption }: { src: string; alt: string; caption: 
 }
 
 /**
- * Renders an arbitrary visual node (e.g. a hand-drawn wheel) inside the same
- * paper frame the screenshot version uses, so the layout stays consistent.
+ * Two side-by-side images with individual labels and one shared caption.
+ * Used for BSA where the visual story is "two characters, one family".
  */
-function PhotoVisual({ caption, children }: { caption: string; children: ReactNode }) {
+function PhotoPair({
+  left,
+  right,
+  caption,
+}: {
+  left: { src: string; label: string };
+  right: { src: string; label: string };
+  caption: string;
+}) {
   return (
     <figure className="mb-10">
-      <div
-        className="aspect-[16/10] overflow-hidden relative flex items-center justify-center"
-        style={{
-          boxShadow: 'inset 0 0 0 1px rgba(74,58,40,0.15), 4px 8px 20px rgba(0,0,0,0.25)',
-          background: 'var(--bus-paper-dark)',
-        }}
-      >
-        {children}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <PhotoTile src={left.src} alt={left.label} label={left.label} />
+        <PhotoTile src={right.src} alt={right.label} label={right.label} />
       </div>
       <figcaption
-        className="font-hand text-[1.05rem] mt-2 text-center"
+        className="font-hand text-[1.05rem] mt-3 text-center"
         style={{ color: 'var(--bus-rust)' }}
       >
         — {caption}
       </figcaption>
     </figure>
+  );
+}
+
+function PhotoTile({ src, alt, label }: { src: string; alt: string; label: string }) {
+  return (
+    <div>
+      <div
+        className="aspect-[16/10] overflow-hidden relative"
+        style={{
+          boxShadow: 'inset 0 0 0 1px rgba(74,58,40,0.15), 4px 8px 20px rgba(0,0,0,0.25)',
+          background: 'var(--bus-paper-dark)',
+        }}
+      >
+        <img src={src} alt={alt} loading="lazy" className="w-full h-full object-cover object-top" />
+      </div>
+      <div
+        className="font-hand text-[0.95rem] mt-1.5 text-center"
+        style={{ color: 'var(--bus-ink-soft)' }}
+      >
+        {label}
+      </div>
+    </div>
   );
 }
 
