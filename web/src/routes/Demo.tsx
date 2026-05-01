@@ -3,6 +3,7 @@ import { useRouteScope } from '../lib/useRouteScope';
 import { getCreationBySlug } from '../data/creations';
 import { Tag } from '../components/ui/Tag';
 import { Chip } from '../components/ui/Chip';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 import NotFound from './NotFound';
 
 /**
@@ -118,6 +119,8 @@ export default function Demo() {
           </Link>
         </div>
       </div>
+
+      <NavigationWheel active="floor" />
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { FileExplorer } from '../components/domain/ide/FileExplorer';
 import { EditorPane } from '../components/domain/ide/EditorPane';
 import { TerminalPane } from '../components/domain/ide/TerminalPane';
 import { StatusBar } from '../components/domain/ide/StatusBar';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 
 /**
  * /TechTour homepage — IDE-themed README of Neco Goode.
@@ -82,6 +83,7 @@ export default function TechTour() {
         </div>
       </IdeChrome>
       <StatusBar />
+      <NavigationWheel active="tech" />
     </div>
   );
 }

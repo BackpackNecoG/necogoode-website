@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useRouteScope } from '../lib/useRouteScope';
 import { fetchTalkStatus, postMessage, isReply } from '../lib/talkDangerously';
 import { creations } from '../data/creations';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 
 /**
  * /console — "Let Neco Talk Dangerously" terminal page.
@@ -387,6 +388,8 @@ export default function Console() {
           </span>
         </div>
       </div>
+
+      <NavigationWheel active="console" />
     </div>
   );
 }

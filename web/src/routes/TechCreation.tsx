@@ -7,6 +7,7 @@ import { FileExplorer } from '../components/domain/ide/FileExplorer';
 import { StatusBar } from '../components/domain/ide/StatusBar';
 import { Chip } from '../components/ui/Chip';
 import { Tag } from '../components/ui/Tag';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 import NotFound from './NotFound';
 
 /**
@@ -215,6 +216,7 @@ export default function TechCreation() {
         </div>
       </IdeChrome>
       <StatusBar language="Markdown" position={`Ln 1, Col 1 · ${c.ticker}`} />
+      <NavigationWheel active="tech" />
     </div>
   );
 }

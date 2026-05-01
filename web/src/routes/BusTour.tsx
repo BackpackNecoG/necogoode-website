@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useRouteScope } from '../lib/useRouteScope';
 import { creations } from '../data/creations';
 import { WorkshopCard } from '../components/domain/workshop/WorkshopCard';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 import {
   GoodeGameVisual,
   SoloLiftVisual,
@@ -117,6 +118,8 @@ export default function BusTour() {
 
       {/* Inline keyframes for the scroll-hint nudge */}
       <style>{`@keyframes nudge { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(8px); } }`}</style>
+
+      <NavigationWheel active="bus" />
     </>
   );
 }

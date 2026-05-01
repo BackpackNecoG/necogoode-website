@@ -4,6 +4,7 @@ import { useRouteScope } from '../lib/useRouteScope';
 import { TickerTape } from '../components/domain/floor/TickerTape';
 import { Watchlist } from '../components/domain/floor/Watchlist';
 import { AlphaVantageWidget } from '../components/domain/floor/AlphaVantageWidget';
+import { NavigationWheel } from '../components/domain/NavigationWheel';
 
 /**
  * /floor — Trading Terminal. Mirrors docs/reference/L-trading-floor.html.
@@ -133,6 +134,8 @@ export default function Floor() {
       </div>
 
       <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
+
+      <NavigationWheel active="floor" />
     </div>
   );
 }
