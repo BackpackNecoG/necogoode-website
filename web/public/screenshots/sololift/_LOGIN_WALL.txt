@@ -1,0 +1,6 @@
+URL gated by login — captured screenshot is the login/landing page; user should provide a real product screenshot post-launch.
+
+Detected: Page has 1 password input(s) — likely an auth wall.
+Original URL: https://sololift.ai
+Final URL:    https://sololift.ai/
+Captured at:  2026-05-01T16:24:40.482Z

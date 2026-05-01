@@ -161,7 +161,7 @@ export const creations: Creation[] = [
       why: 'Chat is a great fallback, but it is a terrible default. I built VWPA to demonstrate that there are entire categories of AI products waiting on better interfaces.',
       forWhom: 'Anyone tired of staring at a blinking cursor wondering what to type, and the partners who agree there is a better way.',
     },
-    liveUrl: 'https://vibingwithprimitiveai.com',
+    liveUrl: 'https://vibewithprimitiveai.com',
     demoUrl: '/demo/vibing-with-primitive-ai',
     metrics: [
       { label: 'Status', value: 'Live · v2', trend: 'up' },

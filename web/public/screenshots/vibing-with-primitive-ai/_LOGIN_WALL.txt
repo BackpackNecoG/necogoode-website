@@ -1,0 +1,6 @@
+URL gated by login — captured screenshot is the login/landing page; user should provide a real product screenshot post-launch.
+
+Detected: Final URL https://www.vibewithprimitiveai.com/login matches login path pattern (started at https://vibewithprimitiveai.com).
+Original URL: https://vibewithprimitiveai.com
+Final URL:    https://www.vibewithprimitiveai.com/login
+Captured at:  2026-05-01T16:24:44.952Z

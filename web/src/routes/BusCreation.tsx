@@ -5,6 +5,34 @@ import { Tag } from '../components/ui/Tag';
 import NotFound from './NotFound';
 
 /**
+ * Real screenshots captured from live URLs by `scripts/screenshots.js`.
+ *
+ * Each captured page is currently a login wall — that's the public face of
+ * the product, since GoodeGame is invitation-only, SoloLift is paid-tier,
+ * and VibingWithPrimitiveAI is gated. Rather than show duplicate full-page
+ * captures (the page fits in viewport so home == in-use), we render ONE
+ * landing screenshot per creation with an honest caption, and let visitors
+ * follow the "Visit it live" CTA below to actually try the product.
+ *
+ * Falls back to the sepia <PhotoSlot /> for BSA + PIP (no live URL yet).
+ */
+type ScreenshotEntry = { src: string; caption: string };
+const SCREENSHOTS: Record<string, ScreenshotEntry | undefined> = {
+  goodegame: {
+    src: '/screenshots/goodegame/home.png',
+    caption: 'the clubhouse door · members enter from here',
+  },
+  sololift: {
+    src: '/screenshots/sololift/home.png',
+    caption: 'the public landing · sign in to use',
+  },
+  'vibing-with-primitive-ai': {
+    src: '/screenshots/vibing-with-primitive-ai/home.png',
+    caption: 'sign-in surface · public app behind it',
+  },
+};
+
+/**
  * /BusTour/creations/:slug
  *
  * Workshop-themed long-form story page. Hero on paper, prose in Fraunces serif,
@@ -94,14 +122,22 @@ export default function BusCreation() {
           {c.bus.forWhom}
         </p>
 
-        {/* Photo placeholders — Neco adds real screenshots post-launch */}
+        {/* Real screenshot if captured; sepia placeholder for BSA + PIP */}
         <h2 className="font-serif text-[1.5rem] font-semibold text-[var(--bus-ink)] mb-4">
           From the workshop
         </h2>
-        <div className="grid grid-cols-2 gap-4 mb-10">
-          <PhotoSlot caption="screenshot · home" />
-          <PhotoSlot caption="screenshot · in use" />
-        </div>
+        {SCREENSHOTS[c.slug] ? (
+          <PhotoImage
+            src={SCREENSHOTS[c.slug]!.src}
+            alt={`${c.name} — landing`}
+            caption={SCREENSHOTS[c.slug]!.caption}
+          />
+        ) : (
+          <div className="grid grid-cols-2 gap-4 mb-10">
+            <PhotoSlot caption="screenshot · home" />
+            <PhotoSlot caption="screenshot · in use" />
+          </div>
+        )}
 
         {/* Call-to-action footer */}
         <hr className="my-10" style={{ borderColor: 'rgba(74,58,40,0.3)' }} />
@@ -141,6 +177,37 @@ export default function BusCreation() {
         </Link>
       </div>
     </div>
+  );
+}
+
+/**
+ * Real captured screenshot — single full-width tile with handwritten caption
+ * underneath. Rendered when we have a real PNG for the creation.
+ */
+function PhotoImage({ src, alt, caption }: { src: string; alt: string; caption: string }) {
+  return (
+    <figure className="mb-10">
+      <div
+        className="aspect-[16/10] overflow-hidden relative"
+        style={{
+          boxShadow: 'inset 0 0 0 1px rgba(74,58,40,0.15), 4px 8px 20px rgba(0,0,0,0.25)',
+          background: 'var(--bus-paper-dark)',
+        }}
+      >
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          className="w-full h-full object-cover object-top"
+        />
+      </div>
+      <figcaption
+        className="font-hand text-[1.05rem] mt-2 text-center"
+        style={{ color: 'var(--bus-rust)' }}
+      >
+        — {caption}
+      </figcaption>
+    </figure>
   );
 }
 

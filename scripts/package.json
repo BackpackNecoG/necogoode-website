@@ -1,0 +1,11 @@
+{
+  "name": "necogoode-scripts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "One-off ops scripts (screenshots, etc.) — kept separate from the web app's deps.",
+  "dependencies": {
+    "playwright": "^1.48.0",
+    "sharp": "^0.34.5"
+  }
+}
