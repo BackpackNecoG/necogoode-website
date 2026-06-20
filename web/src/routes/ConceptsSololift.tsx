@@ -2,17 +2,22 @@ import { Link } from 'react-router-dom';
 import { ReactNode } from 'react';
 import { useRouteScope } from '../lib/useRouteScope';
 import { NavigationWheel } from '../components/domain/NavigationWheel';
-import { concepts, folderUrl } from '../data/conceptLinks';
+import { concepts, projectUrl } from '../data/conceptLinks';
 
 /**
  * /concepts/sololift.ai — the live gallery the /concepts page links to.
  *
- * A short SoloLift case study (what it is, why it needed a real render stage)
- * followed by a responsive grid of all 20 published "Skill Altitude" concepts,
- * each linking out to its live render-origin URL. Reuses the shared splash
- * palette via the 'concepts' scope so it reads as a continuation of the
- * Concept Lab writeup rather than a new themed room.
+ * A short SoloLift case study (what the Skill Altitude page is, why it can only
+ * be judged running) followed by a responsive grid of 20 published cinematic,
+ * scroll-driven "Skill Altitude" concepts, each linking out to its live
+ * render-origin URL. Reuses the shared splash palette via the 'concepts' scope
+ * so it reads as a continuation of the Concept Lab writeup rather than a new
+ * themed room.
  */
+
+/** Earlier, first-pass exploration of the same page in a different visual language. */
+const EARLIER_EXPLORATIONS_URL =
+  'https://conceptlabrender.z19.web.core.windows.net/p/sololift/';
 export default function ConceptsSololift() {
   useRouteScope('concepts');
 
@@ -68,11 +73,12 @@ export default function ConceptsSololift() {
             className="font-serif font-normal leading-[1.05] tracking-[-0.025em] mb-6 text-[var(--splash-text)]"
             style={{ fontSize: 'clamp(2.4rem, 5.5vw, 3.8rem)' }}
           >
-            Skill Altitude, <em className="italic text-[var(--splash-tech)]">running.</em>
+            Skill Altitude, told as a <em className="italic text-[var(--splash-tech)]">cinematic story.</em>
           </h1>
           <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[640px]">
-            Twenty interactive concepts for one SoloLift page&mdash;3D, particles, physics, shaders.
-            Not screenshots. Open any of them and it runs in your browser, right now.
+            Twenty scroll-driven takes on one SoloLift page&mdash;where a technician stands across the
+            eight Microsoft-aligned IT domains, and the horizon they&apos;re climbing next. 3D, shaders,
+            real motion. Things you have to open and scroll to read.
           </p>
         </header>
 
@@ -88,24 +94,27 @@ export default function ConceptsSololift() {
         </Section>
 
         {/* WHY IT NEEDED A REAL RENDER STAGE */}
-        <Section kicker="02 · Why a live stage" title="Some ideas can only be judged running">
+        <Section kicker="02 · Why a live stage" title="A page that has to be scrolled to be read">
           <P>
-            One SoloLift page raised the bar: the per-person{' '}
-            <em className="italic text-[var(--splash-text)]">Skill Altitude</em> view. It visualizes a
-            single technician&apos;s strengths and weaknesses across the eight Microsoft-aligned IT
-            domains, pairs each gap with a Microsoft Learn recommendation, and shows competency growth
-            over time.
+            One SoloLift page asked for more than a layout: the per-person{' '}
+            <em className="italic text-[var(--splash-text)]">Skill Altitude</em> view. It&apos;s the
+            technician&apos;s real competency page&mdash;where they stand across the eight
+            Microsoft-aligned IT domains, how that altitude has risen over time, and their
+            <em className="italic text-[var(--splash-text)]"> horizon</em>: the one domain they&apos;re
+            climbing next, paired with a free Microsoft Learn path to get there.
           </P>
           <P>
-            A page like that wants to feel alive&mdash;terrain that rises with mastery, particles that
-            swarm into shape, physics you can nudge, shaders that breathe. You cannot evaluate any of
-            that as a static mockup, because the whole point is the motion and the interaction. The
-            concepts <em className="italic text-[var(--splash-text)]">have to run</em> to be judged.
+            Told well, that&apos;s a story, and a story unfolds. So each concept below is
+            scroll-driven&mdash;the eight domains rise as you descend, the horizon resolves as you
+            arrive, the past growth replays beneath you. Terrain, particles, physics, shaders, all
+            moving in response to where you are on the page. None of it survives a screenshot; the
+            craft <em className="italic text-[var(--splash-text)]">is</em> the motion and the
+            interaction.
           </P>
           <P>
-            So each concept gets a private URL on an isolated render origin&mdash;a real, live page you
-            open, poke at, and share with a client mid-meeting. The twenty below are that exploration:
-            twenty genuinely different answers to &ldquo;what should Skill Altitude feel like?&rdquo;
+            Which is exactly why each one gets a private URL on an isolated render origin&mdash;a real,
+            live page you open and scroll through end to end. The twenty below are that exploration:
+            twenty genuinely different ways to tell one technician&apos;s ascent.
           </P>
         </Section>
 
@@ -133,16 +142,16 @@ export default function ConceptsSololift() {
           </div>
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-5 mb-8">
             <h2 className="font-serif text-[1.9rem] md:text-[2.2rem] leading-tight tracking-[-0.02em] text-[var(--splash-text)]">
-              All twenty, <em className="italic text-[var(--splash-tech)]">live.</em>
+              Twenty stories of one ascent, <em className="italic text-[var(--splash-tech)]">live.</em>
             </h2>
             <a
-              href={folderUrl}
+              href={projectUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-6 py-3 font-mono text-[0.78rem] tracking-[0.12em] uppercase no-underline transition-colors flex-shrink-0"
               style={{ background: 'var(--splash-tech)', color: 'var(--splash-bg)' }}
             >
-              <span>Open all 20 (folder)</span>
+              <span>Open the project (all 20)</span>
               <span aria-hidden>↗</span>
             </a>
           </div>
@@ -178,8 +187,23 @@ export default function ConceptsSololift() {
             ))}
           </ul>
 
+          {/* Earlier exploration set — secondary */}
+          <p className="mt-8 font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[680px]">
+            <span className="text-[var(--splash-text-faint)]">earlier · </span>
+            Before this set there was a first pass at the same page in a different visual
+            language.{' '}
+            <a
+              href={EARLIER_EXPLORATIONS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[var(--splash-tech)] no-underline"
+            >
+              See the earlier explorations →
+            </a>
+          </p>
+
           {/* Honest TTL note */}
-          <p className="mt-8 font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
+          <p className="mt-4 font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
             <span className="text-[var(--splash-tech)]">note · </span>
             These are private preview links that expire seven days after upload. If a card 404s later,
             that&apos;s the TTL doing its job&mdash;not a bug. Ask and I&apos;ll re-publish a fresh batch.

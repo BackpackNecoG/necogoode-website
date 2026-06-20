@@ -2,8 +2,8 @@
  * conceptLinks.ts — published Concept Lab links for the SoloLift "Skill Altitude"
  * exploration.
  *
- * Hardcoded from tools/push-concepts.mjs output (CONCEPT_LINKS.md), published under the
- * Concept Lab project "SoloLift" (URLs use /p/sololift/...), generated 2026-06-20T04:32:07.946Z.
+ * Hardcoded from tools/push-concepts.mjs output, published under the Concept Lab project
+ * "Skill Altitude" (URLs use https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/), generated 2026-06-20T05:45:56.994Z.
  * Bundles at build time — nothing is fetched at runtime.
  *
  * NOTE: these are private-by-unguessable-URL links that EXPIRE 7 days after upload.
@@ -21,7 +21,7 @@ export interface Concept {
 
 /** One shareable link / QR covering all 20 concepts (the SoloLift project index). */
 export const folderUrl: string =
-  'https://conceptlabrender.z19.web.core.windows.net/p/sololift/';
+  'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/';
 
 /** Alias — the project index URL (preferred name). */
 export const projectUrl: string = folderUrl;
@@ -29,103 +29,103 @@ export const projectUrl: string = folderUrl;
 /** All 20 published "Skill Altitude" concepts, in upload order. */
 export const concepts: Concept[] = [
   {
-    title: 'Altitude Terrain — A Mountain Range of Mastery',
-    id: 'gentle-juniper-55e378',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/gentle-juniper-55e378/',
+    title: 'Summit Ascent — Your Skill Altitude',
+    id: 'electric-jetty-ef5803',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/electric-jetty-ef5803/',
   },
   {
-    title: 'The Climb — Eight Base Camps to the Summit',
-    id: 'molten-keel-bd41b5',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/molten-keel-bd41b5/',
+    title: 'Orbit of Mastery — Your Skill Altitude',
+    id: 'midnight-falcon-8dc0a9',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/midnight-falcon-8dc0a9/',
   },
   {
-    title: 'Living Competency Organism',
-    id: 'glossy-echo-6b83fd',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/glossy-echo-6b83fd/',
+    title: 'Aurora Atlas — Your Skill Altitude',
+    id: 'midnight-island-e61f6f',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/midnight-island-e61f6f/',
   },
   {
-    title: 'Aurora of Mastery',
-    id: 'feral-willow-3898ac',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/feral-willow-3898ac/',
+    title: 'Self-Portrait in Light — Your Skill Altitude',
+    id: 'glossy-island-0f8c14',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/glossy-island-0f8c14/',
   },
   {
-    title: 'Skill Stack — Stack Your Altitude',
-    id: 'scarlet-lattice-aef1ce',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/scarlet-lattice-aef1ce/',
+    title: 'Fluid Field — The Currents of Your Craft',
+    id: 'zephyr-juniper-dd1a4d',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/zephyr-juniper-dd1a4d/',
   },
   {
-    title: 'Skill Galaxy — Orbits of Mastery',
-    id: 'gilded-ridge-d648d4',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/gilded-ridge-d648d4/',
+    title: 'Constellation Voyage — One More Star to Reach',
+    id: 'fluid-ember-10931e',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/fluid-ember-10931e/',
   },
   {
-    title: 'Skill Constellations',
-    id: 'amber-vector-6ce984',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/amber-vector-6ce984/',
+    title: 'The Land You\'ve Made — Skill Altitude',
+    id: 'humble-pylon-5aa4a1',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/humble-pylon-5aa4a1/',
   },
   {
-    title: 'Sonar of Skill',
-    id: 'lunar-thicket-03c72b',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/lunar-thicket-03c72b/',
+    title: 'Molten Reserves — Skill Altitude',
+    id: 'dusty-current-2e39e6',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/dusty-current-2e39e6/',
   },
   {
-    title: 'Ascent Rope',
-    id: 'jade-fjord-f3d4ab',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/jade-fjord-f3d4ab/',
+    title: 'Skill Altitude — The Weight of What You Know',
+    id: 'zephyr-meadow-b06a41',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/zephyr-meadow-b06a41/',
   },
   {
-    title: 'Living Rings',
-    id: 'humble-spire-53ca1d',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/humble-spire-53ca1d/',
+    title: 'Skill Altitude — What You\'ve Crystallized',
+    id: 'crimson-tundra-237382',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/crimson-tundra-237382/',
   },
   {
-    title: 'Altitude Massif',
-    id: 'quiet-current-e07ebd',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/quiet-current-e07ebd/',
+    title: 'Resonance Field — Where You Stand',
+    id: 'dusty-lattice-9608d0',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/dusty-lattice-9608d0/',
   },
   {
-    title: 'Mercury Pools',
-    id: 'solar-grove-21bfed',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/solar-grove-21bfed/',
+    title: 'The Living Thing — Your Skill, Breathing',
+    id: 'rapid-marble-03d91d',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/rapid-marble-03d91d/',
   },
   {
-    title: 'Canyon of Mastery',
-    id: 'brisk-island-39c5ad',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/brisk-island-39c5ad/',
+    title: 'Cathedral of Skill',
+    id: 'gentle-harbor-f43c3b',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/gentle-harbor-f43c3b/',
   },
   {
-    title: 'Altitude Instrument Cluster',
-    id: 'gentle-falcon-f96ebf',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/gentle-falcon-f96ebf/',
+    title: 'Your Aegis',
+    id: 'candid-juniper-e0efef',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/candid-juniper-e0efef/',
   },
   {
-    title: 'Murmuration of Mastery',
-    id: 'humble-pylon-3227dc',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/humble-pylon-3227dc/',
+    title: 'The River of Your Work — Skill Altitude',
+    id: 'ivory-keel-31130f',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/ivory-keel-31130f/',
   },
   {
-    title: 'Altitude Observatory',
-    id: 'velvet-lantern-1478f9',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/velvet-lantern-1478f9/',
+    title: 'Down to the Core — Skill Altitude',
+    id: 'opal-willow-cd7bc5',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/opal-willow-cd7bc5/',
   },
   {
-    title: 'Balance of Mastery',
-    id: 'prism-ember-569cd0',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/prism-ember-569cd0/',
+    title: 'Through the Prism — Your Skill Altitude',
+    id: 'opal-pylon-6daa3b',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/opal-pylon-6daa3b/',
   },
   {
-    title: 'Growth Rings',
-    id: 'prism-quartz-760a05',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/prism-quartz-760a05/',
+    title: 'What You\'re Becoming — A Living Core',
+    id: 'twilight-keel-8c0b2f',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/twilight-keel-8c0b2f/',
   },
   {
-    title: 'Elevation Hike — A Trail Through Your Mastery',
-    id: 'rapid-ember-63de72',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/rapid-ember-63de72/',
+    title: 'Reading the Land — Your Skill Altitude',
+    id: 'brisk-pylon-477e1c',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/brisk-pylon-477e1c/',
   },
   {
-    title: 'Skill Nebula — Eight Constellations of Craft',
-    id: 'noble-signal-544c03',
-    url: 'https://conceptlabrender.z19.web.core.windows.net/p/sololift/noble-signal-544c03/',
+    title: 'Ignition — The Skill Nebula',
+    id: 'zephyr-jetty-4f6f2e',
+    url: 'https://conceptlabrender.z19.web.core.windows.net/p/skill-altitude/zephyr-jetty-4f6f2e/',
   },
 ];
