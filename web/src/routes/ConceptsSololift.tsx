@@ -109,6 +109,23 @@ export default function ConceptsSololift() {
           </P>
         </Section>
 
+        {/* THE TOOL BEHIND THE GALLERY */}
+        <figure className="mt-14 max-w-[860px] m-0">
+          <img
+            src="/concepts/studio-04-upload-result.png"
+            alt="The Concept Lab studio after a concept upload: a one-click Copy link button and an auto-generated QR code."
+            loading="lazy"
+            className="w-full max-w-[760px] h-auto rounded-sm border border-[var(--splash-line)]"
+          />
+          <figcaption className="mt-3 font-mono text-[0.72rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[760px]">
+            This is the tool behind the gallery&mdash;each link below was minted by dropping an HTML
+            concept into the studio.{' '}
+            <Link to="/concepts" className="text-[var(--splash-tech)] no-underline">
+              See how it&apos;s built →
+            </Link>
+          </figcaption>
+        </figure>
+
         {/* GALLERY */}
         <section className="mt-16">
           <div className="font-mono text-[0.7rem] tracking-[0.25em] uppercase text-[var(--splash-text-faint)] mb-3">

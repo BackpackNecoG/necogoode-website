@@ -197,8 +197,77 @@ export default function Concepts() {
           </P>
         </Section>
 
+        {/* LIVE WALKTHROUGH — real screenshots of the studio */}
+        <Section kicker="06 · In practice" title="How I test a concept live">
+          <P>
+            That&apos;s the architecture. Here is the actual thirty seconds&mdash;the real studio, the
+            real screens&mdash;from signing in to a client opening the running concept on their own phone.
+          </P>
+
+          <ol className="mt-8 space-y-12 list-none">
+            <Walkthrough
+              n="1"
+              title="Sign in to a private studio"
+              src="/concepts/studio-01-login.png"
+              alt="The Concept Lab studio sign-in screen, with username and password fields on the isolated authenticated origin."
+              caption="The studio is a separate, authenticated origin. The public render side holds nothing privileged; everything that can write a concept lives behind this login."
+            >
+              Everything starts behind a login on the authenticated side of the trust boundary. The
+              public render origin can&apos;t reach any of this.
+            </Walkthrough>
+
+            <Walkthrough
+              n="2"
+              title="Pick or create a project to partition the work"
+              src="/concepts/studio-03-newproject.png"
+              alt="The 'New project' dialog: a client project with the public code name 'Project Falcon' and a note that the real client name stays private inside the studio."
+              caption="Client work uses a public code name (&ldquo;Project Falcon&rdquo;) while the real name stays private inside the studio. The link you share never reveals who the client is."
+            >
+              Work is partitioned into projects. Personal projects use real names; for client work I
+              give the project a <strong className="text-[var(--splash-text)] font-semibold">public
+              code name</strong> and keep the real client name private inside the studio&mdash;so a link
+              shared in one meeting never discloses a client to anyone else.
+            </Walkthrough>
+
+            <Walkthrough
+              n="3"
+              title="Drag a concept in → instant private URL, Copy, and QR"
+              src="/concepts/studio-04-upload-result.png"
+              alt="After dropping a concept HTML file: a large one-click Copy link button and an auto-generated QR code."
+              caption="Drop a self-contained HTML concept and it comes back as a live private URL with a one-click Copy button and an auto-generated QR&mdash;rendered and running, not downloaded."
+            >
+              Drag a self-contained HTML concept into the drop zone and it&apos;s online immediately:
+              a private URL, a big one-click <strong className="text-[var(--splash-text)] font-semibold">Copy
+              link</strong> button, and a QR code generated on the spot.
+            </Walkthrough>
+
+            <Walkthrough
+              n="4"
+              title="Share live in the meeting — and re-grab anything later"
+              src="/concepts/studio-06-project-index.png"
+              alt="The public project index page: one link and QR that opens every concept in a project, showing only the code name."
+              caption="One project link or QR opens the whole set&mdash;showing only the code name. Later, Recent lets me re-share any concept without re-uploading it."
+            >
+              In the meeting, a single project link or QR opens the{' '}
+              <em className="italic text-[var(--splash-text)]">whole set</em> of concepts&mdash;the index
+              shows only the code name. Afterward, the studio&apos;s{' '}
+              <strong className="text-[var(--splash-text)] font-semibold">Recent</strong> view, grouped
+              by project, lets me re-grab or re-share any link without re-uploading.
+              <img
+                src="/concepts/studio-05-recent.png"
+                alt="The studio's Recent view: links grouped by project, for re-sharing without re-uploading."
+                loading="lazy"
+                className="mt-5 w-full max-w-[760px] h-auto rounded-sm border border-[var(--splash-line)]"
+              />
+              <span className="block mt-3 font-mono text-[0.72rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[760px]">
+                Recent, grouped by project&mdash;re-share without re-uploading.
+              </span>
+            </Walkthrough>
+          </ol>
+        </Section>
+
         {/* COST */}
-        <Section kicker="06 · Cost-consciousness" title="Pennies a month, near-zero when idle">
+        <Section kicker="07 · Cost-consciousness" title="Pennies a month, near-zero when idle">
           <P>
             The whole system is serverless and static. Functions run on{' '}
             <strong className="text-[var(--splash-text)] font-medium">Flex Consumption</strong> and scale to zero when
@@ -438,6 +507,57 @@ function Step({ n, title, children }: { n: string; title: string; children: Reac
       </span>
       <div className="font-sans text-[1rem] leading-relaxed text-[var(--splash-text-soft)] pt-1">
         <strong className="text-[var(--splash-text)] font-semibold">{title}.</strong> {children}
+      </div>
+    </li>
+  );
+}
+
+/* ---------------------------------------------------------------- *
+ * Walkthrough — a numbered step paired with a real studio
+ * screenshot. Images are responsive, lazy-loaded, and bordered to
+ * match the splash surfaces.
+ * ---------------------------------------------------------------- */
+function Walkthrough({
+  n,
+  title,
+  src,
+  alt,
+  caption,
+  children,
+}: {
+  n: string;
+  title: string;
+  src: string;
+  alt: string;
+  caption: string;
+  children: ReactNode;
+}) {
+  return (
+    <li className="flex gap-4 items-start">
+      <span
+        className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center font-mono text-[0.85rem] font-semibold"
+        style={{ border: '1px solid var(--splash-tech)', color: 'var(--splash-tech)' }}
+      >
+        {n}
+      </span>
+      <div className="min-w-0 flex-1">
+        <h3 className="font-serif text-[1.3rem] leading-snug tracking-[-0.01em] text-[var(--splash-text)] mb-2">
+          {title}
+        </h3>
+        <p className="font-sans text-[1rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[680px] mb-5">
+          {children}
+        </p>
+        <figure className="m-0">
+          <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            className="w-full max-w-[760px] h-auto rounded-sm border border-[var(--splash-line)]"
+          />
+          <figcaption className="mt-3 font-mono text-[0.72rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[760px]">
+            {caption}
+          </figcaption>
+        </figure>
       </div>
     </li>
   );
