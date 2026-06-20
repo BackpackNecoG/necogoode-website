@@ -3,6 +3,7 @@ import { useRouteScope } from '../lib/useRouteScope';
 import { NavigationWheel } from '../components/domain/NavigationWheel';
 import { concepts, projectUrl } from '../data/conceptLinks';
 import { altitude3dDirections, altitude3dProjectUrl } from '../data/altitude3d';
+import { altitudeScreens, altitudeScreensProjectUrl } from '../data/altitudeScreens';
 
 /**
  * /concepts/sololift.ai — the live gallery the /concepts page links to.
@@ -63,55 +64,54 @@ export default function ConceptsSololift() {
       </nav>
 
       <main className="relative z-10 max-w-[1080px] mx-auto px-6 md:px-10 pb-28">
-        {/* Hero — the three in-review 3D directions */}
+        {/* Hero — the ten in-review Skill Altitude directions */}
         <header className="pt-12 md:pt-16 mb-12 max-w-[880px]">
           <div className="font-mono text-[0.72rem] tracking-[0.3em] text-[var(--splash-text-faint)] uppercase mb-5">
             <span className="text-[var(--splash-tech)]">— </span>
-            Skill Altitude · immersive 3D · in review
+            Skill Altitude · 10 directions · in review
           </div>
           <h1
             className="font-serif font-normal leading-[1.05] tracking-[-0.025em] mb-6 text-[var(--splash-text)]"
             style={{ fontSize: 'clamp(2.4rem, 5.5vw, 3.8rem)' }}
           >
-            Skill Altitude, as an <em className="italic text-[var(--splash-tech)]">immersive 3D screen.</em>
+            Skill Altitude, reimagined{' '}
+            <em className="italic text-[var(--splash-tech)]">ten grounded ways.</em>
           </h1>
-          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[660px]">
-            This is the technician&apos;s real Skill Altitude page&mdash;where they stand across the
-            eight Microsoft-aligned IT domains, with a recommendation on what to climb next&mdash;
-            reimagined as a live, real-time 3D WebGL screen. Not a marketing piece: the actual product
-            screen. Three directions to choose from below.
+          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[680px]">
+            This is the technician&apos;s real in-app Skill Altitude page&mdash;where they stand across
+            the eight Microsoft-aligned IT domains, with a recommendation on what to improve
+            next&mdash;reimagined ten grounded ways. Each direction has its own signature page-load
+            animation and the same crystal-clear data underneath.
           </p>
         </header>
 
-        {/* THE THREE DIRECTIONS — the headline */}
-        <section className="mb-20">
-          <ul className="grid gap-6 list-none p-0 m-0 lg:grid-cols-3">
-            {altitude3dDirections.map((d, i) => (
-              <li key={d.url} className="flex">
+        {/* THE TEN DIRECTIONS — the headline */}
+        <section className="mb-24">
+          <ul className="grid gap-6 list-none p-0 m-0 sm:grid-cols-2 lg:grid-cols-2">
+            {altitudeScreens.map((s, i) => (
+              <li key={s.url} className="flex">
                 <article className="flex flex-col h-full w-full border border-[var(--splash-line)] bg-[var(--splash-bg-soft)] rounded-sm p-7 md:p-8 transition-colors hover:border-[var(--splash-tech)]">
                   <div className="font-mono text-[0.7rem] tracking-[0.2em] text-[var(--splash-text-faint)] mb-4">
-                    Direction {String(i + 1).padStart(2, '0')}
+                    {String(i + 1).padStart(2, '0')}
                   </div>
-                  <h2 className="font-serif font-normal leading-[1.1] tracking-[-0.02em] text-[var(--splash-text)] mb-4 text-[1.7rem] md:text-[1.9rem]">
-                    {d.name}
+                  <h2 className="font-serif font-normal leading-[1.1] tracking-[-0.02em] text-[var(--splash-text)] mb-3 text-[1.7rem] md:text-[1.9rem]">
+                    {s.name}
                   </h2>
+                  <p className="font-mono text-[0.74rem] italic leading-relaxed text-[var(--splash-text-faint)] mb-4">
+                    on load · {s.load}
+                  </p>
                   <p className="font-serif text-[1.05rem] leading-[1.6] text-[var(--splash-text-soft)] mb-7">
-                    {d.blurb}
+                    {s.blurb}
                   </p>
                   <div className="mt-auto">
                     <a
-                      href={d.url}
+                      href={s.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-2 font-mono text-[0.82rem] tracking-[0.1em] uppercase no-underline text-[var(--splash-tech)] transition-opacity hover:opacity-80"
                     >
-                      <span>Open the live experience →</span>
+                      <span>Open the live screen →</span>
                     </a>
-                    {d.note && (
-                      <p className="mt-3 font-mono text-[0.72rem] leading-relaxed text-[var(--splash-text-faint)]">
-                        {d.note}
-                      </p>
-                    )}
                   </div>
                 </article>
               </li>
@@ -120,18 +120,68 @@ export default function ConceptsSololift() {
 
           <div className="mt-8 flex flex-col gap-3">
             <a
-              href={altitude3dProjectUrl}
+              href={altitudeScreensProjectUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="font-mono text-[0.78rem] tracking-[0.12em] uppercase no-underline text-[var(--splash-text-soft)] transition-colors hover:text-[var(--splash-tech)]"
             >
-              Open all three →
+              Open all ten →
             </a>
             <p className="font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
               <span className="text-[var(--splash-tech)]">note · </span>
               These are private preview links that expire seven days after upload. A 404 later is the
               TTL doing its job&mdash;not a bug.
             </p>
+          </div>
+        </section>
+
+        {/* EARLIER — immersive 3D (3 directions), demoted */}
+        <section className="mb-20">
+          <div className="font-mono text-[0.7rem] tracking-[0.3em] uppercase text-[var(--splash-text-faint)] mb-6">
+            <span className="text-[var(--splash-tech)]">— </span>
+            Earlier — immersive 3D (3 directions)
+          </div>
+          <ul className="grid gap-5 list-none p-0 m-0 lg:grid-cols-3">
+            {altitude3dDirections.map((d, i) => (
+              <li key={d.url} className="flex">
+                <article className="flex flex-col h-full w-full border border-[var(--splash-line)] bg-[var(--splash-bg-soft)] rounded-sm p-5 md:p-6 transition-colors hover:border-[var(--splash-tech)]">
+                  <div className="font-mono text-[0.68rem] tracking-[0.2em] text-[var(--splash-text-faint)] mb-3">
+                    Direction {String(i + 1).padStart(2, '0')}
+                  </div>
+                  <h3 className="font-serif font-normal leading-[1.15] tracking-[-0.02em] text-[var(--splash-text)] mb-3 text-[1.3rem]">
+                    {d.name}
+                  </h3>
+                  <p className="font-serif text-[0.95rem] leading-[1.55] text-[var(--splash-text-soft)] mb-5">
+                    {d.blurb}
+                  </p>
+                  <div className="mt-auto">
+                    <a
+                      href={d.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 font-mono text-[0.76rem] tracking-[0.1em] uppercase no-underline text-[var(--splash-tech)] transition-opacity hover:opacity-80"
+                    >
+                      <span>Open the live experience →</span>
+                    </a>
+                    {d.note && (
+                      <p className="mt-3 font-mono text-[0.7rem] leading-relaxed text-[var(--splash-text-faint)]">
+                        {d.note}
+                      </p>
+                    )}
+                  </div>
+                </article>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-6">
+            <a
+              href={altitude3dProjectUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-[0.76rem] tracking-[0.12em] uppercase no-underline text-[var(--splash-text-soft)] transition-colors hover:text-[var(--splash-tech)]"
+            >
+              Open all three →
+            </a>
           </div>
         </section>
 
