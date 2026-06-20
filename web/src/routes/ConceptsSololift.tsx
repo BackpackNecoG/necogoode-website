@@ -5,6 +5,7 @@ import { concepts, projectUrl } from '../data/conceptLinks';
 import { altitude3dDirections, altitude3dProjectUrl } from '../data/altitude3d';
 import { altitudeScreens, altitudeScreensProjectUrl } from '../data/altitudeScreens';
 import { altitudeCinematics, altitudeCinematicsProjectUrl } from '../data/altitudeCinematics';
+import { altitudeAwakening, altitudeAwakeningProjectUrl } from '../data/altitudeAwakening';
 
 /**
  * /concepts/sololift.ai — the live gallery the /concepts page links to.
@@ -65,46 +66,47 @@ export default function ConceptsSololift() {
       </nav>
 
       <main className="relative z-10 max-w-[1080px] mx-auto px-6 md:px-10 pb-28">
-        {/* Hero — the ten cinematic intros now in review */}
+        {/* Hero — the chosen direction, in five depictions */}
         <header className="pt-12 md:pt-16 mb-12 max-w-[880px]">
           <div className="font-mono text-[0.72rem] tracking-[0.3em] text-[var(--splash-text-faint)] uppercase mb-5">
             <span className="text-[var(--splash-tech)]">— </span>
-            Skill Altitude · cinematic intros · in review
+            Skill Altitude · the chosen direction · in review
           </div>
           <h1
             className="font-serif font-normal leading-[1.05] tracking-[-0.025em] mb-6 text-[var(--splash-text)]"
             style={{ fontSize: 'clamp(2.4rem, 5.5vw, 3.8rem)' }}
           >
-            Ten cinematic intros{' '}
-            <em className="italic text-[var(--splash-tech)]">that resolve into your stats.</em>
+            One ascent,{' '}
+            <em className="italic text-[var(--splash-tech)]">in five depictions.</em>
           </h1>
           <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[680px]">
-            Ten wordless cinematics, each at least ten seconds: a person reaches for&mdash;or
-            touches&mdash;something that leads them to self-awareness, and it resolves into the
-            technician&apos;s real, legible Skill Altitude stats page: where they stand across the
-            eight Microsoft-aligned IT domains, with a recommendation on what to improve next.
-            Every one has a &ldquo;Skip intro&rdquo; control.
+            Refined from the picked &ldquo;Meditation&rdquo; cinematic, this is the chosen
+            direction&mdash;one concept, told five ways. A technician at their computer resolves a
+            ticket; a checkmark pops; and at that moment energy rises from the PC up through their
+            body and releases into their eight competency domains, resolving into the real, legible
+            Skill Altitude stats page. Each runs ~11&ndash;13 seconds and carries a
+            &ldquo;Skip intro&rdquo; control.
           </p>
         </header>
 
-        {/* THE TEN CINEMATICS — the headline */}
+        {/* THE FIVE — the headline */}
         <section className="mb-24">
-          <ul className="grid gap-6 list-none p-0 m-0 sm:grid-cols-2 lg:grid-cols-2">
-            {altitudeCinematics.map((c, i) => (
-              <li key={c.url} className="flex">
+          <ul className="grid gap-6 list-none p-0 m-0 sm:grid-cols-2 lg:grid-cols-3">
+            {altitudeAwakening.map((a, i) => (
+              <li key={a.url} className="flex">
                 <article className="flex flex-col h-full w-full border border-[var(--splash-line)] bg-[var(--splash-bg-soft)] rounded-sm p-7 md:p-8 transition-colors hover:border-[var(--splash-tech)]">
                   <div className="font-mono text-[0.7rem] tracking-[0.2em] text-[var(--splash-text-faint)] mb-4">
                     {String(i + 1).padStart(2, '0')}
                   </div>
                   <h2 className="font-serif font-normal leading-[1.1] tracking-[-0.02em] text-[var(--splash-text)] mb-3 text-[1.7rem] md:text-[1.9rem]">
-                    {c.name}
+                    {a.name}
                   </h2>
                   <p className="font-serif text-[1.05rem] leading-[1.6] text-[var(--splash-text-soft)] mb-7">
-                    {c.story}
+                    {a.depiction}
                   </p>
                   <div className="mt-auto">
                     <a
-                      href={c.url}
+                      href={a.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-2 font-mono text-[0.82rem] tracking-[0.1em] uppercase no-underline text-[var(--splash-tech)] transition-opacity hover:opacity-80"
@@ -119,23 +121,68 @@ export default function ConceptsSololift() {
 
           <div className="mt-8 flex flex-col gap-3">
             <a
-              href={altitudeCinematicsProjectUrl}
+              href={altitudeAwakeningProjectUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="font-mono text-[0.78rem] tracking-[0.12em] uppercase no-underline text-[var(--splash-text-soft)] transition-colors hover:text-[var(--splash-tech)]"
             >
-              Open all ten →
+              Open all five →
             </a>
             <p className="font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
               <span className="text-[var(--splash-tech)]">tip · </span>
-              Each intro is timed (~10&ndash;13 seconds) before the stats page lands&mdash;or use
-              Skip intro to jump straight to the data.
+              Each runs ~11&ndash;13 seconds before the stats page lands&mdash;or use Skip intro to
+              jump straight to the data.
             </p>
             <p className="font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
               <span className="text-[var(--splash-tech)]">note · </span>
               These are private preview links that expire seven days after upload. A 404 later is the
               TTL doing its job&mdash;not a bug.
             </p>
+          </div>
+        </section>
+
+        {/* EARLIER — cinematic intros (10), demoted */}
+        <section className="mb-20">
+          <div className="font-mono text-[0.7rem] tracking-[0.3em] uppercase text-[var(--splash-text-faint)] mb-6">
+            <span className="text-[var(--splash-tech)]">— </span>
+            Earlier — cinematic intros (10)
+          </div>
+          <ul className="grid gap-5 list-none p-0 m-0 sm:grid-cols-2 lg:grid-cols-2">
+            {altitudeCinematics.map((c, i) => (
+              <li key={c.url} className="flex">
+                <article className="flex flex-col h-full w-full border border-[var(--splash-line)] bg-[var(--splash-bg-soft)] rounded-sm p-5 md:p-6 transition-colors hover:border-[var(--splash-tech)]">
+                  <div className="font-mono text-[0.68rem] tracking-[0.2em] text-[var(--splash-text-faint)] mb-3">
+                    {String(i + 1).padStart(2, '0')}
+                  </div>
+                  <h3 className="font-serif font-normal leading-[1.15] tracking-[-0.02em] text-[var(--splash-text)] mb-2 text-[1.3rem]">
+                    {c.name}
+                  </h3>
+                  <p className="font-serif text-[0.95rem] leading-[1.55] text-[var(--splash-text-soft)] mb-5">
+                    {c.story}
+                  </p>
+                  <div className="mt-auto">
+                    <a
+                      href={c.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 font-mono text-[0.76rem] tracking-[0.1em] uppercase no-underline text-[var(--splash-tech)] transition-opacity hover:opacity-80"
+                    >
+                      <span>Watch it →</span>
+                    </a>
+                  </div>
+                </article>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-6">
+            <a
+              href={altitudeCinematicsProjectUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-[0.76rem] tracking-[0.12em] uppercase no-underline text-[var(--splash-text-soft)] transition-colors hover:text-[var(--splash-tech)]"
+            >
+              Open all ten →
+            </a>
           </div>
         </section>
 
