@@ -1,8 +1,8 @@
 import { Link } from 'react-router-dom';
-import { ReactNode } from 'react';
 import { useRouteScope } from '../lib/useRouteScope';
 import { NavigationWheel } from '../components/domain/NavigationWheel';
 import { concepts, projectUrl } from '../data/conceptLinks';
+import { altitude3dDirections, altitude3dProjectUrl } from '../data/altitude3d';
 
 /**
  * /concepts/sololift.ai — the live gallery the /concepts page links to.
@@ -63,63 +63,86 @@ export default function ConceptsSololift() {
       </nav>
 
       <main className="relative z-10 max-w-[1080px] mx-auto px-6 md:px-10 pb-28">
-        {/* Hero */}
-        <header className="pt-12 md:pt-16 mb-14 max-w-[860px]">
+        {/* Hero — the three in-review 3D directions */}
+        <header className="pt-12 md:pt-16 mb-12 max-w-[880px]">
           <div className="font-mono text-[0.72rem] tracking-[0.3em] text-[var(--splash-text-faint)] uppercase mb-5">
             <span className="text-[var(--splash-tech)]">— </span>
-            Concept Lab · live gallery · sololift.ai
+            Skill Altitude · immersive 3D · in review
           </div>
           <h1
             className="font-serif font-normal leading-[1.05] tracking-[-0.025em] mb-6 text-[var(--splash-text)]"
             style={{ fontSize: 'clamp(2.4rem, 5.5vw, 3.8rem)' }}
           >
-            Skill Altitude, told as a <em className="italic text-[var(--splash-tech)]">cinematic story.</em>
+            Skill Altitude, as an <em className="italic text-[var(--splash-tech)]">immersive 3D screen.</em>
           </h1>
-          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[640px]">
-            Twenty scroll-driven takes on one SoloLift page&mdash;where a technician stands across the
-            eight Microsoft-aligned IT domains, and the horizon they&apos;re climbing next. 3D, shaders,
-            real motion. Things you have to open and scroll to read.
+          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[660px]">
+            This is the technician&apos;s real Skill Altitude page&mdash;where they stand across the
+            eight Microsoft-aligned IT domains, with a recommendation on what to climb next&mdash;
+            reimagined as a live, real-time 3D WebGL screen. Not a marketing piece: the actual product
+            screen. Three directions to choose from below.
           </p>
         </header>
 
-        {/* WHAT SOLOLIFT IS */}
-        <Section kicker="01 · The project" title="SoloLift, the worked example">
-          <P>
-            <strong className="text-[var(--splash-text)] font-medium">SoloLift</strong> is an AI
-            help-desk and operations platform for IT teams&mdash;it triages tickets, drafts and
-            executes fixes, and turns day-to-day support work into structured, reviewable actions. It
-            is the real product the Concept Lab was built to serve: a place where a design idea has to
-            survive contact with an actual platform, not just look good in a deck.
-          </P>
-        </Section>
+        {/* THE THREE DIRECTIONS — the headline */}
+        <section className="mb-20">
+          <ul className="grid gap-6 list-none p-0 m-0 lg:grid-cols-3">
+            {altitude3dDirections.map((d, i) => (
+              <li key={d.url} className="flex">
+                <article className="flex flex-col h-full w-full border border-[var(--splash-line)] bg-[var(--splash-bg-soft)] rounded-sm p-7 md:p-8 transition-colors hover:border-[var(--splash-tech)]">
+                  <div className="font-mono text-[0.7rem] tracking-[0.2em] text-[var(--splash-text-faint)] mb-4">
+                    Direction {String(i + 1).padStart(2, '0')}
+                  </div>
+                  <h2 className="font-serif font-normal leading-[1.1] tracking-[-0.02em] text-[var(--splash-text)] mb-4 text-[1.7rem] md:text-[1.9rem]">
+                    {d.name}
+                  </h2>
+                  <p className="font-serif text-[1.05rem] leading-[1.6] text-[var(--splash-text-soft)] mb-7">
+                    {d.blurb}
+                  </p>
+                  <div className="mt-auto">
+                    <a
+                      href={d.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 font-mono text-[0.82rem] tracking-[0.1em] uppercase no-underline text-[var(--splash-tech)] transition-opacity hover:opacity-80"
+                    >
+                      <span>Open the live experience →</span>
+                    </a>
+                    {d.note && (
+                      <p className="mt-3 font-mono text-[0.72rem] leading-relaxed text-[var(--splash-text-faint)]">
+                        {d.note}
+                      </p>
+                    )}
+                  </div>
+                </article>
+              </li>
+            ))}
+          </ul>
 
-        {/* WHY IT NEEDED A REAL RENDER STAGE */}
-        <Section kicker="02 · Why a live stage" title="A page that has to be scrolled to be read">
-          <P>
-            One SoloLift page asked for more than a layout: the per-person{' '}
-            <em className="italic text-[var(--splash-text)]">Skill Altitude</em> view. It&apos;s the
-            technician&apos;s real competency page&mdash;where they stand across the eight
-            Microsoft-aligned IT domains, how that altitude has risen over time, and their
-            <em className="italic text-[var(--splash-text)]"> horizon</em>: the one domain they&apos;re
-            climbing next, paired with a free Microsoft Learn path to get there.
-          </P>
-          <P>
-            Told well, that&apos;s a story, and a story unfolds. So each concept below is
-            scroll-driven&mdash;the eight domains rise as you descend, the horizon resolves as you
-            arrive, the past growth replays beneath you. Terrain, particles, physics, shaders, all
-            moving in response to where you are on the page. None of it survives a screenshot; the
-            craft <em className="italic text-[var(--splash-text)]">is</em> the motion and the
-            interaction.
-          </P>
-          <P>
-            Which is exactly why each one gets a private URL on an isolated render origin&mdash;a real,
-            live page you open and scroll through end to end. The twenty below are that exploration:
-            twenty genuinely different ways to tell one technician&apos;s ascent.
-          </P>
-        </Section>
+          <div className="mt-8 flex flex-col gap-3">
+            <a
+              href={altitude3dProjectUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-[0.78rem] tracking-[0.12em] uppercase no-underline text-[var(--splash-text-soft)] transition-colors hover:text-[var(--splash-tech)]"
+            >
+              Open all three →
+            </a>
+            <p className="font-mono text-[0.74rem] leading-relaxed text-[var(--splash-text-faint)] max-w-[680px]">
+              <span className="text-[var(--splash-tech)]">note · </span>
+              These are private preview links that expire seven days after upload. A 404 later is the
+              TTL doing its job&mdash;not a bug.
+            </p>
+          </div>
+        </section>
+
+        {/* EARLIER EXPLORATIONS — secondary heading */}
+        <div className="font-mono text-[0.7rem] tracking-[0.3em] uppercase text-[var(--splash-text-faint)] mb-6">
+          <span className="text-[var(--splash-tech)]">— </span>
+          Earlier explorations
+        </div>
 
         {/* THE TOOL BEHIND THE GALLERY */}
-        <figure className="mt-14 max-w-[860px] m-0">
+        <figure className="mt-2 max-w-[860px] m-0">
           <img
             src="/concepts/studio-04-upload-result.png"
             alt="The Concept Lab studio after a concept upload: a one-click Copy link button and an auto-generated QR code."
@@ -138,11 +161,12 @@ export default function ConceptsSololift() {
         {/* GALLERY */}
         <section className="mt-16">
           <div className="font-mono text-[0.7rem] tracking-[0.25em] uppercase text-[var(--splash-text-faint)] mb-3">
-            03 · The gallery
+            The cinematic gallery
           </div>
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-5 mb-8">
             <h2 className="font-serif text-[1.9rem] md:text-[2.2rem] leading-tight tracking-[-0.02em] text-[var(--splash-text)]">
-              Twenty stories of one ascent, <em className="italic text-[var(--splash-tech)]">live.</em>
+              Twenty scroll-driven stories of one ascent,{' '}
+              <em className="italic text-[var(--splash-tech)]">live.</em>
             </h2>
             <a
               href={projectUrl}
@@ -231,28 +255,3 @@ export default function ConceptsSololift() {
   );
 }
 
-/* ---------------------------------------------------------------- *
- * Small presentational helpers, in the splash visual language
- * (mirrors the ones in Concepts.tsx).
- * ---------------------------------------------------------------- */
-function Section({ kicker, title, children }: { kicker: string; title: string; children: ReactNode }) {
-  return (
-    <section className="mt-16 max-w-[860px]">
-      <div className="font-mono text-[0.7rem] tracking-[0.25em] uppercase text-[var(--splash-text-faint)] mb-3">
-        {kicker}
-      </div>
-      <h2 className="font-serif text-[1.9rem] md:text-[2.2rem] leading-tight tracking-[-0.02em] text-[var(--splash-text)] mb-5">
-        {title}
-      </h2>
-      {children}
-    </section>
-  );
-}
-
-function P({ children }: { children: ReactNode }) {
-  return (
-    <p className="font-serif text-[1.12rem] leading-[1.7] text-[var(--splash-text-soft)] mb-5 max-w-[680px]">
-      {children}
-    </p>
-  );
-}
