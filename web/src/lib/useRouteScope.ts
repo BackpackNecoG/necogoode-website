@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-export type Scope = 'splash' | 'tech' | 'bus' | 'floor' | 'console';
+export type Scope = 'splash' | 'tech' | 'bus' | 'floor' | 'console' | 'concepts';
 
 /**
  * Sets `body.scope-{name}` so theme.css can scope background/font to the active route.

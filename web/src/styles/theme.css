@@ -121,6 +121,14 @@ body.scope-splash {
   overflow: hidden; /* Splash is single-screen, no scroll */
 }
 
+/* Concepts — shares the splash palette but scrolls (splash itself is locked to one screen) */
+body.scope-concepts {
+  background: var(--splash-bg);
+  color: var(--splash-text);
+  font-family: 'Inter', sans-serif;
+}
+body.scope-concepts ::selection { background: var(--splash-tech-glow); }
+
 /* TechTour IDE */
 body.scope-tech {
   background: var(--tech-bg-darker);

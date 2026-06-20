@@ -7,6 +7,8 @@ import BusCreation from './routes/BusCreation';
 import Demo from './routes/Demo';
 import Floor from './routes/Floor';
 import Console from './routes/Console';
+import Concepts from './routes/Concepts';
+import ConceptsSololift from './routes/ConceptsSololift';
 import NotFound from './routes/NotFound';
 
 export default function App() {
@@ -20,6 +22,8 @@ export default function App() {
       <Route path="/demo/:slug" element={<Demo />} />
       <Route path="/floor" element={<Floor />} />
       <Route path="/console" element={<Console />} />
+      <Route path="/concepts" element={<Concepts />} />
+      <Route path="/concepts/sololift.ai" element={<ConceptsSololift />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );

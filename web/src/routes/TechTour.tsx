@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { useRouteScope } from '../lib/useRouteScope';
 import { IdeChrome } from '../components/domain/ide/IdeChrome';
 import { FileExplorer } from '../components/domain/ide/FileExplorer';
@@ -33,7 +34,7 @@ export default function TechTour() {
                 <span className="text-[var(--tech-text-soft)]">README.md</span>
               </>
             }
-            lineCount={32}
+            lineCount={52}
             activeLineNumber={9}
           >
             {/* Syntax-highlighted README — keep <span> classes in sync with theme.css token names */}
@@ -77,7 +78,28 @@ export default function TechTour() {
             {'  '}<SC c="fn">PIP</SC>,                 <SC c="comment">// the moat · patent-stage</SC>{'\n'}
             ];{'\n'}
             {'\n'}
-            <SC c="comment">// → click any creation in the file tree to read its story</SC>
+            <SC c="comment">// → click any creation in the file tree to read its story</SC>{'\n'}
+            {'\n'}
+            <SC c="dim">---</SC>{'\n'}
+            {'\n'}
+            <SC c="comment">## concept lab · private tooling</SC>{'\n'}
+            {'\n'}
+            <SC c="text">Visual iteration was slow, so I built an internal tool on Azure.</SC>{'\n'}
+            <SC c="text">Drag a self-contained HTML concept in → instant private URL + QR,</SC>{'\n'}
+            <SC c="text">rendered live in-browser, shareable in a meeting. 7-day TTL.</SC>{'\n'}
+            {'\n'}
+            <SC c="keyword">const</SC> <SC c="text">conceptLab</SC> <SC c="op">=</SC> {'{'}{'\n'}
+            {'  '}<SC c="prop">renderOrigin</SC>: <SC c="string">&apos;blob static site · untrusted JS, nothing else&apos;</SC>,{'\n'}
+            {'  '}<SC c="prop">uploadApi</SC>:    <SC c="string">&apos;Functions (Flex) · separate authed origin&apos;</SC>,{'\n'}
+            {'  '}<SC c="prop">secrets</SC>:      <SC c="string">&apos;Key Vault via managed identity · none in code&apos;</SC>,{'\n'}
+            {'  '}<SC c="prop">isolation</SC>:    <SC c="string">&apos;trust boundary between concepts &amp; privilege&apos;</SC>,{'\n'}
+            {'  '}<SC c="prop">cost</SC>:         <SC c="string">&apos;scale-to-zero · pennies/month&apos;</SC>,{'\n'}
+            {'}'};{'\n'}
+            {'\n'}
+            <SC c="comment">// → </SC>
+            <Link to="/concepts" className="text-[var(--tech-syn-fn)] underline underline-offset-2">
+              read the architecture writeup
+            </Link>
           </EditorPane>
           <TerminalPane />
         </div>

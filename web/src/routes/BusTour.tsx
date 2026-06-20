@@ -109,6 +109,9 @@ export default function BusTour() {
             />
           ))}
 
+          {/* Concept-testing card — a different "tool" on the bench */}
+          <ConceptCard />
+
           {/* Contact card */}
           <ContactCard />
 
@@ -200,6 +203,47 @@ function IdentityCard() {
         ))}
       </ul>
     </div>
+  );
+}
+
+function ConceptCard() {
+  return (
+    <Link
+      to="/concepts"
+      className="group relative flex-shrink-0 w-[420px] p-10 rounded-sm no-underline block"
+      style={{
+        background: 'var(--bus-paper)',
+        transform: 'rotate(-1.4deg)',
+        boxShadow: '4px 8px 20px rgba(0,0,0,0.35)',
+      }}
+    >
+      {/* Margin doodle */}
+      <div
+        className="font-hand text-[1.3rem] mb-2"
+        style={{ color: 'var(--bus-rust)', transform: 'rotate(-0.5deg)' }}
+      >
+        <span style={{ color: 'var(--bus-green)' }}>✦  </span>
+        a little tool I built for myself
+      </div>
+
+      <h3 className="font-serif text-[2rem] font-semibold tracking-[-0.015em] mb-3 text-[var(--bus-ink)]">
+        Testing <em className="italic" style={{ color: 'var(--bus-rust)' }}>concepts</em> live.
+      </h3>
+
+      <p className="font-serif text-[1.1rem] leading-[1.6] italic mb-4 text-[var(--bus-ink-soft)]">
+        Showing a client a running idea used to mean a deck and a lot of back-and-forth. So I built a
+        private workshop on Azure: drag an interactive concept in, get a live link and a QR code back,
+        and open it&mdash;running&mdash;right there in the meeting. Links expire on their own after a week.
+      </p>
+
+      <span
+        className="inline-flex items-center gap-2 font-hand text-[1.2rem]"
+        style={{ color: 'var(--bus-rust)' }}
+      >
+        See how it works
+        <span className="transition-transform duration-300 group-hover:translate-x-1.5">→</span>
+      </span>
+    </Link>
   );
 }
 
