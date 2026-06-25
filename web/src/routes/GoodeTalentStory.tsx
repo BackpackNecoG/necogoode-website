@@ -55,7 +55,7 @@ export default function GoodeTalentStory() {
 
         <div className="font-hand text-[1.4rem] mb-2" style={{ color: 'var(--bus-rust)' }}>
           <span style={{ color: 'var(--bus-green)' }}>✦ </span>
-          how I&apos;d work with a Talent team
+          how I&apos;d work with a Talent team — for real
         </div>
 
         <h1 className="font-serif text-[2.6rem] md:text-[3.5rem] font-semibold leading-[1] tracking-[-0.025em] text-[var(--bus-ink)] mb-3">
@@ -67,30 +67,27 @@ export default function GoodeTalentStory() {
             className="inline-block font-mono text-[0.66rem] tracking-[0.18em] uppercase px-2.5 py-1 rounded-sm"
             style={{ background: 'rgba(74,58,40,0.1)', color: 'var(--bus-ink-soft)' }}
           >
-            Working prototypes · not a deck
+            Built, not pitched
           </span>
         </div>
 
         {/* Story prose — general, role-agnostic */}
         <p className="font-serif text-[1.15rem] leading-[1.65] text-[var(--bus-ink)] mb-6">
-          I approach Talent the way I approach any operations problem: start from the repetitive,
-          real work a team does every day — not from the technology. Before a single model call, the
-          question is which tasks are high-volume, error-prone, or quietly draining the people who do
-          them. That is where AI earns its place.
+          Start with the work, not the AI. Every Talent team has tasks that run on repeat — the
+          policy question asked for the hundredth time, the feedback nobody enjoys writing, the tool
+          launch nobody&apos;s tracking. Find the ones that are high-volume or quietly burning people
+          out. That&apos;s where this pays for itself. Everywhere else, it&apos;s a toy.
         </p>
         <p className="font-serif text-[1.15rem] leading-[1.65] text-[var(--bus-ink)] mb-6">
-          Then a few principles shape everything I build. Ground the work in the organization&apos;s
-          own source of truth, so answers are auditable instead of invented. Keep a human in the loop
-          on anything consequential — these tools assist, they do not decide. Build in composable
-          pieces, so a capability proven in one place can be reused in the next. And treat measurement
-          as part of the build, not an afterthought: adoption, fluency, and outcomes get watched from
-          day one.
+          The non-negotiables: answers come from your sources, so they&apos;re auditable, not
+          invented. A human signs off on anything that counts. Pieces get reused, not rebuilt. And
+          it&apos;s measured from the start — adoption, fluency, outcomes — because a tool you
+          can&apos;t measure is a tool you can&apos;t trust.
         </p>
         <p className="font-serif text-[1.15rem] leading-[1.65] text-[var(--bus-ink)] mb-6">
-          I&apos;d rather show than tell. So instead of describing the approach, I built three small
-          prototypes against three recurring Talent problems. Each one is deliberately scoped and
-          guardrailed — a demonstration of how I&apos;d work, not a finished product — and each is
-          something you can pick up and drive yourself.
+          Talk is cheap, so here&apos;s the work. Three prototypes, three problems Talent teams
+          actually have. Each is small and guardrailed on purpose — a demonstration, not a finished
+          product — and each is yours to poke at right now.
         </p>
 
         {/* Pull-quote */}
@@ -98,8 +95,8 @@ export default function GoodeTalentStory() {
           className="my-10 px-8 py-6 font-serif italic text-[1.4rem] leading-tight"
           style={{ color: 'var(--bus-rust)', borderLeft: '4px solid var(--bus-rust)', background: 'rgba(176,90,44,0.06)' }}
         >
-          “Most HR-AI efforts ship a demo and never prove value. The measurement layer is usually the
-          missing piece — so I build it in from the start.”
+          “Most HR-AI efforts ship a demo and never prove value. The measurement layer is the missing
+          piece — so I build it in first.”
         </blockquote>
 
         {/* The three concepts */}

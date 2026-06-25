@@ -42,10 +42,10 @@ export default function GoodeStream() {
             capability — not just describe it.
           </h1>
           <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[660px]">
-            How I think about bringing AI into a Talent organization: start from the repetitive,
-            real problems a team actually has, ground the work in their own source of truth, keep a
-            human in the loop, and measure adoption — not just ship a demo. Three prototypes you can
-            drive yourself.
+            Start with the work, not the AI. I find the Talent tasks that run on repeat or quietly
+            burn people out, ground the fix in your own sources so it&apos;s auditable, keep a human
+            on anything that counts, and measure it from day one. Three prototypes — built, not
+            pitched — and yours to poke at.
           </p>
 
           {/* Honest framing banner */}
