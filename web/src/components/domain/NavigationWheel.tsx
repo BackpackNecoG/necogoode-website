@@ -5,8 +5,9 @@ import { useState } from 'react';
  * NavigationWheel — PrimitiveAI-inspired floating wheel for cross-page navigation.
  *
  * Sits in the bottom-right corner of every non-Splash route. Closed state is a
- * compact "N" pin; clicking opens a circular layout of 5 spokes pointing to the
- * five top-level destinations: home (Splash), TechTour, BusTour, Floor, Console.
+ * compact "N" pin; clicking opens a circular layout of 7 spokes pointing to the
+ * top-level destinations: home (Splash), TechTour, Console, Brain, GoodeStream,
+ * Floor, and BusTour (Workshop).
  *
  * The active page's spoke is highlighted; clicking it just closes the wheel.
  *
@@ -15,7 +16,7 @@ import { useState } from 'react';
  * on every page reinforces the brand without being a banner ad for it.
  */
 
-export type WheelScope = 'splash' | 'tech' | 'bus' | 'floor' | 'console';
+export type WheelScope = 'splash' | 'tech' | 'bus' | 'floor' | 'console' | 'brain' | 'goodestream';
 
 type Spoke = {
   scope: WheelScope;
@@ -26,12 +27,15 @@ type Spoke = {
   angleDeg: number;
 };
 
+// Seven destinations evenly spaced around the wheel (360 / 7 ≈ 51.43° apart).
 const SPOKES: Spoke[] = [
-  { scope: 'splash',  label: 'Door',     to: '/',         glyph: '⌂',  angleDeg: 0 },
-  { scope: 'tech',    label: 'Tech',     to: '/TechTour', glyph: '{}', angleDeg: 72 },
-  { scope: 'console', label: 'Console',  to: '/console',  glyph: '▸_', angleDeg: 144 },
-  { scope: 'floor',   label: 'Floor',    to: '/floor',    glyph: '$',  angleDeg: 216 },
-  { scope: 'bus',     label: 'Workshop', to: '/BusTour',  glyph: '✎',  angleDeg: 288 },
+  { scope: 'splash',      label: 'Door',       to: '/',            glyph: '⌂',  angleDeg: 0 },
+  { scope: 'tech',        label: 'Tech',       to: '/TechTour',    glyph: '{}', angleDeg: 51.43 },
+  { scope: 'console',     label: 'Console',    to: '/console',     glyph: '▸_', angleDeg: 102.86 },
+  { scope: 'brain',       label: 'Brain',      to: '/brain',       glyph: '⊡',  angleDeg: 154.29 },
+  { scope: 'goodestream', label: 'GoodeStream', to: '/goodestream', glyph: '◆',  angleDeg: 205.71 },
+  { scope: 'floor',       label: 'Floor',      to: '/floor',       glyph: '$',  angleDeg: 257.14 },
+  { scope: 'bus',         label: 'Workshop',   to: '/BusTour',     glyph: '✎',  angleDeg: 308.57 },
 ];
 
 const RADIUS_PX = 92;

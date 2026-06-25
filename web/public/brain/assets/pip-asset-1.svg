@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img"
+     aria-label="PIP primitive registry — versioned, uniquely-addressed primitives surviving five isolated review sessions. Concept render.">
+  <defs>
+    <style>
+      .ink{font-family:'Courier New',ui-monospace,monospace;}
+      .glow{filter:drop-shadow(0 0 6px rgba(227,179,65,.35));}
+    </style>
+    <pattern id="grid1" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#E3B341" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0C1018"/>
+      <stop offset="1" stop-color="#070A10"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#bg1)"/>
+  <rect width="1600" height="1000" fill="url(#grid1)"/>
+  <rect x="20" y="20" width="1560" height="960" fill="none" stroke="#E3B341" stroke-opacity="0.35" stroke-width="1.5"/>
+  <rect x="34" y="34" width="1532" height="932" fill="none" stroke="#E3B341" stroke-opacity="0.12" stroke-width="1" stroke-dasharray="3 6"/>
+
+  <!-- IN FAB watermark -->
+  <text class="ink" x="800" y="560" text-anchor="middle" transform="rotate(-18 800 560)"
+        font-size="190" font-weight="700" fill="#E3B341" fill-opacity="0.05" letter-spacing="22">IN FAB</text>
+
+  <!-- title block -->
+  <text class="ink" x="60" y="92" font-size="34" font-weight="700" fill="#E3B341" letter-spacing="4">PIP — PRIMITIVE INFRASTRUCTURE PLATFORM</text>
+  <text class="ink" x="62" y="124" font-size="18" fill="#9A7B2E" letter-spacing="3">U5 · BUS-16 · PRIMITIVE REGISTRY</text>
+  <line x1="60" y1="142" x2="1540" y2="142" stroke="#E3B341" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- registry catalog panel -->
+  <g class="glow">
+    <rect x="60" y="190" width="700" height="700" rx="10" fill="none" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2" stroke-dasharray="9 7"/>
+  </g>
+  <text class="ink" x="86" y="234" font-size="22" font-weight="700" fill="#E3B341" letter-spacing="3">PRIMITIVE REGISTRY</text>
+  <text class="ink" x="86" y="262" font-size="14" fill="#B8902F">structured source-of-truth documents · embedded metadata</text>
+
+  <!-- ID format callout -->
+  <rect x="86" y="290" width="648" height="58" rx="6" fill="#E3B341" fill-opacity="0.05" stroke="#E3B341" stroke-opacity="0.4" stroke-width="1"/>
+  <text class="ink" x="106" y="316" font-size="15" fill="#C9A23B">UNIQUE VERSIONED ID</text>
+  <text class="ink" x="106" y="338" font-size="20" font-weight="700" fill="#F0CD66" letter-spacing="2">PIP-CATEGORY-SEQ-VERSION</text>
+
+  <!-- catalog rows -->
+  <g class="ink" font-size="16">
+    <rect x="86" y="372" width="648" height="78" rx="6" fill="none" stroke="#E3B341" stroke-opacity="0.3"/>
+    <text x="106" y="404" fill="#F0CD66" font-weight="700">PIP-TEXT-001-V1</text>
+    <text x="106" y="430" font-size="13" fill="#8A7333">structured doc · embedded metadata</text>
+    <text x="714" y="404" text-anchor="end" fill="#E3B341">verified ×5</text>
+    <rect x="372" y="380" width="120" height="14" rx="7" fill="#E3B341" fill-opacity="0.18"/>
+    <rect x="372" y="380" width="120" height="14" rx="7" fill="#E3B341" fill-opacity="0.55"/>
+
+    <rect x="86" y="466" width="648" height="78" rx="6" fill="none" stroke="#E3B341" stroke-opacity="0.3"/>
+    <text x="106" y="498" fill="#F0CD66" font-weight="700">PIP-DATA-014-V2</text>
+    <text x="106" y="524" font-size="13" fill="#8A7333">structured doc · embedded metadata</text>
+    <text x="714" y="498" text-anchor="end" fill="#E3B341">verified ×5</text>
+    <rect x="372" y="474" width="120" height="14" rx="7" fill="#E3B341" fill-opacity="0.18"/>
+    <rect x="372" y="474" width="120" height="14" rx="7" fill="#E3B341" fill-opacity="0.55"/>
+
+    <rect x="86" y="560" width="648" height="78" rx="6" fill="none" stroke="#E3B341" stroke-opacity="0.3"/>
+    <text x="106" y="592" fill="#F0CD66" font-weight="700">PIP-COMM-007-V1</text>
+    <text x="106" y="618" font-size="13" fill="#8A7333">structured doc · embedded metadata</text>
+    <text x="714" y="592" text-anchor="end" fill="#B8902F">in review · 3 / 5</text>
+    <rect x="372" y="568" width="120" height="14" rx="7" fill="#E3B341" fill-opacity="0.12"/>
+    <rect x="372" y="568" width="72" height="14" rx="7" fill="#E3B341" fill-opacity="0.45"/>
+  </g>
+
+  <text class="ink" x="86" y="690" font-size="13" fill="#8A7333">addressable like a part number · catalog of small, pre-verified capabilities</text>
+
+  <!-- five isolated review sessions panel -->
+  <g class="glow">
+    <rect x="800" y="190" width="740" height="700" rx="10" fill="none" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2" stroke-dasharray="9 7"/>
+  </g>
+  <text class="ink" x="826" y="234" font-size="22" font-weight="700" fill="#E3B341" letter-spacing="3">FIVE ISOLATED REVIEW SESSIONS</text>
+  <text class="ink" x="826" y="262" font-size="14" fill="#B8902F">separate AI sessions · cannot see each other's reasoning</text>
+
+  <!-- five isolated inspector boxes -->
+  <g class="ink">
+    <!-- session nodes -->
+    <g>
+      <rect x="850" y="300" width="160" height="120" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.55" stroke-width="1.5"/>
+      <text x="930" y="346" text-anchor="middle" font-size="18" font-weight="700" fill="#F0CD66">SESSION 1</text>
+      <text x="930" y="372" text-anchor="middle" font-size="13" fill="#8A7333">isolated</text>
+      <text x="930" y="400" text-anchor="middle" font-size="22" fill="#E3B341">✓ APPROVE</text>
+    </g>
+    <g>
+      <rect x="1040" y="300" width="160" height="120" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.55" stroke-width="1.5"/>
+      <text x="1120" y="346" text-anchor="middle" font-size="18" font-weight="700" fill="#F0CD66">SESSION 2</text>
+      <text x="1120" y="372" text-anchor="middle" font-size="13" fill="#8A7333">isolated</text>
+      <text x="1120" y="400" text-anchor="middle" font-size="22" fill="#E3B341">✓ APPROVE</text>
+    </g>
+    <g>
+      <rect x="1230" y="300" width="160" height="120" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.55" stroke-width="1.5"/>
+      <text x="1310" y="346" text-anchor="middle" font-size="18" font-weight="700" fill="#F0CD66">SESSION 3</text>
+      <text x="1310" y="372" text-anchor="middle" font-size="13" fill="#8A7333">isolated</text>
+      <text x="1310" y="400" text-anchor="middle" font-size="22" fill="#E3B341">✓ APPROVE</text>
+    </g>
+    <g>
+      <rect x="945" y="450" width="160" height="120" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.55" stroke-width="1.5"/>
+      <text x="1025" y="496" text-anchor="middle" font-size="18" font-weight="700" fill="#F0CD66">SESSION 4</text>
+      <text x="1025" y="522" text-anchor="middle" font-size="13" fill="#8A7333">isolated</text>
+      <text x="1025" y="550" text-anchor="middle" font-size="22" fill="#E3B341">✓ APPROVE</text>
+    </g>
+    <g>
+      <rect x="1135" y="450" width="160" height="120" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.55" stroke-width="1.5"/>
+      <text x="1215" y="496" text-anchor="middle" font-size="18" font-weight="700" fill="#F0CD66">SESSION 5</text>
+      <text x="1215" y="522" text-anchor="middle" font-size="13" fill="#8A7333">isolated</text>
+      <text x="1215" y="550" text-anchor="middle" font-size="22" fill="#E3B341">✓ APPROVE</text>
+    </g>
+
+    <!-- isolation barriers (no shared context) -->
+    <line x1="1020" y1="310" x2="1020" y2="410" stroke="#E3B341" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="2 5"/>
+    <line x1="1210" y1="310" x2="1210" y2="410" stroke="#E3B341" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="2 5"/>
+    <line x1="1115" y1="460" x2="1115" y2="560" stroke="#E3B341" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="2 5"/>
+
+    <!-- consensus to SHIP -->
+    <path d="M930 420 V610 H1215 V570" fill="none" stroke="#E3B341" stroke-opacity="0.4" stroke-width="1.5" stroke-dasharray="6 5"/>
+    <path d="M1120 420 V610" fill="none" stroke="#E3B341" stroke-opacity="0.4" stroke-width="1.5" stroke-dasharray="6 5"/>
+    <path d="M1310 420 V610" fill="none" stroke="#E3B341" stroke-opacity="0.4" stroke-width="1.5" stroke-dasharray="6 5"/>
+    <path d="M1025 570 V610" fill="none" stroke="#E3B341" stroke-opacity="0.4" stroke-width="1.5" stroke-dasharray="6 5"/>
+
+    <g class="glow">
+      <rect x="990" y="630" width="360" height="86" rx="10" fill="#E3B341" fill-opacity="0.08" stroke="#E3B341" stroke-opacity="0.8" stroke-width="2"/>
+    </g>
+    <text x="1170" y="668" text-anchor="middle" font-size="22" font-weight="700" fill="#F0CD66" letter-spacing="2">CONSENSUS ×5 → SHIP</text>
+    <text x="1170" y="696" text-anchor="middle" font-size="13" fill="#B8902F">approval earned five independent times, not rubber-stamped once</text>
+  </g>
+
+  <text class="ink" x="826" y="770" font-size="13" fill="#8A7333">embedded metadata · independent isolated review · consensus without contamination</text>
+
+  <!-- footer legend -->
+  <line x1="60" y1="912" x2="1540" y2="912" stroke="#E3B341" stroke-opacity="0.2" stroke-width="1"/>
+  <text class="ink" x="60" y="946" font-size="14" fill="#7A6428" letter-spacing="2">NECO-1 · U5 PIP · STATUS: IN FABRICATION · NOT YET PUBLIC</text>
+
+  <!-- CONCEPT RENDER corner stamp (hard requirement) -->
+  <g class="ink">
+    <rect x="1318" y="922" width="222" height="40" rx="6" fill="none" stroke="#E3B341" stroke-opacity="0.6" stroke-width="1.5"/>
+    <text x="1429" y="949" text-anchor="middle" font-size="18" font-weight="700" fill="#E3B341" letter-spacing="4">CONCEPT RENDER</text>
+  </g>
+</svg>

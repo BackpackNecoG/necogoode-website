@@ -94,6 +94,25 @@
   --floor-loss-bg: rgba(224, 112, 96, 0.12);
   --floor-amber: #F2B450;
   --floor-amber-bg: rgba(242, 180, 80, 0.12);
+
+  /* ---- Brain (NECO-1 circuit board) ----
+     Neutral copper/silk board base; per-build accents come from brainBoard.json
+     (build.accent), NOT from these tokens (COLOR-VARIATION DIRECTIVE). The five
+     accent tokens below mirror the JSON so non-SVG chrome can reference them. */
+  --brain-surface: #0C0E11;
+  --brain-board: #13161B;
+  --brain-copper: #A8642F;
+  --brain-copper-lit: #F2B23E;
+  --brain-silk: #D7D3CA;
+  --brain-mute: #5C6470;
+  --brain-mono: 'IBM Plex Mono', monospace;
+
+  /* Per-build accent palette (reference copies of the JSON accents). */
+  --brain-accent-sololift: #58A6FF;   /* U1 azure/navy */
+  --brain-accent-vwp: #B388FF;        /* U2 violet */
+  --brain-accent-goodegame: #56D364;  /* U3 fairway green */
+  --brain-accent-site: #5EEAD4;       /* U4 teal */
+  --brain-accent-pip: #E3B341;        /* U5 amber/gold (in-fab) */
 }
 
 /* ============================================================
@@ -129,6 +148,17 @@ body.scope-concepts {
 }
 body.scope-concepts ::selection { background: var(--splash-tech-glow); }
 
+/* GoodeStream Talent Dashboard — document-style section on the splash palette */
+body.scope-goodestream {
+  background: var(--splash-bg);
+  color: var(--splash-text);
+  font-family: 'Inter', sans-serif;
+}
+body.scope-goodestream ::selection { background: var(--splash-tech-glow); }
+/* Hide the section-tab scrollbar without losing scroll on mobile. */
+body.scope-goodestream .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+body.scope-goodestream .no-scrollbar::-webkit-scrollbar { display: none; }
+
 /* TechTour IDE */
 body.scope-tech {
   background: var(--tech-bg-darker);
@@ -161,3 +191,11 @@ body.scope-floor {
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* Brain (NECO-1 circuit board) */
+body.scope-brain {
+  background: var(--brain-surface);
+  color: var(--brain-silk);
+  font-family: var(--brain-mono);
+}
+body.scope-brain ::selection { background: rgba(168, 100, 47, 0.4); color: var(--brain-silk); }

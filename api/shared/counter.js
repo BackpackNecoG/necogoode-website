@@ -20,8 +20,10 @@
 
 // Independent daily caps per counter name.
 const LIMITS = {
-  alphavantage: 25,         // matches Alpha Vantage free tier
-  'talk-dangerously': 50,   // gpt-4o-mini cost-controlled cap
+  alphavantage: 25,            // matches Alpha Vantage free tier
+  'talk-dangerously': 50,      // gpt-4o-mini cost-controlled cap
+  'goodestream-hr': 60,        // GoodeStream HR Assist (grounded retrieval) daily cap
+  'goodestream-doc': 40,       // GoodeStream Document Insight daily cap
 };
 
 const caches = {}; // { [name]: { date, used } }

@@ -1,0 +1,522 @@
+{
+  "meta": {
+    "rev": "2026-06 · BUILDS EDITION",
+    "intro": "NECO-1: five components Neco Goode designed and shipped personally, presented as a circuit board — and the portfolio itself was built by concurrent autonomous AI agents."
+  },
+  "caps": [
+    { "id": "azure", "pn": "C1", "name": "AZURE", "desc": "App Service, Static Web Apps, SQL/Postgres, Key Vault" },
+    { "id": "ai", "pn": "C2", "name": "AI/LLM", "desc": "Tiered model routing, RAG, gen-AI workflows" },
+    { "id": "agents", "pn": "C3", "name": "AGENTS", "desc": "Concurrent autonomous coding agents" },
+    { "id": "net", "pn": "C4", "name": ".NET10", "desc": "Backend runtime" },
+    { "id": "react", "pn": "C5", "name": "REACT", "desc": "React + Vite + TypeScript" },
+    { "id": "auto", "pn": "C6", "name": "AUTO", "desc": "Automation & orchestration" }
+  ],
+  "roles": [
+    {
+      "id": "witherite",
+      "pn": "J1",
+      "name": "WITHERITE",
+      "tag": "PWR IN · CURRENT",
+      "blurb": "J1 · WITHERITE LAW GROUP — primary power. Senior Director of IT leading App Services, DevOps, Help Desk, PMO, and Data Analytics. Built the internal Azure data warehouse unifying ERP, CMS, comms, and ITSM. This is where the Azure and AI rails draw their current."
+    },
+    {
+      "id": "mckesson",
+      "pn": "J2",
+      "name": "MCKESSON",
+      "tag": "PWR IN · PRIOR",
+      "blurb": "J2 · MCKESSON — prior power. Enterprise integrations across Workday, Salesforce, JDE, and SAP; onshore + offshore teams monitoring 120+ production automations; 65% processing-delay reduction. The automation rail was forged here."
+    }
+  ],
+  "builds": [
+    {
+      "id": "sololift",
+      "pn": "U1",
+      "name": "SOLOLIFT",
+      "status": "live",
+      "url": "https://www.sololift.ai",
+      "pkg": "SaaS-64 · AI-native ITSM",
+      "desc": "AI-native IT service management on Microsoft 365/Azure. Tickets resolve into knowledge — an automated KBA closure loop turns solved work into reusable articles, with tag search and a KB authoring lane.",
+      "die": ["KBA CLOSURE LOOP", "KB AUTHORING", "TEAM ROUTING", "TIERED LLM ROUTER"],
+      "caps": ["azure", "ai", "agents", "net", "auto"],
+      "accent": { "color": "#58A6FF", "glow": "rgba(88,166,255,.35)", "name": "azure" },
+      "pins": [
+        {
+          "n": 1,
+          "title": "Ticket queue + team routing",
+          "detail": "Union-match routing across team taxonomies with round-robin and load-balanced assignment policies.",
+          "image": { "type": "capture", "route": "/tickets", "authRequired": true, "file": "sololift-pin1.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 26, "y": 24, "w": 46, "h": 48 }],
+          "tour": {
+            "what": "Every ticket that comes in lands with the right team automatically — no dispatcher, no triage meeting.",
+            "how": "Teams are first-class objects in the system, each bound to the categories and tags they own. A matching engine compares an incoming ticket's tags against every team's bindings, scores the overlap, and assigns by priority — with a Default Team as the safety net so nothing ever falls through. Each team picks its own assignment style: manual, round-robin, or load-balanced. The platform also polls Microsoft 365 for out-of-office status, so work never sits in the queue of someone on vacation.",
+            "why": "Routing is where small IT teams quietly lose hours every day. Automating the judgment call — not just the handoff — is what makes a one-person IT shop feel like a staffed one.",
+            "stack": [".NET 10", "C#", "Microsoft Graph", "Azure App Service (Linux)"]
+          },
+          "story": {
+            "built": "I've sat in too many triage meetings deciding where a ticket should go. SoloLift started with the conviction that the triage meeting is a software problem.",
+            "who": "Small IT teams — often a team of one — who don't have a dispatcher and shouldn't need to be one.",
+            "unique": "Routing isn't a dropdown here; it's a scoring engine with a guaranteed floor. A ticket cannot land nowhere.",
+            "challenges": "Getting the fallback semantics right. Union-match scoring with a Default Team net means the system can never be 'right most of the time' — the edge cases in tag overlap took real design work.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 2,
+          "title": "KBA closure wizard",
+          "detail": "Closing a ticket walks the resolver through authoring a knowledge article — the closure loop is gated end-to-end.",
+          "image": { "type": "capture", "route": "/tickets", "authRequired": true, "file": "sololift-pin2.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 74, "y": 24, "w": 24, "h": 52 }],
+          "tour": {
+            "what": "Closing a ticket and writing the knowledge article are the same motion — the wizard walks the resolver from 'fixed it' to 'documented it' in one flow.",
+            "how": "When a ticket resolves, the system locks it into a closure loop — it literally cannot finish until knowledge is captured. A dedicated backend service carries the ticket's resolution details into a pre-filled article draft; the resolver refines it through a short wizard and the article publishes into the knowledge base, tagged and searchable. The gate is enforced server-side, not in the UI, so there is no skipping it.",
+            "why": "Every ITSM tool has a knowledge base; almost all of them are empty, because documentation is a separate chore. Making it the exit door of the ticket is the difference between a KB that exists and one that works.",
+            "stack": [".NET 10", "C#", "Server-side workflow gating", "Azure App Service (Linux)"]
+          },
+          "story": {
+            "built": "Every knowledge base I've ever inherited was a graveyard. Asking people to document after the fact never works — so I removed the 'after.'",
+            "who": "The resolver who would never write a doc on their own — and the next person who hits the same problem at 4:55 on a Friday.",
+            "unique": "The lock is server-side. Most tools nudge; this one gates. A ticket physically cannot close without leaving knowledge behind.",
+            "challenges": "This feature regressed once during a refactor wave. Restoring it meant a careful reconcile against git history rather than a rebuild — and it's why the loop is now gated end-to-end in the backend instead of trusting the UI.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 3,
+          "title": "Knowledge base + AI retrieval layer",
+          "detail": "Authored articles land in a searchable, tag-filtered knowledge base that deflects the next ticket.",
+          "image": { "type": "capture", "route": "/knowledge-base", "authRequired": true, "file": "sololift-pin3.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 1, "y": 10, "w": 21, "h": 84 }],
+          "tour": {
+            "what": "Solved problems become a searchable library — filtered by tags, designed to be surfaced by meaning, not just keywords.",
+            "how": "Articles are tagged at creation and filterable instantly. The platform's AI layer is designed around strict per-tenant isolation: every customer gets their own vector store (pgvector on Azure Postgres), so one company's knowledge never mingles with another's. Model usage is tiered for cost sanity — small fast models are sized to handle roughly 80% of the work, a mid-size model takes the harder 15%, and only about 5% escalates to a premium API — with the first phase running on Azure OpenAI.",
+            "why": "AI features are easy to demo and expensive to run. A routing tier that matches model cost to question difficulty is how an AI-native product stays profitable at small-business prices.",
+            "stack": ["pgvector", "Azure Database for PostgreSQL", "Azure OpenAI", "Tiered LLM routing", "RAG"]
+          },
+          "story": {
+            "built": "An AI layer is table stakes now. An AI layer that doesn't bankrupt a small-business price point is the actual product.",
+            "who": "Tenants who need answers from their own history — and absolutely nobody else's.",
+            "unique": "Per-tenant vector isolation isn't a checkbox, it's the architecture: every customer's knowledge lives in its own store, full stop.",
+            "challenges": "The honest challenge is economics — designing the 80/15/5 routing tier so most questions never touch an expensive model, before scale forces the issue instead of after.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 4,
+          "title": "Built in waves, shipped every cycle",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "sololift-pin4.png", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "The platform ships in small, named waves — and every single cycle ends deployed to production.",
+            "how": "Development runs as planned waves (2.6, 2.6.2, 2.6.3…) executed by concurrent autonomous coding agents. Every wave closes with an Azure deployment by default, and testing happens on the live site — not localhost. A component registry, decision log, and session log are updated in the same pull request as the code they describe.",
+            "why": "A side project that only runs on localhost is a hobby. A cadence that ends every cycle in production is a product.",
+            "stack": ["Azure App Service (Linux)", "Concurrent AI agents", "Deploy-per-cycle discipline", "Living docs — registry + decision log"]
+          },
+          "story": {
+            "built": "I wanted the discipline of an enterprise release train without the ceremony — waves small enough to ship overnight, logged well enough to audit later.",
+            "who": "Future me, mostly. Documentation written at the time of action is the only documentation that stays true.",
+            "unique": "Any wave touching the component registry must update the decision log in the same PR — the docs can't drift because they can't merge separately.",
+            "challenges": "Early on I caught the record drifting from reality. The standing rule became: investigate before responding — git history is the authority, not memory.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 5,
+          "title": "Priced like a partner, not a per-seat tax",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "capture", "route": "/pricing", "authRequired": false, "file": "sololift-pin5.png", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "One implementation fee, one flat platform fee per year, usage at a transparent margin. No per-seat pricing, ever.",
+            "how": "The model is a $10K one-time implementation, $7,500 per year for the platform, and a 25% margin on transactional gas fees — so cost scales with work performed, not headcount.",
+            "why": "Per-seat pricing punishes exactly the customer SoloLift exists for: the small team trying to do more with the people they already have.",
+            "stack": ["Business model design", "Usage-based billing", "Flat platform pricing"]
+          },
+          "story": {
+            "built": "Pricing is product. I designed the model before finishing the platform, because the wrong model would have warped every build decision after it.",
+            "who": "Owners and IT leads who want a number they can budget — not a meter running on their team size.",
+            "unique": "The platform fee buys the platform; the gas fee pays for what you actually consume. Nothing in the model rewards me for your headcount.",
+            "challenges": "Resisting per-seat was the challenge — it's the industry default because it's lucrative. Choosing alignment over extraction is a bet I'm comfortable making.",
+            "storyApproved": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "vwp",
+      "pn": "U2",
+      "name": "VWP",
+      "status": "live",
+      "url": "https://vibewithprimitiveai.com",
+      "pkg": "SaaS-48 · component factory",
+      "desc": "Vibe with PrimitiveAI — a multi-tenant component factory with Stripe billing, anti-abuse architecture, and SDKs published for Python and TypeScript.",
+      "die": ["STRIPE BILLING", "ANTI-ABUSE", "FILE PRIMITIVE", "PY + TS SDKS"],
+      "caps": ["azure", "ai", "agents"],
+      "accent": { "color": "#B388FF", "glow": "rgba(179,136,255,.35)", "name": "violet" },
+      "pins": [
+        {
+          "n": 1,
+          "title": "Component gallery",
+          "detail": "Generated components ship as live, reusable building blocks per tenant.",
+          "image": { "type": "capture", "route": "/workspace", "authRequired": true, "file": "vwp-pin1.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 3, "y": 20, "w": 56, "h": 72 }],
+          "tour": {
+            "what": "Tenants describe the software component they need and get a working, reusable building block — theirs to keep, in their own workspace.",
+            "how": "It's a multi-tenant factory: each customer's components, files, and usage live in isolated workspaces. Generation is AI-driven, and the results are stored as durable assets behind a REST API — so a component made once can be fetched, listed, and reused programmatically forever.",
+            "why": "Most AI tools hand you a one-time answer. A factory hands you inventory — and inventory compounds.",
+            "stack": ["Python", "REST API", "Multi-tenant architecture", "Azure App Service (Linux)", "Azure SQL"]
+          },
+          "story": {
+            "built": "VWP is the consumer face of a bigger thesis: software should be assembled from verified, reusable pieces. The gallery is where that thesis becomes something you can click.",
+            "who": "Builders who want components they own and can re-fetch programmatically — not one-off AI answers that evaporate with the chat.",
+            "unique": "Components persist as durable, per-tenant assets behind an API. Factory output is inventory, not conversation history.",
+            "challenges": "Multi-tenant isolation touches everything — storage, billing, files, generation. Getting the tenant boundary right first made every later feature cheaper to build.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 2,
+          "title": "SDK quickstart",
+          "detail": "pip install vwp-sdk — the Python SDK is live on PyPI (0.7.0), TypeScript staged, seven /v1/files endpoints behind it.",
+          "image": { "type": "capture", "route": "/docs/sdk", "authRequired": false, "file": "vwp-pin2.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 63, "y": 16, "w": 34, "h": 36 }],
+          "tour": {
+            "what": "A developer goes from zero to first API call in minutes — pip install and go.",
+            "how": "The platform API ships versioned, with a file-handling primitive behind seven /v1/files endpoints. The Python SDK is published on PyPI as vwp-sdk (0.7.0); a TypeScript SDK is staged behind it. Same contract, two languages, one source of truth.",
+            "why": "An API without SDKs is a product without doors. Publishing to PyPI is the difference between 'integrable' and 'integrated by lunch.'",
+            "stack": ["Python", "PyPI · vwp-sdk", "TypeScript", "API versioning"]
+          },
+          "story": {
+            "built": "I judge platforms by their time-to-first-call, so mine had to survive its own standard.",
+            "who": "Python developers first — it's live on PyPI today — with TypeScript staged on the same contract.",
+            "unique": "Seven file endpoints behind one primitive: upload once, reference everywhere in the platform.",
+            "challenges": "Shipping from a Windows machine to a Linux cloud surfaced the classics — a UTF-8 BOM hiding in pyproject.toml and PowerShell backslashes corrupting zip paths. Small, maddening, very real.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 3,
+          "title": "Usage + billing meters",
+          "detail": "Allowances are computed dynamically, never stored — an architecture choice that eliminated an entire drift bug class.",
+          "image": { "type": "capture", "route": "/billing", "authRequired": true, "file": "vwp-pin3.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 63, "y": 58, "w": 34, "h": 36 }],
+          "tour": {
+            "what": "Billing that can't quietly drift wrong — what the meter shows is computed live from the source of truth, every time.",
+            "how": "Entitlements like free allowance and active-purchase status are never stored as flags; they're computed dynamically from purchase records through a single helper on every request. That one architectural decision eliminated an entire class of drift bugs. The Stripe go-live ran through a pre-flight audit that caught three escalations before launch, and a post-launch smoke test surfaced and closed a runaway polling loop and a refund-and-keep exploit.",
+            "why": "Most billing bugs aren't math errors — they're stale state. Refusing to store derivable state is the unglamorous decision that keeps customers' invoices and trust intact.",
+            "stack": ["Stripe", "Python", "Azure Key Vault", "GitHub Actions CI/CD", "Anti-abuse controls"]
+          },
+          "story": {
+            "built": "I've seen what stale entitlement flags do to customer trust. I built the billing layer so that class of bug couldn't exist, instead of promising to catch it.",
+            "who": "Every paying customer — billing integrity is the one feature all of them use on every request.",
+            "unique": "Derived state is never stored. Allowance and purchase status are recomputed from source records every single time.",
+            "challenges": "The launch smoke test found six bugs — including a polling loop firing 1,779 requests in eight and a half minutes and a refund-and-keep exploit. Finding them myself, before customers did, is exactly what the pre-flight discipline exists for.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 4,
+          "title": "Fixed by three agents at once",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "vwp-pin4.png", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "When the launch smoke test surfaced six bugs, the fix batch wasn't a week of serial work — it was three autonomous coding agents running in parallel.",
+            "how": "The bugs were decomposed into independent streams by dependency, dispatched to three concurrent Claude Code agents working simultaneously, then merged and verified together. The same model builds whole features: map the dependency graph first, maximize concurrency, never default to serial.",
+            "why": "This is the build model behind every product on this board — it's why a portfolio this size can exist with one engineer behind it.",
+            "stack": ["Claude Code", "Concurrent autonomous agents", "Dependency-graph decomposition", "Orchestrated parallel delivery"]
+          },
+          "story": {
+            "built": "Hours-to-days instead of weeks isn't a slogan; it's a workflow I had to design — decomposition first, concurrency always.",
+            "who": "Honestly? Me — it's the multiplier that lets one person run a portfolio. But it's also the skill every engineering org is about to need.",
+            "unique": "The hard part isn't running agents. It's drawing the dependency graph so the agents never collide.",
+            "challenges": "Trust is earned in verification. Compile-clean overnight is easy now; the discipline is budgeting my own hours to verify everything that shipped.",
+            "storyApproved": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "goodegame",
+      "pn": "U3",
+      "name": "GOODEGAME",
+      "status": "invite",
+      "url": "https://goodegame.com",
+      "pkg": "WEB-32 · golf community",
+      "desc": "Invitation-only golf community. .NET 10 API, React/Vite/TS, PostgreSQL — with an interactive globe of every course the community has played.",
+      "die": [".NET 10 API", "REACT GLOBE", "COURSE DATA API", "JWT AUTH"],
+      "caps": ["net", "react"],
+      "accent": { "color": "#56D364", "glow": "rgba(86,211,100,.35)", "name": "green" },
+      "pins": [
+        {
+          "n": 1,
+          "title": "Interactive globe",
+          "detail": "react-globe.gl rendering courses played, backed by GolfCourseAPI.com data.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "goodegame-pin1.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 6, "y": 12, "w": 56, "h": 76 }],
+          "tour": {
+            "what": "Every course the club has played, pinned on a spinning 3D globe.",
+            "how": "The globe renders with react-globe.gl — WebGL under the hood — fed by course data pulled from GolfCourseAPI.com through the platform's own .NET API, so locations and details stay accurate without hand-entry.",
+            "why": "A list says 'we played golf.' A globe says 'this is a club with a history.' Same data, completely different feeling.",
+            "stack": ["React", "TypeScript", "Vite", "react-globe.gl", "GolfCourseAPI.com"]
+          },
+          "story": {
+            "built": "The group already had the rounds and the stories; they deserved better than a spreadsheet.",
+            "who": "The people I actually play golf with. This one was never meant for the public.",
+            "unique": "Real course data flows in from an external API through my own backend, so the globe stays true without anyone doing data entry.",
+            "challenges": "WebGL globes are easy to demo and fiddly to make feel right — pin density, rotation speed, and mobile performance all pull against each other.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 2,
+          "title": "Rounds + scorecards",
+          "detail": "Round history and scoring for the member group.",
+          "image": { "type": "capture", "route": "/rounds", "authRequired": true, "file": "goodegame-pin2.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 67, "y": 14, "w": 30, "h": 42 }],
+          "tour": {
+            "what": "Round history and scores for the whole group, kept like a clubhouse ledger.",
+            "how": "A .NET 10 API over PostgreSQL handles members, rounds, and scoring. Course imagery runs through a swappable storage interface — local file storage today, cloud storage tomorrow, with zero changes to the rest of the codebase.",
+            "why": "The storage interface is the tell: even a passion project gets production architecture. Swappable providers are how hobby code survives becoming real.",
+            "stack": [".NET 10", "C#", "PostgreSQL", "Interface-based storage provider"]
+          },
+          "story": {
+            "built": "If I was going to keep score anywhere, it was going to be in something I built.",
+            "who": "The club's record-keeper instinct — every group has one.",
+            "unique": "The storage layer is an interface, not a hard dependency: local files today, cloud tomorrow, zero rewrites.",
+            "challenges": "Resisting over-building. A members-only app for friends doesn't need everything — it needs the right things done properly.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 3,
+          "title": "Invite-only access",
+          "detail": "JWT auth with invitation-gated membership — a private club, by design.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "goodegame-pin3.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 67, "y": 64, "w": 30, "h": 28 }],
+          "tour": {
+            "what": "A private club online — you don't sign up, you get invited.",
+            "how": "Authentication is JWT-based with invitation-gated registration: there is no open signup. Membership is granted, not requested.",
+            "why": "Constraint is a feature. Closing the front door is what makes the inside feel like a club instead of an app.",
+            "stack": ["JWT authentication", ".NET 10", "React"]
+          },
+          "story": {
+            "built": "Some software should be a clubhouse, not a platform. No growth loop, no public signup — on purpose.",
+            "who": "Members. That's the whole point.",
+            "unique": "There is no signup endpoint to abuse. The attack surface of registration is zero because registration doesn't exist.",
+            "challenges": "Designing absence is harder than it looks — every tutorial assumes you want users, and I kept having to delete the parts that invited them.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 4,
+          "title": "Run like a real product anyway",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "goodegame-pin4.png", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "Private doesn't mean casual — GoodeGame runs on its own domain with a planned subdomain architecture and production deployment habits.",
+            "how": "The domain lives at goodegame.com with DNS managed at the registrar. The architecture reserves app.goodegame.com for the web app and mail.goodegame.com for transactional email via Azure Communication Services. Images run through the swappable storage provider, so a move to cloud storage is a configuration change.",
+            "why": "Treating a friends-and-family app with production seriousness is the habit — and the habit is what transfers to everything else on this board.",
+            "stack": ["DNS architecture", "Azure Communication Services (planned)", "Subdomain design", "PostgreSQL"]
+          },
+          "story": {
+            "built": "Partly for the club, partly as a gym — small stakes are the best place to rehearse production discipline.",
+            "who": "The members get reliability; I get reps.",
+            "unique": "Even the roadmap is architecture: the mail and app subdomains were reserved before they were needed.",
+            "challenges": "Manual DNS at the registrar is its own adventure — every record change is a small act of faith followed by a propagation delay.",
+            "storyApproved": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "site",
+      "pn": "U4",
+      "name": "NECOGOODE",
+      "status": "live",
+      "url": "https://necogoode.com",
+      "pkg": "SWA-24 · the portfolio",
+      "desc": "The portfolio itself, on Azure Static Web Apps. A splash door routes visitors by audience: a Tech Tour in an IDE aesthetic, a Business Tour in a workshop aesthetic, and a Bloomberg-style trading floor.",
+      "die": ["TECH TOUR", "BUSINESS TOUR", "TRADING FLOOR", "DEMO ROUTER"],
+      "caps": ["react", "azure"],
+      "accent": { "color": "#5EEAD4", "glow": "rgba(94,234,212,.35)", "name": "teal" },
+      "pins": [
+        {
+          "n": 1,
+          "title": "Splash door — Tech Tour",
+          "detail": "Engineers enter an IDE-styled walkthrough of the builds.",
+          "image": { "type": "capture", "route": "/TechTour", "authRequired": false, "file": "site-pin1.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 2, "y": 6, "w": 47, "h": 66 }],
+          "tour": {
+            "what": "Engineers get a portfolio that looks like their own editor — the work presented in the language they live in.",
+            "how": "The splash door routes by audience: choosing the Tech Tour opens an IDE-styled walkthrough of the builds, all client-side routed in React and served from Azure Static Web Apps.",
+            "why": "A portfolio's first job is empathy. Showing an engineer an IDE says 'I know your world' before a single word is read.",
+            "stack": ["React", "Azure Static Web Apps", "Client-side routing"]
+          },
+          "story": {
+            "built": "I built two front doors because I kept watching one portfolio try to talk to two audiences and fail at both.",
+            "who": "The engineer who will judge me in the first ten seconds by whether the page respects how they think.",
+            "unique": "It doesn't describe my work in an IDE aesthetic — it behaves like one, because that's where the visitor lives.",
+            "challenges": "Restraint. An IDE theme collapses into gimmick fast; every decoration had to earn its place.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 2,
+          "title": "Splash door — Business Tour",
+          "detail": "Executives get a workshop-styled, horizontal-scroll narrative of outcomes.",
+          "image": { "type": "capture", "route": "/BusTour", "authRequired": false, "file": "site-pin2.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 51, "y": 6, "w": 47, "h": 66 }],
+          "tour": {
+            "what": "Executives get the same story told as outcomes — a workshop you scroll through sideways, not a spec sheet.",
+            "how": "The second door routes to a horizontal-scroll, workshop-aesthetic narrative built on the same React app and a shared demo router — one codebase, two completely different experiences keyed to who's visiting.",
+            "why": "Bridging people, process, and product isn't a tagline if the portfolio itself does it: one artifact, fluent in two audiences.",
+            "stack": ["React", "Azure Static Web Apps", "Shared /demo/:slug router"]
+          },
+          "story": {
+            "built": "Half my career is translating builds into outcomes. The site had to prove I can do that, not claim it.",
+            "who": "The executive or recruiter who needs the 'so what' before the 'how.'",
+            "unique": "Same codebase, same router, completely different storytelling — the site itself demonstrates the bridge between audiences.",
+            "challenges": "Horizontal scroll is polarizing. Making it feel like a workshop tour instead of a navigation trap took iteration.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 3,
+          "title": "Trading floor ticker",
+          "detail": "Live Alpha Vantage stock ticker with a daily call counter and auto-disable guard.",
+          "image": { "type": "capture", "route": "/floor", "authRequired": false, "file": "site-pin3.png", "viewport": [1600, 1000] },
+          "regions": [{ "x": 2, "y": 76, "w": 96, "h": 20 }],
+          "tour": {
+            "what": "A Bloomberg-style floor with a live stock ticker — and a built-in conscience about API costs.",
+            "how": "The ticker pulls live quotes from Alpha Vantage, counts its own calls against the free daily quota, and auto-disables itself when the budget is spent — a self-governing integration that can never surprise-bill or get rate-banned.",
+            "why": "Anyone can wire up an API. Wiring one up that polices its own consumption is the habit of someone who has run production systems.",
+            "stack": ["React", "Alpha Vantage API", "Cost-guard pattern", "Azure Static Web Apps"]
+          },
+          "story": {
+            "built": "I wanted one corner of the site that was alive — and a live integration is only impressive if it can never embarrass you.",
+            "who": "Visitors who linger — and anyone evaluating whether I think about operational cost.",
+            "unique": "The ticker budgets itself: a daily call counter with auto-disable means the free tier can never be exceeded.",
+            "challenges": "Designing for the failure case first. What happens at call 26 was decided before call 1 was ever wired.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 4,
+          "title": "The custom-domain fight",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "capture", "route": "/", "authRequired": false, "file": "site-pin4.png", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "Putting the site on its own domain turned into a small war with DNS standards — and a lesson in reading the actual spec.",
+            "how": "Azure Static Web Apps validates custom domains via a TXT record, but an RFC 1912 coexistence restriction blocked adding it alongside existing records at the apex. The fix was switching to the CNAME validation method — same proof of ownership, different mechanism.",
+            "why": "Every deployment has one of these. The skill isn't avoiding the wall — it's identifying which wall you've hit and walking around it instead of through it.",
+            "stack": ["Azure Static Web Apps", "DNS / RFC 1912", "CNAME validation", "Registrar management"]
+          },
+          "story": {
+            "built": "Nobody plans this stop — DNS plans it for you. I kept it on the tour because the unglamorous fights are the honest ones.",
+            "who": "Anyone who has ever stared at a 'validation failed' message at 11pm. You are seen.",
+            "unique": "The fix wasn't a workaround; it was understanding why the standard forbids the obvious move — and using the sanctioned alternative.",
+            "challenges": "This whole stop is the challenge. A reminder that the last five percent of shipping is rarely about code.",
+            "storyApproved": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "pip",
+      "pn": "U5",
+      "name": "PIP",
+      "status": "fab",
+      "url": null,
+      "pkg": "BUS-16 · in fabrication",
+      "desc": "A hosted, metered service bus of pre-verified functional primitives — pay-per-invocation, every primitive surviving five isolated review sessions before it ships. The open protocol spec is the long-term moat. Not yet public.",
+      "die": ["PRIMITIVE REGISTRY", "METERED INVOCATION", "OPEN PROTOCOL", "SESSION ISOLATION"],
+      "caps": ["ai", "agents"],
+      "accent": { "color": "#E3B341", "glow": "rgba(227,179,65,.35)", "name": "amber" },
+      "pins": [
+        {
+          "n": 1,
+          "title": "Primitive registry",
+          "detail": "Versioned, uniquely-addressed primitives — structured source-of-truth documents with embedded metadata.",
+          "image": { "type": "asset", "route": null, "authRequired": false, "file": "pip-asset-1.svg", "viewport": [1600, 1000] },
+          "regions": [{ "x": 4, "y": 14, "w": 42, "h": 50 }],
+          "tour": {
+            "what": "A catalog of small, pre-verified software capabilities — each one addressable like a part number.",
+            "how": "Every primitive lives as a structured source-of-truth document with embedded metadata and a unique versioned ID (PIP-CATEGORY-SEQ-VERSION). Before anything ships, it survives five genuinely isolated review sessions — separate AI sessions that cannot see each other's reasoning, so approval is earned five independent times rather than rubber-stamped once.",
+            "why": "Trust in AI-built software is the whole game. Independent, isolated review is how you manufacture trust instead of asserting it.",
+            "stack": ["Claude Code", "Structured metadata documents", "Versioned IDs", "Isolated review sessions"]
+          },
+          "story": {
+            "built": "If AI is going to write production software, verification can't be vibes. The registry exists so trust has a unit.",
+            "who": "Developers and platforms that want to consume capabilities the way they consume electricity — metered and certified.",
+            "unique": "Five approvals from five sessions that cannot see each other. Consensus without contamination.",
+            "challenges": "Making the isolation genuine — separate sessions, not simulated ones — costs real time per primitive. That cost is the product.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 2,
+          "title": "Metered invocation",
+          "detail": "A gas fee per call — primitives as utilities, not licenses.",
+          "image": { "type": "asset", "route": null, "authRequired": false, "file": "pip-asset-2.svg", "viewport": [1600, 1000] },
+          "regions": [{ "x": 54, "y": 14, "w": 42, "h": 50 }],
+          "tour": {
+            "what": "You don't license a primitive — you pay a tiny fee each time you call it, like a utility.",
+            "how": "Each invocation is metered and settled per call. Pricing is designed to be composition-aware: primitives that combine into bigger capabilities price as compositions, not as a flat sum of parts.",
+            "why": "Per-call pricing aligns cost with value created — and turns infrastructure into a revenue meter instead of a sales cycle.",
+            "stack": ["Metered API design", "Composition-aware pricing"]
+          },
+          "story": {
+            "built": "Licensing models tax possession. I wanted to price the act of use.",
+            "who": "Builders who'd rather pay fractions of a cent per call than negotiate a contract.",
+            "unique": "Composition-aware pricing — combined primitives are priced as what they become, not as summed parts.",
+            "challenges": "Metering is easy; pricing composition fairly is a design problem I expect to keep iterating on in the open.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 3,
+          "title": "Open protocol (PSP)",
+          "detail": "An openly adoptable standard so the ecosystem outlives any single vendor.",
+          "image": { "type": "asset", "route": null, "authRequired": false, "file": "pip-asset-3.svg", "viewport": [1600, 1000] },
+          "regions": [{ "x": 4, "y": 72, "w": 92, "h": 24 }],
+          "tour": {
+            "what": "The protocol underneath is being written as an open standard anyone can adopt.",
+            "how": "The PIP Standard Protocol specifies how primitives are described, invoked, and verified — published openly so other vendors can implement it themselves.",
+            "why": "Platforms get displaced; protocols get adopted. The moat isn't the service — it's being the spec the ecosystem standardizes on.",
+            "stack": ["Open protocol design", "Specification authoring"]
+          },
+          "story": {
+            "built": "I've watched platforms get displaced and protocols get adopted. I'm building the part that gets adopted.",
+            "who": "Eventually, competitors — that's the point of an open standard.",
+            "unique": "The moat strategy is generosity: anyone can implement PSP, which makes PIP the reference, not the gatekeeper.",
+            "challenges": "Writing a spec is writing for adversarial readers — every ambiguity is a future incompatibility.",
+            "storyApproved": false
+          }
+        },
+        {
+          "n": 4,
+          "title": "The factory floor is Claude Code",
+          "detail": "tour-only stop — no screen, all story.",
+          "image": { "type": "asset", "route": null, "authRequired": false, "file": "pip-asset-4.svg", "viewport": [1600, 1000] },
+          "regions": [],
+          "tour": {
+            "what": "PIP's primitives are manufactured inside Claude Code — chosen deliberately as the execution environment.",
+            "how": "Claude Code provides filesystem access for the structured source-of-truth documents and, critically, genuine session isolation: each of the five mandatory reviews runs in a separate session with no shared context. The folder tree is the factory; the sessions are independent inspectors.",
+            "why": "Tool choice is an architecture decision. The verification model only works if the isolation is real, and the environment was selected to guarantee it.",
+            "stack": ["Claude Code", "Filesystem-as-factory", "Genuine session isolation", "Structured source-of-truth documents"]
+          },
+          "story": {
+            "built": "I evaluated how to make five reviews honestly independent and chose the environment that made faking it impossible.",
+            "who": "The future buyer of a primitive, who will never see this machinery — only the trust it produces.",
+            "unique": "Most pipelines simulate independence. This one purchases it structurally.",
+            "challenges": "Process honesty. The temptation to let one session 'just check' another's work is exactly what the design forbids.",
+            "storyApproved": false
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img"
+     aria-label="PIP metered invocation — a gas fee per call with composition-aware pricing. Concept render.">
+  <defs>
+    <style>
+      .ink{font-family:'Courier New',ui-monospace,monospace;}
+      .glow{filter:drop-shadow(0 0 6px rgba(227,179,65,.35));}
+    </style>
+    <pattern id="grid2" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#E3B341" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0C1018"/>
+      <stop offset="1" stop-color="#070A10"/>
+    </linearGradient>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#E3B341"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#bg2)"/>
+  <rect width="1600" height="1000" fill="url(#grid2)"/>
+  <rect x="20" y="20" width="1560" height="960" fill="none" stroke="#E3B341" stroke-opacity="0.35" stroke-width="1.5"/>
+  <rect x="34" y="34" width="1532" height="932" fill="none" stroke="#E3B341" stroke-opacity="0.12" stroke-width="1" stroke-dasharray="3 6"/>
+
+  <text class="ink" x="800" y="560" text-anchor="middle" transform="rotate(-18 800 560)"
+        font-size="190" font-weight="700" fill="#E3B341" fill-opacity="0.05" letter-spacing="22">IN FAB</text>
+
+  <text class="ink" x="60" y="92" font-size="34" font-weight="700" fill="#E3B341" letter-spacing="4">PIP — PRIMITIVE INFRASTRUCTURE PLATFORM</text>
+  <text class="ink" x="62" y="124" font-size="18" fill="#9A7B2E" letter-spacing="3">U5 · BUS-16 · METERED INVOCATION</text>
+  <line x1="60" y1="142" x2="1540" y2="142" stroke="#E3B341" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- invocation pipeline: invoke -> meter -> settle -->
+  <text class="ink" x="60" y="232" font-size="22" font-weight="700" fill="#E3B341" letter-spacing="3">PER-CALL PIPELINE</text>
+  <text class="ink" x="62" y="258" font-size="14" fill="#B8902F">primitives as utilities, not licenses</text>
+
+  <g class="ink">
+    <g class="glow">
+      <rect x="80" y="300" width="300" height="150" rx="10" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2"/>
+    </g>
+    <text x="230" y="356" text-anchor="middle" font-size="26" font-weight="700" fill="#F0CD66">invoke()</text>
+    <text x="230" y="392" text-anchor="middle" font-size="15" fill="#8A7333">call a primitive</text>
+    <text x="230" y="420" text-anchor="middle" font-size="15" fill="#8A7333">by versioned ID</text>
+
+    <line x1="380" y1="375" x2="490" y2="375" stroke="#E3B341" stroke-width="2.5" marker-end="url(#arrow2)"/>
+
+    <g class="glow">
+      <rect x="500" y="300" width="300" height="150" rx="10" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2"/>
+    </g>
+    <text x="650" y="356" text-anchor="middle" font-size="26" font-weight="700" fill="#F0CD66">METER</text>
+    <text x="650" y="392" text-anchor="middle" font-size="15" fill="#8A7333">count the call</text>
+    <text x="650" y="420" text-anchor="middle" font-size="15" fill="#8A7333">a gas fee per call</text>
+
+    <line x1="800" y1="375" x2="910" y2="375" stroke="#E3B341" stroke-width="2.5" marker-end="url(#arrow2)"/>
+
+    <g class="glow">
+      <rect x="920" y="300" width="300" height="150" rx="10" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2"/>
+    </g>
+    <text x="1070" y="356" text-anchor="middle" font-size="26" font-weight="700" fill="#F0CD66">SETTLE</text>
+    <text x="1070" y="392" text-anchor="middle" font-size="15" fill="#8A7333">settled per call</text>
+    <text x="1070" y="420" text-anchor="middle" font-size="15" fill="#8A7333">pay as you use</text>
+  </g>
+
+  <!-- gas meter dial -->
+  <g class="glow">
+    <circle cx="1390" cy="375" r="90" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2"/>
+  </g>
+  <g class="ink">
+    <path d="M1390 375 L1390 300" stroke="#E3B341" stroke-opacity="0.25" stroke-width="2"/>
+    <path d="M1390 375 L1455 340" stroke="#E3B341" stroke-opacity="0.25" stroke-width="2"/>
+    <path d="M1390 375 L1455 410" stroke="#E3B341" stroke-opacity="0.25" stroke-width="2"/>
+    <path d="M1390 375 L1325 410" stroke="#E3B341" stroke-opacity="0.25" stroke-width="2"/>
+    <path d="M1390 375 L1325 340" stroke="#E3B341" stroke-opacity="0.25" stroke-width="2"/>
+    <line x1="1390" y1="375" x2="1437" y2="332" stroke="#F0CD66" stroke-width="3.5"/>
+    <circle cx="1390" cy="375" r="7" fill="#E3B341"/>
+    <text x="1390" y="495" text-anchor="middle" font-size="16" font-weight="700" fill="#E3B341">GAS METER</text>
+  </g>
+
+  <!-- composition-aware pricing -->
+  <g class="glow">
+    <rect x="80" y="540" width="1440" height="320" rx="10" fill="none" stroke="#E3B341" stroke-opacity="0.7" stroke-width="2" stroke-dasharray="9 7"/>
+  </g>
+  <text class="ink" x="106" y="584" font-size="22" font-weight="700" fill="#E3B341" letter-spacing="3">COMPOSITION-AWARE PRICING</text>
+  <text class="ink" x="108" y="610" font-size="14" fill="#B8902F">primitives that combine into bigger capabilities price as compositions, not as a flat sum of parts</text>
+
+  <g class="ink">
+    <!-- parts -->
+    <rect x="140" y="660" width="170" height="84" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.5" stroke-width="1.5"/>
+    <text x="225" y="700" text-anchor="middle" font-size="16" font-weight="700" fill="#F0CD66">PRIMITIVE A</text>
+    <text x="225" y="726" text-anchor="middle" font-size="14" fill="#8A7333">metered call</text>
+
+    <text x="345" y="710" text-anchor="middle" font-size="34" fill="#E3B341">+</text>
+
+    <rect x="380" y="660" width="170" height="84" rx="8" fill="#0A0E16" stroke="#E3B341" stroke-opacity="0.5" stroke-width="1.5"/>
+    <text x="465" y="700" text-anchor="middle" font-size="16" font-weight="700" fill="#F0CD66">PRIMITIVE B</text>
+    <text x="465" y="726" text-anchor="middle" font-size="14" fill="#8A7333">metered call</text>
+
+    <line x1="560" y1="702" x2="660" y2="702" stroke="#E3B341" stroke-width="2.5" marker-end="url(#arrow2)"/>
+
+    <g class="glow">
+      <rect x="680" y="640" width="320" height="124" rx="10" fill="#E3B341" fill-opacity="0.07" stroke="#E3B341" stroke-opacity="0.8" stroke-width="2"/>
+    </g>
+    <text x="840" y="688" text-anchor="middle" font-size="20" font-weight="700" fill="#F0CD66">COMPOSITION (A▸B)</text>
+    <text x="840" y="718" text-anchor="middle" font-size="15" fill="#C9A23B">priced as what it becomes</text>
+    <text x="840" y="742" text-anchor="middle" font-size="15" fill="#C9A23B">not as summed parts</text>
+
+    <!-- contrast: flat sum struck through -->
+    <rect x="1060" y="640" width="420" height="124" rx="10" fill="none" stroke="#E3B341" stroke-opacity="0.3" stroke-width="1.5" stroke-dasharray="5 5"/>
+    <text x="1270" y="684" text-anchor="middle" font-size="16" fill="#8A7333">flat sum of parts (A + B)</text>
+    <line x1="1110" y1="694" x2="1430" y2="694" stroke="#9A7B2E" stroke-width="2"/>
+    <text x="1270" y="724" text-anchor="middle" font-size="14" fill="#7A6428">cost aligned with value created</text>
+    <text x="1270" y="746" text-anchor="middle" font-size="14" fill="#7A6428">infrastructure as a revenue meter</text>
+  </g>
+
+  <line x1="60" y1="912" x2="1540" y2="912" stroke="#E3B341" stroke-opacity="0.2" stroke-width="1"/>
+  <text class="ink" x="60" y="946" font-size="14" fill="#7A6428" letter-spacing="2">NECO-1 · U5 PIP · STATUS: IN FABRICATION · NOT YET PUBLIC</text>
+
+  <g class="ink">
+    <rect x="1318" y="922" width="222" height="40" rx="6" fill="none" stroke="#E3B341" stroke-opacity="0.6" stroke-width="1.5"/>
+    <text x="1429" y="949" text-anchor="middle" font-size="18" font-weight="700" fill="#E3B341" letter-spacing="4">CONCEPT RENDER</text>
+  </g>
+</svg>

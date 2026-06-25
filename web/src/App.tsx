@@ -9,6 +9,11 @@ import Floor from './routes/Floor';
 import Console from './routes/Console';
 import Concepts from './routes/Concepts';
 import ConceptsSololift from './routes/ConceptsSololift';
+import Brain from './routes/Brain';
+import GoodeStream from './routes/GoodeStream';
+import GoodeStreamHrAssist from './routes/GoodeStreamHrAssist';
+import GoodeStreamDocumentInsight from './routes/GoodeStreamDocumentInsight';
+import GoodeStreamTam from './routes/GoodeStreamTam';
 import NotFound from './routes/NotFound';
 
 export default function App() {
@@ -24,6 +29,11 @@ export default function App() {
       <Route path="/console" element={<Console />} />
       <Route path="/concepts" element={<Concepts />} />
       <Route path="/concepts/sololift.ai" element={<ConceptsSololift />} />
+      <Route path="/brain" element={<Brain />} />
+      <Route path="/goodestream" element={<GoodeStream />} />
+      <Route path="/goodestream/hr-assist" element={<GoodeStreamHrAssist />} />
+      <Route path="/goodestream/document-insight" element={<GoodeStreamDocumentInsight />} />
+      <Route path="/goodestream/tam" element={<GoodeStreamTam />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );
