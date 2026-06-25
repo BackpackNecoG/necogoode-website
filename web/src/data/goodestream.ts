@@ -1,5 +1,5 @@
 /**
- * GoodeStream Talent Dashboard — shared section metadata.
+ * Goode Talent Concepts — shared section metadata.
  *
  * Single source of truth for the demo list so the landing page, the section
  * tab-nav, and the sub-page headers all stay in sync (lego-piece rule: one
@@ -28,7 +28,7 @@ export const GOODESTREAM_DEMOS: GoodeStreamDemo[] = [
   {
     slug: 'hr-assist',
     tab: 'HR Assist',
-    name: 'GoodeStream HR Assist',
+    name: 'HR Assist',
     tagline: 'A retrieval-grounded HR support agent that answers only from your policy documents — with citations.',
     problem:
       'HR teams field high volumes of repetitive policy questions where a wrong or invented answer is a compliance and trust risk.',
@@ -38,7 +38,7 @@ export const GOODESTREAM_DEMOS: GoodeStreamDemo[] = [
   {
     slug: 'document-insight',
     tab: 'Document Insight',
-    name: 'GoodeStream Document Insight',
+    name: 'Document Insight',
     tagline:
       'One engine that reviews performance feedback and job descriptions against a rubric and returns concrete, fair rewrites.',
     problem:

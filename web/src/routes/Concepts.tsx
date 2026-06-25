@@ -302,7 +302,7 @@ export default function Concepts() {
         {/* Footer nav back to the tours */}
         <div className="mt-16 pt-8 border-t border-[var(--splash-line)] flex flex-col sm:flex-row gap-4 justify-between font-mono text-[0.8rem] text-[var(--splash-text-soft)]">
           <Link to="/" className="no-underline text-current hover:text-[var(--splash-tech)]">
-            ← back to the door
+            ← back home
           </Link>
           <div className="flex gap-6">
             <Link to="/TechTour" className="no-underline text-current hover:text-[var(--splash-tech)]">

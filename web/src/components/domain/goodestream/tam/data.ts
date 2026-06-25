@@ -164,7 +164,7 @@ export function buildTemplateCsv(): string {
   const header = TAM_COLUMNS.join(',');
   const exampleLines = examples.map((r) => TAM_COLUMNS.map((c) => csvEscape(String(r[c]))).join(','));
   return [
-    '# GoodeStream — Talent Adoption Matrix · data template',
+    '# Goode Talent Concepts — Talent Adoption Matrix · data template',
     '# Fill in one row per (team, tool, period). Delete these # comment lines and the example rows before uploading, or leave them — the parser ignores # lines.',
     '# Columns:',
     legend,

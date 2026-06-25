@@ -136,6 +136,65 @@ function Character({
   );
 }
 
+export function GoodeTalentVisual() {
+  // An org/talent network: people nodes connected to a brass "AI-assisted" hub.
+  const people: Array<[number, number]> = [
+    [70, 70],
+    [120, 150],
+    [180, 185],
+    [250, 150],
+    [295, 78],
+    [185, 60],
+  ];
+  const hub: [number, number] = [185, 120];
+  return (
+    <div
+      className="w-full h-full relative"
+      style={{ background: 'linear-gradient(135deg, #21343C, #15232B 70%)' }}
+    >
+      <svg viewBox="0 0 360 240" className="w-full h-full" aria-hidden preserveAspectRatio="xMidYMid slice">
+        {/* connections from hub to each person */}
+        {people.map(([x, y], i) => (
+          <line
+            key={i}
+            x1={hub[0]}
+            y1={hub[1]}
+            x2={x}
+            y2={y}
+            stroke="var(--bus-brass)"
+            strokeOpacity={0.45}
+            strokeWidth={1.25}
+          />
+        ))}
+        {/* people nodes */}
+        {people.map(([x, y], i) => (
+          <g key={`p${i}`}>
+            <circle cx={x} cy={y} r={12} fill="var(--bus-paper)" stroke="var(--bus-wood-dark)" strokeWidth={1} />
+            <circle cx={x} cy={y - 3} r={3.4} fill="var(--bus-wood-dark)" />
+            <path d={`M ${x - 6} ${y + 7} q 6 -7 12 0`} fill="var(--bus-wood-dark)" />
+          </g>
+        ))}
+        {/* AI-assisted hub */}
+        <circle cx={hub[0]} cy={hub[1]} r={22} fill="var(--bus-brass-bright)" />
+        <circle cx={hub[0]} cy={hub[1]} r={22} fill="none" stroke="var(--bus-brass)" strokeWidth={2} />
+        <text x={hub[0]} y={hub[1] + 4} textAnchor="middle" fontSize="11" fontFamily="monospace" fill="var(--bus-wood-deep)">
+          AI
+        </text>
+        {/* spark */}
+        <text x={hub[0] + 20} y={hub[1] - 16} fontSize="16" fill="var(--bus-brass-bright)">
+          ✦
+        </text>
+      </svg>
+      <span
+        className="absolute bottom-3 left-3 font-hand text-[0.95rem]"
+        style={{ color: 'rgba(232,193,112,0.85)', transform: 'rotate(-3deg)' }}
+      >
+        talent + ai
+      </span>
+    </div>
+  );
+}
+
 export function PIPVisual() {
   return (
     <div

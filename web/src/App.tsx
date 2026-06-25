@@ -14,12 +14,15 @@ import GoodeStream from './routes/GoodeStream';
 import GoodeStreamHrAssist from './routes/GoodeStreamHrAssist';
 import GoodeStreamDocumentInsight from './routes/GoodeStreamDocumentInsight';
 import GoodeStreamTam from './routes/GoodeStreamTam';
+import GoodeTalentStory from './routes/GoodeTalentStory';
 import NotFound from './routes/NotFound';
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Splash />} />
+      {/* Home now lands directly on the business workbench (dual-path door retired). */}
+      <Route path="/" element={<BusTour />} />
+      <Route path="/door" element={<Splash />} />
       <Route path="/TechTour" element={<TechTour />} />
       <Route path="/TechTour/creations/:slug" element={<TechCreation />} />
       <Route path="/BusTour" element={<BusTour />} />
@@ -30,6 +33,7 @@ export default function App() {
       <Route path="/concepts" element={<Concepts />} />
       <Route path="/concepts/sololift.ai" element={<ConceptsSololift />} />
       <Route path="/brain" element={<Brain />} />
+      <Route path="/goodestream/story" element={<GoodeTalentStory />} />
       <Route path="/goodestream" element={<GoodeStream />} />
       <Route path="/goodestream/hr-assist" element={<GoodeStreamHrAssist />} />
       <Route path="/goodestream/document-insight" element={<GoodeStreamDocumentInsight />} />

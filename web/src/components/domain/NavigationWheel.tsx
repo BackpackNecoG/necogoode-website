@@ -6,7 +6,7 @@ import { useState } from 'react';
  *
  * Sits in the bottom-right corner of every non-Splash route. Closed state is a
  * compact "N" pin; clicking opens a circular layout of 7 spokes pointing to the
- * top-level destinations: home (Splash), TechTour, Console, Brain, GoodeStream,
+ * top-level destinations: home, TechTour, Console, Brain, Goode Talent,
  * Floor, and BusTour (Workshop).
  *
  * The active page's spoke is highlighted; clicking it just closes the wheel.
@@ -29,11 +29,11 @@ type Spoke = {
 
 // Seven destinations evenly spaced around the wheel (360 / 7 ≈ 51.43° apart).
 const SPOKES: Spoke[] = [
-  { scope: 'splash',      label: 'Door',       to: '/',            glyph: '⌂',  angleDeg: 0 },
+  { scope: 'splash',      label: 'Door',       to: '/door',        glyph: '⌂',  angleDeg: 0 },
   { scope: 'tech',        label: 'Tech',       to: '/TechTour',    glyph: '{}', angleDeg: 51.43 },
   { scope: 'console',     label: 'Console',    to: '/console',     glyph: '▸_', angleDeg: 102.86 },
   { scope: 'brain',       label: 'Brain',      to: '/brain',       glyph: '⊡',  angleDeg: 154.29 },
-  { scope: 'goodestream', label: 'GoodeStream', to: '/goodestream', glyph: '◆',  angleDeg: 205.71 },
+  { scope: 'goodestream', label: 'Goode Talent', to: '/goodestream', glyph: '◆',  angleDeg: 205.71 },
   { scope: 'floor',       label: 'Floor',      to: '/floor',       glyph: '$',  angleDeg: 257.14 },
   { scope: 'bus',         label: 'Workshop',   to: '/BusTour',     glyph: '✎',  angleDeg: 308.57 },
 ];

@@ -212,7 +212,7 @@ export default function ConceptsSololift() {
           </Link>
           <div className="flex gap-6">
             <Link to="/" className="no-underline text-current hover:text-[var(--splash-tech)]">
-              the door →
+              home →
             </Link>
             <Link to="/TechTour" className="no-underline text-current hover:text-[var(--splash-tech)]">
               technical tour →

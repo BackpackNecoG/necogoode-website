@@ -82,7 +82,7 @@ export function SectionTabs() {
   return (
     <div className="sticky top-0 z-20 -mt-px border-y border-[var(--splash-line)] bg-[var(--splash-bg)]/85 backdrop-blur supports-[backdrop-filter]:bg-[var(--splash-bg)]/70">
       <nav
-        aria-label="GoodeStream sections"
+        aria-label="Goode Talent Concepts sections"
         className="max-w-[1080px] mx-auto px-4 md:px-10 flex gap-1 overflow-x-auto no-scrollbar"
       >
         {tabs.map((t) => {
@@ -113,12 +113,12 @@ export function SectionTabs() {
 export function Footer() {
   return (
     <footer className="mt-20 pt-8 border-t border-[var(--splash-line)] flex flex-col sm:flex-row gap-4 justify-between font-mono text-[0.8rem] text-[var(--splash-text-soft)]">
-      <Link to="/" className="no-underline text-current hover:text-[var(--splash-tech)]">
-        ← back to the door
+      <Link to="/goodestream/story" className="no-underline text-current hover:text-[var(--splash-tech)]">
+        ← back to the story
       </Link>
       <div className="flex gap-6">
         <Link to="/goodestream" className="no-underline text-current hover:text-[var(--splash-tech)]">
-          GoodeStream overview →
+          Goode Talent Concepts overview →
         </Link>
         <Link to="/TechTour" className="no-underline text-current hover:text-[var(--splash-tech)]">
           technical tour →

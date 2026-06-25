@@ -32,7 +32,7 @@ export default function GoodeStream() {
         <header className="pt-12 md:pt-16 mb-14 max-w-[860px]">
           <div className="font-mono text-[0.72rem] tracking-[0.3em] text-[var(--splash-text-faint)] uppercase mb-5">
             <span className="text-[var(--splash-tech)]">— </span>
-            GoodeStream · Talent Dashboard
+            Goode Talent Concepts
           </div>
           <h1
             className="font-serif font-normal leading-[1.05] tracking-[-0.025em] mb-6 text-[var(--splash-text)]"
@@ -41,10 +41,11 @@ export default function GoodeStream() {
             Working prototypes that <em className="italic text-[var(--splash-tech)]">prove</em> the
             capability — not just describe it.
           </h1>
-          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[640px]">
-            Three interactive prototypes for the kind of work a Senior Applied AI Lead, Talent role
-            demands. Each one names the problem, shows how I&apos;d target it, and then hands you
-            something you can actually use.
+          <p className="font-serif italic text-[1.25rem] leading-relaxed text-[var(--splash-text-soft)] max-w-[660px]">
+            How I think about bringing AI into a Talent organization: start from the repetitive,
+            real problems a team actually has, ground the work in their own source of truth, keep a
+            human in the loop, and measure adoption — not just ship a demo. Three prototypes you can
+            drive yourself.
           </p>
 
           {/* Honest framing banner */}

@@ -10,6 +10,7 @@ import {
   VibingVisual,
   ByteSizedVisual,
   PIPVisual,
+  GoodeTalentVisual,
 } from '../components/domain/workshop/visuals';
 
 /**
@@ -68,7 +69,7 @@ export default function BusTour() {
         </Link>
         <div className="hidden md:flex gap-10 text-[0.85rem] text-[var(--bus-paper-dark)]">
           <Link to="/BusTour" className="hover:text-[var(--bus-brass-bright)] no-underline text-current">Creations</Link>
-          <Link to="/" className="hover:text-[var(--bus-brass-bright)] no-underline text-current">Path</Link>
+          <Link to="/TechTour" className="hover:text-[var(--bus-brass-bright)] no-underline text-current">Tech tour</Link>
           <a href="mailto:hello@necogoode.com" className="hover:text-[var(--bus-brass-bright)] no-underline text-current">Contact</a>
         </div>
       </nav>
@@ -95,6 +96,16 @@ export default function BusTour() {
             scroll right
             <span className="text-3xl" style={{ animation: 'nudge 2s ease-in-out infinite' }}>→</span>
           </div>
+
+          {/* Goode Talent Concepts — first item on the bench */}
+          <WorkshopCard
+            to="/goodestream/story"
+            tagline="talent + ai · concepts"
+            name="Goode Talent Concepts"
+            description="How I think about bringing AI into a Talent organization — three working prototypes you can actually use: grounded HR support, fair document review, and an adoption-measurement dashboard."
+            tiltDeg={-1.5}
+            visual={<GoodeTalentVisual />}
+          />
 
           {/* Creation cards in canonical order */}
           {creations.map((c, i) => (

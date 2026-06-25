@@ -21,7 +21,7 @@ export default function NotFound() {
             to="/"
             className="px-5 py-3 border border-[var(--splash-text-soft)] text-[var(--splash-text)] no-underline font-mono text-xs tracking-[0.15em] uppercase hover:border-[var(--splash-tech)] hover:text-[var(--splash-tech)]"
           >
-            ← back to the door
+            ← back home
           </Link>
           <Link
             to="/floor"
