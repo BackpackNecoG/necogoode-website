@@ -1,14 +1,13 @@
 <!doctype html>
-<!-- BYTE SIZED TRAINING · necogoode.com/ByteSizedTraining
-     Mr. Bryte anchors a live Python training broadcast: 8 channels (lessons),
-     one continuing dataset, compounding quizzes, a notebook that fills its
-     own cheat cards, and an AI control room that reviews every miss.
-     Sign-in: magic link (Azure Functions + ACS). Engine: emcee concept-core. -->
+<!-- A WEEK WITH MR. BRYTE · necogoode.com/ByteSizedTraining
+     v2: paginated story lessons across reusable worlds. Bryte stays at his
+     desk and speaks through a persistent caption bar. The Week Board grows
+     in real time; the calendar tracks the days; pins track the pages. -->
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Byte Sized Training — live with Mr. Bryte</title>
+<title>A Week with Mr. Bryte — Byte Sized Training</title>
 <meta name="robots" content="noindex"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
@@ -17,18 +16,19 @@
 <script src="vendor/emcee.js" defer></script>
 <script src="vendor/concept-core.js" defer></script>
 <script src="assets/tokenizer.js" defer></script>
-<script src="assets/lessons.js" defer></script>
+<script src="assets/worlds.js" defer></script>
+<script src="assets/week.js" defer></script>
 <script src="assets/engine.js" defer></script>
 <script src="assets/studio.js" defer></script>
 </head>
 <body>
 
-<!-- ══════════ SIGN-IN GATE (magic link) ══════════ -->
+<!-- sign-in gate -->
 <div id="gate" hidden>
   <div class="gate-card">
-    <div class="gate-kick">BYTE SIZED TRAINING · STUDIO ACCESS</div>
-    <h1>Python, live from the studio.<br><b>Mr. Bryte</b> is waiting on set.</h1>
-    <p class="gate-sub">Eight ten-minute lessons, one continuing dataset, an AI control room grading your work. Enter your email and we'll send a magic link — no password, ever.</p>
+    <div class="gate-kick">A WEEK WITH MR. BRYTE · PYTHON</div>
+    <h1>Seven days, eight worlds.<br><b>You're in the story.</b></h1>
+    <p class="gate-sub">Groceries with Addy, league night at the lanes, taco Thursday — and by Sunday you review code like a pro. Magic link, no password.</p>
     <div class="gate-row">
       <input id="gate-email" type="email" placeholder="you@example.com" autocomplete="email"/>
       <button id="gate-send" class="bst-btn">Send my magic link ▶</button>
@@ -37,76 +37,93 @@
   </div>
 </div>
 
-<!-- ══════════ THE STUDIO ══════════ -->
+<!-- name pick (first sign-in) -->
+<div id="namepick" hidden>
+  <div class="gate-card">
+    <div class="gate-kick">BEFORE WE ROLL</div>
+    <h1>What should the week call <b>you</b>?</h1>
+    <p class="gate-sub">The name you pick is used everywhere — on the Week Board, in the questions, next to your scores, and on Sunday's trophy. Addy, Ant, Xavier, and Lena are waiting to meet you.</p>
+    <div class="gate-row">
+      <input id="name-input" maxlength="24" placeholder="Neco"/>
+      <button id="name-save" class="bst-btn">That's me ▶</button>
+    </div>
+  </div>
+</div>
+
+<!-- the studio -->
 <div id="studio" hidden>
   <div class="brandbar">
     <a class="brand" href="/">necogoode<b>.com</b></a>
-    <span class="concept-pill">byte sized training</span>
+    <span class="concept-pill">a week with mr. bryte</span>
+    <button id="go-calendar" class="chip-btn">📅 Calendar</button>
+    <button id="go-report" class="chip-btn">📊 Report card</button>
+    <button id="go-notebook" class="chip-btn">📓 Notebook</button>
+    <button id="go-legend" class="chip-btn">🎨 Legend</button>
     <span id="whoami" class="whoami"></span>
     <a class="back" href="#" id="signout">sign out</a>
   </div>
   <div id="onair"><i></i>ON AIR</div>
 
-  <div id="world">
-    <div class="floorplane ecc-floor"></div>
+  <!-- CALENDAR (home) -->
+  <div id="calendar" class="view">
+    <div class="cal-head">
+      <div class="s-kick">BRYTE'S WEEK · PICK UP WHERE YOU LEFT OFF</div>
+      <h2 id="cal-title">A Week with Mr. Bryte — Python</h2>
+    </div>
+    <div id="cal-grid"></div>
+    <div id="custom-panel" class="custom-panel" hidden></div>
+  </div>
 
-    <div id="bigscreen">
-      <div class="bezel-label">STUDIO 1 · LIVE FEED</div>
-      <div id="segwrap">
-        <div id="teach" class="seg on">
-          <div class="s-kick" id="t-kick">WELCOME TO THE STUDIO</div>
-          <h2 id="t-head">Pick a channel on the remote to begin.</h2>
-          <div id="t-code"></div>
-          <ul id="t-list" class="h-list"></ul>
-          <div id="t-note" class="t-note"></div>
-        </div>
-        <div id="quizbox" class="seg qbox"></div>
-        <div id="report" class="seg rbox"></div>
+  <!-- DAY (lesson) -->
+  <div id="dayview" class="view" hidden>
+    <div class="day-top">
+      <div class="day-title"><span id="day-world"></span><span id="day-name"></span></div>
+      <div class="day-pins" id="day-pins"></div>
+      <div class="pager">
+        <button id="pg-prev" class="chip-btn">← Prev</button>
+        <button id="pg-jump" class="chip-btn">Page <span id="pg-num"></span> ▾</button>
+        <button id="pg-next" class="chip-btn primary">Next →</button>
       </div>
-      <div class="scan"></div>
     </div>
-
-    <div class="desk">
-      <div class="desk-top"></div><div class="mug"></div>
-      <div class="desk-front"><span>BYTE SIZED TRAINING</span></div>
+    <div class="day-grid">
+      <div id="stage">
+        <div id="pagebox"></div>
+      </div>
+      <div id="pagerail"></div>
     </div>
-    <div class="camera cam-l"><i></i></div>
-    <div class="camera cam-r"><i></i></div>
-
-    <div id="lower3"><span class="l3-kick" id="l3kick"></span><div class="l3-main" id="l3main"></div></div>
+    <div id="jumpmenu" hidden></div>
+    <div class="caption-row">
+      <div id="bryte-slot"></div>
+      <div id="caption"><span class="cap-tag">BRYTE</span><span id="cap-text"></span></div>
+      <button id="hintflag" class="chip-btn">🚩 Hint</button>
+      <button id="askbtn" class="chip-btn">? Ask</button>
+    </div>
   </div>
 
-  <!-- remote rail: the 8 channels + report -->
-  <div id="remote" role="navigation" aria-label="channel remote">
-    <span class="rm-label">REMOTE</span>
-    <div id="rm-lessons"></div>
-    <button id="rm-report" data-ch="report">📊 REPORT CARD</button>
-    <button id="rm-notebook">📓 NOTEBOOK</button>
-    <button id="rm-legend">🎨 LEGEND</button>
+  <!-- REPORT -->
+  <div id="reportview" class="view" hidden></div>
+
+  <!-- Week Board -->
+  <div id="boardbar">
+    <span class="bb-label">🎳 WEEK BOARD</span>
+    <div id="board-items"></div>
   </div>
 
-  <!-- the color legend -->
+  <!-- panels -->
   <div id="legend" hidden>
-    <div class="panel-head">🎨 THE LEGEND — every color means one thing<button class="panel-x" data-x="legend">✕</button></div>
+    <div class="panel-head">🎨 THE LEGEND — one color, one meaning<button class="panel-x" data-x="legend">✕</button></div>
     <div id="legend-body"></div>
   </div>
-
-  <!-- the notebook: free notes + auto cheat cards -->
   <div id="notebook" hidden>
     <div class="panel-head">📓 YOUR NOTEBOOK<button class="panel-x" data-x="notebook">✕</button></div>
-    <div class="nb-sub">Notes save automatically. Cheat cards appear here as you finish lessons.</div>
+    <div class="nb-sub">Notes save automatically. Chapter cards file themselves as days complete.</div>
     <textarea id="nb-notes" placeholder="Type anything worth remembering…"></textarea>
     <div id="nb-status" class="nb-status"></div>
-    <div class="nb-cards-head">INDEX CARDS — your auto-built study guide</div>
+    <div class="nb-cards-head">CHAPTER CARDS — the week's story so far</div>
     <div id="nb-cards"></div>
   </div>
 
-  <div class="hinttag"><b>click Bryte</b> to ask a question · drag him · click the floor, he walks</div>
-
-  <div id="ticker">
-    <span class="tk-label">BRYTE WIRE</span>
-    <div class="tk-view"><div class="tk-run" id="tkrun"><span id="tk1"></span><span id="tk2"></span></div></div>
-  </div>
+  <div id="world"></div>
 </div>
 
 </body>

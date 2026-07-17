@@ -1,7 +1,7 @@
 /*! emcee.js v0.1.0 — the embeddable AI demo guide (Phase 1)
  *  One script tag + one tour file = a guided, narrated product demo.
  *  Zero dependencies. https://necogoode.com — me@necogoode.com
- *  Built 2026-07-17T03:23:02.876Z from: 00-core.js, 10-yaml.js, 20-skin-rig.js, 30-chrome.js, 50-tour.js, 60-targeting.js, 70-session.js, 80-interceptor.js, 90-telemetry.js, 95-knowledge.js, 97-insights.js, 98-nudge.js, 99-boot.js
+ *  Built 2026-07-17T06:19:43.021Z from: 00-core.js, 10-yaml.js, 20-skin-rig.js, 30-chrome.js, 50-tour.js, 60-targeting.js, 70-session.js, 80-interceptor.js, 90-telemetry.js, 95-knowledge.js, 97-insights.js, 98-nudge.js, 99-boot.js
  */
 (function () {
 'use strict';

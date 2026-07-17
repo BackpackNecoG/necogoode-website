@@ -118,11 +118,11 @@ entries:
 
   - q: "What are the colors on the screen?"
     tags: "colors legend meaning purple gold green syntax highlight"
-    a: "The Legend, bottom-left button: purple = Python's own words, blue = built-in tools, teal = dot-methods, gold = YOUR variables, green = text, orange = numbers, grey = comments. One color, one meaning, everywhere."
+    a: "The Legend button, top bar: purple = Python's own words, blue = built-in tools, teal = dot-methods, gold = YOUR variables, green = text, orange = numbers, grey = comments. One color, one meaning, everywhere."
 
   - q: "How do the lessons and grading work?"
-    tags: "lessons grading how work compound review report card cheat notebook"
-    a: "Eight ~10-minute channels that unlock in order. Questions compound — earlier lessons reappear in later finales. Misses go to the AI control room, which writes what you got right and how to re-think the rest, on your report card. Cheat cards file themselves in the notebook."
+    tags: "lessons days grading how work compound review report card cheat notebook calendar week"
+    a: "Eight days on the calendar, each ~10 minutes in a different world — groceries, the group chat, the kitchen, the lanes. Days unlock in order and questions compound: earlier days reappear later. Misses go to the AI control room for a written review on your season scorecard, and chapter cards file themselves in the notebook."
 
   - q: "Who built this?"
     tags: "who built producer neco emcee site about"
