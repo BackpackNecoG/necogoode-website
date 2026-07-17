@@ -5,7 +5,7 @@ const { upsert, query } = require('../shared/tables');
 const bst = require('../shared/bst');
 
 module.exports = async function (context, req) {
-  const res = (status, body) => { context.res = { status, headers: { 'content-type': 'application/json' }, body }; };
+  const res = (status, body) => { context.res = { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body }; };
   const email = bst.sessionEmail(req.headers.cookie);
   if (!email) return res(401, {});
   const safeEmail = email.replace(/'/g, '');

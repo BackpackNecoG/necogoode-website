@@ -10,7 +10,7 @@ const ai = require('../shared/ai');
 const bst = require('../shared/bst');
 
 module.exports = async function (context, req) {
-  const res = (status, body) => { context.res = { status, headers: { 'content-type': 'application/json' }, body }; };
+  const res = (status, body) => { context.res = { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body }; };
   const email = bst.sessionEmail(req.headers.cookie);
   if (!email) return res(401, {});
   try {
