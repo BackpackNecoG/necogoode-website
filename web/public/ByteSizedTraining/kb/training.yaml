@@ -1,0 +1,129 @@
+# /ByteSizedTraining/kb/training.yaml — what Mr. Bryte knows about the Python
+# he teaches. Same dialect and retrieval as /kb/emcee.yaml: deterministic
+# keyword matching over `tags`, behind a confidence gate. Every answer is
+# Bryte's broadcast voice, teenager-plain, and factually verified by running
+# the code before shipping.
+kb: bytesized-training
+version: 1
+deferral: "Past my notes, honestly — flag it to the producer: me@necogoode.com"
+entries:
+
+  - q: "What is a variable?"
+    tags: "variable label name assignment what is variable arrow rule box value"
+    a: "A label with an arrow pointing at a value. name = \"Neco\" doesn't fill a box — it points the label name at the text. Move the label and the old value just loses a fan, not its life."
+
+  - q: "What does b = a actually do with a list?"
+    tags: "alias aliasing b equals a copy share same list two labels arrow trap"
+    a: "It sticks a SECOND label on the SAME list — no copy happens. Edit through either label and both see it. A real copy is nums[:] or list(nums)."
+
+  - q: "How do I copy a list?"
+    tags: "copy list slice deepcopy independent duplicate clone"
+    a: "nums[:], list(nums), or nums.copy() — all make a fresh top-level list. Lists nested inside need copy.deepcopy for a full clone."
+
+  - q: "What's mutable vs immutable?"
+    tags: "mutable immutable change in place int str list dict tuple"
+    a: "Mutable = editable in place: list, dict, set. Immutable = never changes: int, float, str, tuple — every 'edit' secretly builds a new value and moves your label."
+
+  - q: "How does slicing work?"
+    tags: "slice slicing start stop step colon bracket substring string index"
+    a: "s[start:stop:step] — start included, stop EXCLUDED. Count the colons before a number: s[:3] stops at 3 ('Dat'), s[::3] steps by 3 ('Dapi'), and s[::-1] is the full reverse."
+
+  - q: "Why does s[::-1] reverse a string?"
+    tags: "reverse string backwards minus one step negative"
+    a: "Empty start, empty stop, step of -1: walk the whole thing backwards. On our dataset, s[::-1] turns DataPipeline into enilepiPataD."
+
+  - q: "What does the f in f-strings mean?"
+    tags: "fstring f-string format formatted braces curly print variables inside string"
+    a: "f for FORMATTED: Python scans the string for {braces}, evaluates what's inside, and drops the result in. Everything outside the braces prints exactly as written."
+
+  - q: "What does .2f do?"
+    tags: "2f decimal places round format spec width alignment"
+    a: "Fixed decimal, two places — and it ROUNDS: {score:.2f} turns 94.5678 into 94.57. A number before the dot is total width, padded with spaces: {7:>5} prints four spaces then 7."
+
+  - q: "Why does string method do nothing?"
+    tags: "strip lower method nothing happened unchanged discard result new string"
+    a: "Strings are immutable, so methods RETURN a new string instead of editing. s.strip() alone drops the result on the floor — catch it: s = s.strip()."
+
+  - q: "What's the difference between sort and sorted?"
+    tags: "sort sorted none in place returns new list reverse descending"
+    a: "nums.sort() rearranges the list itself and returns None — assign that and you've saved nothing. sorted(nums) hands back a NEW sorted list. reverse=True makes either descending."
+
+  - q: "Why did I get None from sort or append?"
+    tags: "none returned sort append reverse assign result"
+    a: "In-place methods — sort, reverse, append, extend, remove — all return None; their work happens inside the list. Want a value back? Use sorted(), or read the list after the call."
+
+  - q: "What's the difference between index and brackets?"
+    tags: "index subscript position value at seat mirror bracket find where"
+    a: "Mirror questions. nums[2] asks what's AT seat 2 (→ 4 in our dataset). nums.index(4) asks WHERE the value 4 lives (→ seat 2). Assessments love swapping them."
+
+  - q: "How do I avoid KeyError?"
+    tags: "keyerror dict missing key get default crash safe lookup"
+    a: "d[key] crashes when the key's missing; d.get(key, fallback) never does — ages.get(\"zed\", 0) quietly hands you 0. And `in` checks KEYS only; values need ages.values()."
+
+  - q: "What's the difference between append and extend?"
+    tags: "append extend add list nested one item many items"
+    a: "append adds ONE item — even if that item is a whole list (nested!). extend unpacks an iterable and adds each element. order.extend([99, 100]) adds two; append would add one list."
+
+  - q: "How does range work?"
+    tags: "range stop excluded off by one loop numbers sequence n plus one"
+    a: "range(start, stop, step), and the stop is EXCLUDED — range(5) is 0 through 4. Summing 1 through n takes range(1, n + 1); the missing +1 is the most planted bug in assessments."
+
+  - q: "What is the counting pattern?"
+    tags: "counting pattern dict count tally frequency get zero plus one"
+    a: "counts[r] = counts.get(r, 0) + 1 inside a loop. get's 0 fallback handles each first sighting, +1 bumps the tally. Our rows land on {'ok': 3, 'fail': 2}."
+
+  - q: "Why is my while loop infinite?"
+    tags: "infinite loop while stuck timeout hang forever continue progress"
+    a: "Something inside must push the condition toward false — and a continue placed BEFORE that progress line skips it forever. Coderbyte shows a timeout, not an error. Decrement first, then continue."
+
+  - q: "Can I remove items from a list while looping over it?"
+    tags: "remove while looping iterate mutation skip filter comprehension"
+    a: "Don't — removals shift the list under the loop and elements get SKIPPED. Filter instead: nums = [n for n in nums if n != 1]. Keep what you want; never hunt what you don't."
+
+  - q: "What's the difference between return and print?"
+    tags: "return print function hands back none display result caller"
+    a: "print shows a value on screen; return HANDS it back to the caller. No return means the function returns None — and result = f() then result + 1 is a TypeError three lines later."
+
+  - q: "What is the mutable default argument trap?"
+    tags: "mutable default argument trap def empty list shared none is none"
+    a: "def f(x, log=[]) builds ONE list at def time, shared by every call — values pile up across calls. Fix: default to None, then `if log is None: log = []` for a fresh list per call."
+
+  - q: "When do I use is instead of double equals?"
+    tags: "is none equals identity comparison value object same"
+    a: "== compares VALUES; is compares IDENTITY (same arrow target). The rule: == for everything, is only for None — x is None, x is not None."
+
+  - q: "What counts as False in Python?"
+    tags: "truthy falsy false empty zero none truthiness if list"
+    a: "The falsy family: 0, 0.0, \"\", [], {}, set(), None, False. Everything else is truthy — including \"0\", \"False\", and [0]. Empty means false; existing means true."
+
+  - q: "Why is if x == 1 or 2 always true?"
+    tags: "or trap always true condition two tests membership in tuple"
+    a: "Python reads it as (x == 1) or (2) — and a bare 2 is truthy, so the whole test always passes. Write x in (1, 2), or spell out both comparisons."
+
+  - q: "What's the difference between / and //?"
+    tags: "division slash floor double slash float modulo remainder percent"
+    a: "/ ALWAYS gives a float (7/2 → 3.5). // floors — toward negative infinity, so -7//2 is -4, not -3. % is the remainder: n % 2 == 0 is the even test."
+
+  - q: "What do the exception names mean?"
+    tags: "exception error names typeerror valueerror keyerror indexerror nameerror meaning"
+    a: "The name is the headline: NameError = typo'd label. TypeError = wrong TYPE. ValueError = right type, impossible value. IndexError = seat past the end. KeyError = missing dict key."
+
+  - q: "How does try except work?"
+    tags: "try except catch error handle finally else bare except"
+    a: "try wraps the risky part; except NamedError catches that one crash and answers it. else runs on success, finally always. A bare except: pass hides real bugs — automatic review finding."
+
+  - q: "What is a lambda?"
+    tags: "lambda anonymous function key sorted one line unnamed"
+    a: "A one-line unnamed function, usually born and used inside a single call: sorted(pairs, key=lambda p: p[1]) sorts by each pair's second item. Reused or multi-line logic deserves a real def."
+
+  - q: "What are the colors on the screen?"
+    tags: "colors legend meaning purple gold green syntax highlight"
+    a: "The Legend, bottom-left button: purple = Python's own words, blue = built-in tools, teal = dot-methods, gold = YOUR variables, green = text, orange = numbers, grey = comments. One color, one meaning, everywhere."
+
+  - q: "How do the lessons and grading work?"
+    tags: "lessons grading how work compound review report card cheat notebook"
+    a: "Eight ~10-minute channels that unlock in order. Questions compound — earlier lessons reappear in later finales. Misses go to the AI control room, which writes what you got right and how to re-think the rest, on your report card. Cheat cards file themselves in the notebook."
+
+  - q: "Who built this?"
+    tags: "who built producer neco emcee site about"
+    a: "Produced by Neco Goode on the Emcee engine — the same rig that runs this whole site. I just work here. Happily."

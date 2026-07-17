@@ -1,0 +1,113 @@
+<!doctype html>
+<!-- BYTE SIZED TRAINING · necogoode.com/ByteSizedTraining
+     Mr. Bryte anchors a live Python training broadcast: 8 channels (lessons),
+     one continuing dataset, compounding quizzes, a notebook that fills its
+     own cheat cards, and an AI control room that reviews every miss.
+     Sign-in: magic link (Azure Functions + ACS). Engine: emcee concept-core. -->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Byte Sized Training — live with Mr. Bryte</title>
+<meta name="robots" content="noindex"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Urbanist:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="assets/styles.css"/>
+<script src="vendor/emcee.js" defer></script>
+<script src="vendor/concept-core.js" defer></script>
+<script src="assets/tokenizer.js" defer></script>
+<script src="assets/lessons.js" defer></script>
+<script src="assets/engine.js" defer></script>
+<script src="assets/studio.js" defer></script>
+</head>
+<body>
+
+<!-- ══════════ SIGN-IN GATE (magic link) ══════════ -->
+<div id="gate" hidden>
+  <div class="gate-card">
+    <div class="gate-kick">BYTE SIZED TRAINING · STUDIO ACCESS</div>
+    <h1>Python, live from the studio.<br><b>Mr. Bryte</b> is waiting on set.</h1>
+    <p class="gate-sub">Eight ten-minute lessons, one continuing dataset, an AI control room grading your work. Enter your email and we'll send a magic link — no password, ever.</p>
+    <div class="gate-row">
+      <input id="gate-email" type="email" placeholder="you@example.com" autocomplete="email"/>
+      <button id="gate-send" class="bst-btn">Send my magic link ▶</button>
+    </div>
+    <div id="gate-msg" class="gate-msg" hidden></div>
+  </div>
+</div>
+
+<!-- ══════════ THE STUDIO ══════════ -->
+<div id="studio" hidden>
+  <div class="brandbar">
+    <a class="brand" href="/">necogoode<b>.com</b></a>
+    <span class="concept-pill">byte sized training</span>
+    <span id="whoami" class="whoami"></span>
+    <a class="back" href="#" id="signout">sign out</a>
+  </div>
+  <div id="onair"><i></i>ON AIR</div>
+
+  <div id="world">
+    <div class="floorplane ecc-floor"></div>
+
+    <div id="bigscreen">
+      <div class="bezel-label">STUDIO 1 · LIVE FEED</div>
+      <div id="segwrap">
+        <div id="teach" class="seg on">
+          <div class="s-kick" id="t-kick">WELCOME TO THE STUDIO</div>
+          <h2 id="t-head">Pick a channel on the remote to begin.</h2>
+          <div id="t-code"></div>
+          <ul id="t-list" class="h-list"></ul>
+          <div id="t-note" class="t-note"></div>
+        </div>
+        <div id="quizbox" class="seg qbox"></div>
+        <div id="report" class="seg rbox"></div>
+      </div>
+      <div class="scan"></div>
+    </div>
+
+    <div class="desk">
+      <div class="desk-top"></div><div class="mug"></div>
+      <div class="desk-front"><span>BYTE SIZED TRAINING</span></div>
+    </div>
+    <div class="camera cam-l"><i></i></div>
+    <div class="camera cam-r"><i></i></div>
+
+    <div id="lower3"><span class="l3-kick" id="l3kick"></span><div class="l3-main" id="l3main"></div></div>
+  </div>
+
+  <!-- remote rail: the 8 channels + report -->
+  <div id="remote" role="navigation" aria-label="channel remote">
+    <span class="rm-label">REMOTE</span>
+    <div id="rm-lessons"></div>
+    <button id="rm-report" data-ch="report">📊 REPORT CARD</button>
+    <button id="rm-notebook">📓 NOTEBOOK</button>
+    <button id="rm-legend">🎨 LEGEND</button>
+  </div>
+
+  <!-- the color legend -->
+  <div id="legend" hidden>
+    <div class="panel-head">🎨 THE LEGEND — every color means one thing<button class="panel-x" data-x="legend">✕</button></div>
+    <div id="legend-body"></div>
+  </div>
+
+  <!-- the notebook: free notes + auto cheat cards -->
+  <div id="notebook" hidden>
+    <div class="panel-head">📓 YOUR NOTEBOOK<button class="panel-x" data-x="notebook">✕</button></div>
+    <div class="nb-sub">Notes save automatically. Cheat cards appear here as you finish lessons.</div>
+    <textarea id="nb-notes" placeholder="Type anything worth remembering…"></textarea>
+    <div id="nb-status" class="nb-status"></div>
+    <div class="nb-cards-head">INDEX CARDS — your auto-built study guide</div>
+    <div id="nb-cards"></div>
+  </div>
+
+  <div class="hinttag"><b>click Bryte</b> to ask a question · drag him · click the floor, he walks</div>
+
+  <div id="ticker">
+    <span class="tk-label">BRYTE WIRE</span>
+    <div class="tk-view"><div class="tk-run" id="tkrun"><span id="tk1"></span><span id="tk2"></span></div></div>
+  </div>
+</div>
+
+</body>
+</html>

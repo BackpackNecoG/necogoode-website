@@ -5,10 +5,16 @@
     "exclude": [
       "/api/*",
       "/assets/*",
+      "/ByteSizedTraining/*",
       "/*.{svg,png,jpg,jpeg,gif,webp,ico,css,js,json,txt,xml,woff,woff2,ttf,otf,eot,map}"
     ]
   },
   "routes": [
+    {
+      "route": "/ByteSizedTraining",
+      "redirect": "/ByteSizedTraining/",
+      "statusCode": 301
+    },
     {
       "route": "/api/*",
       "allowedRoles": ["anonymous"]
@@ -20,7 +26,9 @@
   },
   "mimeTypes": {
     ".json": "application/json",
-    ".svg": "image/svg+xml"
+    ".svg": "image/svg+xml",
+    ".yaml": "text/yaml",
+    ".yml": "text/yaml"
   },
   "responseOverrides": {
     "404": {
