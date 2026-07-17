@@ -47,7 +47,8 @@ async function sendAcsEmail(to, link) {
 module.exports = async function (context, req) {
   const res = (status, body, extra) => { context.res = Object.assign({ status, headers: { 'content-type': 'application/json' }, body }, extra || {}); };
   try {
-    const origin = 'https://' + (req.headers['x-forwarded-host'] || req.headers.host);
+    const origin = process.env.BST_PUBLIC_ORIGIN || process.env.EMCEE_PUBLIC_ORIGIN ||
+      ('https://' + (req.headers['x-forwarded-host'] || req.headers.host));
 
     /* ── GET ?token= — complete the link ─────────────────────────────── */
     if (req.method === 'GET') {
