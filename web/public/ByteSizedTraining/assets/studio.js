@@ -58,15 +58,22 @@
   }
   function pickName(done) {
     $('#namepick').hidden = false;
+    var input = $('#name-input'), msg = $('#name-msg');
+    var say = function (t, isErr) { if (!msg) return; msg.hidden = false; msg.textContent = t; msg.classList.toggle('err', !!isErr); };
+    setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
     var save = function () {
-      var n = $('#name-input').value.trim();
-      if (!n) return;
-      E.setName(n);
-      $('#namepick').hidden = true;
-      done();
+      var n = (input.value || '').trim();
+      if (!n) { say('Type a name first — even a nickname works. It’s what Bryte calls you all week.', true); input.focus(); return; }
+      try {
+        E.setName(n);
+        $('#namepick').hidden = true;
+        done();
+      } catch (err) {
+        say('Something glitched saving that — give it one more tap. (' + (err && err.message || err) + ')', true);
+      }
     };
     $('#name-save').addEventListener('click', save);
-    $('#name-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); });
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); });
   }
 
   /* ── views ───────────────────────────────────────────────────────────── */
