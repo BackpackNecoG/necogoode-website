@@ -120,6 +120,9 @@ export default function BusTour() {
             />
           ))}
 
+          {/* Byte Sized Training — live studio, links out to the static app */}
+          <ByteSizedTrainingCard />
+
           {/* Concept-testing card — a different "tool" on the bench */}
           <ConceptCard />
 
@@ -214,6 +217,61 @@ function IdentityCard() {
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * Byte Sized Training lives at the static path /ByteSizedTraining/ (its own
+ * studio app + Azure Functions), OUTSIDE the React Router SPA — so this is a
+ * plain anchor for a full-page navigation, not a <Link>.
+ */
+function ByteSizedTrainingCard() {
+  return (
+    <a
+      href="/ByteSizedTraining/"
+      className="group relative flex-shrink-0 w-[360px] bg-[var(--bus-paper)] text-[var(--bus-ink)] no-underline shadow-[4px_8px_20px_rgba(0,0,0,0.35)] hover:shadow-[6px_14px_30px_rgba(0,0,0,0.5)] transition-all duration-[400ms] hover:-translate-y-3 hover:!rotate-0"
+      style={{ transform: 'rotate(1.6deg)' }}
+    >
+      {/* Pushpin */}
+      <div className="absolute -top-2.5 right-5 w-6 h-6 rounded-full z-10 shadow-[0_4px_8px_rgba(0,0,0,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.4)]"
+           style={{ background: 'radial-gradient(circle at 30% 30%, var(--bus-rust), #6B2C12)' }}>
+        <span className="absolute top-[7px] left-[7px] w-1.5 h-1.5 rounded-full bg-white/50 blur-[1px]" />
+      </div>
+
+      {/* A little studio screen on the bench */}
+      <div className="h-60 flex flex-col items-center justify-center relative overflow-hidden"
+           style={{ background: 'radial-gradient(ellipse at 50% 35%, #143253, #0B1220 75%)' }}>
+        <div className="absolute top-4 left-4 flex items-center gap-2 text-[0.62rem] tracking-[0.22em] font-semibold"
+             style={{ color: '#FF5A5A' }}>
+          <span className="w-2 h-2 rounded-full" style={{ background: '#FF5A5A', boxShadow: '0 0 8px #FF5A5A' }} />
+          ON AIR
+        </div>
+        <div className="font-serif text-[3.4rem] leading-none" style={{ color: '#38E8FF', textShadow: '0 0 24px rgba(56,232,255,0.45)' }}>
+          B<em className="not-italic" style={{ color: 'var(--bus-brass-bright)' }}>·</em>
+        </div>
+        <div className="font-hand text-[1.15rem] mt-2" style={{ color: '#EDE6D6' }}>
+          Mr. Bryte is on set
+        </div>
+        <div className="absolute bottom-3 right-4 font-mono text-[0.6rem] tracking-widest" style={{ color: 'rgba(237,230,214,0.45)' }}>
+          CH·1 — CH·8
+        </div>
+      </div>
+
+      <div className="p-6 pt-6 pb-7 border-t border-dashed border-[rgba(74,58,40,0.3)]">
+        <div className="font-hand text-[1.05rem] text-[var(--bus-rust)] mb-1.5">— python training · live</div>
+        <h3 className="font-serif text-[1.7rem] font-semibold leading-[1.05] tracking-[-0.015em] mb-2.5 text-[var(--bus-ink)]">
+          Byte Sized Training
+        </h3>
+        <p className="text-[0.92rem] leading-relaxed text-[var(--bus-ink-soft)] mb-4">
+          A live Python broadcast anchored by Mr. Bryte: eight ten-minute lessons, one continuing
+          dataset, and an AI control room that reviews every miss. Sign in with a magic link and step
+          into the studio.
+        </p>
+        <span className="text-[0.78rem] tracking-[0.15em] uppercase text-[var(--bus-ink)] font-semibold border-b-[1.5px] border-[var(--bus-rust)] pb-px transition-colors group-hover:text-[var(--bus-rust)]">
+          Enter the studio →
+        </span>
+      </div>
+    </a>
   );
 }
 
