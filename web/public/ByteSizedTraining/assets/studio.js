@@ -56,24 +56,50 @@
     $('#gate-send').addEventListener('click', send);
     $('#gate-email').addEventListener('keydown', function (e) { if (e.key === 'Enter') send(); });
   }
-  function pickName(done) {
-    $('#namepick').hidden = false;
+  /* Name is NEVER a hard gate: the studio loads first, and the name editor is
+     a dismissable overlay you can reopen any time by clicking your name up top
+     (or asking Bryte). Mistyped it? Click your name and fix it. */
+  var nameWired = false;
+  function hasName() { return !!(E && E.you && E.you() !== 'you'); }
+  function updateWhoami() {
+    var w = $('#whoami'); if (!w) return;
+    w.textContent = '🎙 ' + (hasName() ? E.you() + ' · ' : '') + (me ? me.email : '') + (hasName() ? '  ✏️' : '  · ✏️ set your name');
+    w.title = 'Click to ' + (hasName() ? 'change' : 'set') + ' the name Bryte calls you';
+    w.style.cursor = 'pointer';
+  }
+  function openNameEditor(first) {
+    var np = $('#namepick'); if (!np) return;
     var input = $('#name-input'), msg = $('#name-msg');
-    var say = function (t, isErr) { if (!msg) return; msg.hidden = false; msg.textContent = t; msg.classList.toggle('err', !!isErr); };
-    setTimeout(function () { try { input.focus(); } catch (e) {} }, 60);
+    input.value = hasName() ? E.you() : '';
+    if (msg) { msg.hidden = true; msg.classList.remove('err'); }
+    var kick = $('#name-kick'), head = $('#name-head'), later = $('#name-later');
+    if (kick) kick.textContent = first ? 'WELCOME — ONE QUICK THING' : 'CHANGE YOUR NAME';
+    if (head) head.innerHTML = first ? 'For this training, what would you like your <b>name</b> to be?' : 'What should Mr. Bryte call <b>you</b>?';
+    if (later) later.style.display = first ? '' : 'none';
+    np.hidden = false;
+    setTimeout(function () { try { input.focus(); input.select(); } catch (e) {} }, 60);
+  }
+  function wireNameEditor() {
+    if (nameWired) return; nameWired = true;
+    var np = $('#namepick'), input = $('#name-input'), msg = $('#name-msg');
+    var say = function (t) { if (msg) { msg.hidden = false; msg.textContent = t; msg.classList.add('err'); } };
+    var closeEditor = function (e) { if (e) e.preventDefault(); np.hidden = true; };
     var save = function () {
       var n = (input.value || '').trim();
-      if (!n) { say('Type a name first — even a nickname works. It’s what Bryte calls you all week.', true); input.focus(); return; }
-      try {
-        E.setName(n);
-        $('#namepick').hidden = true;
-        done();
-      } catch (err) {
-        say('Something glitched saving that — give it one more tap. (' + (err && err.message || err) + ')', true);
-      }
+      if (!n) { say('Type a name first — even a nickname works.'); input.focus(); return; }
+      try { E.setName(n); } catch (err) {}
+      np.hidden = true;
+      updateWhoami();
+      if (!$('#calendar').hidden) renderCalendar();
+      caption('Nice to meet you, ' + E.you() + '! I’ll use that all week — change it any time by clicking your name up top.');
+      if (api) { try { api.wave(); } catch (e) {} }
     };
     $('#name-save').addEventListener('click', save);
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); });
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); else if (e.key === 'Escape') closeEditor(); });
+    var later = $('#name-later'); if (later) later.addEventListener('click', closeEditor);
+    var xb = $('#name-close'); if (xb) xb.addEventListener('click', closeEditor);
+    np.addEventListener('click', function (e) { if (e.target === np) closeEditor(); }); // click backdrop
+    var w = $('#whoami'); if (w) w.addEventListener('click', function () { openNameEditor(false); });
   }
 
   /* ── views ───────────────────────────────────────────────────────────── */
@@ -339,6 +365,7 @@
       e.preventDefault(); req('/logout', { method: 'POST' }).then(function () { location.reload(); });
     });
     E.init({ stage: makeStage(), net: net, box: $('#pagebox'), progress: saved || {} });
+    wireNameEditor(); updateWhoami();
     wirePanels(); wirePager();
     if (saved && saved.notes) $('#nb-notes').value = saved.notes;
     mountBryte();
@@ -357,7 +384,8 @@
         'Welcome back, ' + E.you() + '. ' + d.dow + ' is glowing on the calendar — right where you left off.');
       setTimeout(function () { if (api) api.wave(); }, 600);
     };
-    if (!E.you() || E.you() === 'you') pickName(start); else start();
+    start();                                  // studio loads first — never blocked by the name
+    if (!hasName()) openNameEditor(true);     // gentle, dismissable first-run prompt
   }
 
   window.addEventListener('load', function () {

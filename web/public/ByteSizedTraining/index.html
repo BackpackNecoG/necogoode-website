@@ -37,17 +37,19 @@
   </div>
 </div>
 
-<!-- name pick (first sign-in) -->
+<!-- name editor — non-blocking; reopen any time by clicking your name up top -->
 <div id="namepick" hidden>
   <div class="gate-card">
-    <div class="gate-kick">FIRST TIME HERE · LET'S SET YOU UP</div>
-    <h1>For this training, what would you like your <b>name</b> to be?</h1>
-    <p class="gate-sub">Type whatever you'd like Mr. Bryte to call you this week — your real name or a nickname. It shows up everywhere: on the Week Board, inside the questions, next to your scores, and on Sunday's trophy. Addy, Ant, Xavier, and Lena are waiting to meet you.</p>
+    <button id="name-close" class="name-x" aria-label="close">✕</button>
+    <div class="gate-kick" id="name-kick">WELCOME — ONE QUICK THING</div>
+    <h1 id="name-head">For this training, what would you like your <b>name</b> to be?</h1>
+    <p class="gate-sub">Type whatever you'd like Mr. Bryte to call you — your real name or a nickname. It shows up all week, and you can change it any time by clicking your name at the top. Mistyped it? Just click your name and fix it.</p>
     <div class="gate-row">
       <input id="name-input" maxlength="24" placeholder="Type your name…"/>
-      <button id="name-save" class="bst-btn">That's me ▶</button>
+      <button id="name-save" class="bst-btn">Save ▶</button>
     </div>
     <div id="name-msg" class="gate-msg" hidden></div>
+    <div class="name-skip"><a href="#" id="name-later">or just start — I'll set it later ↷</a></div>
   </div>
 </div>
 

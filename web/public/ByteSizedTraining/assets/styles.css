@@ -256,3 +256,13 @@ body{margin:0;background:#070b14;color:var(--cream);font-family:var(--body);
 
 @media (prefers-reduced-motion:reduce){#onair i{animation:none}#hintflag.pulse{animation:none}}
 @media (max-width:860px){.day-grid{grid-template-columns:1fr}#pagerail{position:static;flex-direction:row;flex-wrap:wrap}}
+
+/* name editor chrome (non-blocking name pick / change) */
+.gate-card{position:relative}
+.name-x{position:absolute;top:10px;right:12px;width:30px;height:30px;background:none;border:none;color:var(--paper);font-size:17px;cursor:pointer;opacity:.55;line-height:1}
+.name-x:hover{opacity:1}
+.name-skip{margin-top:14px;text-align:center}
+.name-skip a{color:var(--gold2);font-size:.92rem;opacity:.85;text-decoration:none}
+.name-skip a:hover{opacity:1;text-decoration:underline}
+.whoami{cursor:pointer}
+.whoami:hover{color:var(--gold2)}

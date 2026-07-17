@@ -16,6 +16,11 @@
       "statusCode": 301
     },
     {
+      "route": "/api/bst/*",
+      "allowedRoles": ["anonymous"],
+      "headers": { "Cache-Control": "no-store" }
+    },
+    {
       "route": "/api/*",
       "allowedRoles": ["anonymous"]
     }
