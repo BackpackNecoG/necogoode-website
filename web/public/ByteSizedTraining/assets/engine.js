@@ -144,7 +144,10 @@
 
     renderTeach: function (p) {
       E.clear();
-      var h = '<div class="s-kick">' + E.px(p.kick || '') + '</div><h2>' + E.px(p.head || '') + '</h2>';
+      var h = '<div class="s-kick">' + E.px(p.kick || '') + '</div>';
+      if (p.story) h += '<div class="t-story">' + E.px(p.story) + '</div>';
+      h += '<h2>' + E.px(p.head || '') + '</h2>';
+      if (p.body) h += '<div class="t-body">' + E.px(p.body) + '</div>';
       if (p.code) h += window.BST.codeBlock(E.px(p.code));
       if (p.visual) {
         var v = JSON.parse(E.px(JSON.stringify(p.visual)));

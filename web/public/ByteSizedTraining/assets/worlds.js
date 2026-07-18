@@ -86,6 +86,11 @@
       return '<div class="vz-card"><div class="vz-k">' + esc(o.title || '') + '</div>' +
         o.lines.map(function (l) { return '<div class="vz-rule">' + esc(l) + '</div>'; }).join('') + '</div>';
     },
+    /* scene: {icons, label} — big emoji banner that sets the scene */
+    scene: function (o) {
+      return '<div class="vz-scene"><span class="vz-icons">' + esc(o.icons || '') + '</span>' +
+        (o.label ? '<span class="vz-slabel">' + esc(o.label) + '</span>' : '') + '</div>';
+    },
     /* code: {code} — tokenized snippet inside a visual slot */
     code: function (o) { return '<pre class="bst-code">' + T(o.code) + '</pre>'; }
   };
