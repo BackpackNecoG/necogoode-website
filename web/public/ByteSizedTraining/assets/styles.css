@@ -12,6 +12,11 @@ body{margin:0;background:#070b14;color:var(--cream);font-family:var(--body);
 .tk-var{color:var(--gold2)}.tk-str{color:#9ce09c}.tk-num{color:#f78c6c}
 .tk-op{color:#EDE6D6}.tk-cm{color:#6a8a6a;font-style:italic}.tk-out{color:var(--mut)}
 
+/* The [hidden] attribute must always win — several overlays/views below set an
+   explicit `display` via an ID/class selector, which would otherwise override
+   the UA `[hidden]{display:none}` and leave them permanently on screen. */
+[hidden]{display:none!important}
+
 /* gate + name pick */
 #gate,#namepick{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;
   background:radial-gradient(1000px 600px at 50% 30%,#131d33 0%,#0B1220 55%,#070b14 100%)}
