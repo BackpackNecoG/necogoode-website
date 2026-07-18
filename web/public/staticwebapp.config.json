@@ -6,6 +6,7 @@
       "/api/*",
       "/assets/*",
       "/ByteSizedTraining/*",
+      "/concepts/bytesized-lesson1/*",
       "/*.{svg,png,jpg,jpeg,gif,webp,ico,css,js,json,txt,xml,woff,woff2,ttf,otf,eot,map}"
     ]
   },
@@ -13,6 +14,11 @@
     {
       "route": "/ByteSizedTraining",
       "redirect": "/ByteSizedTraining/",
+      "statusCode": 301
+    },
+    {
+      "route": "/concepts/bytesized-lesson1",
+      "redirect": "/concepts/bytesized-lesson1/",
       "statusCode": 301
     },
     {
