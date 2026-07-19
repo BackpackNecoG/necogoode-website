@@ -1,6 +1,6 @@
 # Byte-Sized Training — Lesson 1
 
-Deployable static lesson package for **A Week with Mr. Bryte · Day 1: The Grocery Run**.
+Deployable static lesson package for **Today’s Byte-Sized Training · Taco Night**.
 
 ## Run locally
 
@@ -14,10 +14,9 @@ Upload the complete folder contents without changing the relative paths. Set `in
 
 - `index.html` — application shell
 - `styles.css` — responsive comic/lesson presentation
-- `lesson.js` — all 12 lesson pages and answer models
+- `lesson.js` — all 18 story and lesson pages with answer models
 - `app.js` — navigation, questions, repairs, hints, progress, and personalization
-- `assets/characters/` — locked character references used by cast pages
-- `assets/scenes/` — illustrated story scenes used inside lesson pages
+- `assets/scenes/` — generated in-world comic scenes; character-bible sheets are not shipped or shown
 
 ## Validation behavior
 
