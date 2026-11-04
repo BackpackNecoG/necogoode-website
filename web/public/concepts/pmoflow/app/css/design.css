@@ -1,0 +1,82 @@
+/* == stream design styles == */
+/* mode tabs + edit header */
+.d-modes button{white-space:nowrap}
+.d-modes button:focus-visible,.d-ins:focus-visible,.d-tools .btn:focus-visible,.d-hlrow:focus-visible,.node[data-go]:focus-visible{outline:3px solid #a5b4fc;outline-offset:2px}
+.d-sel{border:1px solid var(--line);background:#fff;border-radius:999px;padding:3px 8px;font:inherit;font-size:12px;color:var(--ink2)}
+.d-x{border:0;background:none;color:var(--ink3);font-size:14px;line-height:1;padding:0 2px 0 4px;margin-left:2px;border-radius:50%}
+.d-x:hover{color:var(--late)}
+
+/* editor bar */
+.d-editbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-6px auto 18px;max-width:760px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;box-shadow:var(--shadow)}
+.d-editbar .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3)}
+.d-editbar .hint{flex:1 1 220px}
+
+/* insert points: always visible in edit mode */
+.d-conn{height:40px;display:flex;align-items:center;justify-content:center;width:26px;background:none;position:relative}
+.d-conn::before{content:"";position:absolute;left:12px;top:0;bottom:0;width:2px;background:#c7cbd6}
+.d-ins{position:relative;z-index:1;width:26px;height:26px;flex:none;border-radius:50%;border:1px dashed #a5b4fc;background:#fff;color:var(--accent);font-size:16px;line-height:22px;padding:0;text-align:center;transition:.12s}
+.d-ins:hover{background:var(--accent);color:#fff;border-style:solid;transform:scale(1.08)}
+.canvas.d-edit .node{cursor:default}
+.canvas.d-edit .node:hover{transform:none}
+.node .d-tools{display:flex;gap:6px;flex-wrap:wrap;padding:7px 12px 9px;border-top:1px dashed #e5e7eb;background:#fafaff;border-radius:0 0 12px 12px}
+.node.end .btn{margin-left:6px}
+.d-tools.d-inline{display:inline-flex;gap:4px;margin-left:8px;flex-wrap:wrap}
+.d-tools.d-inline .btn{font-weight:400}
+
+/* diff */
+.d-was{display:flex;flex-direction:column;gap:2px}
+.d-removed-h{margin:2px 0 8px;display:flex;align-items:center;gap:6px}
+.d-removed-h .n{background:#fdf4ff;color:#a21caf;border-radius:99px;padding:0 7px;font-size:11px}
+.d-ghost-own{font-size:11.5px;opacity:.8}
+
+/* data highlight rows */
+.d-hlrow.hl-on{background:var(--accent-soft);border-radius:8px;margin:0 -6px;padding-left:6px;padding-right:6px}
+
+/* step modal pickers */
+.d-picks{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow:auto;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fcfcfe}
+.d-picks-sm{max-height:110px;padding:6px;gap:4px}
+.d-pick{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 9px 3px 6px;border:1px solid var(--line);border-radius:999px;background:#fff;cursor:pointer;color:var(--ink2);text-transform:none;letter-spacing:0}
+.d-pick input{margin:0;width:auto}
+.d-pick:has(input:checked){border-color:var(--accent);background:var(--accent-soft);color:var(--ink)}
+.d-picks-sm .d-pick{font-size:11px;padding:2px 7px 2px 5px}
+.d-inline-new{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.d-inline-new input{flex:1 1 160px;font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:8px}
+.d-inline-new select{font:inherit;padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.d-subrow{border:1px solid var(--line);border-radius:10px;padding:8px;margin-bottom:8px;background:#fff;display:flex;flex-direction:column;gap:6px}
+.d-subhead{display:flex;gap:6px}
+.d-subhead input{flex:1;min-width:0;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px}
+.d-brow{display:flex;gap:6px;margin-bottom:6px}
+.d-brow input{flex:1;min-width:0;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px}
+.d-check{display:flex;gap:8px;align-items:center;font-size:13px}
+.d-check input{width:auto;margin:0}
+.d-frow3{grid-template-columns:1fr 1fr 1fr}
+
+/* step page */
+.d-prevnext{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.d-prevnext .btn{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+a.d-wi:hover .t{color:var(--accent)}
+.d-blk{font-size:11px;color:var(--late);margin-top:3px;display:flex;gap:4px;align-items:center;font-weight:600}
+
+/* data page */
+.d-resolve{border-color:#bbf7d0}
+.d-resolve-open{border-color:#fecaca}
+.d-spec .d-acts{white-space:nowrap;text-align:right}
+.d-spec .d-acts .btn + .btn{margin-left:4px}
+.d-rule{color:var(--ink2);font-size:12.5px}
+.d-code{font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f3f4f6;border-radius:5px;padding:1px 5px;white-space:nowrap}
+.d-nowrap{white-space:nowrap}
+.d-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.d-prof td{font-size:12.5px}
+
+@media (max-width:640px){
+  .d-hdr .hdr-side{width:100%}
+  .d-modes{display:flex;width:100%}
+  .d-modes button{flex:1 1 0;padding:7px 2px;font-size:11.5px}
+  .d-editbar{margin-top:0}
+  .d-frow3{grid-template-columns:1fr 1fr}
+  .d-prevnext{justify-content:flex-start}
+  .d-prevnext .btn{max-width:100%}
+  .d-spec .d-acts{white-space:normal}
+  .d-spec .d-acts .btn{margin:2px 0}
+  .hdr input.title{max-width:100%}
+}

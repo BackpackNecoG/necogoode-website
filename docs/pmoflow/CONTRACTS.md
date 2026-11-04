@@ -18,7 +18,7 @@ web/public/concepts/pmoflow/
   app/main.js           boot + router (lead)
   app/store.js          state/adapter/actions (lead)
   app/ui.js             shared UI helpers, modal, drawer, comments/history panel (lead)
-  app/styles.css        all CSS (lead creates; streams may APPEND sections under a `/* == <stream> == */` header)
+  app/styles.css        base CSS (lead). Streams put CSS ONLY in app/css/design.css (D), app/css/pmo.css (P), app/css/release.css (R)
   app/pages/home.js            (stream P)
   app/pages/process.js         (stream D)  map/as-is/to-be/diff/lanes + editor
   app/pages/step.js            (stream D)

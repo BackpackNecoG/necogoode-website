@@ -223,3 +223,6 @@
 .pass{color:var(--done)} .fail{color:var(--late)} .warn{color:#b45309}
 .tbl-wrap{overflow-x:auto}
 @media (max-width:640px){ .frow{grid-template-columns:1fr} .top .who span{display:none} }
+
+@media (max-width:640px){.top{flex-wrap:wrap;gap:8px}.top nav{order:3;width:100%;margin-left:0;overflow-x:auto;flex-wrap:nowrap}.top nav a{white-space:nowrap}.top .who{min-width:0;margin-left:auto}.top .who select{max-width:160px}}
+.toast + .toast{display:none}
