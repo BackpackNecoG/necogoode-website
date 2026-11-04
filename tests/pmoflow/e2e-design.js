@@ -1,4 +1,4 @@
-/* E2E for stream D (process / step / data pages), rounds 1 to 3.
+/* E2E for stream D (process / step / data pages), rounds 1 to 5.
    Usage: node tests/pmoflow/e2e-design.js [port]   (dev server must be running on that port) */
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -173,9 +173,19 @@ const docsOf = st => st.docs;
     await nav(`/process/${pid}?mode=lanes`);
     const gwCount = allNodes(seedP.tobe).filter(isGw).length;
     ok((await page.$$('.d-lane-gw')).length === gwCount && gwCount > 0, `swimlanes show ${gwCount} gateway row(s)`);
-    const lanesFit = await page.evaluate(() => { const w = document.querySelector('.d-lanewrap'), c = document.querySelector('#canvas'); const hs = [...w.querySelectorAll('.lane-h')]; const last = hs[hs.length - 1].getBoundingClientRect(); return { lanes: hs.length, fits: last.right <= w.getBoundingClientRect().right + 1, scrolls: getComputedStyle(w).overflowX === 'auto', inCanvas: w.getBoundingClientRect().right <= c.getBoundingClientRect().right + 1 }; });
-    ok(lanesFit.fits && lanesFit.inCanvas, `all ${lanesFit.lanes} lanes visible inside the canvas at 1440`);
-    ok(lanesFit.scrolls, 'lane area scrolls horizontally when it does not fit');
+    /* R5: lanes never clip: each lane is at least 220 px, the lane area stays inside the canvas and scrolls to reach the last lane */
+    const laneCheck = async label => {
+      const r = await page.evaluate(() => { const w = document.querySelector('.d-lanewrap'), c = document.querySelector('#canvas'); const hs = [...w.querySelectorAll('.lane-h')];
+        const minW = Math.min(...hs.map(h => h.getBoundingClientRect().width)); w.scrollLeft = w.scrollWidth; const last = hs[hs.length - 1].getBoundingClientRect(), wr = w.getBoundingClientRect();
+        const out = { lanes: hs.length, minW, reach: last.right <= wr.right + 1 && last.left >= wr.left - 1, scrolls: getComputedStyle(w).overflowX === 'auto', inCanvas: wr.right <= c.getBoundingClientRect().right + 1 && c.scrollWidth <= c.clientWidth + 1 }; w.scrollLeft = 0; return out; });
+      ok(r.minW >= 219.5, `${label}: every lane at least 220 px (${Math.round(r.minW)})`);
+      ok(r.inCanvas && r.scrolls, `${label}: lane area stays inside the canvas and scrolls`);
+      ok(r.reach, `${label}: last of ${r.lanes} lanes fully reachable by scrolling`);
+    };
+    await laneCheck('swimlanes @1440');
+    await page.setViewportSize({ width: 1280, height: 900 }); await nav(`/process/${pid}?mode=lanes`);
+    await laneCheck('R5 swimlanes @1280'); await shot('process-lanes-1280'); await overflow('lanes @1280');
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     console.log('# as-is side panel lists as-is data');
     await nav(`/process/${pid}?mode=asis`);
@@ -255,6 +265,16 @@ const docsOf = st => st.docs;
     const newPid = page.url().match(/process\/([\w-]+)/)[1];
     ok(!!newPid, 'created process ' + newPid);
     ok(/v=asis/.test(page.url()) && await page.isVisible('.d-editbar [data-ver="asis"].on'), 'new process opens edit on the as-is version');
+    const np0 = await getProc(newPid);
+    ok(np0.asis[0].type === 'trigger' && np0.asis[0].title === '' && np0.tobe[0].title === '', 'R5: new trigger title is empty (the prompt is a placeholder, not a value)');
+    ok(await page.isVisible('#canvas .node.trigger [data-trigger-empty]:has-text("What starts this process?")'), 'R5: empty trigger shows the prompt as placeholder text');
+    await page.click('#canvas .node.trigger [data-ed="edit"]'); await page.waitForSelector('.overlay input[name=title]');
+    ok(await page.inputValue('.overlay input[name=title]') === '' && /What starts this process\?/.test(await page.getAttribute('.overlay input[name=title]', 'placeholder')), 'R5: trigger dialog: empty value, prompt as placeholder');
+    await page.fill('.overlay input[name=title]', 'Requester submits a purchase request');
+    await page.fill('.overlay input[name=touches]', 'Kickoff Desk');
+    await saving(() => act('save'));
+    ok((await getProc(newPid)).asis[0].title === 'Requester submits a purchase request', 'R5: trigger title saved');
+    ok(await page.isVisible('[data-touches] [data-touch="Kickoff Desk"]:has-text("· 1")'), 'R5: kickoff touches count in "Touches across operations"');
     ok(/Map how it runs today, then fork to-be/.test(await page.textContent('[data-asis-hint]')), 'as-is hint: "Map how it runs today, then fork to-be"');
     await shot('process-new-asis'); await iconCheck('edit as-is');
     await page.click('[data-ver="tobe"]'); await page.waitForURL(/v=tobe/);
@@ -578,7 +598,7 @@ const docsOf = st => st.docs;
 
     const seedData = (st.docs.dataElement || []).map(d => d.data).find(d => d.avail === 'missing') || st.docs.dataElement[0].data;
     await nav(`/data/${seedData.id}`);
-    ok(await page.isVisible('text=Impact: every step that depends on this'), 'seed data page renders impact');
+    ok(await page.isVisible('text=Impact: every step that uses this'), 'seed data page renders impact');
     await shot('data-seed'); await overflow('data seed @1440');
 
     console.log('# new data element from the process panel (duplicate blocked, then created)');
@@ -594,9 +614,11 @@ const docsOf = st => st.docs;
     ok(((await state()).docs.dataElement || []).filter(d => d.data.name === 'E2E panel element').length === 1, 'panel modal created data element once');
 
 
-    console.log('# R3: BPMN import round trip (seed to-be)');
+    console.log('# R3: BPMN import round trip (seed to-be), from the process index (creates new processes)');
     await nav(`/process/${pid}?mode=tobe`);
-    ok(await page.isVisible('label.d-import:has-text("Import BPMN")'), 'Import BPMN button on the process page');
+    ok(await page.isVisible('label.d-import:has-text("Import BPMN as new version")'), 'R5: process page offers "Import BPMN as new version"');
+    await nav('/processes');
+    ok(await page.isVisible('label.d-import:has-text("Import BPMN")'), 'process index offers Import BPMN (new process)');
     const impPid = await importFile(`${OUT}/seed-tobe.bpmn`);
     const imp = await getProc(impPid);
     const cs = countNodes(seedP.tobe), ci = countNodes(imp.asis);
@@ -613,6 +635,7 @@ const docsOf = st => st.docs;
     await shot('process-imported');
 
     console.log('# R3: BPMN import round trip (authored: decision + loop-back + parallel)');
+    await nav('/processes');
     const impPid2 = await importFile(`${OUT}/authored-tobe.bpmn`);
     const imp2 = await getProc(impPid2);
     const ca = countNodes(authoredNodes), ci2 = countNodes(imp2.asis);
@@ -669,6 +692,8 @@ const docsOf = st => st.docs;
     const tgt = new Date(st.today + 'T12:00:00'); tgt.setDate(tgt.getDate() + 45); const target = tgt.toISOString().slice(0, 10);
     await page.fill('.overlay input[name=name]', 'E2E Northwind rollout');
     await page.fill('.overlay input[name=target]', target);
+    ok(await page.inputValue('.overlay select[name=pm]') === me && await page.inputValue('.overlay select[name=rm]') === me, 'R5: start project asks for project manager and release manager (default: you)');
+    await page.selectOption('.overlay select[name=rm]', other1.id);
     await page.screenshot({ path: `${OUT}/start-project-modal.png` });
     await saving(() => act('create'));
     await page.waitForURL(/\/project\/[\w-]+$/);
@@ -679,6 +704,7 @@ const docsOf = st => st.docs;
       const d = prj.data;
       ok(d.name === 'E2E Northwind rollout' && d.owner === me && d.target === target && d.status === 'active' && JSON.stringify(d.processes) === JSON.stringify([impPid]) && Array.isArray(d.baselines) && !d.baselines.length && Array.isArray(d.resources) && 'desc' in d,
         'project doc: name, owner = persona, target, processes = [pid], status active, baselines []');
+      ok(d.releaseManager === other1.id, 'R5: project releaseManager saved');
     }
     const pev = await page.evaluate(async id => (await (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/events?ref=project:${id}`)).json()).events || [], prjId);
     ok(pev.some(e => /Started project 'E2E Northwind rollout' from the to-be/.test(e.summary)), 'project creation event is in history');
@@ -726,18 +752,64 @@ const docsOf = st => st.docs;
     await page.click('[data-confirm-live]');
     await page.waitForSelector('.overlay [data-confprof]');
     ok(/No profile yet/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog: no profile yet');
+    console.log('# R5: confirm live needs evidence (profile / connection check / attested link + note)');
+    ok(await page.$eval('.overlay input[name=ev][value=profile]', e => e.disabled), 'R5: profile evidence unavailable without a profile');
+    ok(await page.isVisible('.overlay [data-evopt="attested"] .d-ev-weak:has-text("Attested · weaker")'), 'R5: attested option labelled weaker');
     await page.fill('.overlay input[name=source]', '');
     await act('confirm');
     await page.waitForSelector('.overlay .d-err');
     ok(/Name the live source/.test(await page.textContent('.overlay .d-err')), 'confirm live requires a source');
     await page.fill('.overlay input[name=source]', 'Northwind ERP vendor API (read)');
+    await act('confirm');
+    await page.waitForSelector('.overlay .d-err');
+    ok(/Choose the evidence/.test(await page.textContent('.overlay .d-err')), 'R5: confirm live requires evidence: ' + await page.textContent('.overlay .d-err'));
+    /* (b) a connection check that fails (the element is still marked missing) cannot be evidence */
+    const ck1 = page.waitForResponse(r => r.url().includes('/check/') && r.request().method() === 'POST');
+    await page.click('.overlay [data-run-check]'); const ckr = await ck1; ok(ckr.ok(), 'R5: connection check endpoint answered ' + ckr.status());
+    await page.waitForSelector('.overlay [data-check-result].fail');
+    ok(/Failed/.test(await page.textContent('.overlay [data-check-result]')), 'R5: failed check shown in the dialog: ' + (await page.textContent('.overlay [data-check-result]')).slice(0, 80));
+    await act('confirm');
+    await page.waitForSelector('.overlay .d-err:has-text("did not pass")');
+    ok(true, 'R5: a failed connection check blocks the confirmation');
+    /* (c) attested: link and note both required */
+    await page.check('.overlay input[name=ev][value=attested]');
+    await page.fill('.overlay input[name=evlink]', 'not a link');
+    await act('confirm');
+    await page.waitForSelector('.overlay .d-err:has-text("https://")');
+    ok(true, 'R5: attested evidence needs a real link');
+    await page.fill('.overlay input[name=evlink]', 'https://wiki.northwind.example/integrations/erp-vendor-read');
+    await act('confirm');
+    await page.waitForSelector('.overlay .d-err:has-text("note")');
+    ok(true, 'R5: attested evidence needs a note');
+    await page.fill('.overlay input[name=evnote]', 'Integration test run signed off by IT');
     await page.screenshot({ path: `${OUT}/confirm-live.png` });
     await saving(() => act('confirm'));
     const conf = await getData(msId);
     ok(conf.avail === 'live' && conf.liveConfirmedBy === me && conf.liveSource === 'Northwind ERP vendor API (read)' && !!conf.liveConfirmedAt, 'confirm sets avail live, liveConfirmedBy, liveConfirmedAt, liveSource');
+    ok(conf.liveEvidence && conf.liveEvidence.type === 'attested' && conf.liveEvidence.ref === 'https://wiki.northwind.example/integrations/erp-vendor-read' && conf.liveEvidence.by === me && !!conf.liveEvidence.at, 'R5: liveEvidence {type: attested, ref, at, by} stored');
     ok(ENG.effectiveAvail((await state()).docs, msId) === 'live', 'engine: confirmed element is live');
     await nav(`/data/${msId}`);
     ok(await page.isVisible('.hdr [data-eff="live"]') && await page.isVisible(`[data-confirmed]:has-text("Confirmed live by ${meName}")`) && !(await page.$('[data-confirm-card]')), 'after reload: live, "Confirmed live by <owner>", no confirm card');
+    ok(await page.isVisible('.hdr [data-evidence="attested"]:has-text("Attested (weaker)")'), 'R5: data page shows the evidence type (attested, weaker)');
+    await shot('data-attested');
+    await nav(`/process/${impPid}?mode=tobe`);
+    ok(await page.isVisible(`[data-hl="${msId}"] [data-evidence="attested"]`), 'R5: process panel shows the evidence type');
+    /* (b) a passing connection check on an examples-only element */
+    const ckId = await mkData('E2E check feed', 'example');
+    await nav(`/data/${ckId}`);
+    await page.click('[data-confirm-live]'); await page.waitForSelector('.overlay [data-run-check]');
+    await page.fill('.overlay input[name=source]', 'Northwind document store (read)');
+    const ck2 = page.waitForResponse(r => r.url().includes('/check/'));
+    await page.click('.overlay [data-run-check]'); await ck2;
+    await page.waitForSelector('.overlay [data-check-result].pass');
+    ok(/Passed/.test(await page.textContent('.overlay [data-check-result]')), 'R5: connection check passes once a source is recorded');
+    await saving(() => act('confirm'));
+    const confC = await getData(ckId);
+    ok(confC.liveEvidence && confC.liveEvidence.type === 'check' && confC.check && confC.check.ok, 'R5: liveEvidence type check, with the stored check');
+    ok(ENG.effectiveAvail((await state()).docs, ckId) === 'live', 'engine: checked element is live');
+    await nav(`/data/${ckId}`);
+    ok(await page.isVisible('.hdr [data-evidence="check"]:has-text("Connection check")'), 'R5: data page shows "Connection check" evidence');
+    await nav(`/data/${msId}`);
     ok(await page.isVisible('.d-resolve .badge.b-done:has-text("Ready")'), 'resolution plan shows Ready');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' live \(source: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
@@ -766,6 +838,11 @@ const docsOf = st => st.docs;
         await page.click('[data-confirm-live]');
         await page.waitForSelector('.overlay [data-confprof]');
         ok(/Latest profile · 40 rows/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog shows the latest profile summary: ' + (await page.textContent('.overlay [data-confprof]')).trim().slice(0, 70));
+        const blk = ENG.specDrift(profD, (await state()).docs.profile.map(d => d.data).filter(x => x.dataId === prof.id).sort((a, b) => b.at.localeCompare(a.at))[0]).filter(d => d.issue !== 'unspecified-column').length;
+        const shownBlk = await page.getAttribute('.overlay [data-blocking]', 'data-blocking').catch(() => null);
+        ok(String(blk) === String(shownBlk === null ? 0 : shownBlk), `R5: dialog shows ${blk} blocking drift issue(s)`);
+        ok(await page.$eval('.overlay input[name=ev][value=profile]', e => e.disabled) === blk > 0, 'R5: profile evidence blocked exactly when there are blocking issues');
+        await page.screenshot({ path: `${OUT}/confirm-live-profile.png` });
         await act('cancel');
         await page.selectOption('#persona', me);
       } else ok(true, 'profiled element is already live (confirm dialog profile check skipped)');
@@ -773,9 +850,213 @@ const docsOf = st => st.docs;
     const exStep = flat(seedP.tobe).find(n => (n.data || []).some(d => ENG.effectiveAvail(D0(), d) === 'example'));
     if (exStep) { await nav(`/process/${pid}/step/${exStep.id}`); ok(await page.isVisible('.d-needlive-s:has-text("Needs a live source before go-live")'), 'step page: examples-only data marked amber'); await iconCheck('step page'); }
 
+    console.log('# R5: data element step counts agree everywhere (to-be and as-is, labelled)');
+    let S5 = await state();
+    await nav(`/process/${pid}?mode=tobe`);
+    const useIds = [...new Set(flat(seedP.tobe).flatMap(s => s.data || []))];
+    let useOk = true;
+    for (const d of useIds) {
+      const u = ENG.usageOf(S5.docs, d);
+      const here = `${u.tobeSteps.filter(x => x.pid === pid).length}/${u.asisSteps.filter(x => x.pid === pid).length}`;
+      const shownUse = await page.getAttribute(`[data-hl="${d}"] [data-usage]`, 'data-usage');
+      if (shownUse !== here) { useOk = false; console.log('    usage mismatch', d, shownUse, here); }
+    }
+    ok(useOk && useIds.length > 0, `process panel: per-element to-be/as-is counts match usageOf for ${useIds.length} elements`);
+    ok(/\d+ to-be · \d+ as-is/.test(await page.textContent(`[data-hl="${useIds[0]}"] [data-usage]`)), 'process panel counts are labelled "to-be · as-is"');
+    for (const d of useIds.slice(0, 3)) {
+      const u = ENG.usageOf(S5.docs, d);
+      await nav(`/data/${d}`);
+      const k1 = (await page.textContent('[data-kpi-tobe] b')).trim(), k2 = (await page.textContent('[data-kpi-asis] b')).trim();
+      const tot = await page.getAttribute('[data-impact] [data-usage-total]', 'data-usage-total');
+      const rows = (await page.$$('[data-impact] tr[data-use]')).length;
+      ok(k1 === String(u.tobe) && k2 === String(u.asis) && tot === `${u.tobe}/${u.asis}` && rows === u.tobe + u.asis, `data page ${d}: KPIs, impact header and rows agree with usageOf (${u.tobe} to-be, ${u.asis} as-is)`);
+    }
+    await shot('data-usage');
+
+    console.log('# R5: TC labels on the data page');
+    const cased = (S5.docs.testCase || []).map(x => x.data).find(c => c.dataId);
+    if (cased) {
+      await nav(`/data/${cased.dataId}`);
+      const lbls = await page.$$eval('[data-cases] tr[data-case]', trs => trs.map(t => [t.dataset.case, t.querySelector('.d-tc').textContent.trim()]));
+      ok(lbls.length > 0 && lbls.every(([id, l]) => l === ENG.caseLabel(S5.docs, id) && /^TC\d+$/.test(l)), `case ids shown as caseLabel TC<n> (${lbls.map(x => x[1]).join(', ')})`);
+    } else ok(true, 'no seed test cases (TC label check skipped)');
+
+    console.log('# R5: permissions — owner and resources edit, everyone else is read-only');
+    const outsider = st.people.find(x => x.id !== seedP.owner && !(seedP.resources || []).includes(x.id));
+    const ownerName = st.people.find(x => x.id === seedP.owner).name;
+    ok(!!outsider, 'seed has a person outside ' + seedP.name);
+    await page.selectOption('#persona', outsider.id);
+    await nav(`/process/${pid}?mode=edit`);
+    ok(await page.isVisible('[data-edit-denied]') && !(await page.$('[data-ins]')) && !(await page.$('.d-editbar')), 'non-editor opening Edit gets the read-only map, no editor controls');
+    ok(await page.isVisible(`[data-readonly]:has-text("Ask ${ownerName} for edit access")`), `non-editor sees "Ask ${ownerName} for edit access"`);
+    ok(await page.$eval('.d-modes [data-mode="edit"]', b => b.getAttribute('aria-disabled') === 'true'), 'Edit tab is locked for non-editors');
+    ok(!(await page.$('[data-save-version]')) && !(await page.$('[data-draft-restore]')) && !(await page.$('[data-bpmn-file]')), 'no Save version / Restore / Import as version for non-editors');
+    await shot('process-readonly'); await iconCheck('process read-only');
+    await saving(() => page.click('[data-ask-access]'));
+    ok((await state()).docs.notification.some(n => n.data.to === seedP.owner && /asked for edit access/.test(n.data.text)), 'Ask for access notifies the owner');
+    const nErr = errors.length;
+    const put403 = await page.evaluate(async ([id, actor]) => { const st = await (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/state`)).json(); const p = st.docs.process.find(d => d.id === id).data;
+      return (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/process/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: Object.assign({}, p, { name: 'hijack' }), actor, summary: 'x' }) })).status; }, [pid, outsider.id]);
+    ok(put403 === 403, 'server rejects a non-editor process PUT with 403');
+    await page.selectOption('#persona', me);
+    /* a 403 from the server (access removed in another session) is handled gracefully */
+    const permId = 'proc-e2e-perm-' + Math.random().toString(36).slice(2, 6);
+    const pn = [{ id: 'pt', type: 'trigger', title: 'Request arrives', owner: me, touches: [], data: [] }, { id: 'pa', type: 'step', title: 'First step', owner: me, data: [], touches: [], subs: [] }, { id: 'pb', type: 'step', title: 'Second step', owner: me, data: [], touches: [], subs: [] }, { id: 'pe', type: 'end', title: 'Done' }];
+    ok(await putDoc('process', permId, { id: permId, name: 'E2E permission check', desc: '', owner: me, resources: [me], version: 1, asis: pn, tobe: pn.map(n => Object.assign({}, n, { id: n.id + '2', from: n.id })), released: [] }, 'Test fixture: permission process') === 200, 'fixture: permission process');
+    await nav(`/process/${permId}?mode=edit`);
+    ok(await page.isVisible('[data-ins]'), 'owner can edit');
+    ok(await page.evaluate(async ([id, me, o]) => { const st = await (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/state`)).json(); const p = st.docs.process.find(d => d.id === id).data;
+      return (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/process/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: Object.assign({}, p, { owner: o, resources: [o] }), actor: me, summary: 'Handed over (other session)' }) })).status; }, [permId, me, outsider.id]) === 200, 'fixture: ownership handed over in another session');
+    const w403 = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/' + permId));
+    await page.click('[data-ed="down"][data-id="pa2"]');
+    ok((await w403).status() === 403, 'stale edit is refused by the server (403)');
+    await page.waitForSelector('.toast');
+    ok(/Ask .+ for edit access/.test(await page.textContent('.toast')), 'R5: 403 shows a plain "Ask <owner> for edit access" message: ' + (await page.textContent('.toast')));
+    await page.waitForSelector('[data-edit-denied]', { timeout: 10000 });
+    ok(true, 'after the 403 the page reloads as read-only');
+    /* the browser logs the refused request itself as a resource error; that is not an app error */
+    const extra = errors.splice(nErr).filter(e => !/status of 403/.test(e)); errors.push(...extra);
+
+    console.log('# R5: versions — save, compare, undo');
+    await nav(`/process/${impPid}?mode=tobe`);
+    await page.click('[data-save-version]'); await page.waitForSelector('.overlay input[name=name]');
+    await act('save'); await page.waitForSelector('.overlay .d-err');
+    ok(/needs a name|Give the version a name/.test(await page.textContent('.overlay .d-err')), 'Save version needs a name');
+    await page.fill('.overlay input[name=name]', 'E2E baseline');
+    await saving(() => act('save'));
+    let ipv = await getProc(impPid);
+    ok((ipv.drafts || []).length === 1 && ipv.drafts[0].name === 'E2E baseline' && ipv.drafts[0].by === me && flat(ipv.drafts[0].tobe).length === flat(ipv.tobe).length && Array.isArray(ipv.drafts[0].asis), 'draft stored {id, name, at, by, asis, tobe}');
+    await nav(`/process/${impPid}?mode=tobe`);
+    ok(await page.isVisible('[data-versions] [data-draft]:has-text("E2E baseline")') && /1\/10/.test(await page.textContent('[data-versions] h3')), 'Saved versions card lists it (1/10)');
+    const s0 = flat(ipv.tobe)[0];
+    await nav(`/process/${impPid}?mode=edit&v=tobe`);
+    await page.click(`[data-ed="edit"][data-id="${s0.id}"]`); await page.waitForSelector('.overlay input[name=title]');
+    await page.fill('.overlay input[name=title]', s0.title + ' (v2)');
+    await saving(() => act('save'));
+    await page.click('[data-compare-open]'); await page.waitForURL(/mode=compare/); await settle();
+    ipv = await getProc(impPid);
+    const dv = ENG.diffVersions(ipv.drafts[0].tobe, ipv.tobe);
+    const dvN = Object.values(dv.nodes), dvR = dv.removed.filter(g => g.type !== 'trigger' && g.type !== 'end').length;
+    ok((await page.textContent('[data-cmp-sum]')).trim() === `${dvN.filter(x => x === 'new').length} new · ${dvN.filter(x => x === 'changed').length} changed · ${dvR} removed`, 'compare defaults to the saved draft → current to-be, counts = diffVersions: ' + (await page.textContent('[data-cmp-sum]')).trim());
+    ok(await page.isVisible(`#canvas .node[data-node="${s0.id}"] .chip.diff-changed`) && /was|title/i.test(await page.textContent(`#canvas .node[data-node="${s0.id}"] .d-was`)), 'compare marks the edited step CHANGED with what changed');
+    await shot('process-compare'); await iconCheck('compare'); await overflow('compare @1440');
+    await page.selectOption('[data-cmp="a"]', 'cur-asis'); await page.waitForURL(/a=cur-asis/); await settle();
+    const dpS = ENG.diffSummary(ipv);
+    ok((await page.textContent('[data-cmp-sum]')).trim() === `${dpS.new} new · ${dpS.changed} changed · ${dpS.removed} removed`, 'compare as-is → to-be agrees with the process diff: ' + (await page.textContent('[data-cmp-sum]')).trim());
+    await page.selectOption('[data-cmp="a"]', 'cur-tobe'); await page.waitForURL(/a=cur-tobe/); await settle();
+    ok(/Pick two different versions/.test(await page.textContent('[data-cmp-sum]')), 'compare same version: asks for two different versions');
+    if ((ipv.released || []).length) { await page.selectOption('[data-cmp="a"]', 'rel:' + ipv.released[0].version); await settle(); ok(await page.isVisible('#canvas .flow'), 'compare against a released version renders'); }
+    /* the undo snapshot lives in memory for the session: stay in the app (no reload) */
+    await page.click('.d-modes [data-mode="tobe"]'); await page.waitForURL(/mode=tobe/); await settle();
+    ok(/Edited step/.test(await page.getAttribute('[data-undo]', 'title')), 'Undo last change offered for the edit: ' + await page.getAttribute('[data-undo]', 'title'));
+    await saving(() => page.click('[data-undo]'));
+    ok(flat((await getProc(impPid)).tobe)[0].title === s0.title, 'Undo restored the previous step title');
+    await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Undid: Edited step/.test(t)), 'history shows the undo');
+    /* max 10 */
+    ipv = await getProc(impPid);
+    const ten = Array.from({ length: 10 }, (_, i) => ({ id: 'ver-e2e-' + i, name: 'Fixture ' + i, at: new Date().toISOString(), by: me, asis: [], tobe: [] }));
+    ok(await putDoc('process', impPid, Object.assign({}, ipv, { drafts: ten }), 'Test fixture: 10 drafts') === 200, 'fixture: 10 saved versions');
+    await nav(`/process/${impPid}?mode=tobe`);
+    await page.click('[data-save-version]'); await page.waitForSelector('.overlay:has-text("Saved versions are full")');
+    ok(true, 'an 11th saved version is refused with a clear message'); await act('cancel');
+    await page.click('[data-draft-del="ver-e2e-9"]'); await page.waitForSelector('.overlay [data-act="yes"]');
+    await saving(() => act('yes'));
+    ok((await getProc(impPid)).drafts.length === 9, 'Delete a saved version');
+    ok(await putDoc('process', impPid, Object.assign({}, await getProc(impPid), { drafts: ipv.drafts }), 'Test fixture: restore drafts') === 200, 'fixture: drafts back to 1');
+
+    console.log('# R5: BPMN import as a new version of this process');
+    ipv = await getProc(impPid);
+    await nav(`/process/${impPid}?mode=tobe`);
+    const xmlNow = await exportBpmn('imp-tobe');
+    const xEsc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const fl = flat(ipv.tobe); const ren = fl[2];
+    let xml2 = xmlNow.replace(`name="${xEsc(ren.title)}"`, `name="${xEsc(ren.title)} (revised)"`);
+    xml2 = xml2.replace('</bpmn:process>', '    <bpmn:textAnnotation id="TA_1"><bpmn:text>Reviewer note</bpmn:text></bpmn:textAnnotation>\n    <bpmn:task id="Orphan_1" name="Orphan task" />\n    <bpmn:dataObjectReference id="DO_1" name="Invoice PDF" />\n  </bpmn:process>');
+    ok(xml2 !== xmlNow && xml2.includes('(revised)'), 'built a revised BPMN file');
+    fs.writeFileSync(`${OUT}/imp-revised.bpmn`, xml2);
+    await page.setInputFiles('[data-bpmn-file]', `${OUT}/imp-revised.bpmn`);
+    await page.waitForSelector('.overlay [data-impsum]');
+    const dropTxt = await page.textContent('.overlay [data-dropped]');
+    ok(+(await page.getAttribute('.overlay [data-dropped]', 'data-dropped')) === 3 && /Orphan task/.test(dropTxt) && /not connected/.test(dropTxt) && /Invoice PDF/.test(dropTxt) && /Reviewer note|TA_1/.test(dropTxt), 'dropped elements listed before confirming: ' + dropTxt.replace(/\s+/g, ' ').slice(0, 160));
+    ok(new RegExp(`${fl.length - 1}\\s*matched`).test(await page.textContent('.overlay [data-impsum]')) && /1\s*new/.test(await page.textContent('.overlay [data-impsum]')), 'import summary: matched / new by name: ' + (await page.textContent('.overlay [data-impsum]')).replace(/\s+/g, ' '));
+    await page.screenshot({ path: `${OUT}/import-version-modal.png` });
+    await overflow('import version modal @1440');
+    await saving(() => act('import'));
+    await page.waitForURL(/mode=diff/);
+    const ipi = await getProc(impPid);
+    const fi = flat(ipi.tobe);
+    const keptOk = fl.filter(n => n.id !== ren.id).every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === o.title && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
+    ok(keptOk && fi.length === fl.length, 'matched steps keep id, data tags, sub-steps, owners and as-is links');
+    ok(fi.some(n => n.title === ren.title + ' (revised)' && n.id !== ren.id) && !fi.some(n => n.id === ren.id), 'renamed step comes in as new; the old one leaves the to-be');
+    ok(ipi.id === impPid && ipi.drafts.some(d => d.name === 'Before import of imp-revised.bpmn'), 'still the same process; the previous version was saved first');
+    ok((await getProc(impPid)).asis.length === ipv.asis.length, 'as-is untouched by a to-be import');
+    await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Imported 'imp-revised.bpmn' as a new to-be version/.test(t)), 'history shows the version import');
+    await shot('process-import-version');
+
+    console.log('# R5: deleting a step that has work');
+    const S6 = await state(); const ipd = await getProc(impPid); const fd = flat(ipd.tobe);
+    const wsOn = id => S6.docs.workItem.map(d => d.data).filter(w => w.pid === impPid && w.step === id);
+    const victim = fd.find(n => wsOn(n.id).length) || fd[0];
+    const wiA = 'wi-e2e-a' + Math.random().toString(36).slice(2, 6), wiB = 'wi-e2e-b' + Math.random().toString(36).slice(2, 6), wiC = 'wi-e2e-c' + Math.random().toString(36).slice(2, 6);
+    const tgtStep = fd.find(n => n.id !== victim.id), third = fd.find(n => n.id !== victim.id && n.id !== tgtStep.id);
+    const mkW = (id, step, title, deps) => putDoc('workItem', id, { id, projectId: prjId, pid: impPid, step, title, owner: me, status: 'idle', start: st.today, due: st.today, deps: deps || [], kind: 'build' }, 'Test fixture: ' + title);
+    ok(await mkW(wiA, victim.id, 'E2E build A') === 200 && await mkW(wiC, third.id, 'E2E follow-up C', [wiA]) === 200, 'fixture: work on the step to delete, plus a dependent');
+    await nav(`/process/${impPid}?mode=edit&v=tobe`);
+    await page.click(`[data-ed="del"][data-id="${victim.id}"]`);
+    await page.waitForSelector('.overlay select[name=to]');
+    ok(await page.isVisible(`.overlay [data-delwork="${wiA}"]`) && /has \d+ work item/.test(await page.textContent('.overlay .d-err')), 'warns that the step has work, listing it');
+    await page.screenshot({ path: `${OUT}/delete-step-work.png` });
+    await page.selectOption('.overlay select[name=to]', tgtStep.id);
+    const wp = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/' + impPid));
+    await act('move'); await wp; await settle();
+    let S7 = await state();
+    const movedA = S7.docs.workItem.find(d => d.id === wiA).data;
+    ok(movedA.step === tgtStep.id && !flat((await getProc(impPid)).tobe).some(n => n.id === victim.id), `"Move work to step…": work moved to '${tgtStep.title}', step deleted`);
+    ok(S7.docs.workItem.filter(d => d.data.pid === impPid && d.data.step === victim.id).length === 0, 'no work left pointing at the deleted step');
+    ok(await mkW(wiB, tgtStep.id, 'E2E build B') === 200, 'fixture: second work item');
+    await nav(`/process/${impPid}?mode=edit&v=tobe`);
+    await page.click(`[data-ed="del"][data-id="${tgtStep.id}"]`);
+    await page.waitForSelector('.overlay [data-act="deletework"]');
+    const wp2 = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/' + impPid));
+    await act('deletework'); await wp2; await settle();
+    S7 = await state();
+    ok(!S7.docs.workItem.some(d => d.id === wiA || d.id === wiB) && !flat((await getProc(impPid)).tobe).some(n => n.id === tgtStep.id), '"Delete work too": step and its work deleted');
+    const cAfter = S7.docs.workItem.find(d => d.id === wiC).data;
+    ok(!(cAfter.deps || []).length, 'dependents no longer wait for the deleted work');
+    await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Deleted step/.test(t)), 'history shows the step deletion');
+
+    console.log('# R5: data element owner defaults to the creator');
+    await nav(`/process/${impPid}?mode=edit&v=tobe`);
+    const sO = flat((await getProc(impPid)).tobe).find(n => n.owner && n.owner !== me) || flat((await getProc(impPid)).tobe)[0];
+    await page.click(`[data-ed="edit"][data-id="${sO.id}"]`); await page.waitForSelector('.overlay [data-nd-name]');
+    const ndName = 'E2E creator-owned ' + Math.random().toString(36).slice(2, 6);
+    await page.fill('.overlay [data-nd-name]', ndName); await page.click('.overlay [data-nd-create]');
+    await saving(() => act('save'));
+    const created = (await state()).docs.dataElement.map(d => d.data).find(d => d.name === ndName);
+    ok(created && created.owner === me && (sO.owner === me || created.owner !== sO.owner), `inline-created element is owned by the creator (${created && created.owner}), not the step owner (${sO.owner})`);
+    await nav(`/process/${impPid}?mode=tobe`); await page.click('[data-newdata]'); await page.waitForSelector('.overlay select[name=owner]');
+    ok(await page.inputValue('.overlay select[name=owner]') === me, 'New data element dialog: owner defaults to the creator'); await act('cancel');
+
     console.log('# phone 390');
     await page.setViewportSize({ width: 390, height: 844 });
-    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'edit']) { await nav(`/process/${pid}?mode=${m}`); await overflow(`process ${m} @390`); await shot('phone-process-' + m); }
+    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'edit', 'compare']) { await nav(`/process/${pid}?mode=${m}`); await overflow(`process ${m} @390`); await shot('phone-process-' + m); }
+    console.log('# R5: phone — the map starts near the top; KPIs and controls collapse into a summary row');
+    await nav(`/process/${pid}?mode=tobe`);
+    const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top + scrollY, tools: !!document.querySelector('.d-hdr .d-hdrtools').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
+    ok(ph.sum && !ph.tools && !ph.kpis, 'phone: summary row shown, controls and KPIs collapsed');
+    ok(ph.top < 340, `phone: process map starts near the top (${Math.round(ph.top)} px)`);
+    ok(/\d+ steps · \d+\+\d+ new\/changed · \d+\/\d+ data live/.test(await page.textContent('[data-hdr-toggle]')), 'phone summary row: steps, new/changed, data live');
+    await page.click('[data-hdr-toggle]');
+    ok(await page.isVisible('.d-hdr .d-hdrtools') && await page.isVisible('.d-hdr .kpis') && await page.getAttribute('[data-hdr-toggle]', 'aria-expanded') === 'true', 'phone: expand shows controls and KPIs');
+    await overflow('phone header expanded @390'); await shot('phone-process-expanded');
+    await page.click('[data-hdr-toggle]');
+    ok(!(await page.isVisible('.d-hdr .kpis')), 'phone: collapse again');
+    await page.selectOption('#persona', outsider.id); await nav(`/process/${pid}?mode=edit`); await overflow('read-only @390'); await shot('phone-readonly'); await page.selectOption('#persona', me);
+    await nav(`/process/${impPid}?mode=compare`); await overflow('compare @390'); await shot('phone-compare');
+    await nav(`/data/${ckId}`); await overflow('data checked @390'); await shot('phone-data-evidence');
     await nav(`/process/${pid}?mode=edit`);
     ok(await page.$eval('.branches', el => getComputedStyle(el).flexDirection) === 'column', 'branches stack at 390');
     await page.click('[data-ins="root"] >> nth=0');

@@ -1,7 +1,7 @@
 /* PMOFlow — workspace home (stream P). Route: / */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, av, pname, LOCK } from '../ui.js';
-import { forecasts, flatSteps, projectStats, rag, ragBadge, dataName, rerender, dueLine, effAvail, diffCounts, gateInfo, newProject } from './project.js';
+import { forecasts, flatSteps, projectStats, rag, ragBadge, dataName, rerender, dueLine, effAvail, diffCounts, gateInfo, newProject, relMgr } from './project.js';
 
 let scope = 'mine'; /* 'mine' | 'all' */
 
@@ -85,13 +85,13 @@ function processTile(p) {
 function projectTile(j) {
   const s = projectStats(j.id), r = rag(j, s), gi = gateInfo(j, s), fi = gi.fi;
   const over = gi.k === 'forecast' && fi.over;
-  const when = gi.k === 'live' ? esc(gi.label) : gi.k === 'awaiting' ? `Work done · awaiting go-live${gi.blocking ? ` (${gi.blocking} gate check${gi.blocking === 1 ? '' : 's'} blocking)` : ''}` : `Forecast ${esc(fmt(fi.date))} · target ${esc(fmt(j.target))}`;
+  const when = gi.k === 'live' ? esc(gi.label) : !s.total ? `Not planned · target ${esc(fmt(j.target))}` : gi.k === 'awaiting' ? `Work done · awaiting go-live${gi.blocking ? ` (${gi.blocking} gate check${gi.blocking === 1 ? '' : 's'} blocking)` : ''}` : `Forecast ${esc(fmt(fi.date))} · target ${esc(fmt(j.target))}`;
   return `<a class="tile" href="${link('/project/' + encodeURIComponent(j.id))}" data-link><div class="pmo-tile-h"><h4>${esc(j.name)}</h4>${ragBadge(r)}</div>
     ${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
     <div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div>
     <div class="chips"><span class="chip">${s.done}/${s.total} work done</span>${s.late + s.slip ? `<span class="chip block">${s.late} late · ${s.slip} slipping</span>` : ''}
       <span class="chip ${over ? 'block' : gi.k === 'awaiting' ? 'pmo-amber' : ''}" data-finish>${when}</span><span class="chip">${(j.processes || []).length} linked process${(j.processes || []).length === 1 ? '' : 'es'}</span></div>
-    <div class="pmo-tile-f">${av(j.owner)}<span class="hint">${esc(pname(j.owner))}</span></div></a>`;
+    <div class="pmo-tile-f">${av(j.owner)}<span class="hint">PM ${esc(pname(j.owner))}${relMgr(j) !== j.owner ? ` · release ${esc(pname(relMgr(j)))}` : ''}${j.program ? ` · ${esc(j.program)}` : ''}</span></div></a>`;
 }
 
 export function render() {

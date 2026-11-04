@@ -131,7 +131,7 @@ function dataChips(s) {
 function stepBody(s, path, label) {
   return `<div class="is-body" data-path="${esc(path)}"><textarea class="is-title" data-f="title" rows="2" aria-label="${esc(label)} title">${esc(s.title)}</textarea>
     <div class="is-row">${ownerSel(s)}${dataPicker(s, path)}<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System"></div>${dataChips(s)}
-    ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><input data-f="title" value="${esc(sb.title)}" aria-label="Sub-step ${k + 1}"><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
+    ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><textarea data-f="title" rows="${Math.min(4, Math.max(1, Math.ceil(sb.title.length / 60)))}" class="is-subt" aria-label="Sub-step ${k + 1}">${esc(sb.title)}</textarea><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
     <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
 }
 /* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
@@ -146,7 +146,7 @@ function gateBody(g, path) {
   return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'Parallel: all branches run' : 'Decision'}</span></div>
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Parallel gateway' : 'Decision question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
-      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint">${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? 'loops back' : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
+      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint" data-branch-hint>${/^(no|otherwise|else)$/i.test(b.label) && b.nodes.length ? 'Otherwise · ' : ''}${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? 'loops back' : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
       ${b.nodes.map((s, k) => `<div class="is-bstep">${stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;

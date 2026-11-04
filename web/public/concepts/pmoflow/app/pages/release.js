@@ -67,6 +67,25 @@ export function effAvail(dataId) {
 }
 const AVAIL_TXT = { live: 'Live', pending: 'Fix done, awaiting owner confirmation', example: 'Examples only: needs a live source', missing: 'Missing' };
 
+/* R5 roles: the release manager (defaults to the PM) is the only person who can go live or roll back,
+   and can't be counted as a BU approver (separation of duties). */
+export const rmOf = prj => (prj && (prj.releaseManager || prj.owner)) || null;
+function rmLine(prj) {
+  const rm = rmOf(prj);
+  return `<div class="rl-rm" data-rm="${esc(rm || '')}"><span class="lbl">Release manager</span>${rm ? `${av(rm)} <b>${esc(pname(rm))}</b>` : '<b>Not set</b>'}
+    <span class="hint">Only the release manager can go live or roll back. They can't sign off a business-unit section.</span></div>`;
+}
+
+/* Live evidence (R5): profile with zero blocking drift, a passing connection check, or an attested link + note (weaker). */
+const EV_TXT = { profile: 'Profile: no blocking drift', check: 'Connection check passed', attested: 'Attested: link and note (weaker)', seed: 'Live integration (seeded)' };
+function evidenceOf(de) {
+  const ev = de && de.liveEvidence;
+  let eng = null; const e = E(); if (e && e.evidenceOf) { try { eng = e.evidenceOf(store.state.docs, de); } catch (err) { eng = null; } }
+  if (ev && ev.type) return { type: ev.type, text: (EV_TXT[ev.type] || ev.type) + (eng && !eng.ok ? ` (does not hold: ${eng.reason || 'failing'})` : ''), ref: ev.ref || '', at: ev.at, by: ev.by, ok: eng ? eng.ok : true };
+  if (de && de.check && de.check.ok) return { type: 'check', text: EV_TXT.check, ref: de.check.detail || '', at: de.check.at };
+  return null;
+}
+
 /* ---------- derived data ---------- */
 function projectProcesses(prj) { return (prj.processes || []).map(id => store.get('process', id)).filter(Boolean); }
 function flat(nodes) { const e = E(); return e && e.flatSteps ? e.flatSteps(nodes || []) : (nodes || []).filter(n => n.type === 'step'); }
@@ -91,15 +110,32 @@ function buSections(prj) {
     if (dup) { if (entry.via === 'owner') dup.via = 'owner'; return; }
     arr.push(entry);
   };
-  projectProcesses(prj).forEach(p => flat(p.tobe && p.tobe.length ? p.tobe : p.asis).forEach(s => {
-    const per = store.person(s.owner);
-    if (per && per.bu) add(per.bu, { pid: p.id, pname: p.name, step: s, via: 'owner' });
-    (s.touches || []).forEach(t => { const bu = known.get(String(t || '').trim().toLowerCase()); if (bu) add(bu, { pid: p.id, pname: p.name, step: s, via: 'tag', tag: t }); });
-  }));
-  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([bu, steps]) => ({ bu, steps, fromTags: steps.every(x => x.via === 'tag') }));
+  /* R5: the engine may name sections whose BU has no person yet ("No approver in HR"); those are known BUs too */
+  engineSectionBus(prj).forEach(bu => { if (!known.has(bu.toLowerCase())) known.set(bu.toLowerCase(), bu); });
+  projectProcesses(prj).forEach(p => {
+    const nodes = p.tobe && p.tobe.length ? p.tobe : p.asis;
+    /* R5: the trigger's touches count too */
+    (nodes || []).filter(n => n && n.type === 'trigger').forEach(n => (n.touches || []).forEach(t => { const bu = known.get(String(t || '').trim().toLowerCase()); if (bu) add(bu, { pid: p.id, pname: p.name, step: n, via: 'trigger', tag: t }); }));
+    flat(nodes).forEach(s => {
+      const per = store.person(s.owner);
+      if (per && per.bu) add(per.bu, { pid: p.id, pname: p.name, step: s, via: 'owner' });
+      (s.touches || []).forEach(t => { const bu = known.get(String(t || '').trim().toLowerCase()); if (bu) add(bu, { pid: p.id, pname: p.name, step: s, via: 'tag', tag: t }); });
+    });
+  });
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([bu, steps]) => ({ bu, steps, fromTags: steps.every(x => x.via !== 'owner') }));
 }
-/* Approvals that count: approved, step-up, not by the project owner (R4: owners can't approve their own release). */
-const counts = (prj, a) => !!a && a.decision === 'approved' && a.stepUp && a.approver !== prj.owner;
+/* BU names the engine's bu-signoff check reports (sections, missing approvers), so UI sections match the gate. */
+function engineSectionBus(prj) {
+  const out = new Set();
+  const rd = readiness(prj.id); const c = (rd.checks || []).find(x => x.id === 'bu-signoff'); if (!c) return [];
+  const take = v => { if (typeof v === 'string' && v && !/[:#]/.test(v) && v.length < 40) out.add(v); else if (v && typeof v === 'object' && typeof v.bu === 'string') out.add(v.bu); };
+  (c.items || []).forEach(take); (c.sections || []).forEach(take); (c.noApprover || []).forEach(take);
+  const m = String(c.detail || '').match(/No approver in ([^:;,.]+)/g) || [];
+  m.forEach(x => out.add(x.replace(/^No approver in /, '').trim()));
+  return [...out].filter(bu => bu !== 'PMO' || store.state.people.some(p => p.bu === bu));
+}
+/* Approvals that count: approved, step-up, not by the project owner (R4) and not by the release manager (R5). */
+const counts = (prj, a) => !!a && a.decision === 'approved' && a.stepUp && a.approver !== prj.owner && a.approver !== rmOf(prj);
 function signoffOpenOf(rd) {
   if (typeof rd.signoffOpen === 'boolean') return rd.signoffOpen;
   return (rd.checks || []).filter(c => !['bu-signoff', 'two-person', 'exceptions'].includes(c.id)).every(c => checkState(c) !== 'fail');
@@ -114,14 +150,26 @@ function refView(ref, prjId) {
   const m = /^(\w+):(.+)$/.exec(String(ref || '')); if (!m) return { text: String(ref || ''), extra: '', href: null };
   if (m[1] === 'workItem') { const w = store.get('workItem', m[2]); return w ? { text: w.title, extra: `work item · ${pname(w.owner)}${w.updatedAt ? ' · changed ' + fmtTime(w.updatedAt) : ''}`, href: `/project/${prjId}?mode=work` } : { text: m[2], extra: 'work item', href: null }; }
   if (m[1] === 'process') { const p = store.get('process', m[2]); return { text: `${p ? p.name : m[2]} (process edited)`, extra: p && p.updatedAt ? 'changed ' + fmtTime(p.updatedAt) : '', href: `/process/${m[2]}?mode=diff` }; }
+  if (m[1] === 'project' || m[1] === 'cutover') return cutoverStaleView(store.get('project', m[1] === 'project' ? m[2].replace(/#.*$/, '') : prjId) || store.get('project', prjId));
   return { text: ref, extra: '', href: null };
 }
+/* R5: editing the cutover plan after an approval makes every approval stale. */
+function cutoverStaleView(prj) { return { text: 'Cutover plan edited', extra: `by ${pname(prj && prj.owner)}${prj && prj.cutoverUpdatedAt ? ' · ' + fmtTime(prj.cutoverUpdatedAt) : ''}`, href: null, anchor: 'cutover', cutover: true }; }
 function staleChanges(prj, section, a, rd) {
   if (!a || a.decision !== 'approved') return [];
+  const at = String(a.at || '');
+  const co = prj.cutoverUpdatedAt && String(prj.cutoverUpdatedAt) > at ? [cutoverStaleView(prj)] : [];
   /* Prefer the engine's verdict so the card and the gate never disagree. */
   const chk = rd && (rd.checks || []).find(c => c.id === 'bu-signoff');
-  if (chk && Array.isArray(chk.stale)) { const x = chk.stale.find(y => y.bu === section.bu); return x ? (x.changed || []).map(r => refView(r, prj.id)) : []; }
-  const at = String(a.at || '');
+  if (chk && Array.isArray(chk.stale)) {
+    const x = chk.stale.find(y => y.bu === section.bu); if (!x) return [];
+    const v = (x.changed || []).map(r => refView(r, prj.id));
+    return v.some(y => y.cutover) ? v : co.concat(v);
+  }
+  if (co.length) return co.concat(staleFallback(prj, section, at));
+  return staleFallback(prj, section, at);
+}
+function staleFallback(prj, section, at) {
   const keys = new Set(section.steps.map(x => x.pid + '|' + x.step.id));
   const buPeople = new Set(store.state.people.filter(p => p.bu === section.bu).map(p => p.id));
   const out = [];
@@ -201,8 +249,22 @@ function itemView(item, checkId, prjId, chk) {
 /* data-live items: the effective state, and for 'pending' who has to confirm, with a link to the data page. */
 function dataLiveView(dataId) {
   const de = store.get('dataElement', dataId); const st = effAvail(dataId);
-  const extra = st === 'pending' ? `Fix done, awaiting ${pname(de.owner)} confirmation` : AVAIL_TXT[st] || st;
-  return { text: de.name, extra, href: '/data/' + dataId, state: st, cta: st === 'pending' ? `Open the data page: ${pname(de.owner)} confirms the live source there ›` : null };
+  const ev = evidenceOf(de);
+  const extra = st === 'pending' ? `Fix done, awaiting ${pname(de.owner)} confirmation` : st === 'live' && ev && ev.type === 'attested' ? 'Live, but attested only: a link and a note, weaker than a profile or a connection check' : AVAIL_TXT[st] || st;
+  return { text: de.name, extra, href: '/data/' + dataId, state: st === 'live' && ev && ev.type === 'attested' ? 'attested' : st, cta: st === 'pending' ? `Open the data page: ${pname(de.owner)} confirms the live source there ›` : null };
+}
+
+/* R5: what proves each element is live. Profile and connection-check evidence are independent; attested is a warning. */
+function dataEvidence(prj) {
+  const rows = projectData(prj).map(de => {
+    const st = effAvail(de.id); const ev = evidenceOf(de);
+    const kind = st !== 'live' ? 'none' : ev ? ev.type : (de.avail === 'live' && !de.liveConfirmedBy ? 'seed' : 'unknown');
+    const label = st !== 'live' ? (AVAIL_TXT[st] || st) : ev ? ev.text : kind === 'seed' ? EV_TXT.seed : 'Confirmed live, no evidence recorded';
+    const cls = kind === 'attested' || kind === 'unknown' ? 'warn' : kind === 'none' ? 'fail' : 'pass';
+    const meta = ev ? [ev.by ? pname(ev.by) : '', ev.at ? fmtTime(ev.at) : '', ev.ref && kind !== 'check' ? ev.ref : ''].filter(Boolean).join(' · ') : '';
+    return `<li class="${cls}" data-evidence="${esc(de.id)}" data-ev-type="${esc(kind)}"><span class="rl-ic ${cls}">${ICON[cls]}</span><span><a href="${link('/data/' + de.id)}" data-link>${esc(de.name)}</a> <span class="rl-evb ${esc(kind)}">${esc(label)}</span>${meta ? ` <small>${esc(meta)}</small>` : ''}</span></li>`;
+  }).join('');
+  return rows ? `<div class="rl-ev" data-evidence-list><div class="rl-ev-h"><b>Live evidence</b><span class="hint">A profile with no blocking drift or a passing connection check proves the source. An attested link and note is accepted, but shown as a warning.</span></div><ul>${rows}</ul></div>` : '';
 }
 
 /* ---------- render ---------- */
@@ -218,16 +280,18 @@ export function render(params) {
   const rd = readiness(prjId);
   const live = prj.status === 'live';
   const releases = store.list('release', r => r.projectId === prjId).sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  const lastGo = releases.find(r => !isRollback(r));
+  /* R5: a failed pipeline writes a failed release with no side effects; it never counts as the live release */
+  const lastGo = releases.find(r => !isRollback(r) && !isFailedRel(r));
+  const failedRel = !live && releases[0] && !isRollback(releases[0]) && pipePhase(releases[0]) === 'failed' ? releases[0] : null;
   /* After release show the checks as they stood at go-live (engine first, else the copy stored on the release). */
   if (live && !rd.released && lastGo && Array.isArray(lastGo.checks) && lastGo.checks.length) rd.checks = lastGo.checks;
   const cnt = countChecks(rd.checks);
   const failing = cnt.fail, warns = cnt.warn;
 
-  const relFailed = live && lastGo && releases[0] === lastGo && (lastGo.status === 'failed' || pipePhase(lastGo) === 'failed');
-  const gateCls = relFailed ? 'blocked' : live ? 'live' : rd.pass ? 'pass' : 'blocked';
-  const gateTitle = relFailed ? 'Released, but the pipeline failed' : live ? 'Released' : rd.pass ? 'PASS — ready for go-live' : `Blocked — ${failing} check${failing === 1 ? '' : 's'} failing`;
-  const gateSub = relFailed ? 'The deployment pipeline failed (simulated). Roll back from the banner below.' : live ? `Live since ${fmt(lastGo && lastGo.at)}. Every integration grant was closed at go-live.`
+  const relFailed = !!failedRel;
+  const gateCls = live ? 'live' : rd.pass ? 'pass' : 'blocked';
+  const gateTitle = live ? 'Released' : rd.pass ? (relFailed ? 'PASS — last release failed, retry when ready' : 'PASS — ready for go-live') : `Blocked — ${failing} check${failing === 1 ? '' : 's'} failing`;
+  const gateSub = live ? `Live since ${fmt(lastGo && lastGo.at)}. Every integration grant was closed at go-live.`
     : rd.unavailable ? 'Readiness engine is still loading.'
     : rd.pass ? (warns ? `All required checks pass. ${warns} warning to review.` : 'All required checks pass. Two approvers can release.')
     : 'Go-live unlocks when every check below is green.';
@@ -237,9 +301,10 @@ export function render(params) {
       <div class="rl-title"><h1>Go-live readiness</h1>
         <select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <p>One view for approvers: what must be true before <b>${esc(prj.name)}</b> goes live, who has signed, and which integration access is still open.</p>
+      ${rmLine(prj)}
     </div>
     <div class="hdr-side"><div class="rl-gate ${gateCls}" data-gate="${gateCls}">
-      <span class="rl-gate-ic">${relFailed ? ICON.fail : live ? '★' : rd.pass ? ICON.pass : ICON.fail}</span>
+      <span class="rl-gate-ic">${live ? '★' : rd.pass ? ICON.pass : ICON.fail}</span>
       <div><b>${esc(gateTitle)}</b><span>${esc(gateSub)}</span></div></div>
       <div class="rl-meter" aria-label="${esc(countsText(cnt))}">${rd.checks.map(c => `<i class="${checkState(c)}" title="${esc(c.label)}"></i>`).join('')}</div>
     </div></section>`;
@@ -257,12 +322,13 @@ export function render(params) {
       <div class="rl-items">${items.map(it => { const v = itemView(it, c.id, prjId, c);
         if (v.state) return `<div class="rl-item rl-data ${esc(v.state)}" data-avail="${esc(v.state)}"><span class="rl-dstate ${esc(v.state)}" aria-hidden="true"></span><a href="${link(v.href)}" data-link>${esc(v.text)}</a><small>${esc(v.extra)}</small>${v.cta ? `<a class="rl-go" href="${link(v.href)}" data-link data-confirm-link>${esc(v.cta)}</a>` : ''}</div>`;
         return `<div class="rl-item">${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : `<span>${esc(v.text)}</span>`}${v.extra ? `<small>${esc(v.extra)}</small>` : ''}</div>`; }).join('') || `<div class="hint">${st === 'pass' ? 'Nothing outstanding.' : 'No item detail.'}</div>`}
+        ${c.id === 'data-live' ? dataEvidence(prj) : ''}
         ${lkHtml ? `<div class="rl-item-foot">${lkHtml}</div>` : ''}</div></details>`;
   }).join('') || '<div class="empty">Readiness checks are not available yet.</div>';
 
   return header + `<div class="grid rl-grid"><div class="rl-main">
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>Go-live was refused by the server.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || JSON.stringify(r)))}</li>`).join('')}</ul></div>` : ''}
-    ${live && lastGo && releases[0] === lastGo && (lastGo.status === 'failed' || pipePhase(lastGo) === 'failed') ? failBanner(prj, lastGo) : ''}
+    ${failedRel ? failBanner(prj, failedRel) : ''}
     ${live ? releasedCard(prj, rd, lastGo) : `<div class="card"><h3>Readiness checklist<span class="n" data-counts>${esc(countsText(cnt))}</span></h3>${checks}</div>`}
     ${cutoverCard(prj)}
     ${signoffCard(prj, rd)}
@@ -286,6 +352,7 @@ function signoffCard(prj, rd) {
   const live = prj.status === 'live';
   const open = live || signoffOpenOf(rd);
   const isOwner = meId === prj.owner;
+  const rm = rmOf(prj); const isRm = meId === rm;
   const staleBy = {}; sections.forEach(s => { staleBy[s.bu] = live ? [] : staleChanges(prj, s, latestApproval(prj.id, s.bu), rd); });
   const approved = sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a) && !(staleBy[a.bu] || []).length);
   const approvers = [...new Set(approved.map(a => a.approver))];
@@ -294,36 +361,47 @@ function signoffCard(prj, rd) {
   const cards = sections.map(s => {
     const a = latestApproval(prj.id, s.bu);
     const mine = me.bu === s.bu;
-    const eligible = store.state.people.filter(p => p.bu === s.bu && p.id !== prj.owner);
+    const eligible = store.state.people.filter(p => p.bu === s.bu && p.id !== prj.owner && p.id !== rm);
+    const nobody = !store.state.people.some(p => p.bu === s.bu);
     const stale = staleBy[s.bu] || [];
     const byOwner = a && a.decision === 'approved' && a.approver === prj.owner;
-    const state = !a ? 'pending' : byOwner ? 'owner' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
+    const byRm = a && a.decision === 'approved' && !byOwner && a.approver === rm;
+    const state = !a ? 'pending' : byOwner ? 'owner' : byRm ? 'rm' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
     const stCls = state === 'approved' ? 'b-done' : state === 'rejected' || state === 'stale' ? 'b-late' : 'b-soon';
-    const stTxt = { pending: 'Awaiting sign-off', approved: 'Signed off', rejected: 'Rejected', stale: 'Re-approval needed', owner: 'Needs an independent approver' }[state];
-    const tagged = s.steps.filter(x => x.via === 'tag');
+    const stTxt = { pending: nobody ? 'No approver' : 'Awaiting sign-off', approved: 'Signed off', rejected: 'Rejected', stale: 'Re-approval needed', owner: 'Needs an independent approver', rm: 'Needs an independent approver' }[state];
+    const tagged = s.steps.filter(x => x.via !== 'owner');
+    const names = eligible.map(p => p.name).join(', ');
     let act = '';
-    if (!live) {
-      const label = a && a.decision === 'approved' && !byOwner ? 'Re-approve' : 'Approve section';
+    if (!live && nobody) {
+      act = `<div class="rl-noappr" data-no-approver="${esc(s.bu)}"><b>No approver in ${esc(s.bu)}: assign one.</b><span class="hint">This section is here because a step or the trigger touches ${esc(s.bu)}, but nobody in the workspace belongs to ${esc(s.bu)}. Add a person in ${esc(s.bu)}, or remove the ${esc(s.bu)} tag if the change doesn't affect them.</span></div>`;
+    } else if (!live && state !== 'approved') {
+      /* a signed, current section needs no action: no stale "Switch 'Viewing as'" hint after sign-off */
+      const label = a && a.decision === 'approved' && !byOwner && !byRm ? 'Re-approve' : 'Approve section';
       let why = '';
-      if (isOwner) why = `<span class="hint" data-why="owner">Project owners can't approve their own release. ${eligible.length ? `${esc(eligible.map(p => p.name).join(', '))} can sign off for ${esc(s.bu)}.` : ''}</span>`;
-      else if (!mine) why = `<span class="hint" data-why="bu">Switch 'Viewing as' to ${/^[AEIOU]/i.test(s.bu) ? 'an' : 'a'} ${esc(s.bu)} person to sign off${eligible.length ? ` (${esc(eligible.map(p => p.name).join(', '))})` : ''}.</span>`;
+      if (isOwner && isRm) why = `<span class="hint" data-why="owner">Project owners can't approve their own release, and the release manager can't sign a section. ${names ? `${esc(names)} can sign off for ${esc(s.bu)}.` : ''}</span>`;
+      else if (isOwner) why = `<span class="hint" data-why="owner">Project owners can't approve their own release. ${names ? `${esc(names)} can sign off for ${esc(s.bu)}.` : ''}</span>`;
+      else if (isRm) why = `<span class="hint" data-why="rm">As release manager, ${esc(pname(rm))} can't sign off a business-unit section (separation of duties). ${names ? `${esc(names)} can sign off for ${esc(s.bu)}.` : ''}</span>`;
+      else if (!mine) why = `<span class="hint" data-why="bu">Switch 'Viewing as' to ${/^[AEIOU]/i.test(s.bu) ? 'an' : 'a'} ${esc(s.bu)} person to sign off${names ? ` (${esc(names)})` : ''}.</span>`;
       else if (!open) why = `<span class="hint" data-why="locked">Sign-off opens when the other checks pass.</span>`;
       act = `<div class="rl-bu-act">${why ? `<button class="btn sm" disabled data-locked>${label}</button>${why}`
         : `<button class="btn sm primary" data-signoff="approved" data-bu="${esc(s.bu)}">${label}</button><button class="btn sm danger" data-signoff="rejected" data-bu="${esc(s.bu)}">Reject</button>`}</div>`;
+    } else if (!live && mine && !isOwner && !isRm && open) {
+      act = `<div class="rl-bu-act"><button class="btn sm danger" data-signoff="rejected" data-bu="${esc(s.bu)}">Withdraw and reject</button></div>`;
     }
+    const viaTxt = x => x.via === 'trigger' ? 'trigger touches' : 'tag';
     return `<div class="rl-bu ${state}" data-bu="${esc(s.bu)}" ${s.fromTags ? 'data-from-tags' : ''}>
       <div class="rl-bu-h"><b>${esc(s.bu)}</b>${badge(stTxt, stCls)}</div>
-      ${tagged.length ? `<div class="rl-tagnote" data-tagnote>${s.fromTags ? 'Included because steps are tagged' : 'Also includes steps tagged'} <span class="chip">${esc(s.bu)}</span> in their <i>touches</i> tags.</div>` : ''}
-      ${stale.length ? `<div class="rl-stale" data-stale="${esc(s.bu)}"><b>Re-approval needed: changed after sign-off</b><ul>${stale.map(v => `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)} <small>${esc(v.extra)}</small></li>`).join('')}</ul></div>` : ''}
-      <ol class="rl-steps">${s.steps.map(x => `<li ${x.via === 'tag' ? 'data-via-tag' : ''}><a href="${link(`/process/${x.pid}/step/${x.step.id}`)}" data-link>${esc(x.step.title)}</a> <small>${esc(pname(x.step.owner))} · ${esc(x.pname)}</small>${x.via === 'tag' ? ` <span class="rl-viatag" title="In this section because of its touches tag">tag: ${esc(x.tag)}</span>` : ''}</li>`).join('')}</ol>
-      ${a ? `<div class="rl-signed">${av(a.approver)} <span>${esc(pname(a.approver))} ${a.decision === 'approved' ? 'approved' : 'rejected'} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="rl-mfa">MFA verified</span>' : ''}</span></div>${byOwner ? `<div class="rl-ownerx" data-owner-excluded>Doesn't count: project owners can't approve their own release.</div>` : ''}${a.note ? `<div class="hint">“${esc(a.note)}”</div>` : ''}` : ''}
+      ${tagged.length ? `<div class="rl-tagnote" data-tagnote>${s.fromTags ? 'Included because' : 'Also includes'} ${tagged.some(x => x.via === 'trigger') ? 'the trigger or steps that are' : 'steps'} tagged <span class="chip">${esc(s.bu)}</span> in their <i>touches</i> tags.</div>` : ''}
+      ${stale.length ? `<div class="rl-stale" data-stale="${esc(s.bu)}"><b>Re-approval needed: changed after sign-off</b><ul>${stale.map(v => `<li ${v.cutover ? 'data-stale-cutover' : ''}>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : v.anchor ? `<a href="#${v.anchor}" data-anchor="${v.anchor}">${esc(v.text)}</a>` : esc(v.text)} <small>${esc(v.extra)}</small></li>`).join('')}</ul>${stale.some(v => v.cutover) ? '<div class="hint">A cutover edit changes what every approver signed, so all sections need re-approval.</div>' : ''}</div>` : ''}
+      <ol class="rl-steps">${s.steps.map(x => `<li ${x.via !== 'owner' ? `data-via-${x.via === 'trigger' ? 'trigger' : 'tag'}` : ''}><a href="${link(`/process/${x.pid}/step/${x.step.id}`)}" data-link>${x.via === 'trigger' ? 'Trigger: ' : ''}${esc(x.step.title)}</a> <small>${x.step.owner ? esc(pname(x.step.owner)) + ' · ' : ''}${esc(x.pname)}</small>${x.via !== 'owner' ? ` <span class="rl-viatag" title="In this section because of its touches tag">${viaTxt(x)}: ${esc(x.tag)}</span>` : ''}</li>`).join('')}</ol>
+      ${a ? `<div class="rl-signed">${av(a.approver)} <span>${esc(pname(a.approver))} ${a.decision === 'approved' ? 'approved' : 'rejected'} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="rl-mfa">MFA verified</span>' : ''}</span></div>${byOwner ? `<div class="rl-ownerx" data-owner-excluded>Doesn't count: project owners can't approve their own release.</div>` : ''}${byRm ? `<div class="rl-ownerx" data-rm-excluded>Doesn't count: the release manager can't sign a section.</div>` : ''}${a.note ? `<div class="hint">“${esc(a.note)}”</div>` : ''}` : ''}
       ${act}</div>`;
   }).join('');
   const two = approvers.length >= 2;
   return `<div class="card" id="signoff"><h3>Business-unit sign-off<span class="n">${approved.length}/${sections.length} signed</span></h3>
     ${!live && !open ? `<div class="rl-lock" data-signoff-locked><span class="rl-ic warn">${LOCKI}</span><div><b>Sign-off opens when the other checks pass.</b><div class="hint">Approvers sign off on evidence, not on promises. Still failing: ${esc(blocking.map(c => c.label).join(' · ') || 'checks are loading')}. Existing approvals are kept.</div></div></div>` : ''}
     <div class="rl-two ${two ? 'ok' : ''}"><span class="rl-ic ${two ? 'pass' : 'fail'}">${two ? ICON.pass : ICON.fail}</span>
-      <div><b>Two-person rule</b> · ${approvers.length} distinct approver${approvers.length === 1 ? '' : 's'} ${approvers.map(av).join('')}<div class="hint">Go-live needs at least two different people to have signed off, each with step-up MFA. The project owner (${esc(pname(prj.owner))}) can't be one of them.</div></div></div>
+      <div><b>Two-person rule</b> · ${approvers.length} distinct approver${approvers.length === 1 ? '' : 's'} ${approvers.map(av).join('')}<div class="hint">Go-live needs at least two different people to have signed off, each with step-up MFA. The project owner (${esc(pname(prj.owner))})${rm && rm !== prj.owner ? ` and the release manager (${esc(pname(rm))})` : ''} can't be one of them.</div></div></div>
     ${exc.length && !Object.values(staleBy).some(x => x.length) ? `<div class="rl-exc"><b>Changes after sign-off</b> · listed by the gate. Re-approve the section to clear them.</div>` : ''}
     <div class="rl-bus">${cards || '<div class="empty">No owned or tagged steps in the linked to-be processes yet.</div>'}</div></div>`;
 }
@@ -339,7 +417,10 @@ function cutoverNeeds(c) {
   if (!c.hypercareOwner) need.push('hypercare owner');
   return need;
 }
-const canTick = (prj, t) => { const me = store.state.me; return !!me && (me === t.owner || me === prj.owner || me === (prj.cutover || {}).rollbackOwner); };
+/* R5: a go/no-go task is confirmed only by its own owner; other tasks by their owner or the PM. */
+const canTick = (prj, t) => { const me = store.state.me; if (!me) return false; if (t.gonogo) return !!t.owner && me === t.owner; return me === t.owner || me === prj.owner; };
+const gngOf = prj => tasksOf(prj.cutover).filter(t => t.gonogo);
+const gngOpen = prj => gngOf(prj).filter(t => !t.owner || !t.done);
 function fmtPlanned(v) { if (!v) return '—'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
 function runbookTable(prj, opts) {
   opts = opts || {};
@@ -353,7 +434,8 @@ function runbookTable(prj, opts) {
       return `<li class="${t.done ? 'done' : ''} ${t.gonogo ? 'gng' : ''}" data-rbtask="${esc(t.id)}"><span class="rl-rbn">${i + 1}</span>
         <label class="rl-rbchk"><input type="checkbox" data-rb-done="${esc(t.id)}" ${t.done ? 'checked' : ''} ${tick ? '' : 'disabled'} aria-label="Done: ${esc(t.task)}"></label>
         <div class="rl-rbt"><div><b>${esc(t.task)}</b>${t.gonogo ? ' <span class="rl-gng" title="The cutover lead confirms go or no-go here before continuing">Go/no-go</span>' : ''}</div>
-          <small>${t.owner ? `${av(t.owner)} ${esc(pname(t.owner))}` : 'No owner'} · ${esc(fmtPlanned(t.planned))}${t.done && t.doneBy ? ` · done by ${esc(pname(t.doneBy))} ${esc(fmtTime(t.doneAt))}` : ''}</small></div></li>`;
+          <small><span class="rl-rbown" data-rb-owner="${esc(t.owner || '')}">${t.owner ? `${av(t.owner)} ${esc(pname(t.owner))}` : '<b class="rl-noown">No owner</b>'}</span> · ${esc(fmtPlanned(t.planned))}${t.done && t.doneBy ? ` · ${t.gonogo ? 'confirmed' : 'done'} by ${esc(pname(t.doneBy))} ${esc(fmtTime(t.doneAt))}` : ''}</small>
+          ${t.gonogo && !t.done && !opts.readonly ? `<small class="rl-gngwho" data-gng-who>${t.owner ? `Only ${esc(pname(t.owner))} can confirm go/no-go.` : 'Needs an owner before go-live.'}</small>` : ''}</div></li>`;
     }).join('')}</ol>`;
 }
 function cutoverCard(prj) {
@@ -375,13 +457,13 @@ function cutoverCard(prj) {
       ${row('Communications', c.comms ? `<span class="rl-pre-line">${esc(c.comms)}</span>` : '', 'comms')}
     </div>`}
     <div class="rl-bu-act">${canEdit ? `<button class="btn sm primary" data-cutover-edit>${prj.cutover ? 'Edit cutover plan' : 'Add cutover plan'}</button>`
-      : `<button class="btn sm" disabled>Edit cutover plan</button><span class="hint" data-why>Only the project owner (${esc(pname(prj.owner))}) can edit the cutover plan. Task owners tick their own tasks.</span>`}</div></div>`;
+      : `<button class="btn sm" disabled>Edit cutover plan</button><span class="hint" data-why>Only the project manager (${esc(pname(prj.owner))}) can edit the cutover plan. Task owners tick their own tasks; go/no-go checks are confirmed by their owner only.</span>`}</div></div>`;
 }
 
 async function tickTask(prj, tid, done) {
   const cur = store.get('project', prj.id) || prj;
   const tasks = tasksOf(cur.cutover); const t = tasks.find(x => x.id === tid); if (!t) return;
-  if (!canTick(cur, t)) { toast(`Only ${pname(t.owner)} or the project owner can tick this task.`); store.emit(); return; }
+  if (!canTick(cur, t)) { toast(t.gonogo ? `Only the task owner (${pname(t.owner)}) can confirm this go/no-go.` : `Only ${pname(t.owner)} or the project manager can tick this task.`); store.emit(); return; }
   const next = tasks.map(x => x.id === tid ? Object.assign({}, x, done ? { done: true, doneAt: new Date().toISOString(), doneBy: store.state.me } : { done: false, doneAt: undefined, doneBy: undefined }) : x);
   await store.save('project', prj.id, Object.assign({}, cur, { cutover: Object.assign({}, cur.cutover, { tasks: next }) }), `${done ? 'Completed' : 'Reopened'} cutover task “${t.task}”`);
   toast(done ? 'Task done' : 'Task reopened');
@@ -409,7 +491,7 @@ async function editCutover(prj) {
       <div class="frow"><div class="field"><label>Hypercare days</label><input type="number" min="0" max="90" name="hypercareDays" value="${esc(c.hypercareDays == null ? 10 : c.hypercareDays)}"></div>
         <div class="field"><label>Hypercare owner</label>${sel('hypercareOwner', c.hypercareOwner)}</div></div>
       <div class="field"><label>Communications</label><textarea name="comms" placeholder="Who is told what, and when">${esc(c.comms || '')}</textarea></div>
-      <div class="hint">The go-live gate needs at least one runbook task, a rollback owner and plan, and a hypercare owner.</div>`,
+      <div class="hint">The go-live gate needs at least one runbook task, a rollback owner and plan, and a hypercare owner. Every go/no-go task needs an owner, who confirms it before go-live. Editing the plan after sign-off sends every section back for re-approval.</div>`,
     actions: [{ id: 'save', label: 'Save plan', primary: true }],
   });
   const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
@@ -431,6 +513,8 @@ async function editCutover(prj) {
     const rows = [...mb.querySelectorAll('[data-trow]')];
     const bad = rows.find(r => !r.querySelector('[data-tt]').value.trim() && (r.querySelector('[data-to]').value || r.querySelector('[data-tp]').value));
     if (bad) return 'A runbook task has an owner or time but no description. Describe it or remove the row.';
+    const gng = rows.find(r => r.querySelector('[data-tt]').value.trim() && r.querySelector('[data-tg]').checked && !r.querySelector('[data-to]').value);
+    if (gng) { gng.querySelector('[data-to]').setAttribute('aria-invalid', 'true'); return `“${gng.querySelector('[data-tt]').value.trim()}” is a go/no-go check, so it needs an owner: only that owner can confirm it before go-live.`; }
     const hd = String(f.hypercareDays || '').trim();
     if (hd && (!/^\d+$/.test(hd) || +hd > 90)) return { msg: 'Hypercare days must be a whole number from 0 to 90.', field: 'hypercareDays' };
     return null;
@@ -448,7 +532,8 @@ async function editCutover(prj) {
   const days = Math.max(0, Math.min(90, parseInt(f.hypercareDays, 10) || 0));
   const cutover = { window: (f.window || '').trim(), rollbackOwner: f.rollbackOwner || '', rollbackPlan: (f.rollbackPlan || '').trim(), hypercareDays: days, hypercareOwner: f.hypercareOwner || '', comms: (f.comms || '').trim(), tasks: newTasks };
   const cur = store.get('project', prj.id) || prj;
-  await store.save('project', prj.id, Object.assign({}, cur, { cutover }), `Updated the cutover plan for ${prj.name} (${newTasks.length} runbook task${newTasks.length === 1 ? '' : 's'})`);
+  /* R5: a cutover edit after sign-off makes every approval stale (project.cutoverUpdatedAt) */
+  await store.save('project', prj.id, Object.assign({}, cur, { cutover, cutoverUpdatedAt: new Date().toISOString() }), `Updated the cutover plan for ${prj.name} (${newTasks.length} runbook task${newTasks.length === 1 ? '' : 's'})`);
   await store.notify([cutover.rollbackOwner, cutover.hypercareOwner, ...newTasks.map(t => t.owner)], `${pname(store.state.me)} named you in the cutover plan for ${prj.name}`, 'project:' + prj.id);
   toast('Cutover plan saved');
 }
@@ -493,11 +578,19 @@ function grantsCard(prj) {
 
 function goLiveCard(prj, rd, live) {
   const procs = projectProcesses(prj);
-  return `<div class="card rl-golive ${rd.pass && !live ? 'ready' : ''}"><h3>Go-live</h3>
+  const rm = rmOf(prj); const isRm = store.state.me === rm;
+  const open = gngOpen(prj);
+  const ready = rd.pass && !live && !open.length;
+  let why = '';
+  if (!live && !isRm) why = `<div class="hint rl-why" data-why="rm">Only the release manager (${esc(pname(rm))}) can go live. Switch 'Viewing as' to ${esc(pname(rm))} to release.</div>`;
+  else if (!live && open.length) why = `<div class="hint rl-why" data-why="gonogo">Go/no-go not confirmed: ${open.map(t => `${esc(t.task)} (${t.owner ? esc(pname(t.owner)) + ' confirms' : 'needs an owner'})`).join(' · ')}.</div>`;
+  return `<div class="card rl-golive ${ready ? 'ready' : ''}"><h3>Go-live</h3>
     ${live ? `<p class="rl-p">This project is live. The to-be processes became the new as-is versions.</p>`
-      : `<p class="rl-p">${rd.pass ? 'The gate passes. Releasing promotes each to-be process to the new as-is version and runs the release actions.' : 'Locked until every readiness check passes.'}</p>`}
+      : `<p class="rl-p">${rd.pass ? 'The gate passes. Releasing runs the deployment pipeline first; only if it succeeds are the to-be processes promoted, the SOP published and access closed.' : 'Locked until every readiness check passes.'}</p>`}
     <div class="rl-procs">${procs.map(p => `<div><a href="${link('/process/' + p.id)}" data-link>${esc(p.name)}</a><span class="chip">v${esc(p.version || 1)}${live ? '' : ` → v${esc((p.version || 1) + 1)}`}</span></div>`).join('')}</div>
-    <button class="btn primary rl-gobtn" data-golive ${rd.pass && !live ? '' : 'disabled'}>${live ? 'Released' : 'Go live'}</button>
+    ${!live && gngOf(prj).length ? `<div class="rl-gngsum ${open.length ? 'fail' : 'pass'}" data-gng-summary><span class="rl-ic ${open.length ? 'fail' : 'pass'}">${open.length ? ICON.fail : ICON.pass}</span> Go/no-go: ${gngOf(prj).length - open.length} of ${gngOf(prj).length} confirmed by their owners</div>` : ''}
+    <button class="btn primary rl-gobtn" data-golive ${rd.pass && !live && isRm && !open.length ? '' : 'disabled'}>${live ? 'Released' : 'Go live'}</button>
+    ${why}
     ${!rd.pass && !live ? `<div class="hint" style="margin-top:6px">${rd.checks.filter(c => checkState(c) === 'fail').map(c => esc(c.label)).join(' · ')}</div>` : ''}
     ${live ? '<div class="hint" style="margin-top:6px">Rollback is in the release summary.</div>' : ''}</div>`;
 }
@@ -516,29 +609,36 @@ function releasedCard(prj, rd, rel) {
     ${rollbackBlock(prj, procs)}</div>`;
 }
 
-function canRollback(prj) { const me = store.state.me; return !!me && (me === prj.owner || me === (prj.cutover || {}).rollbackOwner); }
+/* R5: only the release manager rolls back (the server returns 403 otherwise). */
+function canRollback(prj) { const me = store.state.me; return !!me && me === rmOf(prj); }
 function rollbackBlock(prj, procs) {
-  const rbo = (prj.cutover || {}).rollbackOwner;
   const prev = procs.filter(p => (p.version || 1) > 1);
-  return `<div class="rl-rb"><div class="hint">${prev.length ? `Rolling back restores ${prev.map(p => `${esc(p.name)} v${esc((p.version || 1) - 1)}`).join(', ')} as the as-is version.` : 'No previous version to restore.'}</div>
+  return `<div class="rl-rb"><div class="hint">${prev.length ? `Rolling back restores ${prev.map(p => `${esc(p.name)} v${esc((p.version || 1) - 1)}`).join(', ')} as the as-is version and re-publishes the previous SOP.` : 'No previous version to restore.'}</div>
     ${canRollback(prj) ? `<button class="btn danger rl-gobtn" data-rollback ${prev.length ? '' : 'disabled'}>Roll back release</button>`
-      : `<button class="btn rl-gobtn" disabled>Roll back release</button><div class="hint" data-why>Only the project owner (${esc(pname(prj.owner))})${rbo && rbo !== prj.owner ? ` or the rollback owner (${esc(pname(rbo))})` : ''} can roll back.</div>`}</div>`;
+      : `<button class="btn rl-gobtn" disabled>Roll back release</button><div class="hint" data-why="rm">Only the release manager (${esc(pname(rmOf(prj)))}) can roll back.</div>`}</div>`;
 }
 
 const PIPE_FAIL = 'Stage “smoke-test” failed: the vendor sync health check returned HTTP 500 after deploy (simulated).';
+const isFailedRel = r => !!r && !isRollback(r) && (r.status === 'failed' || r.failed === true || (r.pipeline && r.pipeline.status === 'failed'));
 /* Pipeline phase for a release: animating locally, else the stored final status. Legacy 'simulated-ok' reads as succeeded. */
 function pipePhase(r, a) {
   if (ui.pipe && ui.pipe.id === r.id) return ui.pipe.phase;
-  if (!r.pipeline && (r.status === 'queued' || ui.pipeStart === r.projectId)) return 'queued'; /* go-live just returned; the run has not started */
+  if (ui.pipeStart === r.projectId) return 'queued'; /* go-live just returned; the run has not started */
+  if (isFailedRel(r)) return 'failed';
   const st = (r.pipeline && r.pipeline.status) || (a && a.status);
   return st === 'failed' ? 'failed' : st === 'queued' || st === 'running' ? st : 'succeeded';
+}
+function pipeError(r, a) {
+  const pa = (r.actions || []).find(x => x.type === 'pipeline') || {};
+  const m = /Run result: ([^\n]+)/.exec(String(pa.detail || ''));
+  return (r.pipeline && r.pipeline.error) || r.error || (a && a.error) || pa.error || (m && m[1]) || PIPE_FAIL;
 }
 function pipelineView(r, a) {
   const ph = pipePhase(r, a);
   const steps = ['queued', 'running', ph === 'failed' ? 'failed' : 'succeeded'];
   const idx = steps.indexOf(ph);
   const label = { queued: 'Queued', running: 'Running', succeeded: 'Succeeded', failed: 'Failed' };
-  const err = ph === 'failed' ? ((r.pipeline && r.pipeline.error) || a.error || PIPE_FAIL) : '';
+  const err = ph === 'failed' ? pipeError(r, a) : '';
   const det = a.detail == null ? '' : typeof a.detail === 'string' ? a.detail : JSON.stringify(a.detail, null, 2);
   return `<div class="rl-act rl-pipe ${ph}" data-pipe-phase="${esc(ph)}"><div class="rl-act-h"><b>Deployment pipeline</b><span class="hint">${esc(a.target || '')}</span>
     <span class="sim">Simulated pipeline</span>${badge(label[ph], ph === 'failed' ? 'b-late' : ph === 'succeeded' ? 'b-done' : 'b-prog')}</div>
@@ -550,9 +650,9 @@ function pipelineView(r, a) {
 function actionView(a, r) {
   if (a.type === 'pipeline' && r && !isRollback(r)) return pipelineView(r, a);
   const det = a.detail == null ? '' : typeof a.detail === 'string' ? a.detail : JSON.stringify(a.detail, null, 2);
-  const label = { pipeline: 'Deployment pipeline', 'sop-publish': 'Publish SOP', notify: 'Notify stakeholders' }[a.type] || a.type;
+  const label = { pipeline: 'Deployment pipeline', 'sop-publish': 'Publish SOP', notify: 'Notify stakeholders', 'sop-republish': 'Re-publish previous SOP', restore: 'Restore process version' }[a.type] || a.type;
   return `<div class="rl-act"><div class="rl-act-h"><b>${esc(label)}</b><span class="hint">${esc(a.target || '')}</span>
-    <span class="sim">Simulated</span>${badge(a.status || 'simulated-ok', 'b-done')}</div>
+    <span class="sim">Simulated</span>${badge(a.status || 'simulated-ok', /fail/.test(a.status || '') ? 'b-late' : 'b-done')}</div>
     ${det ? (a.type === 'pipeline' || typeof a.detail === 'object' ? `<pre class="rl-pre">${esc(det)}</pre>` : `<div class="hint">${esc(det)}</div>`) : ''}</div>`;
 }
 
@@ -564,19 +664,43 @@ function exceptionView(x, prjId) {
   const extra = [x.summary && x.summary !== v.text ? x.summary : '', x.note && x.note !== v.text ? x.note : '', by, x.at ? fmtTime(x.at) : ''].filter(Boolean).join(' · ');
   return { text: v.text, href: v.href, extra };
 }
+/* Side effects a rollback undid (R5). Server records them; older records are described from their snapshot and actions. */
+function undoneOf(r) {
+  const raw = r.undone || r.restored || r.sideEffects || r.undid;
+  const procName = id => (store.get('process', id) || {}).name || id;
+  if (Array.isArray(raw) && raw.length) return raw.map(x => {
+    if (typeof x === 'string') return x;
+    if (x.detail) return `${x.target ? x.target + ': ' : ''}${x.detail}`;
+    const t = x.type || x.kind || '';
+    const nm = x.name || (x.processId || x.pid ? procName(x.processId || x.pid) : '') || x.target || '';
+    if (/restore|version/.test(t)) return `Restored ${nm}${x.version || x.to ? ' v' + (x.version || x.to) : ''} as the as-is process${x.from ? ` (v${x.from} withdrawn)` : ''}`;
+    if (/sop|publish/.test(t)) return `Re-published the previous SOP${nm ? ' for ' + nm : ''}${x.version ? ' (v' + x.version + ')' : ''}`;
+    if (/grant|access/.test(t)) return x.detail || `Access record noted: ${nm}`;
+    if (/data/.test(t)) return x.detail || `Data state restored: ${nm}`;
+    return x.detail || x.summary || x.text || [t, nm].filter(Boolean).join(': ');
+  });
+  const snap = r.snapshot || {};
+  const out = Object.keys(snap).map(pid => `Restored ${procName(pid)} v${snap[pid]} as the as-is process`);
+  (r.actions || []).filter(a => a.type === 'sop-publish' || a.type === 'sop-republish').forEach(a => out.push(`Re-published the previous SOP${a.target ? ': ' + a.target : ''}`));
+  return out;
+}
 function releaseRecord(r) {
   const snap = r.snapshot || {};
   const rb = isRollback(r);
+  const failed = !rb && pipePhase(r) === 'failed';
   const exc = r.exceptions || [];
-  return `<div class="rl-rec" data-release="${esc(r.id)}" data-kind="${rb ? 'rollback' : 'golive'}">
-    <div class="rl-rec-h">${badge(rb ? 'Rollback' : 'Go-live', rb ? 'b-late' : 'b-done')} <b>${esc(fmtTime(r.at))}</b> · ${rb ? 'rolled back' : 'released'} by ${av(r.by)} ${esc(pname(r.by))}${r.stepUp ? ` · <span class="rl-mfa" data-stepup>step-up verified</span>` : ''}</div>
+  const undone = rb ? undoneOf(r) : [];
+  return `<div class="rl-rec" data-release="${esc(r.id)}" data-kind="${rb ? 'rollback' : 'golive'}" ${failed ? 'data-failed' : ''}>
+    <div class="rl-rec-h">${badge(rb ? 'Rollback' : failed ? 'Go-live failed' : 'Go-live', rb || failed ? 'b-late' : 'b-done')} <b>${esc(fmtTime(r.at))}</b> · ${rb ? 'rolled back' : failed ? 'attempted' : 'released'} by ${av(r.by)} ${esc(pname(r.by))}${r.stepUp ? ` · <span class="rl-mfa" data-stepup>step-up verified</span>` : ''}</div>
     ${rb ? (r.reason || r.note ? `<div class="rl-rec-s"><span class="lbl">Reason</span>${esc(r.reason || r.note)}</div>` : '')
       : `<div class="rl-rec-s"><span class="lbl">Approvers</span>${(r.approvers || []).map(id => `${av(id)}<span class="rl-nm">${esc(pname(id))}</span>`).join(' ') || '—'}</div>`}
-    <div class="rl-rec-s"><span class="lbl">${rb ? 'Restored versions' : 'Released versions'}</span>${Object.keys(snap).map(pid => { const p = store.get('process', pid); return `<a class="chip" href="${link('/process/' + pid)}" data-link data-ver="${esc(pid)}">${esc(p ? p.name : pid)} · v${esc(snap[pid])}</a>`; }).join(' ') || '—'}</div>
-    ${rb ? '' : `<div class="rl-rec-s rl-rec-exc" data-exceptions="${exc.length}"><span class="lbl">Exceptions · changed after an approval</span>${exc.length
+    ${failed ? `<div class="rl-rec-s rl-noeffect" data-no-side-effects><span class="lbl">Side effects</span><b>Nothing was promoted or published.</b> <span class="hint">No process version changed, the SOP was not published, access grants were left as they were, and only the release manager was notified.</span></div>`
+      : `<div class="rl-rec-s"><span class="lbl">${rb ? 'Restored versions' : 'Released versions'}</span>${Object.keys(snap).map(pid => { const p = store.get('process', pid); return `<a class="chip" href="${link('/process/' + pid)}" data-link data-ver="${esc(pid)}">${esc(p ? p.name : pid)} · v${esc(snap[pid])}</a>`; }).join(' ') || '—'}</div>`}
+    ${rb ? `<div class="rl-rec-s rl-undone" data-undone="${undone.length}"><span class="lbl">Side effects undone</span>${undone.length ? `<ul>${undone.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<span class="hint">Nothing to undo.</span>'}</div>` : ''}
+    ${rb || failed ? '' : `<div class="rl-rec-s rl-rec-exc" data-exceptions="${exc.length}"><span class="lbl">Exceptions · changed after an approval</span>${exc.length
       ? `<ul>${exc.map(x => { const v = exceptionView(x, r.projectId); return `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)}${v.extra ? ` <small>${esc(v.extra)}</small>` : ''}</li>`; }).join('')}</ul>`
       : '<span class="hint">None. Nothing changed after its business unit signed off.</span>'}</div>`}
-    <div class="rl-acts-list">${(r.actions || []).map(a => actionView(a, r)).join('')}</div></div>`;
+    <div class="rl-acts-list">${(r.actions || []).filter(a => !failed || a.type === 'pipeline' || a.type === 'notify').map(a => actionView(a, r)).join('') || (failed ? pipelineView(r, { type: 'pipeline', target: 'Customer CI/CD (simulated)' }) : '')}</div></div>`;
 }
 
 function releaseCards(prj, releases) {
@@ -584,9 +708,11 @@ function releaseCards(prj, releases) {
   const latest = releases[0];
   const fresh = ui.lastRelease === latest.id;
   const rbLatest = isRollback(latest);
-  const lf = !rbLatest && (latest.status === 'failed' || pipePhase(latest) === 'failed');
+  const lf = !rbLatest && pipePhase(latest) === 'failed';
+  const statusBadge = r => isRollback(r) ? badge('rolled back', 'b-late') : pipePhase(r) === 'failed' ? badge('failed · no changes', 'b-late') : badge('deployed', 'b-done');
+  const sub = r => { const n = Object.keys(r.snapshot || {}).length; return isRollback(r) ? `${n} process version${n === 1 ? '' : 's'} restored` : pipePhase(r) === 'failed' ? 'pipeline failed · nothing promoted or published' : `${(r.actions || []).length} actions · ${(r.exceptions || []).length} exception${(r.exceptions || []).length === 1 ? '' : 's'}`; };
   return `<div class="card rl-latest ${fresh ? 'fresh' : ''} ${rbLatest || lf ? 'rb' : ''}"><h3>${lf ? 'Release failed' : fresh ? (rbLatest ? 'Rollback complete' : 'Release complete') : (rbLatest ? 'Latest rollback' : 'Latest release')}</h3>${releaseRecord(latest)}</div>
-    <div class="card"><h3>Release history<span class="n">${releases.length}</span></h3>${releases.map(r => { const n = Object.keys(r.snapshot || {}).length; return `<div class="row click" data-relrow="${esc(r.id)}" data-kind="${isRollback(r) ? 'rollback' : 'golive'}"><div><div class="t">${isRollback(r) ? 'Rollback' : 'Go-live'} · ${esc(fmtTime(r.at))}</div><div class="s">${esc(pname(r.by))} · ${isRollback(r) ? `${n} process version${n === 1 ? '' : 's'} restored` : `${(r.actions || []).length} actions · ${(r.exceptions || []).length} exception${(r.exceptions || []).length === 1 ? '' : 's'}`}</div></div><div class="r">${isRollback(r) ? badge('rolled back', 'b-late') : r.status === 'failed' ? badge('pipeline failed', 'b-late') : badge('deployed', 'b-done')}</div></div>${ui.showRel.has(r.id) && r.id !== latest.id ? releaseRecord(r) : ''}`; }).join('')}</div>`;
+    <div class="card"><h3>Release history<span class="n">${releases.length}</span></h3>${releases.map(r => `<div class="row click" data-relrow="${esc(r.id)}" data-kind="${isRollback(r) ? 'rollback' : 'golive'}" ${pipePhase(r) === 'failed' && !isRollback(r) ? 'data-failed' : ''}><div><div class="t">${isRollback(r) ? 'Rollback' : 'Go-live'} · ${esc(fmtTime(r.at))}</div><div class="s">${esc(pname(r.by))} · ${sub(r)}</div></div><div class="r">${statusBadge(r)}</div></div>${ui.showRel.has(r.id) && r.id !== latest.id ? releaseRecord(r) : ''}`).join('')}</div>`;
 }
 
 /* ---------- bind ---------- */
@@ -603,7 +729,8 @@ export function bind(root, params) {
   /* BU sign-off */
   root.querySelectorAll('[data-signoff]').forEach(b => b.onclick = async () => {
     const bu = b.dataset.bu, decision = b.dataset.signoff;
-    if (store.state.me === prj.owner) { toast("Project owners can't approve their own release."); return; }
+    if (store.state.me === prj.owner && decision === 'approved') { toast("Project owners can't approve their own release."); return; }
+    if (store.state.me === rmOf(prj) && decision === 'approved') { toast("The release manager can't sign off a business-unit section."); return; }
     if (!signoffOpenOf(readiness(prjId))) { toast('Sign-off opens when the other checks pass.'); return; }
     let note = '';
     if (decision === 'rejected') {
@@ -631,8 +758,8 @@ export function bind(root, params) {
   if (gl) gl.onclick = () => goLive(prj);
   const rb = root.querySelector('[data-rollback]');
   if (rb) rb.onclick = () => rollBack(prj);
-  const rbn = root.querySelector('[data-rollback-now]');
-  if (rbn) rbn.onclick = () => { const rel = store.list('release', r => r.projectId === prj.id && r.kind !== 'rollback').sort((a, b) => String(b.at).localeCompare(String(a.at)))[0]; rollBack(prj, 'Deployment pipeline failed: ' + ((rel && rel.pipeline && rel.pipeline.error) || PIPE_FAIL)); };
+  const rt = root.querySelector('[data-retry]');
+  if (rt) rt.onclick = () => goLive(prj, true);
   root.querySelectorAll('[data-rb-done]').forEach(cb => cb.onchange = () => tickTask(prj, cb.dataset.rbDone, cb.checked));
   const ce = root.querySelector('[data-cutover-edit]');
   if (ce) ce.onclick = () => editCutover(prj);
@@ -726,13 +853,16 @@ function cycleExceptions(prj) {
 }
 
 function failBanner(prj, rel) {
-  const err = (rel.pipeline && rel.pipeline.error) || PIPE_FAIL;
+  const err = pipeError(rel);
+  const rm = rmOf(prj);
   return `<div class="rl-failbn" data-pipeline-failed><div><b>Release failed: the deployment pipeline did not succeed.</b><span class="sim">Simulated pipeline</span>
-      <div class="hint">${esc(err)} The release is marked failed. Rolling back restores the previous as-is versions.</div></div>
-    ${canRollback(prj) ? `<button class="btn danger" data-rollback-now>Roll back now</button>` : `<span class="hint" data-why>Only the project owner (${esc(pname(prj.owner))})${(prj.cutover || {}).rollbackOwner && prj.cutover.rollbackOwner !== prj.owner ? ` or the rollback owner (${esc(pname(prj.cutover.rollbackOwner))})` : ''} can roll back.</span>`}</div>`;
+      <div class="rl-noeffect-b" data-no-side-effects><b>Nothing was promoted or published.</b> The process versions, the SOP and the access grants are exactly as they were, and only the release manager was notified.</div>
+      <div class="hint">${esc(err)}</div></div>
+    ${store.state.me === rm ? `<button class="btn primary" data-retry ${readiness(prj.id).pass && !gngOpen(prj).length ? '' : 'disabled'}>Retry go-live</button>` : `<span class="hint" data-why="rm">Only the release manager (${esc(pname(rm))}) can retry.</span>`}</div>`;
 }
 
-/* Simulated pipeline: queued -> running -> succeeded | failed, then the final status is saved on the release record. */
+/* Simulated pipeline animation: queued -> running -> the server's outcome (succeeded | failed). The server already decided:
+   a failure wrote a failed release with no side effects; a success promoted, published and closed access. */
 const PIPE_MS = 1300;
 function startPipeline(prj, relId, fail) {
   const t0 = new Date().toISOString();
@@ -747,19 +877,21 @@ async function finishPipeline(prj, relId) {
   p.phase = final; p.log.push({ phase: final, at: new Date().toISOString() });
   store.emit();
   const rel = store.get('release', relId);
-  if (!rel) { ui.pipe = null; return; }
-  const acts = (rel.actions || []).slice();
-  if (!acts.some(a => a.type === 'pipeline')) acts.unshift({ type: 'pipeline', target: 'Customer CI/CD (simulated)', status: 'queued' });
-  const pipeline = { status: final, simulated: true, log: p.log };
-  if (p.fail) pipeline.error = PIPE_FAIL;
-  const next = Object.assign({}, rel, { status: final, pipeline, actions: acts.map(a => a.type === 'pipeline' ? Object.assign({}, a, { status: final }, p.fail ? { error: PIPE_FAIL } : {}) : a) });
+  if (!rel) { ui.pipe = null; store.emit(); return; }
+  const err = p.fail ? pipeError(rel) : '';
+  const pipeline = Object.assign({}, rel.pipeline || {}, { status: final, simulated: true, log: p.log }, p.fail ? { error: err } : {});
+  const acts = (rel.actions || []).length ? rel.actions : [{ type: 'pipeline', target: 'Customer CI/CD (simulated)', status: final }];
+  const next = Object.assign({}, rel, { status: final, pipeline, actions: acts.map(a => a.type === 'pipeline' ? Object.assign({}, a, { status: final }, p.fail ? { error: err } : {}) : a) });
   try {
-    await store.save('release', relId, next, p.fail ? `Deployment pipeline failed for ${prj.name} (simulated); release marked failed` : `Deployment pipeline succeeded for ${prj.name} (simulated)`);
-  } finally { ui.pipe = null; store.emit(); }
-  toast(p.fail ? 'Pipeline failed (simulated). Roll back from the banner.' : 'Pipeline succeeded (simulated)');
+    await store.save('release', relId, next, p.fail ? `Deployment pipeline failed for ${prj.name} (simulated); nothing was promoted or published` : `Deployment pipeline succeeded for ${prj.name} (simulated)`);
+  } catch (e) { /* the server's record stands */ }
+  finally { ui.pipe = null; store.emit(); }
+  toast(p.fail ? 'Pipeline failed (simulated). Nothing was promoted or published.' : 'Pipeline succeeded (simulated)');
 }
 
-async function goLive(prj) {
+async function goLive(prj, retry) {
+  const rm = rmOf(prj);
+  if (store.state.me !== rm) { toast(`Only the release manager (${pname(rm)}) can go live.`); return; }
   const rd = readiness(prj.id);
   if (!rd.pass) { toast('The gate is not passing yet.'); return; }
   const procs = projectProcesses(prj);
@@ -767,55 +899,68 @@ async function goLive(prj) {
   const approvers = [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a)).map(a => a.approver))];
   const openGrants = store.list('grant', g => g.projectId === prj.id && ['active', 'approved'].includes(grantStatus(g))).length;
   const excs = cycleExceptions(prj);
-  const r = await modal({
-    title: `Release ${prj.name}`,
+  const tasks = tasksOf(prj.cutover);
+  const gOpen = gngOpen(prj);
+  /* the runbook as a plain table: every task keeps its owner's name (R5 bug fix: owners were lost in this dialog) */
+  const rbRows = tasks.map((t, i) => `<tr data-gl-task="${esc(t.id)}" class="${t.gonogo ? 'gng' : ''}"><td>${i + 1}</td><td>${esc(t.task)}${t.gonogo ? ' <span class="rl-gng">Go/no-go</span>' : ''}</td>
+    <td data-gl-owner="${esc(t.owner || '')}">${t.owner ? `${av(t.owner)} ${esc(pname(t.owner))}` : '<b class="rl-noown">No owner</b>'}</td>
+    <td>${t.gonogo ? (t.done ? `<span class="rl-ok">Confirmed by ${esc(pname(t.doneBy || t.owner))}</span>` : '<b class="rl-noown">Not confirmed</b>') : t.done ? 'Done' : esc(fmtPlanned(t.planned))}</td></tr>`).join('');
+  const r = modal({
+    title: `${retry ? 'Retry release' : 'Release'} ${prj.name}`,
     body: `<div class="rl-sum">
-      <div><span class="lbl">Processes promoted</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
+      <div><span class="lbl">Release manager</span><div>${av(rm)} ${esc(pname(rm))}</div></div>
+      <div><span class="lbl">Processes promoted if the pipeline succeeds</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
       <div><span class="lbl">Signed off by</span>${approvers.map(id => `<div>${av(id)} ${esc(pname(id))}</div>`).join('')}</div>
-      <div><span class="lbl">Access</span><div>${openGrants} open grant${openGrants === 1 ? '' : 's'} will expire now</div></div>
+      <div><span class="lbl">Access</span><div>${openGrants} open grant${openGrants === 1 ? '' : 's'} will expire if the pipeline succeeds</div></div>
       <div><span class="lbl">Exceptions recorded</span><div>${excs.length ? `${excs.length} change${excs.length === 1 ? '' : 's'} made after a sign-off and re-approved` : 'None'}</div></div>
-      <div><span class="lbl">Release actions</span><div>Trigger the deployment pipeline · publish the new SOP · notify stakeholders</div></div></div>
-      <div class="rl-gl-rb" data-golive-runbook>${runbookTable(prj, { checklist: true, readonly: true })}<div class="hint">After release, task owners tick each task on the release page.</div></div>
-      <label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated pipeline ends in “failed” so you can see the failure and rollback path.</small></span></label>
+      <div><span class="lbl">Release actions</span><div>Run the deployment pipeline, then publish the new SOP and notify stakeholders</div></div></div>
+      <div class="rl-gl-rb" data-golive-runbook>${tasks.length ? `<div class="rl-rb-h"><b>Cutover runbook</b><span class="hint">${gngOf(prj).length - gOpen.length}/${gngOf(prj).length} go/no-go confirmed</span></div>
+        <div class="tbl-wrap"><table class="rl-gltbl"><thead><tr><th>#</th><th>Task</th><th>Owner</th><th>Status</th></tr></thead><tbody>${rbRows}</tbody></table></div>` : '<div class="hint">No runbook tasks.</div>'}
+        ${gOpen.length ? `<div class="rl-err" data-gng-block>Go-live is blocked until every go/no-go task has an owner who has confirmed it.</div>` : ''}</div>
+      <label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated pipeline fails. The server then records a failed release and changes nothing: no promotion, no SOP publish, no access expiry.</small></span></label>
       <span class="sim">Simulated: in this showroom the pipeline trigger is recorded, not sent, and its run is animated.</span>`,
     actions: [{ id: 'go', label: 'Continue to verify', primary: true }],
   });
-  if (r.action !== 'go') return;
-  const fail = (r.form.simfail || []).includes('1');
+  guardModal(() => gngOpen(store.get('project', prj.id) || prj).length ? 'Every go/no-go task must be confirmed by its owner before go-live.' : null);
+  const res0 = await r;
+  if (res0.action !== 'go') return;
+  const fail = (res0.form.simfail || []).includes('1');
   if (!(await stepUp('release to production'))) { toast('Step-up not completed. Nothing was released.'); return; }
   ui.pipeStart = prj.id;
   try {
-    const res = await store.api('/golive/' + prj.id);
+    const res = await store.api('/golive/' + prj.id, { simulateFailure: fail });
     ui.reasons = null;
     await store.load();
     const rel = (res && (res.release || (res.data && res.data.projectId ? res.data : null) || (res.projectId ? res : null))) || null;
     const latest = store.list('release', x => x.projectId === prj.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
     ui.lastRelease = (rel && rel.id) || (latest && latest.id) || null;
+    const failed = !!(res && res.failed) || (rel && rel.status === 'failed');
     const saved = ui.lastRelease && store.get('release', ui.lastRelease);
     if (saved) {
-      const next = Object.assign({}, saved, { status: 'queued', stepUp: { by: store.state.me, at: new Date().toISOString(), method: 'simulated-mfa' } });
-      const addExc = !(saved.exceptions || []).length && excs.length;
+      const next = Object.assign({}, saved, { stepUp: { by: store.state.me, at: new Date().toISOString(), method: 'simulated-mfa' } });
+      const addExc = !failed && !(saved.exceptions || []).length && excs.length;
       if (addExc) next.exceptions = excs;
-      await store.save('release', saved.id, next, `Go-live approved with step-up by ${pname(store.state.me)}${addExc ? `; ${excs.length} re-approved change${excs.length === 1 ? '' : 's'} recorded as exceptions` : ''}`);
-      startPipeline(prj, saved.id, fail);
+      try { await store.save('release', saved.id, next, `${failed ? 'Go-live attempt' : 'Go-live'} approved with step-up by ${pname(store.state.me)}${addExc ? `; ${excs.length} re-approved change${excs.length === 1 ? '' : 's'} recorded as exceptions` : ''}`); } catch (e) { /* server record stands */ }
+      ui.pipeStart = null;
+      startPipeline(prj, saved.id, failed);
     }
     ui.pipeStart = null;
     store.emit();
-    toast(`${prj.name} is live · pipeline queued (simulated)`);
+    toast(failed ? `${prj.name} · pipeline queued (simulated)` : `${prj.name} is live · pipeline queued (simulated)`);
   } catch (e) {
     ui.pipeStart = null;
-    if (e.status === 409) { ui.reasons = (e.body && e.body.reasons && e.body.reasons.length) ? e.body.reasons : [e.message]; store.emit(); toast('Go-live refused. See the reasons above the checklist.'); }
+    if (e.status === 409 || e.status === 403) { ui.reasons = (e.body && e.body.reasons && e.body.reasons.length) ? e.body.reasons : [e.message || `Only the release manager (${pname(rm)}) can go live.`]; store.emit(); toast(e.status === 403 ? 'Go-live refused: only the release manager can go live.' : 'Go-live refused. See the reasons above the checklist.'); }
     else toast('Go-live failed: ' + e.message);
   }
 }
 
-async function rollBack(prj, quick) {
-  if (!canRollback(prj)) { toast('Only the project owner or the rollback owner can roll back.'); return; }
+async function rollBack(prj) {
+  const rm = rmOf(prj);
+  if (!canRollback(prj)) { toast(`Only the release manager (${pname(rm)}) can roll back.`); return; }
   const procs = projectProcesses(prj);
-  /* one-click rollback from a failed pipeline: no confirm dialog, the reason is the failure; step-up still applies */
-  const r = quick ? { action: 'rollback', form: { reason: quick } } : await modal({
+  const r = await modal({
     title: `Roll back ${prj.name}?`,
-    body: `<p style="margin:0 0 8px">This restores the previous as-is version of each process and sets the project back to active. The released version stays in history.</p>
+    body: `<p style="margin:0 0 8px">This undoes the release's side effects: it restores the previous as-is version of each process, re-publishes the previous SOP and sets the project back to active. The released version stays in history.</p>
       <div class="rl-sum"><div><span class="lbl">Processes restored</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc(Math.max(1, (p.version || 1) - 1))}</b></div>`).join('')}</div>
       <div><span class="lbl">Rollback plan</span><div>${esc((prj.cutover || {}).rollbackPlan || 'No plan recorded')}</div></div></div>
       <div class="field" style="margin-top:10px"><label>Reason</label><textarea name="reason" placeholder="What went wrong?"></textarea></div>`,
@@ -823,14 +968,18 @@ async function rollBack(prj, quick) {
   });
   if (r.action !== 'rollback') return;
   if (!(await stepUp('roll back the release'))) { toast('Step-up not completed. Nothing was rolled back.'); return; }
+  const reason = (r.form.reason || '').trim();
   try {
-    const res = await store.api('/rollback/' + prj.id, { reason: (r.form.reason || '').trim() });
+    const res = await store.api('/rollback/' + prj.id, { reason });
     await store.load();
     const latest = store.list('release', x => x.projectId === prj.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
     ui.lastRelease = (res && res.release && res.release.id) || (latest && latest.id) || null;
     const rbRel = ui.lastRelease && store.get('release', ui.lastRelease);
-    if (rbRel) await store.save('release', rbRel.id, Object.assign({}, rbRel, { reason: (r.form.reason || '').trim() || undefined, stepUp: { by: store.state.me, at: new Date().toISOString(), method: 'simulated-mfa' } }), `Rollback approved with step-up by ${pname(store.state.me)}${(r.form.reason || '').trim() ? ': ' + r.form.reason.trim() : ''}`);
+    if (rbRel) { try { await store.save('release', rbRel.id, Object.assign({}, rbRel, { reason: reason || rbRel.reason || undefined, stepUp: { by: store.state.me, at: new Date().toISOString(), method: 'simulated-mfa' } }), `Rollback approved with step-up by ${pname(store.state.me)}${reason ? ': ' + reason : ''}`); } catch (e) { /* server record stands */ } }
     store.emit();
     toast(`${prj.name} rolled back`);
-  } catch (e) { toast('Rollback failed: ' + e.message); }
+  } catch (e) {
+    if (e.status === 403) { ui.reasons = [e.message || `Only the release manager (${pname(rm)}) can roll back.`]; store.emit(); }
+    toast('Rollback failed: ' + e.message);
+  }
 }

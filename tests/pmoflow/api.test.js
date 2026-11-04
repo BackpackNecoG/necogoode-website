@@ -284,11 +284,17 @@ test('seed: relative dates, edge-case CSVs, fictional data', () => {
 
 const allIds = docs => new Set(Object.values(docs).flat().map(d => d.id).filter(id => id.length >= 2));
 /* R4: the cutover check needs at least one runbook task; the seed leaves it for the user to add. */
-async function addRunbook(ws) {
+/* R5: the seed keeps no runbook by design. Add one task with an owner and a confirmed go/no-go step (as the PM),
+   then re-take IT's sign-off: the cutover edit (cutoverUpdatedAt) makes every earlier approval stale. */
+async function addRunbook(ws, opts) {
+  opts = opts || {};
   const st = await state(ws);
   const pr = st.docs.project.find(d => d.id === 'access-review-automation').data;
-  await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, {
-    tasks: [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'dk', planned: '08:00', gonogo: true, done: false }] }) }) });
+  const r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, {
+    tasks: [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'owner' in opts ? opts.owner : 'dk', planned: '08:00', gonogo: true, done: opts.done !== false }] }) }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const at = new Date(Date.now() + 1000).toISOString();
+  await call('PUT', `ws/${ws}/doc/approval/AP8`, { actor: 'dk', data: { projectId: 'access-review-automation', bu: 'IT', approver: 'dk', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'Re-approved after runbook' } });
 }
 
 function assertNoIds(value, docs, where) {
@@ -347,7 +353,7 @@ test('go-live: refused with 409 + reasons; passes end to end; keeps v1; rollback
   assert.equal(r.status, 409);
 
   /* rollback */
-  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'dk' });
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.release.kind, 'rollback');
   st = await state(ws);
@@ -360,7 +366,7 @@ test('go-live: refused with 409 + reasons; passes end to end; keeps v1; rollback
   assert.equal(st.docs.release.filter(d => d.data.kind === 'rollback').length, 1);
   ev = await call('GET', `ws/${ws}/events`, null, { ref: 'project:access-review-automation' });
   assert.equal(ev.body.events[0].action, 'rollback');
-  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'dk' });
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta' });
   assert.equal(r.status, 409);
 });
 
@@ -709,4 +715,212 @@ test('R4 seed: owner confirmations, BU touches, sprints', () => {
   assert.ok(vm.sprints.every(sp => new Date(sp.start + 'T12:00:00Z').getUTCDay() === 1 && new Date(sp.end + 'T12:00:00Z').getUTCDay() === 5));
   assert.equal(s.docs.project.find(d => d.id === 'access-review-automation').data.sprints, undefined, 'auto-built sprints there');
   assert.equal(s.docs.notification.find(d => d.id === 'N2').data.to, 'lp');
+});
+
+/* ------------------------------ Round 5 ------------------------------ */
+/* Bring access-review to a passing gate: runbook (confirmed go/no-go), A4 done, fresh IT + Compliance sign-offs. */
+async function readyAccessReview(ws, runbookOpts) {
+  await addRunbook(ws, runbookOpts);
+  const st = await state(ws);
+  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, find(st, 'workItem', 'A4').data, { status: 'done', doneAt: st.today }) });
+  const at = new Date(Date.now() + 1500).toISOString();
+  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  return state(ws);
+}
+
+test('R5 [S] permissions: process editors, PM-only project fields, release manager only', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const vo = find(st, 'process', 'vendor-onboarding').data;
+  let r = await call('PUT', `ws/${ws}/doc/process/vendor-onboarding`, { actor: 'ta', data: Object.assign({}, vo, { desc: 'edited' }) });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /Ask Maya Chen for edit access/);
+  r = await call('PUT', `ws/${ws}/doc/process/vendor-onboarding`, { actor: 'lp', data: Object.assign({}, vo, { desc: 'edited by a resource' }) });
+  assert.equal(r.status, 200);
+  r = await call('DELETE', `ws/${ws}/doc/process/vendor-onboarding`, { actor: 'ta' });
+  assert.equal(r.status, 403);
+  r = await call('PUT', `ws/${ws}/doc/process/new-proc`, { actor: 'ta', data: { name: 'New', owner: 'ta', resources: ['ta'], version: 1, asis: [], tobe: [], released: [] } });
+  assert.equal(r.status, 200, 'creator who owns a new process may save it');
+
+  const vm = find(st, 'project', 'vendor-modernization').data;
+  for (const [k, v] of [['cutover', { rollbackOwner: 'mc' }], ['releaseManager', 'mc'], ['processes', ['vendor-onboarding']]]) {
+    r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'mc', data: Object.assign({}, vm, { [k]: v }) });
+    assert.equal(r.status, 403, k);
+    assert.match(r.body.error, /Only the project manager \(Tom Alvarez\)/);
+  }
+  r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'mc', data: Object.assign({}, vm, { desc: 'Clarified scope' }) });
+  assert.equal(r.status, 200, 'other fields stay editable');
+  r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, vm, { desc: 'Clarified scope', cutover: { rollbackOwner: 'dk' } }) });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.doc.data.cutoverUpdatedAt, 'cutover edits are stamped');
+  const stamp = r.body.doc.data.cutoverUpdatedAt;
+  r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, r.body.doc.data, { desc: 'no cutover change' }) });
+  assert.equal(r.body.doc.data.cutoverUpdatedAt, stamp, 'unchanged cutover keeps its stamp');
+
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'dk' });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /Only the release manager \(Tom Alvarez\)/);
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ps' });
+  assert.equal(r.status, 403);
+});
+
+test('R5 connection check: simulated probe stored on the data element', async () => {
+  const ws = await newWs();
+  let r = await call('POST', `ws/${ws}/check/D4`, { actor: 'ar' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true);
+  assert.ok(r.body.at && /ERP vendor API/.test(r.body.detail));
+  r = await call('POST', `ws/${ws}/check/D2`, { actor: 'lp' });
+  assert.equal(r.body.ok, false, 'missing data fails the probe');
+  await call('PUT', `ws/${ws}/doc/dataElement/D99`, { actor: 'mc', data: { name: 'Shipping terms', owner: 'mc', source: '', avail: 'example', fields: [], samples: [], discovered: [] } });
+  r = await call('POST', `ws/${ws}/check/D99`, { actor: 'mc' });
+  assert.equal(r.body.ok, false);
+  assert.match(r.body.detail, /No source/);
+  assert.equal((await call('POST', `ws/${ws}/check/D404`, {})).status, 404);
+  const st = await state(ws);
+  assert.equal(find(st, 'dataElement', 'D4').data.check.ok, true);
+  assert.equal(find(st, 'dataElement', 'D2').data.check.ok, false);
+  const ev = (await call('GET', `ws/${ws}/events`, null, { ref: 'dataElement:D4' })).body.events;
+  assert.equal(ev[0].summary, 'Connection check for Vendor master record: ok');
+});
+
+test('R5 release orchestration: gate -> go/no-go -> pipeline failure has no side effects -> success -> rollback undoes', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  /* go/no-go task not confirmed: refused after the gate */
+  let st = await readyAccessReview(ws, { done: false });
+  let r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.ok(r.body.reasons.some(x => /Go\/no-go task "Enable automated campaign" is not confirmed/.test(x)), JSON.stringify(r.body.reasons));
+  st = await readyAccessReview(ws);
+  const gate = engine.readiness(st.docs, 'access-review-automation', st.today);
+  assert.equal(gate.pass, true, JSON.stringify(gate.checks.filter(c => !c.pass)));
+
+  /* simulated pipeline failure */
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.failed, true);
+  assert.equal(r.body.release.status, 'failed');
+  assert.equal(r.body.release.kind, 'golive');
+  st = await state(ws);
+  assert.equal(find(st, 'process', 'access-review').data.version, 1, 'no promotion');
+  assert.equal(find(st, 'grant', 'G4').data.status, 'active', 'no grant expiry');
+  assert.equal(find(st, 'project', 'access-review-automation').data.status, 'active');
+  assert.ok(!r.body.release.actions.some(a => a.type === 'sop-publish'), 'no SOP publish');
+  const notes = st.docs.notification.map(d => d.data).filter(n => n.ref === 'release:' + r.body.release.id);
+  assert.deepEqual(notes.map(n => n.to), ['ta'], 'only the release manager is notified');
+
+  /* success */
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.release.status, 'succeeded');
+  const goliveId = r.body.release.id;
+  st = await state(ws);
+  assert.equal(find(st, 'process', 'access-review').data.version, 2);
+  assert.equal(find(st, 'grant', 'G4').data.status, 'expired');
+
+  /* rollback undoes the side effects and records them */
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta', reason: 'Campaign emails misrouted' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const rb = r.body.release;
+  assert.equal(rb.undoes, goliveId);
+  assert.ok(rb.undone.some(u => u.type === 'process-version' && u.from === 2 && u.to === 1));
+  assert.ok(rb.undone.some(u => u.type === 'sop-publish' && u.to === 1));
+  assert.ok(rb.actions.some(a => a.type === 'sop-publish' && /v1/.test(a.target)));
+  st = await state(ws);
+  assert.equal(find(st, 'process', 'access-review').data.version, 1);
+  assert.equal(find(st, 'release', goliveId).data.rolledBackBy, rb.id);
+});
+
+test('R5 status report: not-yet-live count and email recipients', async () => {
+  const ws = await newWs();
+  const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  const st = await state(ws);
+  const notLive = r.body.facts.notLive.length;
+  if (engine && engine.effectiveAvail) {
+    const used = new Set(st.docs.process.filter(p => ['vendor-onboarding', 'invoice-approval'].includes(p.id))
+      .flatMap(p => engine.flatSteps(p.data.tobe)).flatMap(n => (n.data || []).concat((n.subs || []).flatMap(x => x.data || []))));
+    assert.equal(notLive, [...used].filter(id => engine.effectiveAvail(st.docs, id) !== 'live').length);
+  }
+  assert.ok(notLive >= 5, 'missing + examples + pending');
+  assert.ok(r.body.summary.includes(`${notLive} data elements are not yet live`));
+  assert.deepEqual(r.body.recipients.map(x => x.email), ['tom.alvarez@northwind.example', 'maya.chen@northwind.example', 'priya.shah@northwind.example',
+    'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example']);
+});
+
+test("R5 SOP parser: reviewers' exact phrasings", () => {
+  const docs = seed('2026-11-04').docs;
+  const r = ai.sopRules([
+    '1. Ana Ruiz receives the invoice and enters it in the ERP',
+    '2. Manager reviews the invoice. If approved, Ana Ruiz schedules the payment for the next pay run; otherwise the manager approves an exception or returns it to the vendor with comments',
+    '3. If the PO does not match, go back to step 1',
+    '4. If the vendor disputes the amount, return to step 1',
+    '5. Leo Park releases payment',
+  ].join('\n'), docs);
+  const n = r.nodes;
+  assert.equal(n[1].owner, 'ar', 'full-name owner');
+  assert.equal(n[1].system, 'ERP');
+  assert.equal(n[2].title, 'Manager reviews the invoice');
+  assert.equal(n[3].type, 'decision');
+  assert.equal(n[3].title, 'Approved?');
+  assert.deepEqual(n[3].branches[0].nodes.map(x => [x.title, x.owner]), [['Ana Ruiz schedules the payment for the next pay run', 'ar']]);
+  assert.deepEqual(n[3].branches[1].nodes.map(x => x.title), ['The manager approves an exception or returns it to the vendor with comments'], 'otherwise -> No, untruncated');
+  assert.equal(n[4].branches[0].goto, n[1].id, 'go back to step 1');
+  assert.equal(n[5].branches[0].goto, n[1].id, 'return to step 1');
+  assert.equal(n[6].owner, 'lp');
+  /* ", otherwise" (comma) is also a No branch */
+  const c = ai.sopRules('1. If approved, Ana Ruiz pays the invoice, otherwise the manager approves the exception', docs);
+  assert.equal(c.nodes[1].branches[1].nodes[0].title, 'The manager approves the exception');
+});
+
+test('R5 seed: release manager, day rates, program and budget, evidence on live data, no HR unless touched', () => {
+  const s = seed('2026-11-04');
+  for (const p of s.docs.project.map(d => d.data)) {
+    assert.equal(p.releaseManager, p.owner);
+    assert.ok(p.program && p.budget && p.budget.planned > 0);
+  }
+  assert.ok(s.people.every(p => p.dayRate > 0));
+  for (const d of s.docs.dataElement.map(x => x.data).filter(x => x.avail === 'live')) {
+    assert.equal(d.liveEvidence.type, 'check');
+    assert.equal(d.check.ok, true);
+    assert.equal(d.liveEvidence.by, d.owner);
+  }
+  const touchesHR = JSON.stringify(s.docs.process).includes('"HR"');
+  assert.equal(s.people.some(p => p.bu === 'HR'), touchesHR);
+  const ar = s.docs.project.find(d => d.id === 'access-review-automation').data;
+  assert.equal((ar.cutover.tasks || []).length, 0, 'seed keeps no runbook by design');
+  const d7 = s.docs.dataElement.find(d => d.id === 'D7').data;
+  const covered = new Set(s.docs.testCase.map(d => d.data).filter(c => c.dataId === 'D7').map(c => c.field));
+  assert.ok(d7.fields.every(f => covered.has(f.name)), 'every D7 spec field has a case');
+});
+
+test('R5 runbook ticks: task owner may confirm own task without staling approvals; others may not', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const pr = find(st, 'project', 'access-review-automation').data;
+  const tasks = [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'dk', planned: '08:00', gonogo: true, done: false },
+    { id: 'CT2', order: 2, task: 'Confirm manager list', owner: 'ps', planned: '08:30', gonogo: true, done: false }];
+  let r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, { tasks }) }) });
+  assert.equal(r.status, 200);
+  const stamp = r.body.doc.data.cutoverUpdatedAt;
+  assert.ok(stamp);
+  const tick = (base, id, by) => Object.assign({}, base, { cutover: Object.assign({}, base.cutover, {
+    tasks: base.cutover.tasks.map(t => (t.id === id ? Object.assign({}, t, { done: true, doneAt: new Date().toISOString(), doneBy: by }) : t)) }) });
+  /* Priya ticks her own task: allowed, no stamp */
+  r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ps', data: tick(r.body.doc.data, 'CT2', 'ps') });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.doc.data.cutoverUpdatedAt, stamp, 'a tick is not a cutover edit');
+  const afterTick = r.body.doc.data;
+  /* Priya ticks Dev's task: refused */
+  r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ps', data: tick(afterTick, 'CT1', 'ps') });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /Dev Kumar/);
+  /* Priya edits task text: PM-only */
+  const edited = Object.assign({}, afterTick, { cutover: Object.assign({}, afterTick.cutover, { tasks: afterTick.cutover.tasks.map(t => (t.id === 'CT2' ? Object.assign({}, t, { task: 'Changed' }) : t)) }) });
+  r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ps', data: edited });
+  assert.equal(r.status, 403);
+  /* the PM edits the text: stamped */
+  await new Promise(res => setTimeout(res, 5));
+  r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: edited });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.doc.data.cutoverUpdatedAt > stamp);
 });

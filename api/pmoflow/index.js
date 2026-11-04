@@ -103,6 +103,47 @@ function describe(type, data, docs) {
   }
 }
 
+/* R5: ticking a runbook task (done/doneAt/doneBy) is not a cutover edit */
+const TICK = ['done', 'doneAt', 'doneBy'];
+function cutoverSansTicks(c) {
+  if (!c) return null;
+  const o = Object.assign({}, c);
+  if (Array.isArray(o.tasks)) o.tasks = o.tasks.map(t => { const x = Object.assign({}, t); TICK.forEach(k => delete x[k]); return x; });
+  return o;
+}
+function cutoverStructureChanged(a, b) { return JSON.stringify(cutoverSansTicks(a)) !== JSON.stringify(cutoverSansTicks(b)); }
+function tickedTasks(a, b) {
+  const before = new Map(((a && a.tasks) || []).map((t, i) => [t.id || i, t]));
+  return ((b && b.tasks) || []).filter((t, i) => { const p = before.get(t.id || i) || {}; return TICK.some(k => JSON.stringify(p[k]) !== JSON.stringify(t[k])); });
+}
+
+function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
+
+/* R5 [S] permission rules for PUT. Returns an error message or null. Server promotions bypass this (they write via the store). */
+function permissionError(type, prev, next, actor, docs) {
+  if (type === 'process') {
+    const ref = prev || next;
+    const editors = [ref.owner].concat(ref.resources || []).filter(Boolean);
+    if (!prev && !editors.length) return null;                       /* brand-new process with no owner yet */
+    if (editors.includes(actor)) return null;
+    return `Only the process owner (${personName(docs, ref.owner)}) and the process resources can edit ${describe('process', ref, docs)}. Ask ${personName(docs, ref.owner)} for edit access.`;
+  }
+  if (type === 'project' && prev) {
+    const changed = ['releaseManager', 'processes'].filter(k => JSON.stringify(prev[k] == null ? null : prev[k]) !== JSON.stringify(next[k] == null ? null : next[k]));
+    if (cutoverStructureChanged(prev.cutover, next.cutover)) changed.unshift('cutover');
+    else if (actor !== prev.owner) {
+      /* only runbook ticks changed: each ticked task must belong to the actor */
+      const others = tickedTasks(prev.cutover, next.cutover).filter(t => t.owner !== actor);
+      if (others.length) return `Only the task owner (${others.map(t => personName(docs, t.owner)).join(', ')}) or the project manager (${personName(docs, prev.owner)}) can confirm "${others.map(t => t.task || 'untitled').join('", "')}".`;
+    }
+    if (changed.length && actor !== prev.owner) {
+      const what = changed.map(k => ({ cutover: 'the cutover plan', releaseManager: 'the release manager', processes: 'the linked processes' }[k])).join(', ');
+      return `Only the project manager (${personName(docs, prev.owner)}) can change ${what} on ${describe('project', prev, docs)}.`;
+    }
+  }
+  return null;
+}
+
 const names = docs => {
   const m = {};
   ['person', 'dataElement', 'process', 'project', 'workItem'].forEach(t => (docs[t] || []).forEach(d => { m[t + ':' + d.id] = d.data.name || d.data.title || d.id; }));
@@ -130,7 +171,7 @@ function pipelineAction(kind, projectId, relId, snapshot) {
       'Accept: application/vnd.github+json\nAuthorization: Bearer <token from Key Vault>\n\n' + JSON.stringify(dispatch, null, 2) };
 }
 
-async function goLive(wsId, docs, project, actor, today) {
+async function goLive(wsId, docs, project, actor, today, simulateFailure) {
   const eng = engine();
   if (!eng || typeof eng.readiness !== 'function') return { status: 503, body: { error: 'engine unavailable' } };
   const projectId = project.id;
@@ -138,9 +179,42 @@ async function goLive(wsId, docs, project, actor, today) {
   const gate = eng.readiness(docs, projectId, today);
   if (!gate.pass) return { status: 409, body: { error: 'readiness gate failed',
     reasons: gate.checks.filter(c => !c.pass && !c.warning).map(c => `${c.label}: ${c.detail}`) } };
+  /* R5 step 2: go/no-go enforcement — every go/no-go runbook task has an owner and is confirmed done */
+  const tasks = (project.cutover && Array.isArray(project.cutover.tasks)) ? project.cutover.tasks : [];
+  const gng = [];
+  tasks.filter(t => t && t.gonogo).forEach((t, i) => {
+    const label = `Go/no-go task "${String(t.task || 'untitled').trim() || 'untitled'}"`;
+    if (!t.owner) gng.push(`${label} has no owner.`);
+    if (t.done !== true) gng.push(`${label} is not confirmed (Go/no-go confirmed).`);
+  });
+  if (gng.length) return { status: 409, body: { error: 'go/no-go not confirmed', reasons: gng } };
+
   const at = new Date().toISOString();
-  const events = [], snapshot = {};
+  const rm = project.releaseManager || project.owner;
+  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
   const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
+  const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
+  const approvers = [...new Set((docs.approval || []).map(d => d.data)
+    .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
+
+  /* R5 step 3: pipeline (simulated). On failure: record it, notify the release manager only, no side effects. */
+  if (simulateFailure) {
+    const plan = Object.fromEntries(procDocs.map(pd => [pd.id, (Number(pd.data.version) || 1) + 1]));
+    const pipe = pipelineAction('golive', projectId, relId, plan);
+    pipe.status = 'simulated-failed';
+    pipe.detail += '\n\nRun result: failed at step "deploy automation" (simulated). Nothing was promoted, published or expired.';
+    const release = { id: relId, kind: 'golive', status: 'failed', projectId, at, by: actor, approvers, actions: [pipe,
+      { type: 'notify', target: (people[rm] && people[rm].name) || rm, status: 'simulated-ok', detail: `Pipeline failure notice for ${project.name} sent to the release manager only.` }],
+      exceptions: [], checks: JSON.parse(JSON.stringify(gate.checks)), snapshot: {} };
+    await store.putDoc(wsId, 'release', relId, release);
+    const nid = 'ntf-' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
+    await store.putDoc(wsId, 'notification', nid, { id: nid, to: rm, text: `Go-live pipeline failed for ${project.name}. Nothing was changed; fix and retry.`, ref: 'release:' + relId, at, read: false });
+    await store.appendEvent(wsId, { actor, at, action: 'golive-failed', ref: 'project:' + projectId, summary: `Go-live pipeline failed for ${project.name}; no changes were made` });
+    return { status: 200, body: { ok: false, failed: true, release, project } };
+  }
+
+  /* R5 step 4: side effects, success only */
+  const events = [], snapshot = {};
   for (const pd of procDocs) {
     const p = JSON.parse(JSON.stringify(pd.data));
     const prevVersion = Number(p.version) || 1;
@@ -165,12 +239,8 @@ async function goLive(wsId, docs, project, actor, today) {
     events.push({ action: 'update', ref: 'grant:' + g.id, summary: `${describe('grant', g, docs)} ${next} at go-live` });
   }
   /* R4: go-live never flips data to live; only the data owner's confirmation (liveConfirmedBy + liveSource) does */
-  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
-  const approvers = [...new Set((docs.approval || []).map(d => d.data)
-    .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
-  const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
   const release = {
-    id: relId, kind: 'golive', projectId, at, by: actor, approvers,
+    id: relId, kind: 'golive', status: 'succeeded', projectId, at, by: actor, approvers,
     actions: [pipelineAction('golive', projectId, relId, snapshot),
       ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
@@ -193,8 +263,11 @@ async function rollback(wsId, docs, project, actor, reason) {
   const projectId = project.id;
   if (project.status !== 'live') return { status: 409, body: { error: 'only a live project can be rolled back', reasons: ['Project status is ' + (project.status || 'active') + '.'] } };
   const at = new Date().toISOString();
-  const events = [], snapshot = {};
+  const events = [], snapshot = {}, undone = [];
   const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
+  /* R5: the go-live being reversed */
+  const undoes = (docs.release || []).map(d => d.data).filter(r => r.projectId === projectId && r.kind === 'golive' && r.status !== 'failed' && !r.rolledBackBy)
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
   for (const pd of procDocs) {
     const p = JSON.parse(JSON.stringify(pd.data));
     const cur = Number(p.version) || 1;
@@ -214,7 +287,10 @@ async function rollback(wsId, docs, project, actor, reason) {
     snapshot[p.id] = p.version;
     await store.putDoc(wsId, 'process', p.id, p);
     events.push({ action: 'rollback', ref: 'process:' + p.id, summary: `Rolled ${p.name} back from v${cur} to v${cur - 1}` });
+    undone.push({ type: 'process-version', target: p.name, from: cur, to: cur - 1, detail: `Restored the v${cur - 1} as-is and its designed to-be` });
+    undone.push({ type: 'sop-publish', target: `SOP library: ${p.name}`, from: cur, to: cur - 1, detail: `Re-published SOP v${cur - 1}; v${cur} withdrawn` });
   }
+  undone.push({ type: 'grants', target: 'Access grants', detail: 'Grants expired at go-live stay expired (least privilege); request access again if needed' });
   const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
   const relId = 'rel-' + projectId.slice(0, 36) + '-rb-' + Date.now().toString(36);
   const owner = project.cutover && project.cutover.rollbackOwner;
@@ -226,8 +302,10 @@ async function rollback(wsId, docs, project, actor, reason) {
       { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
         detail: `Rollback notice for ${project.name}` + (owner && people[owner] ? `; rollback owner ${people[owner].name}.` : '.') }],
     reason: String(reason || '').slice(0, 500), exceptions: [], snapshot,
+    status: 'succeeded', undone, undoes: undoes ? undoes.id : null,
   };
   await store.putDoc(wsId, 'release', relId, release);
+  if (undoes) await store.putDoc(wsId, 'release', undoes.id, Object.assign({}, undoes, { rolledBackBy: relId, rolledBackAt: at }));
   const proj = Object.assign({}, project, { status: 'active', rolledBackAt: at });
   delete proj.liveAt;
   await store.putDoc(wsId, 'project', projectId, proj);
@@ -303,6 +381,12 @@ module.exports = async function (context, req) {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
         const exists = !!prev;
+        /* R5 [S]: permissions */
+        const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
+        if (denied) return fail(403, denied);
+        /* R5: cutover edits are stamped so approvals taken before them go stale */
+        if (type === 'project' && cutoverStructureChanged(prev && prev.data.cutover, data.cutover) &&
+          (!data.cutoverUpdatedAt || (prev && prev.data.cutoverUpdatedAt === data.cutoverUpdatedAt))) data.cutoverUpdatedAt = new Date().toISOString();
         /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
@@ -314,6 +398,11 @@ module.exports = async function (context, req) {
       if (method === 'DELETE') {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
+        if (prev && (type === 'process' || type === 'project')) {
+          const denied = type === 'process' ? permissionError('process', prev.data, prev.data, actor, st.docs)
+            : (actor !== prev.data.owner ? `Only the project manager (${personName(st.docs, prev.data.owner)}) can delete ${describe('project', prev.data, st.docs)}.` : null);
+          if (denied) return fail(403, denied);
+        }
         await store.deleteDoc(wsId, type, id);
         const ev = await store.appendEvent(wsId, { actor, action: 'delete', ref: `${type}:${id}`,
           summary: ai.labeler(st.docs).scrub(summaryOf(body, `Deleted ${prev ? describe(type, prev.data, st.docs) : type}`)) });
@@ -379,6 +468,27 @@ module.exports = async function (context, req) {
       return send(r.status, r.body);
     }
 
+    /* POST /ws/:ws/check/:dataId — simulated in-tenant connection probe (R5 evidence) */
+    if (action === 'check' && seg.length === 4) {
+      const dataId = seg[3];
+      if (!ID_RE.test(dataId)) return fail(400, 'invalid data id');
+      const st = await store.getState(ws);
+      const de = ((st.docs.dataElement || []).find(d => d.id === dataId) || {}).data;
+      if (!de) return fail(404, 'unknown data element');
+      const at = new Date().toISOString();
+      const source = String(de.source || '').trim();
+      const ok = !!source && de.avail !== 'missing';
+      const detail = ok
+        ? `Simulated in-tenant probe reached ${source} and read one ${de.name} record (field names only; no values kept).`
+        : !source ? `No source is recorded for ${de.name}, so there is nothing to probe. Add the source system first.`
+          : `Simulated in-tenant probe found no integration for ${de.name} at ${source}; it is still marked missing.`;
+      const check = { ok, at, detail, by: actorOf(body) };
+      await store.putDoc(wsId, 'dataElement', dataId, Object.assign({}, de, { check }));
+      await store.appendEvent(wsId, { actor: actorOf(body), action: 'check', ref: 'dataElement:' + dataId,
+        summary: `Connection check for ${de.name}: ${ok ? 'ok' : 'failed'}` });
+      return send(200, { ok, at, detail });
+    }
+
     /* POST /ws/:ws/golive/:projectId  and  POST /ws/:ws/rollback/:projectId */
     if ((action === 'golive' || action === 'rollback') && seg.length === 4) {
       const projectId = seg[3];
@@ -386,8 +496,11 @@ module.exports = async function (context, req) {
       const st = await store.getState(ws);
       const project = ((st.docs.project || []).find(d => d.id === projectId) || {}).data;
       if (!project) return fail(404, 'unknown project');
+      /* R5 [S]: only the release manager (defaults to the project owner) can go live or roll back */
+      const rm = project.releaseManager || project.owner;
+      if (actorOf(body) !== rm) return fail(403, `Only the release manager (${personName(st.docs, rm)}) can ${action === 'golive' ? 'take' : 'roll back'} ${project.name}${action === 'golive' ? ' live' : ''}.`);
       const r = action === 'golive'
-        ? await goLive(wsId, st.docs, project, actorOf(body), today)
+        ? await goLive(wsId, st.docs, project, actorOf(body), today, body.simulateFailure === true)
         : await rollback(wsId, st.docs, project, actorOf(body), body && body.reason);
       return send(r.status, r.body);
     }

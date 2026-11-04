@@ -229,3 +229,83 @@ a.d-wi:hover .t{color:var(--accent)}
   .d-pcell[data-col="projects"]{flex-wrap:wrap}
   .d-plbl{display:inline-block;flex:none;width:104px;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);padding-top:2px}
 }
+
+/* == round 5 == */
+/* trigger prompt is a placeholder, not a value */
+.d-ph{color:var(--ink3);font-weight:500;font-style:italic}
+/* read-only for non-editors */
+.d-modes button.d-locked{opacity:.55;cursor:not-allowed}
+.d-ro{white-space:nowrap}
+.d-robanner{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;max-width:760px;margin:-6px auto 18px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:12px;padding:9px 12px;font-size:13px}
+.d-robanner b{display:inline-flex;gap:5px;align-items:center}
+.d-robanner span{flex:1 1 260px}
+/* compare versions */
+.d-cmpbar{display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin:-6px auto 18px;max-width:760px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 12px;box-shadow:var(--shadow);font-size:12px;color:var(--ink3)}
+.d-cmpbar label{display:flex;gap:6px;align-items:center;text-transform:uppercase;letter-spacing:.5px;font-size:11px;min-width:0}
+.d-cmpbar select{text-transform:none;letter-spacing:0;max-width:240px}
+.d-cmpsum{margin-left:auto;font-weight:600;color:var(--ink2)}
+/* saved versions */
+.d-draftacts{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+[data-versions] .row{align-items:flex-start}
+/* BPMN import as a new version */
+.d-impsum{display:flex;gap:6px 14px;flex-wrap:wrap;font-size:13px;background:#f5f7ff;border:1px solid #e0e7ff;border-radius:8px;padding:7px 10px}
+.d-dropped{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fcfcfe}
+.d-dropped .n{background:#fef2f2;color:#b91c1c;border-radius:99px;padding:0 7px;font-size:11px;margin-left:4px}
+.d-dropped[data-dropped="0"] .n{background:#ecfdf3;color:#15803d}
+.d-dropped ul{margin:6px 0 0;padding-left:18px;max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+.d-dropped li{overflow-wrap:anywhere}
+/* deleting a step with work */
+.d-worklist{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:4px;font-size:13px}
+.d-worklist li{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+/* evidence */
+.d-ev{border:1px solid transparent;font-size:11px}
+.d-ev-ok{background:#ecfdf3;color:#15803d;border-color:#bbf7d0}
+.d-ev-weak{background:#fffbeb;color:#b45309;border-color:#fde68a}
+.d-evs{display:flex;flex-direction:column;gap:8px}
+.d-evopt{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:#fff;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;color:var(--ink)}
+.d-evopt > input{margin:3px 0 0;width:auto;flex:none}
+.d-evopt > div{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.d-evopt:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.d-evopt.d-evdis{cursor:default;background:#fafafa}
+.d-evopt.d-evdis > div > b{color:var(--ink3)}
+.d-evopt .d-confprof{margin:0}
+.d-blklist{margin:4px 0;padding-left:18px;font-size:12px}
+.d-checkrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+.d-checkrow span{flex:1 1 180px;min-width:0;overflow-wrap:anywhere}
+.d-evattest{margin:0}
+.d-evattest .field{margin:0}
+.d-checkres{font-size:12.5px;border-radius:8px;padding:5px 9px;margin-bottom:10px;background:#f8fafc;border:1px solid var(--line);overflow-wrap:anywhere}
+/* data page: usage + cases */
+.d-chip-tobe{background:var(--accent-soft);color:var(--accent)}
+.d-tc{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.d-cases td{font-size:12.5px}
+/* swimlanes never clip: the lanes scroll inside the canvas, each lane at least 220 px */
+.grid > .canvas{min-width:0}
+.d-lanewrap{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.d-lanes{width:100%}
+.d-lanes .lane-h,.d-lanes .lane-c{min-width:220px}
+/* phone: header KPIs and controls collapse into one summary row */
+.d-sumrow{display:none}
+.d-collapse{display:contents}
+@media (max-width:640px){
+  .d-hdr{padding:12px 14px;gap:8px}
+  .d-hdr .hdr-side{gap:8px}
+  .d-sumrow{display:flex;width:100%;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);background:#f8f9fc;border-radius:10px;padding:7px 10px;font:inherit;font-size:12.5px;color:var(--ink2);text-align:left;cursor:pointer}
+  .d-sumrow b{color:var(--ink)}
+  .d-sumtog{color:var(--accent);font-weight:600;white-space:nowrap}
+  .d-hdr:not(.d-hdr-open) .d-collapse{display:none}
+  .d-cmpsum{margin-left:0;width:100%}
+  .d-cmpbar label{width:100%}
+  .d-cmpbar select{flex:1;max-width:none;min-width:0}
+  .d-ro{white-space:normal}
+  #canvas .d-modenote{display:none}
+}
+/* evidence options are labels: undo the uppercase field-label look for their text, keep it for the inner field labels */
+.field .d-evopt,.field .d-evopt *{text-transform:none;letter-spacing:0}
+.field .d-evopt .field > label{text-transform:uppercase;letter-spacing:.5px;font-size:11px}
+.d-evopt > div > .badge{align-self:flex-start}
+.d-evopt .d-confprof{font-size:12.5px}
+.field label.d-evopt{font-size:13px;color:var(--ink)}
+.field label.d-evopt .hint{color:var(--ink3);font-size:12px}
+.field .d-evopt .field > label{color:var(--ink3)}
+@media (max-width:640px){.d-cmparrow{display:none}}

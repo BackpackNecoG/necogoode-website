@@ -303,6 +303,8 @@ function seed(createdAtISODate) {
   tc('TC6', 'D1', 'Tax ID (EIN)', 'invalid', '123456789', 'reject', 'Missing hyphen');
   tc('TC7', 'D7', 'Cost center', 'valid', 'CC1042', 'accept', 'Matches CC####');
   tc('TC8', 'D7', 'Cost center', 'invalid', '1042', 'reject', 'Missing CC prefix');
+  tc('TC9', 'D7', 'Approver', 'invalid', '', 'reject', 'Required value is blank');
+  tc('TC10', 'D7', 'Limit', 'boundary', '1000000', 'accept', 'Upper bound is allowed');
 
   add('testRun', { id: 'TR1', projectId: 'vendor-modernization', env: 'dev', at: at(-1, 18), by: 'dk', results: [
     { caseId: 'TC1', outcome: 'pass', note: '' }, { caseId: 'TC2', outcome: 'pass', note: '' },
@@ -357,6 +359,11 @@ const STEP_META = {                                                       /* pid
   'access-review/r2': { sla: '10 business days', system: 'Review portal' },
   'access-review/r3': { sla: '1 business day', system: 'Identity platform' },
 };
+const DAY_RATE = { mc: 900, ta: 950, ps: 850, lp: 850, ar: 750, dk: 1000 };
+const PMO = {
+  'vendor-modernization': { program: 'Finance Operations Modernization', budget: { planned: 48000 } },
+  'access-review-automation': { program: 'Security & Compliance', budget: { planned: 16000 } },
+};
 const RISK_WORK = { R1: ['W2', 'W3'], R2: ['W6', 'W7', 'W8'], R3: ['W10', 'W11'], R4: ['A4'] };
 
 function enrichR2(docs, day, at) {
@@ -372,8 +379,17 @@ function enrichR2(docs, day, at) {
   docs.dataElement.forEach(d => { d.data.sensitivity = SENSITIVITY[d.id] || 'internal'; });
   /* R4: live elements carry the data owner's confirmation and the confirmed source */
   docs.dataElement.filter(d => d.data.avail === 'live').forEach(d => {
-    Object.assign(d.data, { liveConfirmedBy: d.data.owner, liveConfirmedAt: at(-20, 10), liveSource: d.data.source });
+    Object.assign(d.data, { liveConfirmedBy: d.data.owner, liveConfirmedAt: at(-20, 10), liveSource: d.data.source,
+      /* R5: evidence that can't be faked — a passing simulated connection check */
+      check: { ok: true, at: at(-20, 9), detail: `Simulated in-tenant probe reached ${d.data.source} and read one ${d.data.name} record (field names only; no values kept).`, by: d.data.owner },
+      liveEvidence: { type: 'check', ref: 'check', at: at(-20, 9), by: d.data.owner } });
   });
+  /* R5: PMO fields */
+  docs.person.forEach(d => { d.data.dayRate = DAY_RATE[d.id] || 800; });
+  docs.project.forEach(d => Object.assign(d.data, PMO[d.id] || {}, { releaseManager: d.data.owner }));
+  /* R5: an HR approver exists only if some step or trigger touches HR */
+  const touchesHR = docs.process.some(p => JSON.stringify([p.data.tobe, p.data.asis]).match(/"touches":\[[^\]]*"HR"/));
+  if (touchesHR) docs.person.push({ id: 'hr', data: { id: 'hr', name: 'Grace Lin', role: 'HR Business Partner', color: '#0d9488', bu: 'HR', capacity: 3, dayRate: 850 } });
   byId('dataElement').D2.discovered = [{ text: 'Account holder must be required: the capture form accepted a blank value (dev run, case "Account holder blank").',
     fromRun: 'TR1', at: at(-1, 18) }];
   const walk = (pid, nodes) => (nodes || []).forEach(n => {
@@ -401,9 +417,9 @@ function enrichR2(docs, day, at) {
     { id: 'uat-access-review-r3', pid: 'access-review', step: 'r3', title: 'Auto-remove uncertified access',
       given: 'One rejected account', when: 'The removal job runs', then: 'Access is removed and the evidence pack lists it', data: [] },
   ];
-  const d7Cases = ['TC7', 'TC8'].map(caseId => ({ caseId, outcome: 'pass', note: '' }));
+  const d7Cases = ['TC7', 'TC8', 'TC9', 'TC10'].map(caseId => ({ caseId, outcome: 'pass', note: '' }));
   /* vendor-modernization intentionally has no cutover plan: it shows as an open gate item */
-  docs.testRun.push({ id: 'TR2', data: { id: 'TR2', projectId: 'access-review-automation', env: 'dev', at: at(-4, 15), by: 'dk',
+  docs.testRun.push({ id: 'TR2', data: { id: 'TR2', projectId: 'access-review-automation', env: 'dev', source: 'ci', at: at(-4, 15), by: 'dk',
     results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '' })).concat(d7Cases) } });
   docs.testRun.push({ id: 'TR3', data: { id: 'TR3', projectId: 'access-review-automation', env: 'uat', at: at(-2, 15), by: 'ps',
     results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '', evidence: 'Screenshot pack in UAT folder' })).concat(d7Cases) } });

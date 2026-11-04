@@ -2,36 +2,90 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject } from './project.js';
+import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
-const st = { blPrj: null, blId: null, repPrj: null, riskFilter: 'open' };
+const st = { blPrj: null, blId: null, repPrj: null, riskFilter: 'open', burnPrj: null };
 const reports = {}; /* projectId -> {loading, data, error} */
 const dayDiff = (a, b) => Math.round((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
 
 /* ---------------------------------------------------------------- projects */
+const NO_PROGRAM = 'No program';
+/* R5: projects grouped by program (named programs A–Z, then the unassigned ones). */
+export function byProgram(projects) {
+  const g = {};
+  projects.forEach(p => { const k = String(p.program || '').trim() || NO_PROGRAM; (g[k] = g[k] || []).push(p); });
+  return Object.keys(g).sort((a, b) => (a === NO_PROGRAM) - (b === NO_PROGRAM) || a.localeCompare(b)).map(k => ({ program: k, projects: g[k] }));
+}
+function projectRow(j) {
+  const s = projectStats(j.id), r = rag(j, s), gi = gateInfo(j, s), fi = gi.fi;
+  const buf = fi.date && j.target ? dayDiff(j.target, fi.date) : null;
+  /* Gate-aware: never "Finished · Nd early" while go-live is still pending the readiness gate. */
+  const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">target ${esc(fmt(j.target))}</div>`
+    : !s.total ? `<b class="pmo-muted">Not planned</b><div class="hint">target ${esc(fmt(j.target))}</div>`
+    : gi.k === 'awaiting' ? `<b>Work done ${esc(fmt(fi.date))}</b><div class="hint"><a href="${link('/release/' + encodeURIComponent(j.id))}" data-link class="${gi.blocking ? 'fail' : ''}">Awaiting go-live${gi.blocking ? ` · ${gi.blocking} blocking` : ''} ›</a></div>`
+    : `<b style="color:${buf != null && buf < 0 ? 'var(--late)' : 'inherit'}">${esc(fmt(fi.date))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${buf == null ? '—' : buf < 0 ? `<span class="fail">${-buf}d over</span>` : `${buf}d buffer`}</div>`;
+  const rel = store.list('release', x => x.projectId === j.id && x.kind !== 'rollback' && x.status !== 'failed').sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+  const rm = relMgr(j);
+  return `<tr class="click" data-go="/project/${esc(j.id)}" data-prow="${esc(j.id)}">
+    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · release ${esc(pname(rm))}` : ''}</div></td>
+    <td>${ragBadge(r)}</td>
+    <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
+    <td class="pmo-nowrap" data-when>${when}</td>
+    <td class="pmo-nowrap"><span class="${s.late ? 'fail' : ''}"><b>${s.late}</b> late</span> · <span class="${s.slip ? 'warn' : ''}"><b>${s.slip}</b> slipping</span></td>
+    <td>${j.status === 'live' ? `<span class="badge b-done">Live</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not released ›</a>`}</td></tr>`;
+}
 function projectsHTML(projects) {
   if (!projects.length) return '<div class="card"><h3>Projects</h3><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>';
-  const rows = projects.map(j => {
-    const s = projectStats(j.id), r = rag(j, s), gi = gateInfo(j, s), fi = gi.fi;
-    const buf = fi.date && j.target ? dayDiff(j.target, fi.date) : null;
-    /* Gate-aware: never "Finished · Nd early" while go-live is still pending the readiness gate. */
-    const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">target ${esc(fmt(j.target))}</div>`
-      : gi.k === 'awaiting' ? `<b>Work done ${esc(fmt(fi.date))}</b><div class="hint"><a href="${link('/release/' + encodeURIComponent(j.id))}" data-link class="${gi.blocking ? 'fail' : ''}">Awaiting go-live${gi.blocking ? ` · ${gi.blocking} blocking` : ''} ›</a></div>`
-      : `<b style="color:${buf != null && buf < 0 ? 'var(--late)' : 'inherit'}">${esc(fmt(fi.date))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${buf == null ? '—' : buf < 0 ? `<span class="fail">${-buf}d over</span>` : `${buf}d buffer`}</div>`;
-    const rel = store.list('release', x => x.projectId === j.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
-    return `<tr class="click" data-go="/project/${esc(j.id)}">
-      <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} ${esc(pname(j.owner))}</div></td>
-      <td>${ragBadge(r)}</td>
-      <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
-      <td class="pmo-nowrap" data-when>${when}</td>
-      <td class="pmo-nowrap"><span class="${s.late ? 'fail' : ''}"><b>${s.late}</b> late</span> · <span class="${s.slip ? 'warn' : ''}"><b>${s.slip}</b> slipping</span></td>
-      <td>${j.status === 'live' ? `<span class="badge b-done">Live</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not released ›</a>`}</td></tr>`;
+  const groups = byProgram(projects);
+  const rows = groups.map(g => {
+    const fin = g.projects.map(financials);
+    const planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
+    const rc = {}; g.projects.forEach(p => { const k = rag(p, projectStats(p.id)).k; rc[k] = (rc[k] || 0) + 1; });
+    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · forecast cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} red</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} amber</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
   }).join('');
-  return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length}</span><button class="btn sm primary" data-new-project>+ New project</button></h3>
+  return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><button class="btn sm primary" data-new-project>+ New project</button></h3>
     <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Forecast / target</th><th>Schedule</th><th>Release</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="pmo-rule"><span class="rag rag-red"><i></i>Red</span><span class="rag rag-amber"><i></i>Amber</span><span class="rag rag-green"><i></i>Green</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
+    <div class="pmo-rule"><span class="rag rag-red"><i></i>Red</span><span class="rag rag-amber"><i></i>Amber</span><span class="rag rag-green"><i></i>Green</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
+}
+
+/* ---------------------------------------------------------------- financials (R5) */
+function financialsHTML(projects) {
+  if (!projects.length) return '<div class="card"><h3>Financials</h3><div class="empty">No projects yet.</div></div>';
+  const groups = byProgram(projects);
+  const all = projects.map(financials);
+  const max = Math.max(1, ...all.map(f => Math.max(f.planned || 0, f.forecast, f.actual)));
+  const pct = n => (n / max * 100).toFixed(2);
+  const row = j => {
+    const f = financials(j), over = f.planned && f.forecast > f.planned, v = f.planned ? f.forecast - f.planned : null;
+    return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>
+        <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, forecast ${money(f.forecast)}, actual ${money(f.actual)}`)}">
+          ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span><span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
+      <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
+      <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${esc(money(f.forecast))}</td>
+      <td class="pmo-num" data-fin-actual>${esc(money(f.actual))}</td>
+      <td class="pmo-num">${v == null ? '<span class="hint">—</span>' : `<span class="pmo-var ${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : v < 0 ? '−' : ''}${esc(money(Math.abs(v)))}</span>`}</td></tr>`;
+  };
+  const body = groups.map(g => {
+    const f = g.projects.map(financials), sum = k => f.reduce((a, x) => a + (x[k] || 0), 0);
+    return `<tr class="pmo-prog-h"><td colspan="5"><b>${esc(g.program)}</b> <span class="hint">planned ${esc(money(sum('planned')))} · forecast ${esc(money(sum('forecast')))} · actual ${esc(money(sum('actual')))}</span></td></tr>${g.projects.map(row).join('')}`;
+  }).join('');
+  const tot = k => all.reduce((a, x) => a + (x[k] || 0), 0);
+  return `<div class="card" data-financials><h3>Financials <span class="n">${esc(money(tot('forecast')))} forecast</span></h3>
+    <div class="hint" style="margin:-4px 0 10px">Planned budget vs forecast cost (all work) vs actual cost (done work). Cost = effort × the owner’s day rate (default ${esc(money(DEFAULT_RATE))}/day); edit rates in Workload.</div>
+    <div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned</th><th class="pmo-num">Forecast</th><th class="pmo-num">Actual</th><th class="pmo-num">Forecast vs plan</th></tr></thead><tbody>${body}
+      <tr class="pmo-fin-tot"><td><b>Portfolio</b></td><td class="pmo-num"><b>${esc(money(tot('planned')))}</b></td><td class="pmo-num"><b>${esc(money(tot('forecast')))}</b></td><td class="pmo-num"><b>${esc(money(tot('actual')))}</b></td><td></td></tr></tbody></table></div>
+    <div class="pmo-wl-key"><span><i class="plan"></i>Planned budget</span><span><i class="fc"></i>Forecast cost</span><span><i class="act"></i>Actual cost</span><span><i class="over"></i>Forecast over budget</span></div></div>`;
+}
+
+/* ---------------------------------------------------------------- burndown (R5) */
+function burnHTML(projects) {
+  const withWork = projects.filter(p => store.list('workItem', w => w.projectId === p.id).length);
+  if (!withWork.length) return '<div class="card"><h3>Burndown</h3><div class="empty">No project has work yet.</div></div>';
+  const j = withWork.find(p => p.id === st.burnPrj) || withWork.find(p => p.status !== 'live') || withWork[0];
+  return `<div class="card" data-pf-burn><h3 class="pmo-h3row">Burndown <select class="pmo-sel" data-burn-prj aria-label="Project for the burndown">${withWork.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></h3>
+    ${burnChart(projectBurn(j), { id: 'portfolio', title: j.name + ' burndown', idealTo: j.target ? 'target ' + fmt(j.target) : '' })}</div>`;
 }
 
 /* ---------------------------------------------------------------- workload */
@@ -63,7 +117,7 @@ function workloadHTML() {
       return `<div class="pmo-wl-row ${r.overloaded ? 'over' : ''}" data-wl="${esc(r.pid)}"><div class="pmo-wl-who">${av(r.pid)}<span>${esc(pname(r.pid))}</span></div>
         <div class="pmo-wl-bar" role="img" aria-label="${esc(pname(r.pid))}: ${d1(r.effN)} days of effort against ${d1(r.capN)} days capacity in 14 days">
           <i class="${r.overloaded ? 'late' : 'rest'}" style="width:${pct(r.effN)}%"></i><b class="pmo-cap" style="left:${pct(r.capN)}%" title="Capacity ${d1(r.capN)}d"></b></div>
-        <div class="pmo-wl-n"><div><b class="${r.overloaded ? 'fail' : ''}">${d1(r.effN)}d</b> / ${d1(r.capN)}d <button class="pmo-capbtn" data-cap="${esc(r.pid)}" title="Edit capacity (days per week)" aria-label="Edit capacity of ${esc(pname(r.pid))}">${d1(r.cap)}d/wk ✎</button></div>
+        <div class="pmo-wl-n"><div><b class="${r.overloaded ? 'fail' : ''}">${d1(r.effN)}d</b> / ${d1(r.capN)}d <button class="pmo-capbtn" data-cap="${esc(r.pid)}" title="Edit capacity (days per week)" aria-label="Edit capacity of ${esc(pname(r.pid))}">${d1(r.cap)}d/wk ✎</button> <button class="pmo-capbtn" data-rate="${esc(r.pid)}" title="Edit day rate (cost per person-day)" aria-label="Edit day rate of ${esc(pname(r.pid))}">${esc(money(rateOf(r.pid)))}/day ✎</button></div>
           <div class="hint">${r.overloaded ? '<span class="badge b-late">Overloaded</span> ' : ''}${r.open || 0} open${r.late ? ` · <span class="fail">${r.late} late</span>` : ''}${r.dueNext7 ? ` · ${r.dueNext7} due in 7d` : ''}</div></div></div>`;
     }).join('')}</div>
     <div class="pmo-wl-key"><span><i class="rest"></i>Effort next 14 days</span><span><i class="late"></i>Over capacity</span><span><i class="capk"></i>Capacity (days/week × 2)</span></div></div>`;
@@ -79,8 +133,24 @@ async function editCapacity(pid) {
   if (v === cur) return;
   const next = Object.assign({}, p, { capacity: v });
   Object.assign(p, { capacity: v }); /* keep store.state.people in step with the person doc */
-  await store.save('person', pid, next, `Capacity of ${p.name}: ${cur} → ${v} days/week`);
+  await psave('person', pid, next, `Capacity of ${p.name}: ${cur} → ${v} days/week`);
   toast('Capacity saved');
+}
+
+/* R5: day rate drives cost (effort × rate). Default 800. */
+async function editRate(pid, err, val) {
+  const p = store.person(pid); if (!p) return;
+  const cur = rateOf(pid);
+  const r = await modal({ title: `Day rate: ${p.name}`, body: `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">Cost of one person-day of ${esc(p.name.split(' ')[0])}’s time. Work cost = effort × the owner’s day rate. Default ${esc(money(DEFAULT_RATE))}.</p>
+    <div class="field"><label for="pf-rate">Day rate (USD)</label><input id="pf-rate" type="number" name="dayRate" min="0" max="10000" step="25" value="${esc(val != null ? val : cur)}" /></div>`, actions: [{ id: 'save', label: 'Save day rate', primary: true }] });
+  if (r.action !== 'save') return;
+  const v = Number(r.form.dayRate);
+  if (r.form.dayRate === '' || !(v >= 0 && v <= 10000)) return editRate(pid, 'The day rate must be between 0 and 10,000.', r.form.dayRate);
+  if (v === cur && p.dayRate != null) return;
+  const next = Object.assign({}, p, { dayRate: v });
+  Object.assign(p, { dayRate: v }); /* keep store.state.people in step with the person doc */
+  await psave('person', pid, next, `Day rate of ${p.name}: ${money(cur)} → ${money(v)} per day`);
+  toast('Day rate saved');
 }
 
 /* ---------------------------------------------------------------- risks */
@@ -152,7 +222,7 @@ async function editRisk(r, err) {
   if (!next.title) return editRisk(next, 'Describe the risk.');
   if (isNew) {
     next.id = store.newId('rsk');
-    await store.save('risk', next.id, next, `Logged risk “${next.title}” (impact ${LV_LBL[next.impact]}, likelihood ${LV_LBL[next.likelihood]}${next.workItems.length ? ', ' + next.workItems.length + ' linked work item' + (next.workItems.length > 1 ? 's' : '') : ''})`);
+    await psave('risk', next.id, next, `Logged risk “${next.title}” (impact ${LV_LBL[next.impact]}, likelihood ${LV_LBL[next.likelihood]}${next.workItems.length ? ', ' + next.workItems.length + ' linked work item' + (next.workItems.length > 1 ? 's' : '') : ''})`);
     toast('Risk added'); return;
   }
   const ch = [];
@@ -169,13 +239,13 @@ async function editRisk(r, err) {
   if (wAdd.length) ch.push('linked ' + wAdd.map(wt).join(', '));
   if (wRem.length) ch.push('unlinked ' + wRem.map(wt).join(', '));
   if (!ch.length) { toast('No changes'); return; }
-  await store.save('risk', next.id, next, `Edited risk “${next.title}”: ${ch.join('; ')}`);
+  await psave('risk', next.id, next, `Edited risk “${next.title}”: ${ch.join('; ')}`);
   toast('Risk saved');
 }
 async function deleteRisk(r) {
   const res = await modal({ title: 'Delete risk?', body: `<p style="margin:0">Delete <b>${esc(r.title)}</b>? Consider closing it instead to keep the record.</p>`, actions: [{ id: 'delete', label: 'Delete', danger: true }] });
   if (res.action !== 'delete') return;
-  await store.remove('risk', r.id, `Deleted risk “${r.title}”`);
+  await premove('risk', r.id, `Deleted risk “${r.title}”`);
   toast('Risk deleted');
 }
 
@@ -255,13 +325,14 @@ async function copyText(text) {
 export function render() {
   const projects = store.list('project');
   const totals = projects.map(p => ({ p, s: projectStats(p.id) }));
-  const rc = { red: 0, amber: 0, green: 0, live: 0 }; totals.forEach(({ p, s }) => rc[rag(p, s).k]++);
+  const rc = { red: 0, amber: 0, green: 0, live: 0, none: 0 }; totals.forEach(({ p, s }) => rc[rag(p, s).k]++);
   const openWork = totals.reduce((a, x) => a + (x.s.total - x.s.done), 0);
   const openRisks = store.list('risk', r => r.status !== 'closed').length;
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Portfolio</div><h1>Portfolio</h1>
-      <p>Every project’s health in one place: progress, forecast against target, who is overloaded, what could go wrong, and how far the plan has drifted from its baseline.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi"><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em></b><span>Red · amber · green</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
+      <p>Every project’s health in one place, grouped by program: progress, forecast against target, cost against budget, burndown, who is overloaded, what could go wrong, and how far the plan has drifted from its baseline.</p></div>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>Red · amber · green${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
     <div class="pmo-stack">${projectsHTML(projects)}</div>
+    <div class="two pmo-top">${financialsHTML(projects)}${burnHTML(projects)}</div>
     <div class="two pmo-top">${workloadHTML()}${reportHTML(projects)}</div>
     <div class="pmo-stack">${risksHTML(projects)}</div>
     <div class="pmo-stack">${varianceHTML(projects)}</div>`;
@@ -274,11 +345,13 @@ export function bind(root) {
   on('[data-edit-risk]', el => { const r = store.get('risk', el.dataset.editRisk); if (r) editRisk(r); });
   on('[data-del-risk]', el => { const r = store.get('risk', el.dataset.delRisk); if (r) deleteRisk(r); });
   on('[data-cap]', el => editCapacity(el.dataset.cap));
+  on('[data-rate]', el => editRate(el.dataset.rate));
   on('[data-rf]', el => { st.riskFilter = el.dataset.rf; rerender(); });
   const chg = (sel, fn) => { const el = root.querySelector(sel); if (el) el.addEventListener('change', () => fn(el.value)); };
   chg('[data-bl-prj]', v => { st.blPrj = v; st.blId = null; rerender(); });
   chg('[data-bl-id]', v => { st.blId = v; rerender(); });
   chg('[data-rep-prj]', v => { st.repPrj = v; rerender(); });
+  chg('[data-burn-prj]', v => { st.burnPrj = v; rerender(); });
   on('[data-gen-rep]', () => { const sel = root.querySelector('[data-rep-prj]'); generate(sel ? sel.value : st.repPrj); });
   on('[data-copy-rep]', async () => {
     const sel = root.querySelector('[data-rep-prj]'); const j = store.get('project', sel && sel.value); const rep = j && reports[j.id];

@@ -94,10 +94,12 @@ function statusFacts(docs, projectId, today, engine) {
   /* R4: effective state; a finished fix still awaits the data owner's confirmation ('pending') */
   const eff = d => (engine && typeof engine.effectiveAvail === 'function') ? engine.effectiveAvail(docs, d.id)
     : (d.avail === 'live' ? 'live' : d.avail);
-  facts.blockers = [...usedData].map(id => dataEls[id]).filter(d => d && ['missing', 'pending'].includes(eff(d))).map(d => {
+  /* R5: "not yet live" = every used element that is not effectively live (missing + examples + pending) */
+  facts.notLive = [...usedData].map(id => dataEls[id]).filter(d => d && eff(d) !== 'live').map(d => {
     const resolver = work.find(w => w.resolves === d.id);
     return { name: d.name, owner: L.person(d.owner), state: eff(d), resolver: resolver ? resolver.title : null };
   });
+  facts.blockers = facts.notLive.filter(b => ['missing', 'pending'].includes(b.state));
   facts.openDiscovered = [...usedData].map(id => dataEls[id]).filter(Boolean)
     .flatMap(d => (d.discovered || []).filter(x => !x.resolved).map(x => ({ data: d.name, requirement: L.scrub(x.text) })));
   const wById = Object.fromEntries(list(docs, 'workItem').map(w => [w.id, w]));
@@ -150,6 +152,13 @@ function lateSlip(f) {
   const verb = n => (n === 1 ? 'is' : 'are');
   return `${plural(late, 'item')} ${verb(late)} past due and ${plural(slip, 'more item', 'more items')} ${verb(slip)} slipping;`;
 }
+const notLiveN = f => (f.notLive || f.blockers || []).length;
+/* R5: email-draft recipients = project resources as first.last@northwind.example (fictional domain) */
+function recipientsOf(docs, project) {
+  const people = Object.fromEntries(list(docs, 'person').map(p => [p.id, p]));
+  return [...new Set(project.resources || [])].map(id => people[id]).filter(Boolean).map(p => ({ name: p.name,
+    email: p.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z\s-]/g, '').trim().split(/\s+/).join('.') + '@northwind.example' }));
+}
 function statusRules(f) {
   const s = f.stats || {};
   const rag = f.rag || ragOf(f);
@@ -158,7 +167,7 @@ function statusRules(f) {
     rag: rag.status,
     headline: `${RAG_WORD[rag.status]}: ${f.project.name} is ${RAG_PHRASE[rag.status]}, ${s.pct || 0}% done, ${finish} vs target ${fd(f.project.target)}`,
     summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.join(' and ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
-      `${lateSlip(f)} ${plural((f.blockers || []).length, 'data element')} ${(f.blockers || []).length === 1 ? 'is' : 'are'} not yet live.`,
+      `${lateSlip(f)} ${plural(notLiveN(f), 'data element')} ${notLiveN(f) === 1 ? 'is' : 'are'} not yet live.`,
     highlights: [`${s.done || 0} of ${plural(s.total || 0, 'work item')} complete`]
       .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${plural(f.readiness.failing.length, 'check')} open`] : []),
     risks: (f.atRisk || []).map(atRiskLine)
@@ -167,6 +176,7 @@ function statusRules(f) {
     asks: (f.blockers || []).map(b => b.state === 'pending'
         ? `${b.owner}: confirm ${b.name} is live (the fix is done and awaits your confirmation)`
         : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
+      .concat((f.notLive || []).filter(b => b.state === 'example').map(b => `${b.owner}: provide a live source for ${b.name} (examples only today)`))
       .concat((f.openDiscovered || []).map(x => `Resolve the discovered requirement on ${x.data}: ${x.requirement}`))
       .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`)),
   };
@@ -330,7 +340,8 @@ function sopRules(text, docs) {
   };
   /* One numbered line can hold several sentences: main step, inline condition, otherwise-clause, parallel work. */
   const processSentences = (body) => {
-    const sentences = body.split(/(?<=[.;!])\s+(?=[A-Z(])/).map(x => x.trim()).filter(x => x.length >= 3);
+    /* R5: "…; otherwise …" and "…, otherwise …" start their own clause so they reach the No branch */
+    const sentences = body.split(/(?<=[.;!])\s+(?=[A-Z(])|;\s*(?=(?:otherwise|else|if not)\b)|,\s*(?=otherwise\b)/i).map(x => x.trim()).filter(x => x.length >= 3);
     for (const sen of sentences) {
       const g = gotoOf(sen);
       const els = ELSE_RE.exec(sen);
@@ -508,7 +519,8 @@ async function run(kind, body, docs, today) {
   if (kind === 'status-report') {
     const facts = statusFacts(docs, projectId, today, engine);
     const L = labeler(docs);
-    const fallback = L.scrub(statusRules(facts));
+    const recipients = recipientsOf(docs, list(docs, 'project').find(p => p.id === projectId));
+    const fallback = Object.assign(L.scrub(statusRules(facts)), { recipients });
     if (!configured()) return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) };
     try {
       const out = await chat(RULES + ' Write a concise project status report for executives. Return ' +
@@ -523,7 +535,7 @@ async function run(kind, body, docs, today) {
       const conflicts = other.some(k => new RegExp('\\b(' + RAG_WORD[k] + '|' + RAG_PHRASE[k] + ')\\b', 'i').test(out.headline));
       out.headline = conflicts ? fallback.headline : (new RegExp('^' + RAG_WORD[want] + '\\b').test(out.headline) ? out.headline : `${RAG_WORD[want]}: ${out.headline}`);
       return { status: 200, body: Object.assign(L.scrub({ headline: out.headline.slice(0, 200), summary: out.summary.slice(0, 1200),
-        highlights: strArr(out.highlights), risks: strArr(out.risks), asks: strArr(out.asks) }), { rag: facts.rag.status, source: 'ai', facts }) };
+        highlights: strArr(out.highlights), risks: strArr(out.risks), asks: strArr(out.asks) }), { rag: facts.rag.status, recipients, source: 'ai', facts }) };
     } catch (e) { return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) }; }
   }
 

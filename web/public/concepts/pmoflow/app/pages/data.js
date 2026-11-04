@@ -1,7 +1,7 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, av, personChip, pname, AVAIL, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, NEEDS_LIVE, avOf, awaitingText } from './process.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, NEEDS_LIVE, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl } from './process.js';
 
 const clone = o => JSON.parse(JSON.stringify(o));
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
@@ -10,6 +10,8 @@ const availOpts = sel => Object.entries(AVAIL).filter(([k]) => k !== 'pending' &
 
 export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: { label: 'Internal', cls: 'd-s-internal' }, confidential: { label: 'Confidential', cls: 'd-s-conf' }, pii: { label: 'PII', cls: 'd-s-pii' } };
 export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="Sensitivity: ${esc(v.label)}">${esc(v.label)}</span>` : '<span class="badge b-none" title="Sensitivity not classified">Unclassified</span>'; };
+/* only http(s) links are rendered as links */
+const safeUrl = u => /^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '#';
 const canEdit = x => !!x && store.state.me === x.owner;
 const onlyMsg = x => `Only ${pname(x.owner)} can change this`;
 /* disabled-state attributes for owner-only controls */
@@ -36,12 +38,16 @@ export function render(params) {
   const x = store.get('dataElement', did);
   if (!x) return notFound('Data element “' + did + '”');
   const eff = effAvail(did), a = avOf(eff);
-  const users = eng('impactOfData', [docs(), did], []).map(u => { const p = store.get('process', u.pid); const s = p && flat(p.tobe).find(y => y.id === u.stepId); return s ? { pid: u.pid, p, s } : null; }).filter(Boolean);
+  /* R5: one usage source (engine usageOf) for every count: to-be and as-is, labelled */
+  const use = usage(did);
+  const rowsOf = (list, ver) => list.map(u => { const p = store.get('process', u.pid); const s = p && flat(p[ver]).find(y => y.id === u.stepId); return s ? { pid: u.pid, p, s, ver } : null; }).filter(Boolean);
+  const users = rowsOf(use.tobe, 'tobe'), asisUsers = rowsOf(use.asis, 'asis');
   const fc = eng('forecastAll', [docs(), today()], {});
   const resolver = store.list('workItem', w => w.resolves === did)[0];
   const downstream = resolver ? eng('dependents', [docs(), resolver.id], []).map(id => store.get('workItem', id)).filter(Boolean) : [];
   const ready = eff === 'live';
   const usingProjects = [...new Set(users.map(u => u.pid))].flatMap(pid => projectsFor(pid));
+  const procCount = new Set([...users, ...asisUsers].map(u => u.pid)).size;
   const testPrj = usingProjects[0];
   const profile = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
   const drift = profile ? eng('specDrift', [x, profile], []) : [];
@@ -54,12 +60,15 @@ export function render(params) {
       : eff === 'example' ? `<div class="s d-noplan d-noplan-amber" data-noplan>No resolution plan. Only examples exist, so the go-live gate's live-data check fails until a work item connects a live source. Add a resolver work item on the project page.</div>`
       : '<div class="s d-noplan" data-noplan>No resolution plan. No work item resolves this yet, so every step that needs it has no real date. Add a resolver work item on the project page.</div>'}</div>` : '';
 
-  /* R4: only the data owner's confirmation (with a source) makes a fixed element live */
-  const confirmedBy = x.liveConfirmedBy ? `Confirmed live by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${x.liveSource ? ' · source: ' + esc(x.liveSource) : ''}` : '';
+  /* R4/R5: only the data owner's confirmation, with a source and evidence, makes an element live */
+  const ev = x.liveEvidence || null;
+  const evDetail = ev ? (ev.type === 'attested' ? `${ev.ref ? ` · <a href="${esc(safeUrl(ev.ref))}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">evidence link</a>` : ''}${ev.note ? ' · “' + esc(ev.note) + '”' : ''}` : ev.type === 'check' ? (x.check && x.check.detail ? ' · ' + esc(x.check.detail) : '') : ev.type === 'profile' ? (() => { const pr = store.get('profile', ev.ref); return pr ? ` · profile of ${esc(pr.rows)} rows, ${esc(fmtTime(pr.at))}` : ''; })() : '') : '';
+  const confirmedBy = x.liveConfirmedBy ? `Confirmed live by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${x.liveSource ? ' · source: ' + esc(x.liveSource) : ''} ${evidenceTag(x)}${evDetail}` : '';
   const confirm = eff === 'live'
     ? (confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : '')
     : `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Confirm live</h3>
-      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The resolver work is done. ${esc(pname(x.owner))}, as the data owner, confirms the live source before the go-live gate counts it.` : `When a live source is connected, the data owner confirms it here. Until then the go-live gate's live-data check fails.`}</p>
+      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The resolver work is done. ${esc(pname(x.owner))}, as the data owner, confirms the live source before the go-live gate counts it.` : `When a live source is connected, the data owner confirms it here. Until then the go-live gate's live-data check fails.`} Confirming needs evidence: a clean profile, a passing connection check, or a link and note (attested, the weaker kind).</p>
+      ${x.check ? `<div class="d-checkres ${x.check.ok ? 'pass' : 'fail'}" data-last-check>Last connection check ${esc(fmtTime(x.check.at))}: ${x.check.ok ? 'ok' : 'failed'}. ${esc(x.check.detail || '')}</div>` : ''}
       <div class="d-ownerrow" style="margin-top:0"><button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live ${gate(x)}>Confirm live…</button>${canEdit(x) ? '' : `<span class="d-only">${LOCK} Only ${esc(pname(x.owner))} (data owner) can confirm</span>`}</div></div>`;
 
   const spec = `<div class="card"><h3>Specification <span class="n">${fields.length} field${fields.length === 1 ? '' : 's'}</span></h3>
@@ -70,8 +79,14 @@ export function render(params) {
   const examples = `<div class="card"><h3>Examples on file <span class="n">${(x.samples || []).length}</span></h3>${(x.samples || []).length ? x.samples.map(f => `<div class="row"><span>📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample artifact (concept, not downloadable)</div></div></div>`).join('') : '<div class="s">None. Nobody has produced a real example of this data yet.</div>'}
     ${x.sampleCsv ? '<div class="hint" style="margin-top:8px">A synthetic sample extract is on file for profiling.</div>' : ''}</div>`;
 
-  const impact = `<div class="card" style="margin-top:16px"><h3>Impact: every step that depends on this <span class="n">${users.length}</span></h3>${users.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Process</th><th>Owner</th><th>Project</th></tr>
-    ${users.map(u => { const prj = projectsFor(u.pid)[0]; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td>${esc(u.p.name)}</td><td>${esc(pname(u.s.owner))}</td><td class="d-nowrap">${prj ? stepBadge(st) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No to-be step uses this data element yet.</div>'}</div>`;
+  const allUsers = [...users, ...asisUsers];
+  const impact = `<div class="card" style="margin-top:16px" data-impact><h3>Impact: every step that uses this <span class="n" data-usage-total="${users.length}/${asisUsers.length}">${users.length} to-be · ${asisUsers.length} as-is</span></h3>${allUsers.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Map</th><th>Process</th><th>Owner</th><th>Project</th></tr>
+    ${allUsers.map(u => { const prj = u.ver === 'tobe' ? projectsFor(u.pid)[0] : null; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}" data-use="${u.ver}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td><span class="chip ${u.ver === 'asis' ? '' : 'd-chip-tobe'}">${u.ver === 'asis' ? 'As-is' : 'To-be'}</span></td><td>${esc(u.p.name)}</td><td>${esc(pname(u.s.owner))}</td><td class="d-nowrap">${u.ver === 'asis' ? '<span class="hint">Today’s process</span>' : prj ? stepBadge(st) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No step uses this data element yet.</div>'}</div>`;
+  /* R5: test cases, labelled TC<n> */
+  const cases = store.list('testCase', c => c.dataId === did);
+  const uncovered = fields.filter(f => !cases.some(c => String(c.field || '').toLowerCase() === String(f.name).toLowerCase()));
+  const tcards = `<div class="card" data-cases><h3>Test cases <span class="n">${cases.length}</span></h3>${cases.length ? `<div class="tbl-wrap"><table class="d-cases"><tr><th>Case</th><th>Field</th><th>Kind</th><th>Input</th><th>Expect</th></tr>${cases.slice(0, 8).map(c => `<tr data-case="${esc(c.id)}"><td><b class="d-tc">${esc(caseLbl(c))}</b></td><td>${esc(c.field || '—')}</td><td>${esc(c.kind || '')}</td><td><code class="d-code">${esc(c.input === '' ? '(empty)' : c.input)}</code></td><td class="${c.expect === 'reject' ? 'fail' : 'pass'}">${esc(c.expect || '')}</td></tr>`).join('')}</table></div>${cases.length > 8 ? `<div class="hint" style="margin-top:6px">and ${cases.length - 8} more${testPrj ? ` in <a href="${link('/testing/' + testPrj.id)}" data-link style="color:var(--accent)">Testing</a>` : ''}</div>` : ''}` : '<div class="s">No test cases yet. Generate them from the specification in Testing.</div>'}
+    ${fields.length ? (uncovered.length ? `<div class="hint fail" style="margin-top:8px" data-uncovered>${uncovered.length} spec field${uncovered.length === 1 ? ' has' : 's have'} no case: ${esc(uncovered.map(f => f.name).join(', '))}</div>` : '<div class="hint pass" style="margin-top:8px">Every spec field has at least one case.</div>') : ''}</div>`;
 
   const prof = `<div class="card" style="margin-top:16px"><h3>Latest profile ${profile ? `<span class="n">${esc(profile.rows)} rows · ${esc(fmtTime(profile.at))}</span>` : ''}</h3>
     ${profile ? `<div class="hint" style="margin:-4px 0 8px">Statistics only. Examples are masked: digits become 9, letters x/X, first and last character kept.</div>
@@ -87,14 +102,14 @@ export function render(params) {
       ${d.resolved ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}" ${gate(x)}>Resolve</button></div>`}</div>`).join('') + (open && !canEdit(x) ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing discovered yet. Requirements found during testing land here.</div>'}</div>`;
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Data element</div><h1>${esc(x.name)}</h1>${x.note ? `<p>${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}">${effDot(did)}${esc(a.label)}</span>${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
-    <div class="hdr-side"><div class="d-ownerrow d-right">${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}<button class="btn" data-dedit ${gate(x)}>Edit</button></div><div class="kpis"><div class="kpi"><b>${users.length}</b><span>Steps use it</span></div><div class="kpi"><b>${new Set(users.map(u => u.pid)).size}</b><span>Processes</span></div><div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work items waiting</span></div></div></div></section>
+    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}">${effDot(did)}${esc(a.label)}</span>${eff === 'live' ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
+    <div class="hdr-side"><div class="d-ownerrow d-right">${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}<button class="btn" data-dedit ${gate(x)}>Edit</button></div><div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>To-be steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>As-is steps</span></div><div class="kpi"><b>${procCount}</b><span>Processes</span></div><div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work items waiting</span></div></div></div></section>
   ${eff === 'live' ? '' : confirm}
   ${resolution}
   <div class="two">${spec}${examples}</div>
   ${impact}
   ${prof}
-  <div class="two">${disc}<div></div></div>
+  <div class="two">${disc}${tcards}</div>
   <div class="two">${activityCard('dataElement:' + did)}</div>`;
 }
 
@@ -259,6 +274,81 @@ async function fieldModal(f, siblings, st, err) {
   return field;
 }
 
+/* R5: confirm live with evidence that cannot be faked:
+   (a) the latest profile with zero blocking drift, (b) a passing connection check, or (c) a link plus a note ("attested", weaker). */
+async function confirmLive(did, cur, save) {
+  let err = '', vals = {}, check = null;
+  for (;;) {
+    const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (data owner) can confirm`); return; }
+    const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
+    const drift = prof ? eng('specDrift', [x, prof], []) : [];
+    const blk = blockingDrift(drift);
+    const lastCheck = check || x.check || null;
+    const sel = vals.ev || (prof && !blk.length ? 'profile' : '');
+    const opt = (v, dis, inner) => `<label class="d-evopt ${dis ? 'd-evdis' : ''}" data-evopt="${v}"><input type="radio" name="ev" value="${v}" ${sel === v && !dis ? 'checked' : ''} ${dis ? 'disabled' : ''} /><div>${inner}</div></label>`;
+    const pr = modal({
+      title: `Confirm '${x.name}' is live`,
+      body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p style="margin:0">You are confirming, as the data owner, that steps can now read <b>${esc(x.name)}</b> from a live source.</p>
+        <div class="field"><label>Live source</label><input name="source" value="${esc(vals.source != null ? vals.source : (x.liveSource || x.source || ''))}" placeholder="e.g. ERP vendor master API (read)" /></div>
+        <div class="field"><label id="d-ev-l">Evidence</label><div class="d-evs" role="radiogroup" aria-labelledby="d-ev-l">
+          ${opt('profile', !prof || blk.length, `<b>Latest profile</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest profile · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} drift issue${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : '<span class="pass">matches the specification</span>'}
+            ${blk.length ? `<ul class="d-blklist">${blk.slice(0, 5).map(d => `<li>${esc(d.field)}: ${esc(plainDetail(d.detail))}</li>`).join('')}</ul><div class="fail">Blocked: fix the blocking drift and profile again, or use other evidence.</div>` : drift.length ? '<div class="hint">Only columns with no spec differ; they do not block.</div>' : ''}` : '<span class="hint">No profile yet. Profile a real extract in Testing to use this.</span>'}</div>`)}
+          ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated in-tenant probe of the recorded source${x.source ? ` (${esc(x.source)})` : ''}. It must pass.</div>
+            <div class="d-checkrow"><button type="button" class="btn sm" data-run-check>Run connection check</button><span data-check-result aria-live="polite" class="${lastCheck ? (lastCheck.ok ? 'pass' : 'fail') : 'hint'}">${lastCheck ? `${lastCheck.ok ? '✓ Passed' : '✗ Failed'} ${esc(fmtTime(lastCheck.at))}: ${esc(lastCheck.detail || '')}` : 'Not run yet.'}</span></div>`)}
+          ${opt('attested', false, `<b>Evidence link and note</b> <span class="badge d-ev d-ev-weak">Attested · weaker</span><div class="hint">The gate shows attested evidence as a warning.</div>
+            <div class="frow d-evattest"><div class="field"><label>Evidence link</label><input name="evlink" value="${esc(vals.evlink || '')}" placeholder="https://…" inputmode="url" /></div><div class="field"><label>Note</label><input name="evnote" value="${esc(vals.evnote || '')}" placeholder="What the link shows" /></div></div>`)}
+        </div></div>`,
+      actions: [{ id: 'confirm', label: 'Confirm live', primary: true }],
+    });
+    const m = [...document.querySelectorAll('.overlay .modal')].pop();
+    const rc = m.querySelector('[data-run-check]'), out = m.querySelector('[data-check-result]');
+    /* typing into an option's inputs selects that option */
+    m.querySelectorAll('[data-evopt] input:not([type=radio])').forEach(i => i.addEventListener('focus', () => { const r = i.closest('[data-evopt]').querySelector('input[type=radio]'); if (r && !r.disabled) r.checked = true; }));
+    rc.onclick = async () => {
+      const radio = m.querySelector('input[name=ev][value=check]'); radio.checked = true;
+      rc.disabled = true; out.className = 'hint'; out.textContent = 'Running…';
+      try {
+        const typed = (m.querySelector('[name=source]').value || '').trim();
+        const now = cur();
+        if (!now.source && typed) { await store.save('dataElement', did, Object.assign(clone(now), { source: typed }), `Set the source of '${now.name}' to ${typed}`); }
+        const r = await store.api('/check/' + encodeURIComponent(did));
+        check = { ok: !!r.ok, at: r.at || new Date().toISOString(), detail: r.detail || '', by: store.state.me };
+        /* mirror what the server stored, so a later save keeps it */
+        const doc = (store.state.docs.dataElement || []).find(d => d.id === did); if (doc) doc.data.check = check;
+        out.className = check.ok ? 'pass' : 'fail';
+        out.textContent = `${check.ok ? '✓ Passed' : '✗ Failed'} ${fmtTime(check.at)}: ${check.detail}`;
+      } catch (e) { out.className = 'fail'; out.textContent = 'The check could not run: ' + e.message; }
+      rc.disabled = false;
+    };
+    const r = await pr;
+    if (r.action !== 'confirm') return;
+    vals = { source: (r.form.source || '').trim(), ev: (r.root.querySelector('input[name=ev]:checked') || {}).value || '', /* formValues does not read radio groups */ evlink: (r.form.evlink || '').trim(), evnote: (r.form.evnote || '').trim() };
+    if (!vals.source) { err = 'Name the live source you are confirming.'; continue; }
+    const by = store.state.me, at = new Date().toISOString();
+    let evidence = null;
+    if (vals.ev === 'profile') {
+      if (!prof) { err = 'There is no profile yet. Choose other evidence.'; continue; }
+      if (blk.length) { err = `The latest profile has ${blk.length} blocking drift issue${blk.length === 1 ? '' : 's'}. Choose other evidence.`; continue; }
+      evidence = { type: 'profile', ref: prof.id, at, by };
+    } else if (vals.ev === 'check') {
+      const c = check || cur().check;
+      if (!c) { err = 'Run the connection check first.'; continue; }
+      if (!c.ok) { err = 'The connection check did not pass, so it cannot be the evidence.'; continue; }
+      evidence = { type: 'check', ref: c.at, at, by };
+    } else if (vals.ev === 'attested') {
+      if (!/^https?:\/\/\S+\.\S+/i.test(vals.evlink)) { err = 'Add an evidence link that starts with https://'; continue; }
+      if (!vals.evnote) { err = 'Add a note that says what the evidence link shows.'; continue; }
+      evidence = { type: 'attested', ref: vals.evlink, note: vals.evnote, at, by };
+    } else { err = 'Choose the evidence for this confirmation.'; continue; }
+    const d = clone(cur());
+    if (check) d.check = check;
+    Object.assign(d, { avail: 'live', liveConfirmedBy: by, liveConfirmedAt: at, liveSource: vals.source, liveEvidence: evidence });
+    if (!d.source) d.source = vals.source;
+    await save(d, `Confirmed '${d.name}' live (source: ${vals.source}; evidence: ${EVID[evidence.type].long.toLowerCase()})`);
+    return;
+  }
+}
+
 export function bind(root, params) {
   const did = params.did; const cur = () => store.get('dataElement', did);
   if (!cur()) return;
@@ -286,7 +376,7 @@ export function bind(root, params) {
     const d = clone(cur()); const before = d.avail, sBefore = d.sensitivity || '';
     Object.assign(d, { name, owner: r.form.owner, avail: r.form.avail, source: r.form.source.trim(), note: r.form.note.trim() });
     if (r.form.sensitivity) d.sensitivity = r.form.sensitivity; else delete d.sensitivity;
-    if (d.avail !== 'live') { delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource; } /* no longer live: the confirmation no longer stands */
+    if (d.avail !== 'live') { delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource; delete d.liveEvidence; } /* no longer live: the confirmation no longer stands */
     const parts = [];
     if (before !== d.avail) parts.push(`availability ${avOf(before).short} → ${avOf(d.avail).short}`);
     if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'unclassified'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'unclassified'}`);
@@ -296,29 +386,7 @@ export function bind(root, params) {
     }
   };
   const cl = root.querySelector('[data-confirm-live]');
-  if (cl) cl.onclick = async () => {
-    let err = '', src = null;
-    for (;;) {
-      const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (data owner) can confirm`); return; }
-      const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
-      const drift = prof ? eng('specDrift', [x, prof], []) : [];
-      const r = await modal({
-        title: `Confirm '${x.name}' is live`,
-        body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p style="margin:0">You are confirming, as the data owner, that steps can now read <b>${esc(x.name)}</b> from a live source.</p>
-          <div class="field"><label>Live source</label><input name="source" value="${esc(src != null ? src : (x.liveSource || x.source || ''))}" placeholder="e.g. ERP vendor master API (read)" /></div>
-          <div class="d-confprof" data-confprof>${prof ? `<b>Latest profile</b> · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${(prof.columns || []).length} columns · ${drift.length ? `<span class="fail">${drift.length} spec drift issue${drift.length === 1 ? '' : 's'}</span>` : '<span class="pass">matches the specification</span>'}` : '<span class="hint">No profile yet. You can still confirm; profiling a real extract first is recommended.</span>'}</div>`,
-        actions: [{ id: 'confirm', label: 'Confirm live', primary: true }],
-      });
-      if (r.action !== 'confirm') return;
-      src = (r.form.source || '').trim();
-      if (!src) { err = 'Name the live source you are confirming.'; continue; }
-      const d = clone(cur());
-      Object.assign(d, { avail: 'live', liveConfirmedBy: store.state.me, liveConfirmedAt: new Date().toISOString(), liveSource: src });
-      if (!d.source) d.source = src;
-      await save(d, `Confirmed '${d.name}' live (source: ${src})`);
-      return;
-    }
-  };
+  if (cl) cl.onclick = () => confirmLive(did, cur, save);
   root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {
     const x = cur(); if (!canEdit(x)) { toast(onlyMsg(x)); return; }
     const i = +b.dataset.resolve; const item = (x.discovered || [])[i]; if (!item) return;

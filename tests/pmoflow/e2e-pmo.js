@@ -38,6 +38,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const STORE = ROOT + '/app/store.js';
   const getDoc = (type, id) => page.evaluate(async ([u, t, i]) => (await import(u)).store.get(t, i), [STORE, type, id]);
   const asPersona = async re => { const id = await page.$eval('#persona', (s, r) => [...s.options].find(o => new RegExp(r).test(o.text)).value, re); await page.selectOption('#persona', id); await settle(); return id; };
+  /* R5: outside the Map view, comments + history sit in a collapsed "Activity" toggle; open it before reading history */
+  const openAct = () => page.evaluate(() => { const d = document.querySelector('[data-activity]'); if (d && !d.open) { d.open = true; d.dispatchEvent(new Event('toggle')); } });
   /* icon-only controls (no visible text) must carry an aria-label */
   const unlabelled = () => page.evaluate(() => [...document.querySelectorAll('#app button, #app a, .overlay button')].filter(b => b.offsetParent && !b.textContent.replace(/[^\p{L}\p{N}]/gu, '').length && !b.getAttribute('aria-label') && !b.getAttribute('aria-labelledby')).map(b => b.outerHTML.slice(0, 80)));
 
@@ -105,7 +107,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await act('cancel');
   await sleep(800); await page.reload(); await page.waitForSelector('.hdr h1');
   check('reload: new project persisted', (await page.locator('.hdr h1').innerText()).includes(NP));
-  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
   check('new project: history shows creation', (await page.locator('[data-history]').innerText()).includes('Created project'));
   await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
   check('new project: tile on home', await page.locator('.home-grid a.tile', { hasText: NP }).count() === 1);
@@ -282,7 +284,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot('05a-timeline-dragged-1440');
   await sleep(800); await page.reload(); await page.waitForSelector('.tl button.tbar');
   check('reload: dragged dates persisted', (await getDoc('workItem', dragId)).due === after2.due);
-  await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
   check('history shows "Rescheduled" with a summary', /Rescheduled “.+” on the timeline: .+ → .+ \(\+3d\)/.test(await page.locator('[data-feed="prj-work"]').innerText()));
   await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
 
@@ -290,7 +292,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ================= ROUND 4: views of the same work items ================= */
   const PRJ = decodeURIComponent(prjPath.split('/project/')[1]);
   const prjGo = async (q, sel) => { await page.goto(ROOT + '/project/' + encodeURIComponent(PRJ) + (q || '')); await page.waitForSelector(sel || '.pmo-toolbar'); await settle(); };
-  const feedText = async () => { await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {}); return page.locator('[data-feed="prj-work"]').innerText(); };
+  const feedText = async () => { await openAct(); await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {}); return page.locator('[data-feed="prj-work"]').innerText(); };
   const isWkend = s => { const g = new Date(s + 'T12:00:00').getDay(); return g === 0 || g === 6; };
   /* synthetic HTML5 drag-and-drop (for targets that are off-screen, where a mouse drag can't reach) */
   const dnd = async (src, dst) => { const dt = await page.evaluateHandle(() => new DataTransfer());
@@ -404,7 +406,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const pj = await getDoc('project', PRJ);
   check('plan sprints: project.sprints saved with the cadence', Array.isArray(pj.sprints) && pj.sprints[0].start === spStart && pj.sprints.every((s, i) => shift(s.start, s.end) === 6 && (!i || shift(pj.sprints[i - 1].start, s.start) === 7)), pj.sprints && pj.sprints.slice(0, 2));
   check('plan sprints: columns follow the new cadence', await page.locator('.pmo-spr[data-sprint]').count() === pj.sprints.length);
-  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
   check('history: sprint cadence change', (await page.locator('[data-history]').innerText()).includes('Sprint cadence: 7-day sprints'));
 
   /* ---- shared filter bar + saved views ---- */
@@ -455,7 +457,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('view picker re-applies the saved filters', await page.locator('.pmo-board .pmo-card').count() === filtered && new URL(page.url()).searchParams.get('status') === 'open');
   await sleep(800); await page.reload(); await page.waitForSelector('[data-board]'); await settle();
   check('reload: filters persist from the URL', await page.locator('.pmo-board .pmo-card').count() === filtered && await page.isChecked('[data-fbar] input[data-f="late"]'));
-  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
   check('history: saved view', (await page.locator('[data-history]').innerText()).includes('Saved view “E2E late open work”'));
   await page.selectOption('[data-fbar] select[data-f="owner"]', ownerPick); await settle();
   await page.click('[data-save-view]'); await modalOpen(); await page.fill('.overlay input[name="name"]', 'E2E throwaway view'); await act('save'); await settle();
@@ -499,7 +501,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('report: headline + RAG pill', (await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim().length > 5 && await page.locator(`[data-prj-rep] .rag-${ragK2}`).count() === 1);
   const mail = await page.getAttribute('[data-rep-mail]', 'href');
   const mailU = new URL(mail);
-  check('email draft: mailto with subject + plain-text body', mail.startsWith('mailto:?subject=') && mailU.searchParams.get('subject').includes('status') && mailU.searchParams.get('body').includes((await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim()), mail.slice(0, 120));
+  check('email draft: mailto with subject + plain-text body', /^mailto:[a-z.]+@northwind\.example(,[a-z.]+@northwind\.example)*\?subject=/.test(mail) && mailU.searchParams.get('subject').includes('status') && mailU.searchParams.get('body').includes((await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim()), mail.slice(0, 120));
   await page.evaluate(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
   await page.click('[data-rep-print]');
   check('Print / PDF calls window.print', await page.evaluate(() => window.__printed) === 1);
@@ -553,7 +555,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('suggest work');
   await asPersona('^Leo Park'); await page.waitForSelector('table.pmo-work');
   await page.click('[data-suggest]'); await modalOpen();
-  check('non-owner: suggestions preview explains who can create', (await page.locator('.overlay .pmo-ro-note').innerText()).includes('project owner'));
+  check('non-owner: suggestions preview explains who can create', (await page.locator('.overlay .pmo-ro-note').innerText()).includes('project manager'));
   check('non-owner: no "Create selected" action', await page.locator('.overlay [data-act="create"]').count() === 0);
   check('non-owner: suggestion fields read-only', await page.locator('.overlay .pmo-sg-f select:not([disabled])').count() === 0);
   await act('cancel');
@@ -628,11 +630,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('reload: edited item persisted', await workRow(T2).count() === 1);
   check('reload: status persisted', await workRow(T2).locator('select[data-status]').inputValue() === 'done');
   check('reload: deleted item stays deleted', await workRow(T3).count() === 0);
-  await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
   const feed = await page.locator('[data-feed="prj-work"]').innerText();
   check('work history shows edit', feed.includes('Edited'), feed.slice(0, 200));
   check('work history shows delete', feed.includes('Deleted work item'));
-  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
   const hist = await page.locator('[data-history]').innerText();
   check('project history shows baseline + link', hist.includes('Saved baseline') && (canLink ? /linked/i.test(hist) : true), hist.slice(0, 200));
   await shot('08-work-after-reload-1440');
@@ -743,12 +745,201 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await act('cancel');
   check('portfolio: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
 
+  /* ================= ROUND 5: roles, planning conflicts, status reasons, PMO ================= */
+  console.log('R5 roles + settings');
+  const E5 = (fn, ...a) => page.evaluate(async ([u, fn, a]) => { const { store } = await import(u); return window.PMOEngine[fn](store.state.docs, ...a); }, [STORE, fn, a]);
+  const money5 = n => '$' + Math.round(n).toLocaleString('en-US');
+  const tomId = await asPersona('Project Manager');
+  await prjGo('?mode=work', 'table.pmo-work');
+  const vm = await getDoc('project', PRJ);
+  check('R5 header: project manager shown', (await page.locator('[data-role-pm]').innerText()).includes('Tom Alvarez'));
+  check('R5 header: release manager shown', (await page.locator('[data-role-rm]').innerText()).includes(await page.evaluate(async ([u, id]) => (await import(u)).store.person(id).name, [STORE, vm.releaseManager || vm.owner])));
+  check('R5 header: RAG pill shows its reason', (await page.locator('.pmo-hrag [data-rag-reason]').innerText()).replace(/[·\s]/g, '').length > 3);
+  /* activity toggle: collapsed outside the Map, full cards on the Map */
+  check('R5 activity: one collapsed "Activity" toggle in Work view', await page.locator('[data-activity]').count() === 1 && !(await page.locator('[data-activity]').evaluate(d => d.open)) && await page.locator('.side .card > h3', { hasText: /^Comments$/ }).count() === 0);
+  await page.click('[data-activity] > summary');
+  await page.fill('[data-activity] textarea[name="cmt"]', 'E2E R5 activity comment'); await page.click('[data-activity] [data-post]'); await settle();
+  check('R5 activity: stays open and shows the new comment', await page.locator('[data-activity]').evaluate(d => d.open) && (await page.locator('[data-activity]').innerText()).includes('E2E R5 activity comment'));
+  await prjGo('', '.canvas.pm');
+  check('R5 activity: Map keeps Comments + History cards (no toggle)', await page.locator('[data-activity]').count() === 0 && await page.locator('.side .card > h3', { hasText: /^Comments$/ }).count() === 1);
+  /* settings: PM only */
+  await asPersona('^Maya Chen');
+  check('R5 settings: disabled for non-PM with explanation', await page.locator('[data-settings]').isDisabled() && /Only Tom Alvarez \(project manager\)/.test(await page.getAttribute('[data-settings]', 'title')));
+  check('R5 link process / baseline: disabled for non-PM', await page.locator('.pmo-actions [data-link-proc]').isDisabled() && await page.locator('[data-baseline]').isDisabled());
+  await asPersona('Project Manager');
+  await page.click('[data-settings]'); await modalOpen();
+  check('R5 settings modal: PM, release manager, program, budget fields', await page.locator('.overlay select[name="owner"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
+  await page.selectOption('.overlay select[name="releaseManager"]', 'lp');
+  await page.fill('.overlay input[name="budget"]', '-5'); await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
+  check('R5 settings: negative budget rejected, input kept', (await page.locator('.overlay .banner').innerText()).includes('budget') && await page.inputValue('.overlay select[name="releaseManager"]') === 'lp');
+  await page.fill('.overlay input[name="budget"]', '52000'); await page.fill('.overlay input[name="program"]', 'Finance Operations Modernization');
+  await act('save'); await settle();
+  const vm2 = await getDoc('project', PRJ);
+  check('R5 settings: release manager + budget saved', vm2.releaseManager === 'lp' && vm2.budget && vm2.budget.planned === 52000 && vm2.owner === tomId, { rm: vm2.releaseManager, b: vm2.budget });
+  check('R5 header: new release manager shown', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('R5 history: settings change summarised', /Project settings: .*release manager Tom Alvarez → Leo Park.*planned budget/.test(await page.locator('[data-history]').innerText()));
+  await sleep(600); await page.reload(); await page.waitForSelector('[data-role-rm]');
+  check('R5 reload: settings persisted', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park') && (await page.locator('[data-hfin]').innerText()).includes('$52,000'));
+  /* the server enforces "only the PM edits the plan": a non-PM change to linked processes is refused with 403 */
+  await asPersona('^Maya Chen');
+  const srv403 = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const j = store.get('project', id);
+    const r = await fetch(`/api/pmoflow/ws/${store.state.ws}/doc/project/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: Object.assign({}, j, { processes: [] }), actor: store.state.me, summary: 'E2E non-PM plan change' }) }); return r.status; }, [STORE, PRJ]);
+  check('R5 server: non-PM plan change rejected (403)', srv403 === 403, srv403);
+  /* and the UI handles a refusal: toast, server truth restored, no unhandled error */
+  await asPersona('Project Manager');
+  await page.route('**/doc/project/**', r => r.request().method() === 'PUT' ? r.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Only the project manager can change the plan.' }) }) : r.continue());
+  await page.click('[data-settings]'); await modalOpen(); await page.fill('.overlay input[name="budget"]', '61000'); await act('save');
+  await page.waitForSelector('.toast:has-text("Not saved")', { timeout: 8000 }).catch(() => {});
+  const t403 = await page.locator('.toast').innerText().catch(() => '');
+  await page.unroute('**/doc/project/**'); await settle();
+  check('R5 403: UI says the change was not saved', /Not saved: Only the project manager/.test(t403), t403);
+  check('R5 403: server truth restored', (await getDoc('project', PRJ)).budget.planned === 52000);
+  for (let i = errors.length - 1; i >= 0; i--) if (/status of 403/.test(errors[i])) errors.splice(i, 1); /* the browser logs the intentional 403 response */
+
+  console.log('R5 planning conflicts + auto-schedule');
+  await prjGo('?mode=timeline', '.tl .tbar');
+  const pair = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = decodeURIComponent(location.pathname.split('/project/')[1]);
+    const items = store.list('workItem', w => w.projectId === prj && w.status !== 'done');
+    const conf = new Set(E.scheduleConflicts(store.state.docs, prj).map(c => c.workId));
+    for (const w of items) for (const d of (w.deps || [])) { const id = typeof d === 'object' ? d.id : d; const t = typeof d === 'object' ? d.type || 'FS' : 'FS'; const dep = items.find(x => x.id === id);
+      if (dep && t === 'FS' && !conf.has(w.id) && document.querySelector(`.tl button.tbar[data-bar="${w.id}"]`)) return { w: w.id, d: dep.id, ws: w.start, dd: dep.due }; }
+    return null; }, STORE);
+  check('R5 conflicts: an FS pair to break exists', !!pair, pair);
+  const confBefore = (await E5('scheduleConflicts', PRJ)).length;
+  check('R5 conflicts: markers match the engine before a drag', await page.locator('[data-conf-mark]').count() === new Set((await E5('scheduleConflicts', PRJ)).map(c => c.workId)).size);
+  if (pair) {
+    const dshift = Math.round((new Date(pair.dd + 'T12:00:00') - new Date(pair.ws + 'T12:00:00')) / 86400000) - 3; /* start 3 days before the predecessor finishes */
+    const b5 = page.locator(`.tl button.tbar[data-bar="${pair.w}"]`); await b5.scrollIntoViewIfNeeded();
+    const g5 = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); return { x: r.left + Math.min(20, r.width / 2), y: r.top + r.height / 2, pxDay: b.parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span) }; }, pair.w);
+    const steps = Math.max(1, Math.min(-dshift, 30));
+    await page.mouse.move(g5.x, g5.y); await page.mouse.down();
+    for (let k = 1; k <= 8; k++) await page.mouse.move(g5.x - g5.pxDay * steps * k / 8, g5.y);
+    const tip5 = await page.locator('.pmo-dragtip').innerText().catch(() => '');
+    check('R5 drag: live tip warns about the new conflict', /conflicts with/.test(tip5) && await page.locator('.pmo-dragtip.conf').count() === 1, tip5);
+    await page.mouse.up(); await settle();
+    const after5 = await E5('scheduleConflicts', PRJ);
+    check('R5 drag: conflict recorded after the drop', after5.some(c => c.workId === pair.w && c.dep === pair.d) && after5.length > confBefore, after5.length);
+    check('R5 timeline: marker + red bar outline after the drag', await page.locator(`[data-conf-mark="${pair.w}"]`).count() === 1 && await page.locator(`.tl [data-bar="${pair.w}"].pmo-conf`).count() === 1);
+    check('R5 timeline: conflict banner lists the conflicts', (await page.locator('[data-conf-bar]').innerText()).includes(`${after5.length} scheduling conflict`));
+  }
+  /* non-PM may preview but not apply */
+  await asPersona('^Maya Chen'); await page.waitForSelector('[data-autosched]');
+  await page.click('[data-autosched]'); await modalOpen();
+  check('R5 auto-schedule: non-PM preview has no Apply, explains who can', await page.locator('.overlay [data-act="apply"]').count() === 0 && /Only Tom Alvarez \(project manager\)/.test(await page.locator('.overlay .pmo-ro-note').innerText()));
+  await act('cancel');
+  await asPersona('Project Manager'); await page.waitForSelector('[data-autosched]');
+  const prop = await E5('autoSchedule', PRJ);
+  await page.click('[data-autosched]'); await modalOpen();
+  const asRows = await page.locator('.overlay [data-as-row]').count();
+  check('R5 auto-schedule: preview shows one before → after row per proposed move', asRows === Object.keys(prop).length && asRows > 0, { asRows, n: Object.keys(prop).length });
+  if (pair) {
+    const rowTxt = await page.locator(`.overlay [data-as-row="${pair.w}"]`).innerText().catch(() => '');
+    const f5 = s => new Date(s + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    check('R5 auto-schedule: dragged item proposed after its predecessor', !!prop[pair.w] && prop[pair.w].start >= pair.dd && rowTxt.includes(f5(prop[pair.w].start)), rowTxt);
+  }
+  await shot('20-autoschedule-preview-1440', false);
+  await act('apply'); await page.waitForSelector('.toast:has-text("Applied")', { timeout: 20000 }).catch(() => {}); await settle();
+  const applied = await Promise.all(Object.entries(prop).map(async ([id, v]) => { const w = await getDoc('workItem', id); return w.start === v.start && w.due === v.due ? null : { id, v, w: [w.start, w.due] }; }));
+  check('R5 auto-schedule: applied dates match the preview', applied.every(x => !x), applied.filter(Boolean));
+  check('R5 auto-schedule: no conflicts left', (await E5('scheduleConflicts', PRJ)).length === 0 && await page.locator('[data-conf-mark]').count() === 0 && await page.locator('[data-conf-bar].has').count() === 0, await E5('scheduleConflicts', PRJ));
+  check('R5 history: auto-schedule moves summarised', /Auto-scheduled “.+”: .+ → .+/.test(await feedText()));
+  await shot('21-timeline-after-autoschedule-1440');
+
+  console.log('R5 external dependencies');
+  await prjGo('?mode=work', 'table.pmo-work');
+  const extW = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const mine = store.list('workItem', w => w.projectId === prj && w.status !== 'done')[0]; const ext = store.list('workItem', w => w.projectId !== prj && store.get('project', w.projectId))[0]; return mine && ext ? { mine: mine.id, ext: ext.id, title: mine.title } : null; }, [STORE, PRJ]);
+  check('R5 external: an item in another project exists', !!extW);
+  if (extW) {
+    await page.click(`[data-edit-work="${extW.mine}"]`); await modalOpen();
+    check('R5 external: modal lists other projects\' work as "external"', await page.locator('.overlay [data-ext-deps] .pmo-ext').count() > 1);
+    await page.click('.overlay [data-ext-deps] > summary');
+    await page.check(`.overlay input[name="deps"][value="${extW.ext}"]`); await act('save'); await settle();
+    const mw = await getDoc('workItem', extW.mine);
+    check('R5 external: dependency saved', (mw.deps || []).some(d => (typeof d === 'object' ? d.id : d) === extW.ext));
+    check('R5 external: Work tab marks it external', await page.locator(`tr[data-wid="${extW.mine}"] .pmo-ext`).count() === 1);
+    check('R5 history: external dependency named', /now after .+ \(external\)/.test(await feedText()));
+  }
+
+  console.log('R5 causing slip + status reasons');
+  const slipIds = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const fc = window.PMOEngine.forecastAll(store.state.docs, store.state.today); return store.list('workItem', w => w.projectId === prj && w.status !== 'done' && fc[w.id] && fc[w.id].causesSlip).map(w => w.id); }, [STORE, PRJ]);
+  check('R5 causing slip: the engine flags some items', slipIds.length > 0, slipIds.length);
+  const hasBadge = async sel => (await Promise.all(slipIds.map(async id => await page.locator(sel(id)).count() > 0))).every(Boolean);
+  check('R5 causing slip: badge on every flagged Work row', await hasBadge(id => `tr[data-wid="${id}"] [data-causes-slip]`) && await page.locator('tr[data-wid] [data-causes-slip]').count() === slipIds.length);
+  await prjGo('?mode=board', '[data-board]');
+  check('R5 causing slip: badge on every flagged Board card', await hasBadge(id => `[data-card="${id}"] [data-causes-slip]`) && await page.locator('[data-card] [data-causes-slip]').count() === slipIds.length);
+  await prjGo('?mode=timeline', '.tl .tbar');
+  check('R5 causing slip: badge on every flagged Timeline row', await page.locator('.tl tr [data-causes-slip]').count() === slipIds.length);
+  await prjGo('', '.canvas.pm .node');
+  const slipSteps = await page.evaluate(async ([u, ids]) => { const { store } = await import(u); return [...new Set(ids.map(id => store.get('workItem', id).step))]; }, [STORE, slipIds]);
+  check('R5 causing slip: badge on the Map step of each flagged item', (await Promise.all(slipSteps.map(async s => await page.locator(`.canvas.pm .node[data-step="${s}"] [data-causes-slip]`).count() === 1))).every(Boolean), slipSteps);
+  await shot('22-map-causing-slip-1440');
+  /* zero-work project: grey "Not planned" everywhere, never Green; created with PM + release manager */
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  await page.click('.pmo-hero [data-new-project]'); await modalOpen();
+  check('R5 new project: Project manager + Release manager selects', await page.locator('.overlay label[for="pf-pm"]').textContent() === 'Project manager' && await page.locator('.overlay label[for="pf-rm"]').textContent() === 'Release manager');
+  const NP5 = 'E2E Northwind unplanned initiative';
+  await page.fill('.overlay input[name="name"]', NP5); await page.selectOption('.overlay select[name="releaseManager"]', 'ar');
+  await page.fill('.overlay input[name="program"]', 'E2E Program'); await page.fill('.overlay input[name="budget"]', '30000');
+  await act('create'); await page.waitForURL(/\/project\/prj-/); await page.waitForSelector('.pmo-hrag'); await settle();
+  const np5 = await getDoc('project', decodeURIComponent(new URL(page.url()).pathname.split('/project/')[1]));
+  check('R5 new project: roles, program, budget saved', np5.owner === tomId && np5.releaseManager === 'ar' && np5.resources.includes('ar') && np5.program === 'E2E Program' && np5.budget.planned === 30000, np5);
+  check('R5 Not planned: project header pill is grey with a reason', await page.locator('.pmo-hrag [data-rag-k="none"]').count() === 1 && (await page.locator('.pmo-hrag').innerText()).includes('Not planned') && await page.locator('.pmo-hrag .rag-green').count() === 0);
+  check('R5 Not planned: finish KPI says so', (await page.locator('[data-kpi-finish]').innerText()).includes('Not planned'));
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  check('R5 Not planned: home tile grey, never Green', await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('[data-rag-k="none"]').count() === 1 && await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('.rag-green').count() === 0);
+  check('R5 home: every RAG pill shows its reason', await page.locator('.home-grid .rag').count() === await page.locator('.home-grid .rag [data-rag-reason]').count());
+
+  console.log('R5 portfolio: programs, financials, burndown, day rates');
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('[data-financials]'); await settle();
+  check('R5 Not planned: portfolio row grey', await page.locator('[data-prow]', { hasText: NP5 }).locator('[data-rag-k="none"]').count() === 1 && (await page.locator('[data-prow]', { hasText: NP5 }).innerText()).includes('Not planned'));
+  check('R5 portfolio: every RAG pill shows its reason', await page.locator('.pmo-ptable .rag').count() === await page.locator('.pmo-ptable .rag [data-rag-reason]').count());
+  const progs = await page.evaluate(async u => { const { store } = await import(u); return [...new Set(store.list('project').map(p => p.program || 'No program'))]; }, STORE);
+  check('R5 portfolio: grouped by program', await page.locator('[data-program-row]').count() === progs.length && await page.locator('[data-program-row="E2E Program"]').count() === 1, progs);
+  const finOk = async () => (await Promise.all((await page.locator('[data-fin]').evaluateAll(rs => rs.map(r => r.dataset.fin))).map(async id => {
+    const f = await E5('projectFinancials', id); const row = page.locator(`[data-fin="${id}"]`);
+    return (await row.locator('[data-fin-forecast]').innerText()) === money5(f.forecastCost) && (await row.locator('[data-fin-actual]').innerText()) === money5(f.actualCost) && (f.planned == null || (await row.locator('[data-fin-planned]').innerText()) === money5(f.planned)); }))).every(Boolean);
+  check('R5 financials: planned / forecast / actual match the engine', await page.locator('[data-fin]').count() >= 3 && await finOk());
+  const bd = await E5('burndown', await page.inputValue('[data-burn-prj]'), await page.evaluate(async u => (await import(u)).store.state.today, STORE));
+  check('R5 burndown: SVG with actual + ideal lines', (await page.getAttribute('[data-burn="portfolio"] [data-line="actual"]', 'd')).startsWith('M') && (await page.getAttribute('[data-burn="portfolio"] [data-line="ideal"]', 'd')).startsWith('M'));
+  check('R5 burndown: accessible label + data table matches the engine', /remaining/.test(await page.getAttribute('[data-burn="portfolio"] svg', 'aria-label')) && await page.locator('[data-burn="portfolio"] tbody tr').count() === bd.length, { rows: await page.locator('[data-burn="portfolio"] tbody tr').count(), n: bd.length });
+  /* day rate next to capacity */
+  const rate0 = await page.innerText('[data-rate="dk"]');
+  await page.click('[data-rate="dk"]'); await modalOpen(); await page.fill('.overlay input[name="dayRate"]', '1200'); await act('save'); await settle();
+  check('R5 day rate: saved on the person', (await getDoc('person', 'dk')).dayRate === 1200 && (await page.innerText('[data-rate="dk"]')).includes('$1,200'), rate0);
+  check('R5 day rate: financials recalculated', await finOk());
+  await sleep(600); await page.reload(); await page.waitForSelector('[data-rate="dk"]');
+  check('R5 reload: day rate persisted', (await page.innerText('[data-rate="dk"]')).includes('$1,200'));
+  await shot('23-portfolio-r5-1440');
+
+  console.log('R5 project burndown, sprint burndown, report recipients');
+  await prjGo('?mode=sprints', '[data-sprints]');
+  check('R5 sprint burndown in the Sprints view', await page.locator('[data-sprint-burn] [data-burn="sprint"] svg, [data-sprint-burn] [data-burn-empty]').count() === 1 && await page.locator('[data-sburn-pick] option').count() === await page.locator('[data-sprint]').count());
+  const spPick = await page.locator('[data-sburn-pick] option').nth(1).getAttribute('value');
+  await page.selectOption('[data-sburn-pick]', spPick); await settle();
+  check('R5 sprint burndown: picking a sprint redraws it', await page.inputValue('[data-sburn-pick]') === spPick);
+  check('R5 project burndown in the side panel', (await page.getAttribute('[data-burn="project"] [data-line="ideal"]', 'd')).startsWith('M'));
+  await shot('24-sprints-burndown-1440');
+  await prjGo('', '.canvas.pm');
+  await page.click('[data-report]'); await page.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 });
+  const rc5 = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', prj);
+    const em = id => { const n = store.person(id).name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/\s+/); return n[0] + '.' + n[n.length - 1] + '@northwind.example'; };
+    const used = new Set(j.processes.flatMap(pid => E.flatSteps((store.get('process', pid) || {}).tobe || []).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
+    return { to: [...new Set([j.owner, ...j.resources])].map(em), notLive: [...used].filter(d => E.effectiveAvail(store.state.docs, d) !== 'live').length }; }, [STORE, PRJ]);
+  const mail5 = decodeURIComponent((await page.getAttribute('[data-rep-mail]', 'href')).split('?')[0].replace(/^mailto:/, '')).split(',');
+  check('R5 email draft: recipients are the project resources as first.last@northwind.example', JSON.stringify(mail5.sort()) === JSON.stringify(rc5.to.slice().sort()) && await page.locator('[data-rep-to] [data-rcpt]').count() === rc5.to.length, { mail5, to: rc5.to });
+  check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && (await page.innerText('[data-prj-rep] .pmo-rep-p')).includes(`${rc5.notLive} data element${rc5.notLive === 1 ? '' : 's'} ${rc5.notLive === 1 ? 'is' : 'are'} not yet live`), await page.innerText('[data-prj-rep] .pmo-rep-p'));
+  const body5 = new URL(await page.getAttribute('[data-rep-mail]', 'href')).searchParams.get('body');
+  check('R5 email body carries the same count', body5.includes(`Data: ${rc5.notLive} of`));
+  await shot('25-report-recipients-1440', false);
+  check('R5: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
+
   /* ---------------- phone width ---------------- */
   console.log('phone 390');
   await page.setViewportSize({ width: 390, height: 844 });
   const phone = [['/', '10-home-390', '.pmo-attn'], [prjPath + '?mode=map', '11-project-map-390', '.canvas.pm .node'], [prjPath + '?mode=timeline', '12-project-timeline-390', '.tl .tbar'],
     [prjPath + '?mode=work', '13-project-work-390', 'table.pmo-work'], ['/portfolio', '14-portfolio-390', '.pmo-ptable'],
-    [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]']];
+    [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]'], ['/portfolio', '26-portfolio-r5-390', '[data-financials]']];
   for (const [p, name, sel] of phone) {
     await page.goto(ROOT + p.replace(/^\/concepts\/pmoflow/, '')); await page.waitForSelector(sel); await sleep(300);
     const label = p.replace(/^.*\/project\/[^?]+/, '/project');

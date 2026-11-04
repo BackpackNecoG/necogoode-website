@@ -106,6 +106,8 @@ function baseDocs() {
   const project = [{ id: PRJ, name: 'Vendor Onboarding Modernization', owner: 'ta', resources: [], target: '2026-12-15',
     processes: ['vendor-onboarding', 'invoice-approval'], status: 'active',
     baselines: [{ id: 'b1', at: '2026-10-01', label: 'Kickoff', items: { W6: { start: '2026-10-27', due: '2026-11-03' }, W10: { start: '2026-11-15', due: '2026-11-20' } } }] }];
+  // R5: live needs evidence; seeded live elements carry an ok connection check.
+  dataElement.forEach(d => { if (d.avail === 'live') d.check = { ok: true, at: '2026-11-01T00:00:00Z', detail: 'Probe ok' }; });
   // process data entries intentionally omit data.id: the engine must take the entry id.
   return {
     person: wrap(person), dataElement: wrap(dataElement), workItem: wrap(workItem), project: wrap(project),
@@ -118,7 +120,7 @@ function baseDocs() {
 function readyDocs() {
   const d = baseDocs();
   d.workItem.forEach(e => { e.data.status = 'done'; });
-  d.dataElement.forEach(e => { e.data.avail = 'live'; });
+  d.dataElement.forEach(e => { e.data.avail = 'live'; e.data.check = { ok: true, at: '2026-11-01T00:00:00Z', detail: 'Probe ok' }; });
   const bus = ['Procurement', 'Compliance', 'Treasury', 'Accounts Payable', 'IT'];
   d.approval = bus.map((bu, i) => ({ id: 'AP' + i, data: { id: 'AP' + i, projectId: PRJ, bu, approver: i % 2 ? 'ar' : 'mc', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true, note: '' } }));
   d.testCase = wrap([
@@ -126,13 +128,15 @@ function readyDocs() {
     { id: 'T2', dataId: 'D2', field: 'Routing number', kind: 'boundary', input: '12345678', expect: 'reject', origin: 'spec' },
     { id: 'TX', dataId: 'DX-unused', field: 'x', kind: 'valid', input: 'a', expect: 'accept', origin: 'user' },
   ]);
+  // R5: every spec field needs a (non-custom) case.
+  ['Bank name', 'Account holder', 'Amount', 'Account number'].forEach((f, i) => d.testCase.push({ id: 'TF' + i, data: { id: 'TF' + i, dataId: 'D2', field: f, kind: 'valid', input: 'x', expect: 'accept', origin: 'spec' } }));
   // R3: every project data element needs at least one test case.
   ['D1', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9'].forEach(id => d.testCase.push({ id: 'C' + id, data: { id: 'C' + id, dataId: id, field: 'f', kind: 'valid', input: 'x', expect: 'accept', origin: 'user' } }));
   d.testRun = wrap([
     { id: 'R1', projectId: PRJ, env: 'dev', at: '2026-11-01T09:00:00Z', by: 'dk', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }, { caseId: 'TX', outcome: 'pass' }] },
     { id: 'R2', projectId: PRJ, env: 'uat', at: '2026-11-02T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }] },
   ]);
-  d.testCase.filter(e => e.id.startsWith('C')).forEach(e => { d.testRun[0].data.results.push({ caseId: e.id, outcome: 'pass' }); d.testRun[1].data.results.push({ caseId: e.id, outcome: 'pass' }); });
+  d.testCase.filter(e => e.id.startsWith('C') || e.id.startsWith('TF')).forEach(e => { d.testRun[0].data.results.push({ caseId: e.id, outcome: 'pass' }); d.testRun[1].data.results.push({ caseId: e.id, outcome: 'pass' }); });
   E.generateUatScripts(d, PRJ).forEach(sc => d.testRun[1].data.results.push({ scriptId: sc.id, outcome: 'pass', evidence: 'screenshot' }));
   d.project[0].data.cutover = { window: 'Sat 06:00-10:00', rollbackOwner: 'dk', rollbackPlan: 'Restore v1 as-is', hypercareDays: 10, hypercareOwner: 'ta', comms: 'Teams', tasks: [{ id: 'CT1', order: 1, task: 'Switch over', owner: 'dk', planned: '06:00', gonogo: true, done: false }] };
   d.grant = wrap([{ id: 'G1', projectId: PRJ, dataId: 'D2', env: 'uat', access: 'read', reason: 'UAT', requestedBy: 'dk', status: 'active', expires: '2026-12-01', log: [] }]);
@@ -513,7 +517,7 @@ test('R2 readiness: stricter tests-passed', () => {
   d = readyDocs(); d.project[0].data.uatScripts = [{ id: 'custom-1', pid: 'vendor-onboarding', step: 's3', title: 'Bank capture', given: 'g', when: 'w', then: 't', data: ['D2'] }];
   let c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
   assert.deepEqual(c.scripts, ['custom-1']); assert.deepEqual(c.unrun, ['custom-1']);
-  d.testRun[1].data.results.push({ scriptId: 'custom-1', outcome: 'pass' });
+  d.testRun[1].data.results.push({ scriptId: 'custom-1', outcome: 'pass', evidence: 'Screenshot in the ticket' });   // R5: script passes need evidence
   assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
 });
 
@@ -793,9 +797,11 @@ test('R4 effectiveAvail: pending until the data owner confirms', () => {
   d2.liveConfirmedBy = 'lp'; d2.liveSource = '';                  // owner but no source
   assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
   d2.liveSource = 'Treasury portal API';
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');            // R5: confirmation alone is not enough; evidence required
+  d2.check = { ok: true, at: '2026-11-04T09:00:00Z', detail: 'Probe ok' }; d2.liveEvidence = { type: 'check', ref: 'probe', at: '2026-11-04T09:00:00Z', by: 'lp' };
   assert.equal(E.effectiveAvail(d, 'D2'), 'live');
   const e = baseDocs(); e.dataElement.find(x => x.id === 'D1').data.owner = 'mc';
-  Object.assign(e.dataElement.find(x => x.id === 'D1').data, { liveConfirmedBy: 'mc', liveSource: 'Vendor portal' });
+  Object.assign(e.dataElement.find(x => x.id === 'D1').data, { liveConfirmedBy: 'mc', liveSource: 'Vendor portal', liveEvidence: { type: 'attested', ref: 'https://intranet.northwind.example/evidence/1', at: '2026-11-04', by: 'mc' } });
   assert.equal(E.effectiveAvail(e, 'D1'), 'live');                // examples element confirmed live by its owner
   // gate: pending fails data-live with "awaiting <owner> to confirm"
   const r = readyDocs(); const rd2 = r.dataElement.find(x => x.id === 'D2').data;
@@ -803,7 +809,7 @@ test('R4 effectiveAvail: pending until the data owner confirms', () => {
   const c = check(E.readiness(r, PRJ, TODAY), 'data-live');
   assert.equal(c.pass, false); assert.deepEqual(c.pending, ['D2']);
   assert.equal(c.awaiting[0].text, 'awaiting Leo Park to confirm');
-  assert.match(c.detail, /Bank remittance details: fix done, awaiting Leo Park to confirm it is live\./);
+  assert.match(c.detail, /Bank remittance details: fix done, awaiting Leo Park to confirm it is live with evidence\./);   // R5 wording
 });
 
 test('R4 sign-off: sections from touches, project owner excluded, signoffOpen', () => {
@@ -972,4 +978,256 @@ test('R4 coverage: latest result per item across all runs in the env, by project
   // runs of another project are ignored
   d.testRun.push({ id: 'R8', data: { id: 'R8', projectId: 'other', env: 'uat', at: '2026-11-04T09:00:00Z', results: [{ caseId: 'T1', outcome: 'fail' }] } });
   assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
+});
+
+/* ================================ Round 5 ================================ */
+test('R5 effectiveAvail requires evidence; attested evidence is a warn', () => {
+  const d = readyDocs();
+  const d2 = d.dataElement.find(e => e.id === 'D2').data;
+  delete d2.check;                                                   // claimed live, no evidence
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+  d2.liveEvidence = { type: 'profile', ref: 'PR1', at: '2026-11-03', by: 'lp' };
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');                // no profile on file
+  d.profile = [{ id: 'PR1', data: { id: 'PR1', dataId: 'D2', at: '2026-11-03', rows: 4, columns: E.profileCsv(CSV, {}) } }];
+  assert.equal(E.evidenceOf(d, d2).ok, false);                       // the 8-digit routing number is blocking drift
+  const clean = 'Bank name,Routing number,Account holder,Amount,Account number,Extra\nNorthwind Bank,123456789,Ann Lee,10.00,12345678,x\n';
+  d.profile[0].data.columns = E.profileCsv(clean, {});
+  assert.equal(E.effectiveAvail(d, 'D2'), 'live');                   // only "column with no spec" left: not blocking
+  d2.liveEvidence = { type: 'check', ref: 'probe', at: '2026-11-03', by: 'lp' };
+  d2.check = { ok: false, at: '2026-11-03', detail: 'timeout' };
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+  d2.liveEvidence = { type: 'attested', ref: 'https://intranet.northwind.example/evidence/7', at: '2026-11-03', by: 'lp' };
+  assert.equal(E.effectiveAvail(d, 'D2'), 'live');
+  const c = check(E.readiness(d, PRJ, TODAY), 'data-live');
+  assert.equal(c.pass, true); assert.equal(c.status, 'warn'); assert.deepEqual(c.attested, ['D2']);
+  assert.match(c.detail, /Bank remittance details is live on attested evidence only/);
+  assert.equal(E.readiness(d, PRJ, TODAY).summary.warn, 1);
+  d2.liveEvidence.ref = '';
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+});
+
+test('R5 coverage: every spec field needs a non-custom case; envs, skipped, script evidence', () => {
+  let d = readyDocs(); d.testCase = d.testCase.filter(e => e.id !== 'TF2');   // Amount uncovered
+  let c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.equal(c.pass, false); assert.deepEqual(c.uncoveredFields, [{ dataId: 'D2', field: 'Amount' }]);
+  assert.match(c.detail, /1 spec field has no test case: Bank remittance details · Amount\./);
+  d = readyDocs(); d.testCase.find(e => e.id === 'TF2').data.kind = 'custom';    // custom-only doesn't count
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').uncoveredFields.length, 1);
+  // SIT failures block; prod-verify is not part of the gate
+  d = readyDocs(); d.testRun.push({ id: 'RS', data: { id: 'RS', projectId: PRJ, env: 'sit', at: '2026-11-02T00:00:00Z', results: [{ caseId: 'T1', outcome: 'fail' }] } });
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').failing, ['T1']);
+  d = readyDocs(); d.testRun.push({ id: 'RP', data: { id: 'RP', projectId: PRJ, env: 'prod-verify', at: '2026-11-02T00:00:00Z', results: [{ caseId: 'T1', outcome: 'fail' }] } });
+  c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.equal(c.pass, true); assert.equal(c.byEnv['prod-verify'].fail, 1);
+  // skipped (not-run) never overrides an earlier result, and is counted
+  d = readyDocs(); d.testRun.push({ id: 'RK', data: { id: 'RK', projectId: PRJ, env: 'uat', source: 'ci', at: '2026-11-03T00:00:00Z', results: [{ caseId: 'T1', outcome: 'not-run' }] } });
+  c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.equal(c.pass, true); assert.deepEqual(c.skipped, []);
+  d.testCase.push({ id: 'T9', data: { id: 'T9', dataId: 'D2', field: 'Routing number', kind: 'edge', input: '0', expect: 'reject', origin: 'profile' } });
+  d.testRun.find(e => e.id === 'RK').data.results.push({ caseId: 'T9', outcome: 'not-run' });
+  c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.deepEqual(c.skipped, ['T9']); assert.ok(c.unrun.includes('T9')); assert.equal(c.byEnv.uat.skipped, 1);
+  assert.match(c.detail, /1 test skipped\./);
+  // a UAT script pass without evidence does not count unless the run source is CI
+  d = readyDocs(); d.testRun[1].data.results.filter(x => x.scriptId).forEach(x => { delete x.evidence; });
+  c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.equal(c.pass, false); assert.ok(c.noEvidence.length > 0);
+  d.testRun[1].data.source = 'ci';
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
+});
+
+test('R5 sign-off: trigger touches, BU without a person, release manager excluded, cutover staleness', () => {
+  let d = readyDocs();
+  d.process[0].data.tobe[0].touches = ['Procurement', 'HR'];       // trigger touches HR; nobody is in HR
+  let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.equal(bu.pass, false); assert.deepEqual(bu.noPerson, ['HR']);
+  assert.match(bu.detail, /No approver in HR: assign one\./);
+  d.person.push({ id: 'hr', data: { id: 'hr', name: 'Grace Lin', role: 'HR Business Partner', bu: 'HR' } });
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.noPerson, []); assert.deepEqual(bu.unsigned, ['HR']);
+  d.approval.push({ id: 'AP8', data: { id: 'AP8', projectId: PRJ, bu: 'HR', approver: 'hr', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true } });
+  assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
+  // release manager can't approve
+  d = readyDocs(); d.project[0].data.releaseManager = 'ar';          // ar approved Compliance and Accounts Payable
+  const r = E.readiness(d, PRJ, TODAY);
+  bu = check(r, 'bu-signoff');
+  assert.deepEqual(bu.unsigned, ['Accounts Payable', 'Compliance']);
+  assert.deepEqual(bu.excludedApprovers, ['ta', 'ar']);
+  assert.match(bu.detail, /Approvals by the project owner and release manager \(Tom Alvarez and Ana Ruiz\) do not count\./);
+  assert.equal(check(r, 'two-person').pass, false);
+  // cutover edits after approval make every approval stale
+  d = readyDocs(); d.project[0].data.cutoverUpdatedAt = '2026-11-03T00:00:00Z';
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.equal(bu.stale.length, 5);
+  assert.ok(bu.stale.every(x => /the cutover plan/.test(x.reason)));
+});
+
+test('R5 cutover check: tasks present, go/no-go tasks owned', () => {
+  let d = readyDocs(); d.project[0].data.cutover.tasks = [];
+  let c = check(E.readiness(d, PRJ, TODAY), 'cutover-plan');
+  assert.equal(c.pass, false); assert.equal(c.detail, 'A runbook task is not set.');
+  d = readyDocs(); d.project[0].data.cutover.tasks.push({ id: 'CT2', order: 2, task: 'Go/no-go call', owner: '', gonogo: true });
+  c = check(E.readiness(d, PRJ, TODAY), 'cutover-plan');
+  assert.equal(c.pass, false); assert.match(c.detail, /1 go\/no-go task has no owner: "Go\/no-go call"\./);
+  assert.deepEqual(c.items, ['task:CT2']);
+});
+
+test('R5 diffVersions compares any two versions by node id', () => {
+  const p = baseDocs().process[0].data;
+  const draft = { id: 'dr1', name: 'Draft 1', tobe: JSON.parse(JSON.stringify(p.tobe)) };
+  draft.tobe.find(n => n.id === 's3').title = 'Capture and verify banking details';
+  draft.tobe.find(n => n.id === 's5').data = ['D6'];
+  draft.tobe.splice(2, 0, { id: 's9', title: 'Collect beneficial owners', owner: 'ps', data: [] });
+  draft.tobe = draft.tobe.filter(n => n.id !== 's6');
+  const df = E.diffVersions(p, draft);
+  assert.equal(df.nodes.s3, 'changed'); assert.ok(df.changes.s3[0].startsWith('Title'));
+  assert.deepEqual(df.changes.s5, ['Data removed: D4']);
+  assert.equal(df.nodes.s9, 'new'); assert.equal(df.nodes.s1, 'same'); assert.equal(df.nodes.d1, 'same');
+  assert.deepEqual(df.removed.map(n => n.id), ['s6']);
+  assert.deepEqual(Object.keys(E.diffVersions(p, p).nodes).filter(k => E.diffVersions(p, p).nodes[k] !== 'same'), []);
+  assert.equal(E.diffVersions({ version: 1, asis: p.asis }, p).nodes.s1, 'new');   // released as-is vs current to-be: ids differ
+});
+
+test('R5 scheduleConflicts and autoSchedule (business days, durations kept)', () => {
+  const d = depDocs();
+  d.workItem.find(e => e.id === 'B').data.start = '2026-11-04';   // SS A + 1 → must start ≥ Nov 5
+  d.workItem.find(e => e.id === 'E').data.start = '2026-11-09';   // FS A (due Nov 10) → conflict
+  d.workItem.find(e => e.id === 'E').data.due = '2026-11-10';
+  deepFreeze(d);
+  const cf = E.scheduleConflicts(d, 'P');
+  assert.deepEqual(cf.map(x => [x.workId, x.dep, x.type]).sort(), [['B', 'A', 'SS'], ['C', 'A', 'FF'], ['D', 'A', 'FS'], ['E', 'A', 'FS']]);
+  assert.equal(cf.find(x => x.workId === 'E').detail, '"Item E" starts Nov 9, but "Item A" finishes Nov 10; it can start on Nov 10 at the earliest.');
+  const plan = E.autoSchedule(d, 'P');
+  assert.deepEqual(plan.E, { start: '2026-11-10', due: '2026-11-11' });   // 1 business day kept
+  assert.deepEqual(plan.D, { start: '2026-11-11', due: '2026-11-13' });   // FS lag 1; original 2-bd span kept
+  assert.deepEqual(plan.C, { start: '2026-11-10', due: '2026-11-12' });   // FF: due ≥ Nov 10 + 2
+  assert.equal(plan.A, undefined);                                         // unchanged items omitted
+  // applying the plan clears the conflicts
+  const d2 = depDocs(); d2.workItem.find(e => e.id === 'E').data.start = '2026-11-09'; d2.workItem.find(e => e.id === 'E').data.due = '2026-11-10';
+  const p2 = E.autoSchedule(d2, 'P');
+  d2.workItem.forEach(e => { if (p2[e.id]) Object.assign(e.data, p2[e.id]); });
+  assert.deepEqual(E.scheduleConflicts(d2, 'P'), []);
+  assert.deepEqual(Object.keys(E.autoSchedule(d2, 'P', ['A'])), []);       // restricted to given ids
+});
+
+test('R5 external deps, causesSlip', () => {
+  const d = baseDocs();
+  d.workItem.push({ id: 'X1', data: { id: 'X1', projectId: 'other-project', pid: 'p', step: 's', title: 'Treasury platform upgrade', owner: 'lp', status: 'idle', start: '2026-11-04', due: '2026-11-25', deps: [] } });
+  d.project.push({ id: 'other-project', data: { id: 'other-project', name: 'Treasury Platform', processes: [] } });
+  d.workItem.find(e => e.id === 'W11').data.deps = [{ id: 'X1', type: 'FS', lag: 0 }];
+  deepFreeze(d);
+  const fc = E.forecastAll(d, TODAY);
+  assert.equal(fc.W11.forecast, '2026-12-07');                    // Nov 25 + 8 business days (W11 spans Nov 10–20)
+  assert.equal(fc.W11.basis.external, true);
+  assert.equal(fc.X1.causesSlip, true);
+  assert.match(E.explainForecast(d, 'W11', TODAY)[1].text, /^Waits for external "Treasury platform upgrade" in "Treasury Platform" \(forecast Nov 25\)/);
+  const base = E.forecastAll(baseDocs(), TODAY);
+  assert.deepEqual(Object.keys(base).filter(k => base[k].causesSlip).sort(), ['W2', 'W4', 'W6', 'W8']);
+  assert.equal(base.W10.causesSlip, false);
+  const ex = E.scheduleConflicts(Object.assign({}, d, { workItem: d.workItem.map(e => e.id === 'W11' ? { id: 'W11', data: Object.assign({}, e.data, { start: '2026-11-10' }) } : e) }), PRJ);
+  assert.ok(ex.some(x => x.workId === 'W11' && x.external && /\(external\)/.test(x.detail)));
+});
+
+test('R5 projectStats RAG with reason; notPlanned', () => {
+  let st = E.projectStats(baseDocs(), PRJ, TODAY);
+  assert.deepEqual([st.rag, st.ragReason, st.notPlanned], ['red', '1 late item', false]);
+  let d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.due = '2026-11-20';
+  st = E.projectStats(d, PRJ, TODAY);
+  assert.equal(st.rag, 'amber'); assert.match(st.ragReason, /item(s)? slipping/);
+  d = baseDocs(); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
+  st = E.projectStats(d, PRJ, TODAY);
+  assert.deepEqual([st.rag, st.ragReason], ['green', 'All work done']);
+  d.project[0].data.target = '2026-11-25';
+  st = E.projectStats(d, PRJ, TODAY);
+  assert.deepEqual([st.rag, st.ragReason], ['amber', 'Only 5 days of buffer before the target']);
+  d.project[0].data.target = '2026-11-10';
+  assert.deepEqual(E.projectStats(d, PRJ, TODAY).ragReason, 'Forecast Nov 20 is after the target Nov 10');
+  d = baseDocs(); d.workItem = [];
+  st = E.projectStats(d, PRJ, TODAY);
+  assert.deepEqual([st.rag, st.ragReason, st.notPlanned], ['grey', 'No work planned yet', true]);
+});
+
+test('R5 generateScenarios: one per path, branches expanded, loops once', () => {
+  const sc = E.generateScenarios(deepFreeze(baseDocs()), PRJ);
+  assert.deepEqual(sc.map(x => x.title), ['Vendor Onboarding: Risk tier? = High', 'Vendor Onboarding: Risk tier? = Standard', 'Invoice Approval: main path']);
+  assert.deepEqual(sc[0].steps.map(x => x.step), ['s1', 's2', 'd1', 's2a', 's3', 's4', 's5', 's6']);
+  assert.deepEqual(sc[1].steps.map(x => x.step), ['s1', 's2', 'd1', 's3', 's4', 's5', 's6']);
+  assert.equal(sc[0].steps[2].action, 'At "Risk tier?", choose "High"');
+  assert.ok(sc.every(x => x.steps.every(s => !IDS.test(s.action + s.expected))));
+  // loop-back and parallel
+  const d = baseDocs();
+  d.process[1].data.tobe = [
+    { id: 'k', type: 'trigger', title: 'Invoice received', owner: 'ar', data: [] },
+    { id: 'i1', title: 'Match to PO', owner: 'ar', data: ['D4'] },
+    { id: 'g1', type: 'decision', title: 'Matched?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [{ id: 'i1b', title: 'Fix the PO', owner: 'ar', data: [] }], goto: 'i1' }] },
+    { id: 'p1', type: 'parallel', title: 'Fan out', branches: [{ label: 'Pay', nodes: [{ id: 'i3', title: 'Schedule payment', owner: 'lp', data: [] }] }, { label: 'File', nodes: [{ id: 'i5', title: 'Archive invoice', owner: 'ar', data: [] }] }] },
+    { id: 'e', type: 'end', title: 'Done' },
+  ];
+  const s2 = E.generateScenarios(d, PRJ).filter(x => x.pid === 'invoice-approval');
+  assert.deepEqual(s2.map(x => x.steps.map(y => y.step).join('>')), [
+    'i1>g1>p1>i3>i5',
+    'i1>g1>i1b>i1>i1>g1>p1>i3>i5',
+  ]);
+  assert.equal(s2[1].title, 'Invoice Approval: Matched? = No, loop back once, Matched? = Yes');
+  assert.ok(s2[1].steps.some(x => x.action === 'Return to "Match to PO"'));
+});
+
+test('R5 caseLabel: TC<n> per element, stable by creation', () => {
+  const d = readyDocs();
+  assert.equal(E.caseLabel(d, 'T1'), 'TC1');
+  assert.equal(E.caseLabel(d, 'T2'), 'TC2');
+  assert.equal(E.caseLabel(d, 'TF0'), 'TC3');
+  assert.equal(E.caseLabel(d, 'CD1'), 'TC1');                       // numbering is per element
+  d.testCase.filter(e => e.data.dataId === 'D2').forEach((e, i) => { e.data.createdAt = '2026-11-0' + (i + 2) + 'T00:00:00Z'; });
+  d.testCase.find(e => e.id === 'T2').data.createdAt = '2026-11-01T00:00:00Z';   // created first
+  assert.equal(E.caseLabel(d, 'T2'), 'TC1');
+  assert.equal(E.caseLabel(d, 'T1'), 'TC2');
+  assert.equal(E.caseLabel(d, 'nope'), null);
+});
+
+test('R5 generated cases: longest-length expectation follows the spec; no "? rows"; merged shapes', () => {
+  const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
+  const cols = E.profileCsv(CSV, {}).map(c => { const x = Object.assign({}, c); delete x.rows; return x; });
+  const cases = E.generateTests(d2, { rows: 4, columns: cols });
+  const longest = cases.find(c => c.field === 'Routing number' && /longest observed length \(9\)/i.test(c.note));   // may merge into the identical spec case
+  assert.equal(longest.expect, 'accept');                          // spec allows 9 digits
+  assert.ok(aba(longest.input));
+  const holderLong = cases.find(c => c.field === 'Account holder' && /longest observed length/i.test(c.note));
+  assert.equal(holderLong.expect, 'accept');                       // within max 40
+  cases.forEach(c => assert.ok(!/\?/.test(c.note.replace(/Risk tier\?/g, '')), c.note));
+  assert.ok(cases.some(c => /\(1 of 4 rows\)/.test(c.note)));
+  // duplicate humanized patterns are merged
+  assert.deepEqual(E.humanPatterns([{ pattern: 'Aa{4} Aa{5}', count: 2 }, { pattern: 'Aa{3} Aa{6}', count: 3 }, { pattern: '9{8}', count: 1 }]),
+    [{ text: 'two capitalized words', count: 5 }, { text: '8 digits', count: 1 }]);
+  const drift = E.specDrift({ fields: [{ name: 'Code', type: 'text', pattern: '^\\d+$' }] }, { rows: 5, columns: E.profileCsv('Code\nAb Cd\nAbc Def\nGh Ij\n123\n45\n', {}) });
+  assert.equal(drift.find(x => x.issue === 'pattern-mismatch').detail, '3 of 5 codes look like two capitalized words, which does not match the spec pattern.');
+});
+
+test('R5 usageOf counts to-be and as-is separately', () => {
+  const u = E.usageOf(deepFreeze(baseDocs()), 'D2');
+  assert.deepEqual([u.tobe, u.asis], [4, 3]);
+  assert.deepEqual(u.asisSteps.map(x => x.stepId), ['a3', 'a4', 'b3']);
+  assert.deepEqual(E.usageOf(baseDocs(), 'D9'), { tobe: 1, asis: 0, tobeSteps: [{ pid: 'invoice-approval', stepId: 'i4' }], asisSteps: [] });
+});
+
+test('R5 financials: workCost, projectFinancials, burndown', () => {
+  const d = baseDocs();
+  d.person.find(e => e.id === 'dk').data.dayRate = 1000;
+  d.workItem.find(e => e.id === 'W8').data.effortDays = 5;
+  d.project[0].data.budget = { planned: 9000 };
+  d.project[0].data.program = 'Supplier Excellence';
+  deepFreeze(d);
+  assert.equal(E.workCost(d, 'W8'), 5000);                         // 5 days × 1,000
+  assert.equal(E.workCost(d, 'W6'), 800);                          // default: 1 day × 800
+  const f = E.projectFinancials(d, PRJ);
+  // dk: W3, W7, W9 at 1 day × 1000 + W8 5000 = 8000; others: W1, W2, W4, W5, W6, W10 at 800 = 4800 → 12800 (+W11 dk 1000) = 13800
+  assert.deepEqual(f, { planned: 9000, forecastCost: 13800, actualCost: 1800, remainingCost: 12000, variance: 4800, overBudget: true, program: 'Supplier Excellence' });
+  const bd = E.burndown(d, PRJ, TODAY);
+  assert.deepEqual(bd[0], { date: '2026-10-08', remaining: 15, ideal: 15 });
+  assert.equal(bd[bd.length - 1].date, '2026-12-15'); assert.equal(bd[bd.length - 1].ideal, 0);
+  assert.equal(bd.find(p => p.date === '2026-10-20').remaining, 14);   // W1 done on its due date
+  assert.equal(bd.find(p => p.date === '2026-10-30').remaining, 13);   // W9
+  assert.equal(bd.find(p => p.date === '2026-11-05').remaining, null);  // future
+  assert.ok(bd.every(p => !['0', '6'].includes(String(new Date(p.date + 'T00:00:00Z').getUTCDay()))));
+  assert.deepEqual(E.burndown(d, 'nope', TODAY), []);
 });

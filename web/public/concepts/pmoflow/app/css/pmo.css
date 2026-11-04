@@ -405,3 +405,97 @@ a.btn{text-decoration:none;color:inherit;display:inline-flex;align-items:center}
   .pmo-prj-rep .pmo-rep{border:0;padding:0}
   .pmo-prj-rep .pmo-rep-grid{grid-template-columns:1fr}
 }
+
+/* ===================== R5: roles, conflicts, status reasons, PMO financials, burndown ===================== */
+/* RAG pills carry their reason; zero-work projects are grey "Not planned" */
+.rag .pmo-rag-why{font-weight:500;font-size:11px;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.rag-none{background:#f3f4f6;color:#4b5563;border-color:#e5e7eb}.rag-none i{background:#9ca3af}
+.pmo-muted{color:var(--ink3)}
+.pmo-causes{white-space:nowrap}
+.pm .node .meta .pmo-causes{margin-left:2px}
+.pmo-tl-badges{margin:2px 0 1px;line-height:1}
+.pmo-tl-badges .badge{font-size:10px;padding:0 6px}
+/* header roles */
+.pmo-roles{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.pmo-role{display:inline-flex;gap:6px;align-items:center;min-width:0}
+.pmo-hfin{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+/* planning conflicts */
+.pmo-confbar{display:flex;gap:8px 10px;align-items:center;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfbfd;font-size:12.5px}
+.pmo-confbar.has{border-color:#fecaca;background:var(--late-soft);color:var(--late)}
+.pmo-confbar .hint{flex:1 1 220px;min-width:0}
+.pmo-confbar .btn{margin-left:auto}
+.pmo-conf-tag{display:inline-grid;place-items:center;width:16px;height:16px;border-radius:4px;background:var(--late);color:#fff;font-size:10px;font-weight:700;vertical-align:1px}
+.tbar.pmo-conf{outline:2px solid var(--late);outline-offset:1px}
+.pmo-dragtip.conf{background:var(--late);color:#fff}
+.pmo-astable{width:100%;font-size:12.5px;border-collapse:collapse}
+.pmo-astable th,.pmo-astable td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.pmo-astable th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3)}
+/* external dependencies */
+.pmo-ext{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;padding:0 5px;border-radius:4px;background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;vertical-align:1px}
+.pmo-extdeps{margin-top:6px;border:1px dashed #fed7aa;border-radius:8px;padding:4px 8px}
+.pmo-extdeps>summary{cursor:pointer;font-size:12.5px;padding:3px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.pmo-extdeps .pmo-checks{margin-top:4px}
+.pmo-extgrp{font-size:11px;font-weight:700;color:var(--ink3);text-transform:uppercase;letter-spacing:.4px;padding:6px 6px 0}
+/* activity toggle (non-Map views) */
+.pmo-activity>summary{cursor:pointer;list-style:none;display:flex;flex-direction:column;gap:2px}
+.pmo-activity>summary::-webkit-details-marker{display:none}
+.pmo-activity>summary h3{margin:0;display:flex;align-items:center;gap:6px}
+.pmo-activity>summary h3::before{content:"▸";font-size:11px;color:var(--ink3);transition:transform .15s}
+.pmo-activity[open]>summary h3::before{transform:rotate(90deg)}
+.pmo-act-b{margin-top:10px}
+.pmo-act-b h4{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink3);margin:12px 0 6px}
+.pmo-act-b h4:first-child{margin-top:0}
+/* status report recipients */
+.pmo-rep-to{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-top:10px;font-size:12px}
+.pmo-rep-to .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3);font-weight:700}
+.pmo-rep-to .chip{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.pmo-rep-fact{margin:-2px 0 8px}
+/* burndown chart */
+.pmo-burn{margin:0}
+.pmo-burn svg{width:100%;height:auto;display:block;max-height:220px}
+.pmo-burn-ax{stroke:#d1d5db;stroke-width:1}
+.pmo-burn-t{font-size:9px;fill:#6b7280}
+.pmo-burn-ideal{fill:none;stroke:#9ca3af;stroke-width:1.5;stroke-dasharray:4 3}
+.pmo-burn-act{fill:none;stroke:var(--accent);stroke-width:2.2;stroke-linejoin:round}
+.pmo-burn-dot{fill:var(--accent)}
+.pmo-burn-today{stroke:var(--accent);stroke-width:1;opacity:.35}
+.pmo-burn figcaption{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:11.5px;color:var(--ink2);margin-top:4px}
+.pmo-burn-key{display:inline-flex;gap:5px;align-items:center}
+.pmo-burn-key i{display:inline-block;width:14px;height:0;border-top:2px solid var(--accent)}
+.pmo-burn-key i.ideal{border-top:2px dashed #9ca3af}
+.pmo-burn-tbl{margin-top:6px;font-size:12px}
+.pmo-burn-tbl summary{cursor:pointer;color:var(--accent)}
+.pmo-burn-tbl table{width:100%;border-collapse:collapse;margin-top:4px}
+.pmo-burn-tbl th,.pmo-burn-tbl td{text-align:left;padding:3px 6px;border-bottom:1px solid var(--line);font-weight:400}
+.pmo-burn-tbl thead th{font-weight:700;font-size:11px;color:var(--ink3)}
+.pmo-burn-tbl .tbl-wrap{max-height:220px;overflow:auto}
+.pmo-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.pmo-sburn{margin:0 0 12px}
+.pmo-sburn .pmo-h3row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.pmo-sburn .pmo-burn{max-width:560px}
+/* portfolio: program groups + financials */
+.pmo-prog-h td{background:#f8fafc;border-top:1px solid var(--line);font-size:12.5px;padding-top:8px;padding-bottom:8px}
+.pmo-ptable .pmo-prog-h{cursor:default}
+.pmo-fin{width:100%;border-collapse:collapse;font-size:12.5px}
+.pmo-fin th,.pmo-fin td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.pmo-fin th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3)}
+.pmo-fin .pmo-num{text-align:right;white-space:nowrap}
+.pmo-fin a{color:inherit}
+.pmo-fin-tot td{border-top:2px solid var(--line)}
+.pmo-fbars{display:flex;flex-direction:column;gap:2px;margin-top:5px;max-width:240px}
+.pmo-fb{display:block;height:5px;border-radius:3px;min-width:2px}
+.pmo-fb.plan,.pmo-wl-key .plan{background:#cbd5e1}
+.pmo-fb.fc,.pmo-wl-key .fc{background:#a5b4fc}
+.pmo-fb.fc.over,.pmo-wl-key .over{background:var(--late)}
+.pmo-fb.act,.pmo-wl-key .act{background:var(--done)}
+.pmo-capbtn+.pmo-capbtn{margin-left:2px}
+@media (max-width:640px){
+  .rag .pmo-rag-why{max-width:150px}
+  .pmo-fin{font-size:12px}
+  .pmo-fbars{max-width:150px}
+}
+.card h3.pmo-h3row .pmo-sel{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px}
+.pmo-wl-row{grid-template-columns:150px minmax(0,1fr) 235px}
+.pmo-wl-n .hint{white-space:normal}
+@media (max-width:1060px){ .pmo-wl-row{grid-template-columns:1fr} }
+.pmo-sburn .pmo-burn{max-width:440px}
