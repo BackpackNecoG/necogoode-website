@@ -36,16 +36,22 @@ export const dataName = id => (dataEl(id) || {}).name || id;
    'live' if avail is live or its resolver work item is done; otherwise 'example' or 'missing'. */
 export function effAvail(id) {
   const r = eng('effectiveAvail', [docs(), id], null);
-  if (r === 'live' || r === 'example' || r === 'missing') return r;
+  if (r === 'live' || r === 'example' || r === 'missing' || r === 'pending') return r;
   const d = dataEl(id); if (!d) return 'missing';
-  if (d.avail === 'live' || store.list('workItem', w => w.resolves === id && w.status === 'done').length) return 'live';
+  if (d.avail === 'live' || (d.liveConfirmedBy && d.liveConfirmedBy === d.owner && d.liveSource)) return 'live';
+  if (store.list('workItem', w => w.resolves === id && w.status === 'done').length) return 'pending';
   return d.avail === 'example' ? 'example' : 'missing';
 }
 export const availOf = effAvail;
+/* R4: availability labels including 'pending' (fix done, awaiting the data owner's confirmation; amber) */
+export const AV = Object.assign({}, AVAIL, { pending: { label: 'Fix done, awaiting owner confirmation', short: 'Pending', color: 'var(--soon)' } });
+export const avOf = k => AV[k] || AV.missing;
+/* "awaiting <owner> to confirm" for a pending element */
+export const awaitingText = id => { const d = dataEl(id); return `Fix done, awaiting ${d && d.owner ? pname(d.owner) : 'the data owner'} to confirm`; };
 /* dot coloured by effective availability */
-export function effDot(id) { const a = AVAIL[effAvail(id)]; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}" aria-hidden="true"></span>`; }
+export function effDot(id) { const a = avOf(effAvail(id)); return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}" aria-hidden="true"></span>`; }
 export const NEEDS_LIVE = 'Needs a live source before go-live';
-export function readyCounts(ids) { ids = ids || []; const st = ids.map(effAvail); return { live: st.filter(a => a === 'live').length, total: ids.length, missing: st.filter(a => a === 'missing').length, example: st.filter(a => a === 'example').length }; }
+export function readyCounts(ids) { ids = ids || []; const st = ids.map(effAvail); return { live: st.filter(a => a === 'live').length, total: ids.length, missing: st.filter(a => a === 'missing').length, example: st.filter(a => a === 'example').length, pending: st.filter(a => a === 'pending').length }; }
 /* new/changed/removed counts (R3): every count shown comes from the engine's diffSummary */
 export function diffCounts(p) {
   const r = eng('diffSummary', [p], null);
@@ -120,7 +126,7 @@ function nodeHTML(n, ctx, idx) {
   let body = '';
   if (trig) body = `<div class="stats">${(n.touches || []).map(touchChip).join('') || '<span class="hint">Kickoff</span>'}</div>`;
   else {
-    body = `<div class="stats"><span>Data <b>${rd.live}/${rd.total}</b> live</span>${rd.missing ? `<span class="d-miss" title="Data with no source yet">${LOCK} ${rd.missing} missing</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}: examples only">${rd.example} need${rd.example === 1 ? 's' : ''} live source</span>` : ''}<span>${(n.touches || []).length} area${(n.touches || []).length === 1 ? '' : 's'}</span>${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>${opsLine(n)}`;
+    body = `<div class="stats"><span>Data <b>${rd.live}/${rd.total}</b> live</span>${rd.missing ? `<span class="d-miss" title="Data with no source yet">${LOCK} ${rd.missing} missing</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the data owner has not confirmed it live yet">${rd.pending} awaiting confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}: examples only">${rd.example} need${rd.example === 1 ? 's' : ''} live source</span>` : ''}<span>${(n.touches || []).length} area${(n.touches || []).length === 1 ? '' : 's'}</span>${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>${opsLine(n)}`;
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
@@ -235,7 +241,7 @@ export function bpmnXml(p, nodes, label) {
   const connect = (tails, id) => tails.forEach(t => flow(t.id, id, t.name));
   const doc = n => { const bits = [];
     if (n.owner) bits.push('Owner: ' + pname(n.owner));
-    if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + AVAIL[availOf(d)].short + ')').join(', '));
+    if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + avOf(availOf(d)).short + ')').join(', '));
     if (n.system) bits.push('System: ' + n.system); if (n.sla) bits.push('SLA: ' + n.sla); if (n.durationHrs) bits.push('Duration: ' + n.durationHrs + 'h');
     if ((n.subs || []).length) bits.push('Sub-steps: ' + n.subs.map(x => x.title).join('; '));
     return bits.length ? `      <bpmn:documentation>${xe(bits.join('. '))}</bpmn:documentation>` : ''; };
@@ -462,19 +468,21 @@ export function render(params) {
   const dl = [...new Set(vsteps.flatMap(s => s.data || []))];
   const stepGo = s => rel ? '' : `data-go="/process/${esc(pid)}/step/${esc(s.id)}"`;
   const missingSteps = vsteps.filter(s => (s.data || []).some(d => availOf(d) === 'missing'));
+  const pendSteps = vsteps.filter(s => !missingSteps.includes(s) && (s.data || []).some(d => availOf(d) === 'pending'));
   const liveSteps = vsteps.filter(s => !missingSteps.includes(s) && (s.data || []).some(d => availOf(d) === 'example'));
-  const ord = ['missing', 'example', 'live'];
+  const ord = ['missing', 'pending', 'example', 'live'];
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const used = vsteps.filter(s => (s.data || []).includes(d)).length;
     return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
       <div><div class="t">${esc(x.name || d)}</div><div class="s">${esc(x.source || 'Source not set')} · ${esc(pname(x.owner))}</div></div>
-      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)">${esc(AVAIL[effAvail(d)].short)} ›</a><div class="s">${used} step${used === 1 ? '' : 's'}</div></div></div>`;
+      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)">${esc(avOf(effAvail(d)).short)} ›</a><div class="s">${used} step${used === 1 ? '' : 's'}</div></div></div>`;
   }).join('');
   const touches = {}; vsteps.forEach(s => (s.touches || []).forEach(t => touches[t] = (touches[t] || 0) + 1));
   const linked = projectsFor(pid);
   const sideHTML = `
     <div class="card"><h3>${LOCK} Steps needing missing data <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${vname} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Needs ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('') : '<div class="s">Every data element has a source.</div>'}
-      ${liveSteps.length ? `<div class="d-needlive-h">${NEEDS_LIVE} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Examples only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}</div>
+      ${liveSteps.length ? `<div class="d-needlive-h">${NEEDS_LIVE} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Examples only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}
+      ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Fix done, awaiting owner confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${s.data.filter(d => availOf(d) === 'pending').map(d => esc(awaitingText(d).replace('Fix done, a', 'A') + ': ' + dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}</div>
     <div class="card" data-side-data="${view.key}"><h3>Data requirements <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">Data the ${vname} map uses. Tap a row to highlight every step that uses it</div>${dataRows || '<div class="s">Tag data on steps and this list builds itself.</div>'}
       ${rel ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New data element</button></div>'}</div>
     <div class="card"><h3>Touches across operations</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch"># ${esc(t)} · ${c}</span>`).join('') || '<span class="s">No areas tagged yet.</span>'}</div></div>
@@ -495,9 +503,10 @@ async function saveProc(p, summary) {
 
 /* ---------- modals ---------- */
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
-const availOpts = sel => Object.entries(AVAIL).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
+/* creating or editing never marks data live directly: only the data owner's "Confirm live" does (R4) */
+const availOpts = sel => Object.entries(AVAIL).filter(([k]) => k !== 'pending' && (k !== 'live' || sel === 'live')).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
 const allData = () => store.list('dataElement').slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
-const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${(AVAIL[a] || AVAIL.missing).color}" title="${esc((AVAIL[a] || AVAIL.missing).label)}"></span>`;
+const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${avOf(a).color}" title="${esc(avOf(a).label)}"></span>`;
 const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : effDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
 function subRow(s, k) {
   const sel = new Set((s && s.data) || []);
@@ -645,8 +654,8 @@ async function simpleNodeModal(node) {
 export const confirmBox = async (title, text, label) => (await modal({ title, body: `<p style="margin:0">${esc(text)}</p>`, actions: [{ id: 'yes', label: label || 'Confirm', danger: true }] })).action === 'yes';
 
 /* ---------- BPMN import + start project ---------- */
-function importBtn() { return `<label class="btn sm d-import">Import BPMN<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="Import a BPMN 2.0 file (.bpmn or .xml)" /></label>`; }
-function bindImport(root) {
+export function importBtn() { return `<label class="btn sm d-import">Import BPMN<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="Import a BPMN 2.0 file (.bpmn or .xml)" /></label>`; }
+export function bindImport(root) {
   root.querySelectorAll('[data-bpmn-file]').forEach(inp => inp.onchange = async () => {
     const file = inp.files && inp.files[0]; inp.value = ''; if (!file) return;
     if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB. Export a single process.'); return; }
@@ -711,6 +720,53 @@ async function openNew() {
   finally { newOpen = false; }
 }
 
+/* ---------- loop-back arrows (R4) ----------
+   A curved return arrow from the end of a branch (its "Loop back to" label) to the target node, drawn as an SVG
+   overlay on the canvas. The text label stays in the DOM for screen readers; the SVG is aria-hidden. */
+let loopCanvas = null, loopRaf = 0;
+export function drawLoops(root) {
+  const cv = (root || document).querySelector('#canvas');
+  loopCanvas = cv;
+  if (!cv) return;
+  cv.querySelectorAll(':scope > svg.d-loops').forEach(x => x.remove());
+  const labels = [...cv.querySelectorAll('.d-goto[data-goto]')];
+  cv.classList.toggle('d-hasloop', labels.length > 0);
+  if (!labels.length) return;
+  const cr = cv.getBoundingClientRect();
+  const W = cv.scrollWidth, H = cv.scrollHeight;
+  const rel = r => ({ l: r.left - cr.left + cv.scrollLeft, r: r.right - cr.left + cv.scrollLeft, t: r.top - cr.top + cv.scrollTop, b: r.bottom - cr.top + cv.scrollTop });
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'd-loops'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
+  svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = '<defs><marker id="d-loop-head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#d97706"/></marker></defs>';
+  const used = { left: 0, right: 0 };
+  labels.forEach(lb => {
+    let tgt = cv.querySelector(`[data-node="${CSS.escape(lb.dataset.goto)}"]`);
+    if (!tgt) return;
+    if (tgt.classList.contains('decision')) tgt = tgt.querySelector('.diamond') || tgt;
+    const a = rel(lb.getBoundingClientRect()), t = rel(tgt.getBoundingClientRect());
+    if (!a.r || !t.r) return;
+    /* route on the side nearest the label so the arrow does not cross sibling branches */
+    const side = (a.l + a.r) / 2 < W / 2 - 4 ? 'left' : 'right';
+    const k = used[side]++;
+    const y1 = (a.t + a.b) / 2, y2 = Math.min(t.t + 20, (t.t + t.b) / 2);
+    const R = Math.max(4, Math.min(14, Math.abs(y1 - y2) / 2));
+    let x1, x2, X;
+    if (side === 'right') { x1 = a.r + 2; x2 = t.r + 2; X = Math.min(W - 5 - k * 6, Math.max(x1, x2) + 26 + k * 12); }
+    else { x1 = a.l - 2; x2 = t.l - 2; X = Math.max(5 + k * 6, Math.min(x1, x2) - 26 - k * 12); }
+    const dx = side === 'right' ? 1 : -1, dy = y2 < y1 ? -1 : 1;
+    const r1 = Math.min(R, Math.abs(X - x1)), r2 = Math.min(R, Math.abs(X - x2));
+    const d = `M${x1} ${y1} H${X - dx * r1} Q${X} ${y1} ${X} ${y1 + dy * r1} V${y2 - dy * r2} Q${X} ${y2} ${X - dx * r2} ${y2} H${x2 + dx * 3}`;
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d); path.setAttribute('class', 'd-loop'); path.setAttribute('data-loop', lb.dataset.goto);
+    path.setAttribute('marker-end', 'url(#d-loop-head)');
+    svg.appendChild(path);
+  });
+  cv.appendChild(svg);
+}
+if (typeof window !== 'undefined') window.addEventListener('resize', () => { cancelAnimationFrame(loopRaf); loopRaf = requestAnimationFrame(() => { if (loopCanvas && loopCanvas.isConnected) drawLoops(loopCanvas.parentNode); }); });
+
 /* ---------- bind ---------- */
 function applyHl(root) {
   const nodes = root.querySelectorAll('#canvas .node[data-step]');
@@ -726,6 +782,7 @@ export function bind(root, params) {
   bindActivity(root);
   const q = params.q || {};
   const ver = q.v === 'asis' ? 'asis' : 'tobe';
+  drawLoops(root);
   const vs = root.querySelector('[data-version]');
   if (vs) vs.onchange = () => go(vs.value ? `/process/${pid}?mode=asis&rel=${encodeURIComponent(vs.value)}` : `/process/${pid}?mode=asis`);
   const vc = root.querySelector('[data-version-current]'); if (vc) vc.onclick = () => go(`/process/${pid}?mode=asis`);

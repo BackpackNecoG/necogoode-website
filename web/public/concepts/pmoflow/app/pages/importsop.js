@@ -42,11 +42,14 @@ function matchData(v) {
 }
 
 const isGate = n => n && (n.type === 'decision' || n.type === 'parallel' || (Array.isArray(n.branches) && n.branches.length));
+/* Every draft node keeps a stable source id so loop-backs (branch.goto) can point at it. */
+let srcSeq = 0;
+const srcId = n => (n && typeof n.id === 'string' && n.id) ? n.id : 'x' + (++srcSeq);
 function normStep(n) {
   const title = String(n.title || n.text || n.name || '').trim();
   if (!title) return null;
   return {
-    type: 'step', title,
+    type: 'step', title, src: srcId(n),
     owner: matchPerson(n.owner || n.ownerId || n.role),
     data: [...new Set((n.data || n.dataElements || []).map(matchData).filter(Boolean))],
     touches: Array.isArray(n.touches) ? n.touches.map(String) : [],
@@ -58,15 +61,17 @@ function normStep(n) {
 function normNode(n) {
   if (!n || n.type === 'trigger' || n.type === 'end') return null;
   if (isGate(n)) {
-    const branches = (n.branches || []).map(b => ({ label: String((b && b.label) || '').trim() || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : normStep(x)).filter(Boolean) }));
+    const branches = (n.branches || []).map(b => { const br = { label: String((b && b.label) || '').trim() || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : normStep(x)).filter(Boolean) };
+      if (b && b.goto != null && b.goto !== '') br.goto = String(b.goto); return br; });
     while (branches.length < 2) branches.push({ label: branches.length ? 'No' : 'Yes', nodes: [] });
-    return { type: n.type === 'parallel' ? 'parallel' : 'decision', title: String(n.title || n.text || 'Decision').trim(), branches };
+    return { type: n.type === 'parallel' ? 'parallel' : 'decision', title: String(n.title || n.text || 'Decision').trim(), src: srcId(n), branches };
   }
   return normStep(n);
 }
 function normalize(res) {
   const raw = (res && (res.nodes || res.steps || res.draft || (res.process && (res.process.nodes || res.process.steps || res.process.asis)))) || [];
   const nodes = raw.map(normNode).filter(Boolean);
+  resolveGotos(nodes);
   const existing = new Set(store.list('dataElement').map(d => strip(d.name)));
   const seen = new Set();
   const newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x)
@@ -80,6 +85,20 @@ function normalize(res) {
   const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
   const trigger = (res && (res.trigger || (res.process && res.process.trigger))) || (trigNode && trigNode.title) || '';
   return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger };
+}
+
+/* goto may arrive as a node id, a 1-based step number or a step title; keep it only if it resolves to a draft node. */
+function targets(nodes) { const out = []; (nodes || []).forEach(n => { out.push(n); (n.branches || []).forEach(b => b.nodes.forEach(x => out.push(x))); }); return out; }
+function resolveGotos(nodes) {
+  const all = targets(nodes); const tops = nodes.filter(n => n.type === 'step');
+  nodes.forEach(g => (g.branches || []).forEach(b => {
+    if (b.goto == null) return;
+    const v = String(b.goto);
+    let t = all.find(n => n.src === v);
+    if (!t && /^\d+$/.test(v)) t = nodes[+v - 1] || tops[+v - 1];
+    if (!t) t = all.find(n => strip(n.title) === strip(v));
+    if (t) b.goto = t.src; else delete b.goto;
+  }));
 }
 
 /* Path helpers. Paths: "3" top-level node, "3.b1.0" step 0 of branch 1, "3.s2" sub-step 2 of top-level step 3. */
@@ -102,7 +121,7 @@ function dataPicker(s, path) {
   return `<details class="is-data" data-dpath="${esc(path)}" ${open ? 'open' : ''}><summary>Data${s.data.length ? ` (${s.data.length})` : ''}</summary><div class="is-pop">${des.map(x => `<label><input type="checkbox" data-f="data" value="${esc(x.id)}" ${s.data.includes(x.id) ? 'checked' : ''}> ${esc(x.name)}</label>`).join('') || '<span class="hint">No data elements in this workspace.</span>'}</div></details>`;
 }
 function ownerSel(s) {
-  return `<select data-f="owner" aria-label="Owner"><option value="">No owner</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === s.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select>`;
+  return `<select data-f="owner" aria-label="Owner" class="${s.owner ? '' : 'is-noowner'}" ${s.owner ? '' : 'data-noowner'}><option value="">Choose an owner…</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === s.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select>`;
 }
 function dataChips(s) {
   const linked = s.data.map(id => `<span class="chip">${esc((store.get('dataElement', id) || {}).name || id)}</span>`);
@@ -115,12 +134,21 @@ function stepBody(s, path, label) {
     ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><input data-f="title" value="${esc(sb.title)}" aria-label="Sub-step ${k + 1}"><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
     <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
 }
+/* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
+function gotoRow(g, b, bpath) {
+  const all = targets(ui.draft.nodes).filter(n => n !== g && !b.nodes.includes(n));
+  const t = b.goto && all.find(n => n.src === b.goto);
+  const num = n => { const i = ui.draft.nodes.indexOf(n); return i >= 0 ? `Step ${i + 1}` : 'Branch step'; };
+  return `<div class="is-goto ${t ? 'on' : ''}" ${t ? `data-loopback="${esc(t.title)}"` : ''}>${t ? `<span class="is-ret" aria-hidden="true">↩</span><span>Loops back to <b>${esc(num(t))}: ${esc(t.title.slice(0, 60))}</b></span>` : ''}
+    <select data-goto="${esc(bpath)}" aria-label="Loop back to"><option value="">${t ? 'Remove loop-back' : 'No loop-back'}</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>↩ ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
+}
 function gateBody(g, path) {
   return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'Parallel: all branches run' : 'Decision'}</span></div>
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Parallel gateway' : 'Decision question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
-      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint">${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
+      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint">${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? 'loops back' : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
       ${b.nodes.map((s, k) => `<div class="is-bstep">${stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
+      ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
 }
 
@@ -130,6 +158,8 @@ export function render() {
   const gates = d ? d.nodes.filter(x => x.type === 'decision').length : 0;
   const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
+  const noOwner = d ? allSteps(d.nodes, []).filter(x => !x.owner).length : 0;
+  const loops = d ? d.nodes.reduce((n, g) => n + (g.branches || []).filter(b => b.goto).length, 0) : 0;
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>Proposed new data elements</h4>
       <p class="hint">The parser found data the SOP needs that matches no existing element closely enough to link. Tick the ones to create on import; they start as Missing and owned by you.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
@@ -137,6 +167,8 @@ export function render() {
 
   const draftHtml = d ? `<div class="card is-draft"><h3>Draft process<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span><span class="n">${n} steps${gates ? ` · ${gates} decision${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} parallel` : ''}</span></h3>
     ${ui.notes.length ? `<div class="note is-notes"><b>${ui.source === 'AI' ? 'AI notes' : 'Parser notes'}</b><ul>${ui.notes.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+    ${noOwner ? `<div class="is-ownerprompt" data-owner-prompt><b>${noOwner} step${noOwner === 1 ? '' : 's'} need${noOwner === 1 ? 's' : ''} an owner.</b> The SOP didn't name a person, role or business unit we could match, so the owner is left blank rather than guessed. Choose one for each highlighted step.</div>` : ''}
+    ${loops ? `<div class="hint" data-loops>${loops} loop-back${loops === 1 ? '' : 's'} found (“resubmit”, “return to step N”). They're drawn as return arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">Trigger</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
       <span class="is-n">${s.type === 'step' ? i + 1 : '◆'}</span>
@@ -206,15 +238,16 @@ export function bind(root) {
     li.querySelectorAll(':scope > .is-ctl [data-mv]').forEach(b => b.onclick = () => { readDraft(root); const j = i + +b.dataset.mv; const a = ui.draft.nodes; [a[i], a[j]] = [a[j], a[i]]; store.emit(); });
     li.querySelector(':scope > .is-ctl [data-rm]').onclick = () => { readDraft(root); ui.draft.nodes.splice(i, 1); store.emit(); };
   });
+  root.querySelectorAll('[data-goto]').forEach(el => el.onchange = () => { readDraft(root); const [p, j] = el.dataset.goto.split(/\.b(?=\d+$)/); const br = at(p).branches[+j]; if (el.value) br.goto = el.value; else delete br.goto; store.emit(); });
   root.querySelectorAll('[data-f=owner],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; rerender(); });
   root.querySelectorAll('[data-f=title],[data-f=system],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
   root.querySelectorAll('[data-rm-path]').forEach(b => b.onclick = () => { readDraft(root); removeAt(b.dataset.rmPath); store.emit(); });
   root.querySelectorAll('[data-add-sub]').forEach(b => b.onclick = () => { readDraft(root); const s = at(b.dataset.addSub); (s.subs = s.subs || []).push({ title: 'New sub-step', data: [] }); store.emit(); });
-  root.querySelectorAll('[data-add-bstep]').forEach(b => b.onclick = () => { readDraft(root); const [p, j] = b.dataset.addBstep.split(/\.b(?=\d+$)/); at(p).branches[+j].nodes.push({ type: 'step', title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); });
-  const add = root.querySelector('[data-add-step]'); if (add) add.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'step', title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); };
-  const ag = root.querySelector('[data-add-gate]'); if (ag) ag.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'decision', title: 'Condition met?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] }); store.emit(); };
-  const ap = root.querySelector('[data-add-par]'); if (ap) ap.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'parallel', title: 'Do these at the same time', branches: [{ label: 'Branch A', nodes: [] }, { label: 'Branch B', nodes: [] }] }); store.emit(); };
+  root.querySelectorAll('[data-add-bstep]').forEach(b => b.onclick = () => { readDraft(root); const [p, j] = b.dataset.addBstep.split(/\.b(?=\d+$)/); at(p).branches[+j].nodes.push({ type: 'step', src: srcId({}), title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); });
+  const add = root.querySelector('[data-add-step]'); if (add) add.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'step', src: srcId({}), title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); };
+  const ag = root.querySelector('[data-add-gate]'); if (ag) ag.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'decision', src: srcId({}), title: 'Condition met?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] }); store.emit(); };
+  const ap = root.querySelector('[data-add-par]'); if (ap) ap.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'parallel', src: srcId({}), title: 'Do these at the same time', branches: [{ label: 'Branch A', nodes: [] }, { label: 'Branch B', nodes: [] }] }); store.emit(); };
   const cr = root.querySelector('[data-create]'); if (cr) cr.onclick = () => { readDraft(root); createProcess(); };
 }
 
@@ -246,6 +279,7 @@ async function createProcess() {
     body: `<div class="field"><label>Name</label><input name="name" value="${esc(guess.slice(0, 80))}"></div>
       <div class="field"><label>Description</label><textarea name="desc">${esc('Imported from SOP. ' + steps.length + ' steps.')}</textarea></div>
       <div class="field"><label>Trigger</label><input name="trigger" value="${esc(d.trigger || 'Process starts')}"></div>
+      ${steps.some(x => !x.owner) ? `<div class="is-ownerprompt" data-create-noowner>${steps.filter(x => !x.owner).length} step${steps.filter(x => !x.owner).length === 1 ? ' has' : 's have'} no owner yet. You can create the process now and choose owners in the editor; the go-live gate needs an owner on every to-be step.</div>` : ''}
       ${picks.length ? `<div class="hint">Also creates ${picks.length} data element${picks.length === 1 ? '' : 's'}: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
       <div class="hint">Creates version 1 of the as-is process and a to-be copy you can redesign. Opens in the editor.</div>`,
     actions: [{ id: 'create', label: 'Create', primary: true }],
@@ -276,20 +310,27 @@ async function createProcess() {
 
   /* 2. build the as-is tree with fresh ids, then the to-be copy with `from` links */
   const nid = () => store.newId('n');
+  const idOf = new Map();
   const mkStep = s => {
     const extra = (s.newData || []).map(n => made.get(strip(n))).filter(Boolean);
     const node = { id: nid(), type: 'step', title: s.title.trim(), data: [...new Set(s.data.concat(extra))], touches: (s.touches || []).slice() };
+    if (s.src) idOf.set(s.src, node.id);
     if (s.owner) node.owner = s.owner;
     if (s.system) node.system = s.system;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
   };
-  const mk = n => n.type === 'step' ? mkStep(n)
-    : { id: nid(), type: n.type, title: n.title.trim(), branches: n.branches.map(b => ({ label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) })) };
+  const mk = n => { if (n.type === 'step') return mkStep(n);
+    const g = { id: nid(), type: n.type, title: n.title.trim(), branches: n.branches.map(b => { const br = { label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) }; if (b.goto) br._goto = b.goto; return br; }) };
+    if (n.src) idOf.set(n.src, g.id); return g; };
   const asis = [{ id: nid(), type: 'trigger', title: ((r.form.trigger || '').trim() || 'Process starts'), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
-  const copy = n => { const c = Object.assign(clone(n), { id: nid(), from: n.id }); if (n.branches) c.branches = n.branches.map(b => ({ label: b.label, nodes: b.nodes.map(copy) })); return c; };
+  /* loop-backs: point each branch at the new id of its target; drop targets that were removed from the draft */
+  asis.forEach(n => (n.branches || []).forEach(b => { if (b._goto) { const t = idOf.get(b._goto); if (t) b.goto = t; delete b._goto; } }));
+  const toId = new Map();
+  const copy = n => { const c = Object.assign(clone(n), { id: nid(), from: n.id }); toId.set(n.id, c.id); if (n.branches) c.branches = n.branches.map(b => Object.assign({ label: b.label, nodes: b.nodes.map(copy) }, b.goto ? { goto: b.goto } : {})); return c; };
   const tobe = asis.map(copy);
+  tobe.forEach(n => (n.branches || []).forEach(b => { if (b.goto) b.goto = toId.get(b.goto) || b.goto; }));
   const pid = store.newId('proc');
   const resources = [...new Set(steps.map(s => s.owner).filter(Boolean).concat(store.state.me ? [store.state.me] : []))];
   try {

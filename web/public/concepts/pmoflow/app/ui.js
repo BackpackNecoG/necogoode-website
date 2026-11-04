@@ -23,8 +23,8 @@ export function personChip(id) { const p = store.person(id); return p ? `<span c
 export const pname = id => (store.person(id) || {}).name || '—';
 export const badge = (text, cls) => `<span class="badge ${cls || 'b-idle'}">${esc(text)}</span>`;
 export const chip = (html, cls) => `<span class="chip ${cls || ''}">${html}</span>`;
-export const AVAIL = { live: { label: 'Live integration', short: 'Live', color: 'var(--live)' }, example: { label: 'Examples only', short: 'Examples', color: 'var(--example)' }, missing: { label: 'Missing', short: 'Missing', color: 'var(--missing)' } };
-export function dataDot(dataId) { const d = store.get('dataElement', dataId); const a = AVAIL[(d && d.avail) || 'missing']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}"></span>`; }
+export const AVAIL = { live: { label: 'Live integration', short: 'Live', color: 'var(--live)' }, example: { label: 'Examples only', short: 'Examples', color: 'var(--example)' }, missing: { label: 'Missing', short: 'Missing', color: 'var(--missing)' }, pending: { label: 'Fix done, awaiting owner confirmation', short: 'Pending', color: 'var(--soon)' } };
+export function dataDot(dataId) { const d = store.get('dataElement', dataId); const st = (window.PMOEngine && window.PMOEngine.effectiveAvail) ? window.PMOEngine.effectiveAvail(store.state.docs, dataId) : (d && d.avail); const a = AVAIL[st || 'missing'] || AVAIL.missing; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}"></span>`; }
 export const LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
 
 export function toast(text) {

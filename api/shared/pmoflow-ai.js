@@ -76,14 +76,14 @@ function statusFacts(docs, projectId, today, engine) {
     const fc = engine.forecastAll(docs, today);
     facts.atRisk = work.filter(w => fc[w.id] && ['late', 'slip'].includes(fc[w.id].sched))
       .map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, forecast: fc[w.id].forecast, sched: fc[w.id].sched, slipDays: fc[w.id].slipDays,
-        cause: fc[w.id].cause ? L.label(fc[w.id].cause) : null }));
+        daysPastDue: w.status !== 'done' && w.due < today ? dayDiff(w.due, today) : 0, cause: fc[w.id].cause ? L.label(fc[w.id].cause) : null }));
     const r = engine.readiness(docs, projectId, today);
     facts.readiness = { pass: r.pass, failing: r.checks.filter(c => !c.pass && !c.warning).map(c => ({ label: c.label, detail: L.scrub(c.detail) })) };
   } else {
     const done = work.filter(w => w.status === 'done').length;
     facts.stats = { total: work.length, done, pct: work.length ? Math.round(100 * done / work.length) : 0, target: project.target,
       late: work.filter(w => w.status !== 'done' && w.due < today).length };
-    facts.atRisk = work.filter(w => w.status !== 'done' && w.due < today).map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, sched: 'late' }));
+    facts.atRisk = work.filter(w => w.status !== 'done' && w.due < today).map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, sched: 'late', daysPastDue: dayDiff(w.due, today) }));
   }
   const procIds = new Set(project.processes || []);
   const usedData = new Set();
@@ -91,11 +91,13 @@ function statusFacts(docs, projectId, today, engine) {
     const walk = ns => (ns || []).forEach(n => { (n.data || []).forEach(d => usedData.add(d)); (n.subs || []).forEach(x => (x.data || []).forEach(d => usedData.add(d))); (n.branches || []).forEach(b => walk(b.nodes)); });
     walk(p.tobe);
   });
-  facts.blockers = [...usedData].map(id => dataEls[id]).filter(d => d && d.avail === 'missing').map(d => {
+  /* R4: effective state; a finished fix still awaits the data owner's confirmation ('pending') */
+  const eff = d => (engine && typeof engine.effectiveAvail === 'function') ? engine.effectiveAvail(docs, d.id)
+    : (d.avail === 'live' ? 'live' : d.avail);
+  facts.blockers = [...usedData].map(id => dataEls[id]).filter(d => d && ['missing', 'pending'].includes(eff(d))).map(d => {
     const resolver = work.find(w => w.resolves === d.id);
-    const ready = engine ? engine.dataReady(docs, d.id) : !!(resolver && resolver.status === 'done');
-    return ready ? null : { name: d.name, owner: L.person(d.owner), resolver: resolver ? resolver.title : null };
-  }).filter(Boolean);
+    return { name: d.name, owner: L.person(d.owner), state: eff(d), resolver: resolver ? resolver.title : null };
+  });
   facts.openDiscovered = [...usedData].map(id => dataEls[id]).filter(Boolean)
     .flatMap(d => (d.discovered || []).filter(x => !x.resolved).map(x => ({ data: d.name, requirement: L.scrub(x.text) })));
   const wById = Object.fromEntries(list(docs, 'workItem').map(w => [w.id, w]));
@@ -111,6 +113,9 @@ function statusFacts(docs, projectId, today, engine) {
   return L.scrub(facts);
 }
 
+const plural = (n, word, pl) => `${n} ${n === 1 ? word : (pl || word + 's')}`;
+const dayDiff = (a, b) => Math.round((Date.parse(String(b).slice(0, 10) + 'T12:00:00Z') - Date.parse(String(a).slice(0, 10) + 'T12:00:00Z')) / 86400000);
+
 /* Portfolio rule (R3): red if any late item or forecast after target; amber if slipping or under 7 days of buffer; else green. */
 function ragOf(f) {
   const s = f.stats || {}, reasons = [];
@@ -118,18 +123,33 @@ function ragOf(f) {
   const slipping = (f.atRisk || []).filter(w => w.sched === 'slip').length || s.slip || 0;
   const finish = s.actualFinish || s.finish, target = f.project.target;
   const buffer = finish && target ? Math.round((Date.parse(target + 'T12:00:00Z') - Date.parse(String(finish).slice(0, 10) + 'T12:00:00Z')) / 86400000) : null;
-  if (late) reasons.push(`${late} work item(s) late`);
-  if (buffer != null && buffer < 0) reasons.push(`forecast finish is ${-buffer} day(s) after target`);
+  if (late) reasons.push(`${plural(late, 'work item')} ${late === 1 ? 'is' : 'are'} late`);
+  if (buffer != null && buffer < 0) reasons.push(`the forecast finish is ${plural(-buffer, 'day')} after target`);
   if (reasons.length) return { status: 'red', reasons, bufferDays: buffer };
-  if (slipping) reasons.push(`${slipping} work item(s) slipping`);
-  if (buffer != null && buffer < 7) reasons.push(`only ${buffer} day(s) of buffer before target`);
+  if (slipping) reasons.push(`${plural(slipping, 'work item')} ${slipping === 1 ? 'is' : 'are'} slipping`);
+  if (buffer != null && buffer < 7) reasons.push(`there ${buffer === 1 ? 'is' : 'are'} only ${plural(buffer, 'day')} of buffer before target`);
   if (reasons.length) return { status: 'amber', reasons, bufferDays: buffer };
-  return { status: 'green', reasons: [buffer != null ? `there are ${buffer} day(s) of buffer and nothing is late or slipping` : 'nothing is late or slipping'], bufferDays: buffer };
+  return { status: 'green', reasons: [buffer != null ? `there ${buffer === 1 ? 'is' : 'are'} ${plural(buffer, 'day')} of buffer and nothing is late or slipping` : 'nothing is late or slipping'], bufferDays: buffer };
 }
 const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green' };
 const RAG_PHRASE = { red: 'off track', amber: 'at risk', green: 'on track' };
 
 function fd(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : d; }
+/* R4: "late by N days" = days past due; slip against plan is reported separately */
+function atRiskLine(w) {
+  const fc = w.forecast ? `forecast ${fd(w.forecast)}` : '';
+  const slip = w.slipDays ? `${plural(w.slipDays, 'day')} behind plan` : '';
+  const why = w.cause ? `waiting on ${w.cause}` : '';
+  if (w.daysPastDue > 0) {
+    return `"${w.title}" (${w.owner}) is late by ${plural(w.daysPastDue, 'day')} (was due ${fd(w.due)})` + [fc && slip ? `${fc}, ${slip}` : fc || slip, why].filter(Boolean).map(x => `; ${x}`).join('');
+  }
+  return `"${w.title}" (${w.owner}) is slipping${slip ? ` ${slip}` : ''}` + [fc, why].filter(Boolean).map(x => `; ${x}`).join('');
+}
+function lateSlip(f) {
+  const late = (f.atRisk || []).filter(w => w.daysPastDue > 0).length, slip = (f.atRisk || []).length - late;
+  const verb = n => (n === 1 ? 'is' : 'are');
+  return `${plural(late, 'item')} ${verb(late)} past due and ${plural(slip, 'more item', 'more items')} ${verb(slip)} slipping;`;
+}
 function statusRules(f) {
   const s = f.stats || {};
   const rag = f.rag || ragOf(f);
@@ -138,13 +158,15 @@ function statusRules(f) {
     rag: rag.status,
     headline: `${RAG_WORD[rag.status]}: ${f.project.name} is ${RAG_PHRASE[rag.status]}, ${s.pct || 0}% done, ${finish} vs target ${fd(f.project.target)}`,
     summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.join(' and ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
-      `${(f.atRisk || []).length} item(s) are late or slipping and ${(f.blockers || []).length} data element(s) are still missing.`,
-    highlights: [`${s.done || 0} of ${s.total || 0} work items complete`]
-      .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${f.readiness.failing.length} check(s) open`] : []),
-    risks: (f.atRisk || []).map(w => `"${w.title}" (${w.owner}) is ${w.sched === 'slip' ? 'slipping' : w.sched}${w.slipDays ? ` by ${w.slipDays} day(s)` : ''}${w.cause ? `, waiting on ${w.cause}` : ''}`)
+      `${lateSlip(f)} ${plural((f.blockers || []).length, 'data element')} ${(f.blockers || []).length === 1 ? 'is' : 'are'} not yet live.`,
+    highlights: [`${s.done || 0} of ${plural(s.total || 0, 'work item')} complete`]
+      .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${plural(f.readiness.failing.length, 'check')} open`] : []),
+    risks: (f.atRisk || []).map(atRiskLine)
       .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (impact ${r.impact}, likelihood ${r.likelihood}, owner ${r.owner})`))
       .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `${r.title}: all linked work is done, so it is likely mitigated. ${r.owner}: confirm and close.`)),
-    asks: (f.blockers || []).map(b => `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
+    asks: (f.blockers || []).map(b => b.state === 'pending'
+        ? `${b.owner}: confirm ${b.name} is live (the fix is done and awaits your confirmation)`
+        : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
       .concat((f.openDiscovered || []).map(x => `Resolve the discovered requirement on ${x.data}: ${x.requirement}`))
       .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`)),
   };
@@ -156,6 +178,9 @@ const STOP = new Set(['the', 'and', 'for', 'from', 'with', 'into', 'onto', 'that
 const VERBS = /^(collect|enter|send|receive|verify|check|review|email|upload|capture|update|create|key|record|pull|get|request|confirm|validate|approve|read|match|store|attach|notify|submit|file|scan|sign|route|export|import|look|obtain|gather|process|prepare|schedule|issue|post|log|add|set|open|close)(s|es|ed)?$/i;
 const DOMAINS = { vendor: /\b(vendors?|suppliers?)\b/i, employee: /\b(employees?|staff|payroll|personnel|new hires?|workers?)\b/i, customer: /\b(customers?|clients?)\b/i };
 const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event)\b\s*[:\-–—]/i;
+const GOTO_RE = /\b(?:return(?:s|ed)?|go(?:es)? back|loop(?:s)? back|send(?:s)? (?:it )?back|back)\s+to\s+step\s+(\d+)\b/i;
+const GOTO_STRIP = /,?\s*(?:and\s+|then\s+)?(?:return(?:s|ed)?|go(?:es)? back|loop(?:s)? back|send(?:s)? (?:it )?back|back)\s+to\s+step\s+\d+\.?/i;
+const RESUBMIT_RE = /\bre-?submit(s|ted|ting)?\b/i;
 const ELSE_RE = /^(otherwise|else|if not)\b[,:]?\s*(.*)$/i;
 const PAR_RE = /\b(at the same time|in parallel|simultaneously|concurrently)\b/i;
 const TRIGGER_LINE = /^(trigger|start(?:ing)? event|starts? when|begins? when)\s*[:\-–—]\s*(.+)$/i;
@@ -246,8 +271,10 @@ function sopRules(text, docs) {
     return viaAlias ? viaAlias.id : undefined;
   };
   const systemOf = (line) => { const m = SYSTEMS.find(x => new RegExp('\\b' + x + '\\b').test(line)); return m || undefined; };
+  let seq = 0;
   const makeStep = (title, line) => {
-    const n = { type: 'step', title: clip(cap(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, '')), 90) };
+    /* R4: titles are never truncated */
+    const n = { id: 's' + (++seq), type: 'step', title: cap(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, '')) };
     const o = ownerOf(line); if (o) n.owner = o;
     const d = linkData(line); if (d.length) n.data = d;
     const sys = systemOf(line); if (sys) n.system = sys;
@@ -266,44 +293,77 @@ function sopRules(text, docs) {
   const decisionTitle = (cond) => {
     let c = cond.replace(/[.;?]$/, '').trim();
     if (/^(over|above|under|below|more than|greater than|less than|exceeds?)\b/i.test(c)) c = 'amount ' + c;
-    return clip(cap(c), 80) + '?';
+    return cap(c) + '?';
   };
 
   /* state shared across lines */
   const nodes = [];
-  let last = null, lastDecision = null;
-  const pushTop = n => { if (nodes.length < 40) nodes.push(n); };
+  let last = null, lastDecision = null, curLine = null;
+  const lineFirst = {};              /* step number -> id of the first node that line produced */
+  const pendingGoto = [];            /* [{branch, num}] resolved after parsing (forward references) */
+  const pushTop = n => {
+    if (nodes.length >= 40) return;
+    nodes.push(n);
+    if (curLine != null && !lineFirst[curLine]) lineFirst[curLine] = n.id;
+  };
+  const newDecision = (title, yes) => ({ id: 'd' + (++seq), type: 'decision', title, branches: [{ label: 'Yes', nodes: yes }, { label: 'No', nodes: [] }] });
+  const newParallel = branches => ({ id: 'p' + (++seq), type: 'parallel', title: 'In parallel', branches });
   const branchLabel = (step, i) => { const p = people.find(x => x.id === step.owner); return (p && p.bu) || 'Branch ' + (i + 1); };
+  /* R4: "return to step N" / "resubmit" -> goto on the branch */
+  const gotoOf = (sen) => {
+    const m = GOTO_RE.exec(sen);
+    if (m) return { num: Number(m[1]) };
+    if (RESUBMIT_RE.test(sen)) {
+      const prior = nodes.filter(n => n.type === 'step' && /\bsubmit/i.test(n.title));
+      const first = nodes.find(n => n.type === 'step');
+      const tgt = prior[0] || first;
+      return tgt ? { id: tgt.id } : null;
+    }
+    return null;
+  };
+  const stripGoto = t => t.replace(GOTO_STRIP, '').replace(/^\s*(then|and)\s+/i, '').replace(/[,;\s]+$/, '').trim();
+  const setGoto = (branch, g) => { if (!g) return; if (g.id) branch.goto = g.id; else pendingGoto.push({ branch, num: g.num }); };
+  const branchWith = (branch, text, g) => {
+    const rest = stripGoto(text);
+    if (rest.length >= 3 && !/^(return|go back|loop back|send back)\b/i.test(rest)) { const st = makeStep(modal(rest), rest); branch.nodes.push(st); last = st; }
+    setGoto(branch, g);
+  };
   /* One numbered line can hold several sentences: main step, inline condition, otherwise-clause, parallel work. */
   const processSentences = (body) => {
     const sentences = body.split(/(?<=[.;!])\s+(?=[A-Z(])/).map(x => x.trim()).filter(x => x.length >= 3);
     for (const sen of sentences) {
+      const g = gotoOf(sen);
       const els = ELSE_RE.exec(sen);
-      if (els) {
-        const rest = els[2].trim();
-        if (lastDecision && rest.length >= 3) { const st = makeStep(modal(rest), rest); lastDecision.branches[1].nodes.push(st); last = st; continue; }
-      }
+      if (els && lastDecision) { branchWith(lastDecision.branches[1], els[2].trim(), g); continue; }
       if (PAR_RE.test(sen)) {
         const rest = sen.replace(PAR_RE, ' ').replace(/^\s*[,:;-]\s*|\s*[,]\s*$/g, '').replace(/\s+/g, ' ').trim();
         const parts = rest.replace(/:$/, '').split(/\s*;\s*|,?\s+and\s+(?=(?:the\s+)?[A-Z])|,\s*while\s+/).map(x => x.trim()).filter(x => x.length >= 3);
         if (parts.length >= 2) {
           const steps = parts.map(x => makeStep(modal(x), x));
-          pushTop({ type: 'parallel', title: 'In parallel', branches: steps.map((st, i) => ({ label: branchLabel(st, i), nodes: [st] })) });
+          pushTop(newParallel(steps.map((st, i) => ({ label: branchLabel(st, i), nodes: [st] }))));
           last = steps[steps.length - 1]; continue;
         }
-        if (!parts.length || /:$/.test(rest)) { const g = { type: 'parallel', title: 'In parallel', branches: [] }; pushTop(g); last = g; continue; }
+        if (!parts.length || /:$/.test(rest)) { const gw = newParallel([]); pushTop(gw); last = gw; continue; }
         const st = makeStep(modal(parts[0]), parts[0]);
         const prev = nodes[nodes.length - 1];
         if (prev && prev.type === 'parallel') prev.branches.push({ label: branchLabel(st, prev.branches.length), nodes: [st] });
-        else if (prev && prev.type === 'step') nodes[nodes.length - 1] = { type: 'parallel', title: 'In parallel', branches: [prev, st].map((x, i) => ({ label: branchLabel(x, i), nodes: [x] })) };
+        else if (prev && prev.type === 'step') nodes[nodes.length - 1] = Object.assign(newParallel([prev, st].map((x, i) => ({ label: branchLabel(x, i), nodes: [x] }))), {});
         else pushTop(st);
         last = st; continue;
       }
       if (COND.test(sen)) {
         const { cond, action } = splitCond(sen);
-        const st = makeStep(modal(action), sen);
-        const dec = { type: 'decision', title: decisionTitle(cond), branches: [{ label: 'Yes', nodes: [st] }, { label: 'No', nodes: [] }] };
-        pushTop(dec); lastDecision = dec; last = st; continue;
+        const dec = newDecision(decisionTitle(cond), []);
+        branchWith(dec.branches[0], action, g);
+        pushTop(dec); lastDecision = dec; continue;
+      }
+      if (g) {
+        /* a loop-back with no condition of its own: the No path of the decision just made, or a rework decision */
+        const prev = nodes[nodes.length - 1];
+        if (prev && prev === lastDecision && !prev.branches[1].goto && !prev.branches[1].nodes.length) { branchWith(prev.branches[1], sen, g); continue; }
+        const dec = newDecision('Rework needed?', []);
+        branchWith(dec.branches[0], sen, g);
+        pushTop(dec); lastDecision = dec; continue;
       }
       const st = makeStep(sen, sen); pushTop(st); last = st;
     }
@@ -316,7 +376,7 @@ function sopRules(text, docs) {
   for (const rl of raw) {
     const t = rl.trim();
     const m = TRIGGER_LINE.exec(t) || TRIGGER_PROSE.exec(t);
-    if (m) { trigger = clip(cap(m[m.length - 1].replace(/[.;]$/, '').trim()), 80); break; }
+    if (m) { trigger = cap(m[m.length - 1].replace(/[.;]$/, '').trim()); break; }
   }
   const NUM = /^(?:step\s+)?(\d+)[.):]\s+|^step\s+\d+\s*[-–:]\s*/i;
   const SUBNUM = /^\d+\.\d+[.)]?\s+/;
@@ -336,9 +396,9 @@ function sopRules(text, docs) {
     const asSub = last && (isSubNum || (isLetter && sawNumbered) || (isBullet && (indent > 0 || sawNumbered)) || (!isNum && !isBullet && !isLetter && indent >= 2));
     if (asSub) {
       const els = ELSE_RE.exec(body);
-      if (els && lastDecision) { const st = makeStep(modal(els[2]), els[2]); lastDecision.branches[1].nodes.push(st); last = st; continue; }
+      if (els && lastDecision) { branchWith(lastDecision.branches[1], els[2].trim(), gotoOf(body)); continue; }
       if (last.type === 'parallel') { const st = makeStep(modal(body), body); last.branches.push({ label: branchLabel(st, last.branches.length), nodes: [st] }); continue; }
-      const sub = { title: clip(cap(body.replace(/[.;]$/, '')), 90), data: linkData(body) };
+      const sub = { title: cap(body.replace(/[.;]$/, '')), data: linkData(body) };
       (last.subs || (last.subs = [])).push(sub);
       continue;
     }
@@ -347,14 +407,15 @@ function sopRules(text, docs) {
       if (wasFirst && !/[.!?]$/.test(t) && t.split(/\s+/).length <= 8) continue;   /* bare title line */
       if (/:\s*$/.test(t) || TRIGGER_PROSE.test(t)) continue;    /* heading or start-event sentence */
     }
-    if (isNum) sawNumbered = true;
+    if (isNum) { sawNumbered = true; const m = /(\d+)/.exec(t); curLine = m ? Number(m[1]) : null; } else curLine = null;
     processSentences(body);
     if (nodes.length >= 40) break;
   }
-  nodes.unshift({ type: 'trigger', title: trigger });
+  for (const pg of pendingGoto) { if (lineFirst[pg.num]) pg.branch.goto = lineFirst[pg.num]; }
+  nodes.unshift({ id: 'k', type: 'trigger', title: trigger });
   const decisions = nodes.filter(n => n.type === 'decision').length, parallels = nodes.filter(n => n.type === 'parallel').length;
   return { nodes, newData,
-    notes: `Parsed ${nodes.length - 1} top-level node(s) after the trigger "${trigger}"${decisions ? `, ${decisions} decision(s)` : ''}${parallels ? `, ${parallels} parallel gateway(s)` : ''}. ` +
+    notes: `Parsed ${plural(nodes.length - 1, 'top-level node')} after the trigger "${trigger}"${decisions ? `, ${plural(decisions, 'decision')}` : ''}${parallels ? `, ${plural(parallels, 'parallel gateway')}` : ''}. ` +
       'Title, purpose and scope lines were skipped; sub-items were nested. Owners link only on a full name, business unit or role alias; data links only on a strong match. ' +
       'Unmatched data is listed as proposals. Review before saving.' };
 }
@@ -363,25 +424,40 @@ function sanitizeSop(out, docs) {
   const peopleIds = new Set(list(docs, 'person').map(p => p.id));
   const dataIds = new Set(list(docs, 'dataElement').map(d => d.id));
   const cleanData = a => [...new Set((Array.isArray(a) ? a : []).filter(d => dataIds.has(d)))];
+  const used = new Set();
+  let seq = 0;
+  /* every node gets a unique id (model ids kept when safe) so goto targets resolve */
+  const idFor = (n, prefix) => {
+    let id = typeof n.id === 'string' && /^[\w.-]{1,40}$/.test(n.id) && !used.has(n.id) ? n.id : null;
+    while (!id || used.has(id)) id = prefix + (++seq);
+    used.add(id); return id;
+  };
+  const gotos = [];
   const cleanNode = (n, depth) => {
     if (!n || typeof n.title !== 'string' || !n.title.trim()) return null;
-    if (n.type === 'trigger' && depth === 0) return { type: 'trigger', title: n.title.trim().slice(0, 100) };
+    if (n.type === 'trigger' && depth === 0) return { id: idFor(n, 'k'), type: 'trigger', title: n.title.trim().slice(0, 300) };
     if ((n.type === 'decision' || n.type === 'parallel') && depth === 0 && Array.isArray(n.branches)) {
-      const branches = n.branches.slice(0, 4).map(b => ({ label: String((b && b.label) || '').slice(0, 30) || 'Branch',
-        nodes: (Array.isArray(b && b.nodes) ? b.nodes : []).slice(0, 10).map(x => cleanNode(x, 1)).filter(Boolean) }));
-      return { type: n.type, title: n.title.trim().slice(0, 100), branches };
+      const g = { id: idFor(n, n.type === 'parallel' ? 'p' : 'd'), type: n.type, title: n.title.trim().slice(0, 300) };
+      g.branches = n.branches.slice(0, 4).map(b => {
+        const br = { label: String((b && b.label) || '').slice(0, 30) || 'Branch',
+          nodes: (Array.isArray(b && b.nodes) ? b.nodes : []).slice(0, 10).map(x => cleanNode(x, 1)).filter(Boolean) };
+        if (b && typeof b.goto === 'string') { br.goto = b.goto; gotos.push(br); }
+        return br;
+      });
+      return g;
     }
-    const node = { type: 'step', title: n.title.trim().slice(0, 120) };
+    const node = { id: idFor(n, 's'), type: 'step', title: n.title.trim().slice(0, 300) };
     if (typeof n.owner === 'string' && peopleIds.has(n.owner)) node.owner = n.owner;
     const data = cleanData(n.data); if (data.length) node.data = data;
     const touches = strArr(n.touches, 4).map(x => x.slice(0, 40)); if (touches.length) node.touches = touches;
     if (typeof n.system === 'string' && n.system.trim()) node.system = n.system.trim().slice(0, 40);
     const subs = (Array.isArray(n.subs) ? n.subs : []).filter(x => x && typeof x.title === 'string' && x.title.trim()).slice(0, 12)
-      .map(x => ({ title: x.title.trim().slice(0, 120), data: cleanData(x.data) }));
+      .map(x => ({ title: x.title.trim().slice(0, 300), data: cleanData(x.data) }));
     if (subs.length) node.subs = subs;
     return node;
   };
   const nodes = (Array.isArray(out && out.nodes) ? out.nodes : []).slice(0, 40).map(n => cleanNode(n, 0)).filter(Boolean);
+  gotos.forEach(b => { if (!used.has(b.goto)) delete b.goto; });   /* drop loop-backs to unknown steps */
   const newData = (Array.isArray(out && out.newData) ? out.newData : []).filter(x => x && typeof x.name === 'string' && x.name.trim()).slice(0, 15)
     .map(x => ({ name: x.name.trim().slice(0, 80), reason: typeof x.reason === 'string' ? x.reason.slice(0, 300) : '' }));
   return { nodes, newData, notes: typeof (out && out.notes) === 'string' ? out.notes.slice(0, 600) : '' };
@@ -405,7 +481,9 @@ async function run(kind, body, docs, today) {
         '{"type":"decision","title":"<condition>?","branches":[{"label":"Yes","nodes":[step]},{"label":"No","nodes":[]}]}. ' +
         'The first node is {"type":"trigger","title"} naming the SOP\'s stated start event, or "Process starts" if none is stated (never a copy of step 1). ' +
         'Work done "at the same time", "in parallel" or "simultaneously" becomes {"type":"parallel","title","branches":[{"label","nodes":[step]}]}. ' +
-        '"Otherwise", "else" or "if not" goes in the No branch of the preceding decision. A step with an inline condition ' +
+        '"Otherwise", "else" or "if not" goes in the No branch of the preceding decision. Every node has a short unique "id". ' +
+        '"Resubmit" or "return to step N" sets "goto": <id of that step> on the branch (a loop-back). Never truncate titles. ' +
+        'Leave owner out unless a full name, business unit or role alias (e.g. AP clerk = Accounts Payable) matches; never default it. A step with an inline condition ' +
         '("Manager approves. If over $5,000, Finance Director also approves.") becomes the main step followed by a decision whose Yes branch holds the conditional action. ' +
         'Steps may carry "system" when a named system (e.g. ERP, Concur, NetSuite, Workday, SharePoint, Teams, Outlook, DocuSign, Salesforce) is used. ' +
         'Skip title, purpose, scope, owner and revision lines. Lettered or indented sub-items become subs of the step above them. ' +

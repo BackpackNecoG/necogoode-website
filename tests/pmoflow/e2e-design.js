@@ -115,6 +115,34 @@ const docsOf = st => st.docs;
     const seedP = procs.slice().sort((a, b) => flat(b.tobe).length - flat(a.tobe).length)[0];
     const pid = seedP.id;
 
+    console.log('# R4: process index /processes');
+    ok(await page.getAttribute('#nav a:has-text("Processes")', 'href') === '/concepts/pmoflow/processes', 'nav "Processes" opens /processes');
+    await page.click('#nav a:has-text("Processes")');
+    await page.waitForSelector('.d-prow');
+    ok(await page.isVisible('#nav a.on:has-text("Processes")'), 'nav highlights Processes');
+    const prow = await page.$$eval('.d-prow', rs => rs.map(r => ({ id: r.dataset.prow, ver: r.querySelector('[data-ver]').textContent.trim(), steps: r.querySelector('[data-col=steps] b').textContent.trim(), diff: r.querySelector('[data-col=diff] b').textContent.trim(), data: (r.querySelector('[data-datacounts]') || { dataset: {} }).dataset.datacounts || '', owner: r.querySelector('[data-col=owner]').textContent, prj: r.querySelector('[data-col=projects]').textContent })));
+    ok(prow.length === procs.length, `index lists every process (${prow.length})`);
+    let rowsOk = true;
+    for (const r of prow) {
+      const p = procs.find(x => x.id === r.id); const ds = ENG.diffSummary(p); const ids = [...new Set(flat(p.tobe).flatMap(s => s.data || []))];
+      const c = k => ids.filter(d => ENG.effectiveAvail(st.docs, d) === k).length;
+      const projs = (st.docs.project || []).map(d => d.data).filter(j => (j.processes || []).includes(p.id));
+      const exp = { ver: 'v' + (p.version || 1), steps: String(flat(p.tobe).length), diff: `${ds.new}+${ds.changed}`, data: ids.length ? `${c('live')}/${c('pending')}/${c('example')}/${c('missing')}` : '' };
+      if (r.ver !== exp.ver || r.steps !== exp.steps || r.diff !== exp.diff || r.data !== exp.data || !r.owner.includes(st.people.find(x => x.id === p.owner).name) || !projs.every(j => r.prj.includes(j.name))) { rowsOk = false; console.log('    row mismatch', r, exp); }
+    }
+    ok(rowsOk, 'each row: version, owner, steps, new+changed (diffSummary), live/pending/examples/missing (effectiveAvail), projects');
+    ok(await page.getAttribute('[data-new-workflow]', 'href') === '/concepts/pmoflow/new' && await page.getAttribute('[data-import-sop]', 'href') === '/concepts/pmoflow/import' && !!(await page.$('label.d-import [data-bpmn-file]')), '"+ New workflow", "Import BPMN" and "Import SOP" actions');
+    await page.fill('[data-psearch]', seedP.name.split(' ')[0].toLowerCase());
+    const vis = await page.$$eval('.d-prow', rs => rs.filter(r => !r.hidden).map(r => r.dataset.prow));
+    ok(vis.includes(pid) && vis.length < procs.length && /of/.test(await page.textContent('[data-pcount]')), `search filters rows (${vis.length} of ${procs.length})`);
+    await page.fill('[data-psearch]', 'zzqx nothing');
+    ok(await page.isVisible('[data-pnone]') && !(await page.$$eval('.d-prow', rs => rs.filter(r => !r.hidden).length)), 'search with no match shows an empty state');
+    await page.fill('[data-psearch]', ''); await page.dispatchEvent('[data-psearch]', 'input');
+    await shot('processes'); await overflow('processes @1440'); await iconCheck('processes');
+    await page.click('[data-new-workflow]'); await page.waitForURL(/\/new$/); await page.waitForSelector('.overlay input[name=name]'); await act('cancel'); await page.waitForURL(/pmoflow\/?$/);
+    await nav('/processes'); await page.click('[data-import-sop]'); await page.waitForURL(/\/import$/);
+    await nav('/processes'); await page.click(`[data-prow="${pid}"] .d-pname a`); await page.waitForURL(new RegExp('/process/' + pid + '$'));
+
     console.log('# view modes on ' + pid);
     for (const m of ['asis', 'tobe', 'diff', 'lanes']) {
       await nav(`/process/${pid}?mode=${m}`);
@@ -200,6 +228,23 @@ const docsOf = st => st.docs;
     ok(uatN > 0, `changed seed step has UAT scripts (${uatN})`);
     await settle(); await shot('step'); await overflow('step @1440');
 
+    console.log('# R4: step page "Why this date?"');
+    const stepWithWork = (st.docs.workItem || []).map(d => d.data).find(w => w.status !== 'done' && w.pid === pid && ENG.explainForecast(st.docs, w.id, st.today).length);
+    ok(!!stepWithWork, 'seed has an open work item with a forecast explanation');
+    if (stepWithWork) {
+      await nav(`/process/${pid}/step/${stepWithWork.step}`);
+      const openItems = (st.docs.workItem || []).map(d => d.data).filter(w => w.pid === pid && w.step === stepWithWork.step && w.status !== 'done' && ENG.explainForecast(st.docs, w.id, st.today).length);
+      ok((await page.$$('.d-why')).length === openItems.length, `one "Why this date?" per open work item (${openItems.length})`);
+      const why = `.d-why[data-why="${stepWithWork.id}"]`;
+      ok(!(await page.$eval(why, d => d.open)), 'explanation is collapsed until asked');
+      await page.click(why + ' summary');
+      const lines = await page.$$eval(why + ' li', ls => ls.map(l => l.textContent.trim()));
+      const expLines = ENG.explainForecast(st.docs, stepWithWork.id, st.today).map(x => x.text);
+      ok(JSON.stringify(lines) === JSON.stringify(expLines), 'explanation = explainForecast: ' + lines.join(' / ').slice(0, 120));
+      ok(!lines.some(l => /\b(wi|de|n)-[a-z0-9]{4,}\b|undefined/.test(l)), 'explanation uses names, not ids');
+      await shot('step-why'); await overflow('step why @1440');
+    }
+
     console.log('# /new → edit flows');
     await nav('/new');
     await page.waitForSelector('.overlay input[name=name]');
@@ -248,6 +293,33 @@ const docsOf = st => st.docs;
     ok(await page.isVisible('.diamond:has-text("Amount over limit?")'), 'decision inserted');
     ok(await page.isVisible('.blabel:has-text("Needs more info")'), 'renamed branch label shown');
     ok((await page.textContent('.d-goto')).includes('Loop back to “Verify identity”'), 'loop-back label rendered at branch end');
+    const loopCheck = async label => {
+      const r = await page.evaluate(() => {
+        const lb = document.querySelector('#canvas .d-goto[data-goto]'); const path = document.querySelector(`#canvas svg.d-loops path.d-loop[data-loop="${lb.dataset.goto}"]`);
+        if (!path) return null;
+        const tg = document.querySelector(`#canvas [data-node="${lb.dataset.goto}"]`).getBoundingClientRect(), l = lb.getBoundingClientRect(), svg = path.ownerSVGElement.getBoundingClientRect();
+        const len = path.getTotalLength(), a = path.getPointAtLength(0), z = path.getPointAtLength(len);
+        const abs = p => ({ x: p.x + svg.left, y: p.y + svg.top });
+        const A = abs(a), Z = abs(z);
+        return { hidden: path.ownerSVGElement.getAttribute('aria-hidden'), marker: path.getAttribute('marker-end'), curved: /Q/.test(path.getAttribute('d')),
+          startOk: Math.abs(A.y - (l.top + l.bottom) / 2) < 3 && (Math.abs(A.x - l.right) < 4 || Math.abs(A.x - l.left) < 4),
+          endOk: Z.y >= tg.top - 1 && Z.y <= tg.bottom + 1 && (Math.abs(Z.x - tg.right) < 8 || Math.abs(Z.x - tg.left) < 8), labelText: lb.textContent };
+      });
+      ok(!!r && r.curved && r.marker && r.hidden === 'true', `${label}: curved SVG return arrow with an arrowhead, aria-hidden`);
+      ok(!!r && r.startOk && r.endOk, `${label}: arrow runs from the end of the branch to the target node`);
+      ok(!!r && /Loop back to/.test(r.labelText), `${label}: text label kept for accessibility`);
+    };
+    await loopCheck('edit map @1440');
+    await nav(page.url().replace(BASE, '').replace(/mode=edit.*/, 'mode=tobe'));
+    await loopCheck('to-be map @1440');
+    await page.screenshot({ path: `${OUT}/loop-1440.png`, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await nav(page.url().replace(BASE, ''));
+    await loopCheck('to-be map @390'); await overflow('loop map @390');
+    await page.screenshot({ path: `${OUT}/loop-390.png`, fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await nav(page.url().replace(BASE, '').replace(/mode=tobe/, 'mode=edit&v=tobe'));
+    await page.waitForSelector('[data-ins]');
 
     /* step inside the first branch */
     await page.click('[data-ins$="#0"] >> nth=0');
@@ -390,22 +462,84 @@ const docsOf = st => st.docs;
     ok(ndata.owner === me, 'inline element is owned by the step owner (current persona)');
     ok(await putDoc('dataElement', did, Object.assign({}, ndata, { discovered: [{ text: 'Document numbers can carry a check letter', fromRun: 'TR1', at: new Date().toISOString() }] }), 'Test fixture: discovered requirement') === 200, 'fixture: discovered requirement stored');
     await nav(`/data/${did}`);
+    console.log('# R4: plain-language spec builder (no regex needed)');
     await page.click('[data-fadd]');
+    await page.waitForSelector('.overlay .d-fmts');
+    const fmtNames = (await page.$$eval('.overlay .d-fmts .d-fmt', ls => ls.map(l => l.textContent.trim()))).join(',');
+    ok(fmtNames === 'Digits,Letters,Text,Date,Money,Email,Phone,List', 'format choices: digits / letters / text / date / money / email / phone / list (' + fmtNames + ')');
+    ok(!(await page.$eval('.overlay details[data-adv]', d => d.open)), 'regex sits under a collapsed "Advanced"');
+    ok(!(await page.isVisible('.overlay input[name=pattern]')), 'pattern input hidden until Advanced is opened');
     await page.fill('.overlay input[name=name]', 'Document number');
-    await page.selectOption('.overlay select[name=type]', 'digits');
-    await page.fill('.overlay input[name=rule]', 'Required');
-    await page.fill('.overlay input[name=length]', '9');
-    await page.fill('.overlay input[name=pattern]', '^\\d{9}$');
+    await page.check('.overlay input[name=fmt][value=digits]');
+    await page.check('.overlay input[name=lenMode][value=exact]');
+    /* validation keeps the dialog input: exact length left empty */
+    await act('save');
+    await page.waitForSelector('.overlay .d-err');
+    ok(/whole number/.test(await page.textContent('.overlay .d-err')) && await page.inputValue('.overlay input[name=name]') === 'Document number' && await page.isChecked('.overlay input[name=fmt][value=digits]'), 'validation error keeps the typed name and chosen format');
+    await page.fill('.overlay input[name=len]', '9');
     await page.check('.overlay input[name=required]');
+    ok(/9 digits · required/.test(await page.textContent('.overlay [data-specsum]')), 'builder reads back in plain words: ' + (await page.textContent('.overlay [data-specsum]')).trim());
+    await page.click('.overlay details[data-adv] summary');
+    ok(await page.inputValue('.overlay input[name=pattern]') === '^\\d{9}$', 'Advanced shows the generated pattern ^\\d{9}$');
+    await page.screenshot({ path: `${OUT}/spec-builder.png` });
     await saving(() => act('save'));
-    await page.click('[data-fedit="0"]');
-    await page.fill('.overlay input[name=format]', '9 digits');
-    await saving(() => act('save'));
+    let sf0 = (await getData(did)).fields[0];
+    ok(sf0 && sf0.type === 'digits' && sf0.length === 9 && sf0.pattern === '^\\d{9}$' && sf0.required === true && sf0.format === '9 digits', 'generated type digits, length 9, pattern, required, format "9 digits"');
+    /* edit: change to letters between 2 and 3, must match another field (added next) */
     await page.click('[data-fadd]');
-    await page.fill('.overlay input[name=name]', 'Temp field');
+    await page.fill('.overlay input[name=name]', 'Issuing country');
+    await page.check('.overlay input[name=fmt][value=letters]');
+    await page.check('.overlay input[name=lenMode][value=range]');
+    await page.fill('.overlay input[name=lenMin]', '2'); await page.fill('.overlay input[name=lenMax]', '3');
     await saving(() => act('save'));
-    await page.click('[data-fdel="1"]');
-    await saving(() => act('yes'));
+    let sf1 = (await getData(did)).fields[1];
+    ok(sf1 && sf1.type === 'text' && sf1.min === 2 && sf1.max === 3 && sf1.pattern === '^[A-Za-z]{2,3}$' && sf1.length == null, 'letters 2–3: type text, min 2, max 3, pattern ^[A-Za-z]{2,3}$');
+    await page.click('[data-fadd]');
+    await page.fill('.overlay input[name=name]', 'Holder name on ID');
+    await page.check('.overlay input[name=fmt][value=text]');
+    await page.selectOption('.overlay select[name=matches]', 'Issuing country');
+    ok(await page.$$eval('.overlay select[name=matches] option', os => os.map(o => o.value).join('|')) === '|Document number|Issuing country', '"must match another field" lists the other fields');
+    await saving(() => act('save'));
+    const sf2 = (await getData(did)).fields[2];
+    ok(sf2 && sf2.matches === 'Issuing country' && /Must match Issuing country/.test(sf2.rule) && sf2.type === 'text' && !sf2.pattern, 'must-match rule saved as plain words; text needs no pattern');
+    await page.click('[data-fadd]');
+    await page.fill('.overlay input[name=name]', 'Account type');
+    await page.check('.overlay input[name=fmt][value=list]');
+    ok(await page.isVisible('.overlay input[name=values]') && !(await page.isVisible('.overlay input[name=len]')), 'list shows allowed values, hides length');
+    await page.fill('.overlay input[name=values]', 'Checking, Savings, Checking');
+    await saving(() => act('save'));
+    const sf3 = (await getData(did)).fields[3];
+    ok(sf3 && sf3.type === 'list' && JSON.stringify(sf3.values) === '["Checking","Savings"]', 'list values saved (de-duplicated)');
+    await page.click('[data-fadd]');
+    await page.fill('.overlay input[name=name]', 'Payment limit');
+    await page.check('.overlay input[name=fmt][value=money]');
+    await page.fill('.overlay input[name=amtMin]', '0'); await page.fill('.overlay input[name=amtMax]', '25000');
+    await saving(() => act('save'));
+    const sf4 = (await getData(did)).fields[4];
+    ok(sf4 && sf4.type === 'currency' && sf4.min === 0 && sf4.max === 25000 && !!sf4.pattern, 'money: type currency, min 0, max 25000, pattern generated');
+    ok(/\$0 – \$25,000/.test(await page.textContent('.d-spec tr:nth-child(6) [data-fsum]')), 'spec table shows "Money amount · $0 – $25,000"');
+    /* edit the first field: reopens in the builder with its choices; a hand-written Advanced pattern is kept */
+    await page.click('[data-fedit="0"]');
+    ok(await page.isChecked('.overlay input[name=fmt][value=digits]') && await page.isChecked('.overlay input[name=lenMode][value=exact]') && await page.inputValue('.overlay input[name=len]') === '9', 'edit reopens with digits, exactly 9');
+    await page.click('.overlay details[data-adv] summary');
+    await page.fill('.overlay input[name=pattern]', '^\\d{9}[A-Z]?$');
+    await page.check('.overlay input[name=lenMode][value=any]');
+    ok(await page.inputValue('.overlay input[name=pattern]') === '^\\d{9}[A-Z]?$', 'hand-edited pattern is not overwritten by later choices');
+    await saving(() => act('save'));
+    sf0 = (await getData(did)).fields[0];
+    ok(sf0.pattern === '^\\d{9}[A-Z]?$' && sf0.patternCustom === true && sf0.length == null, 'custom Advanced pattern saved');
+    /* engine generates tests from the builder output */
+    const gen = ENG.generateTests(await getData(did));
+    ok(['Document number', 'Issuing country', 'Holder name on ID', 'Account type', 'Payment limit'].every(n => gen.some(t => t.field === n)), `engine generates tests for every builder field (${gen.length})`);
+    /* clean up to one field for the rest of the flow */
+    for (let i = 4; i >= 1; i--) { await page.click(`[data-fdel="${i}"]`); await saving(() => act('yes')); }
+    await page.click('[data-fedit="0"]');
+    await page.click('.overlay details[data-adv] summary');
+    await page.click('.overlay [data-advreset]');
+    await page.check('.overlay input[name=lenMode][value=exact]');
+    await page.fill('.overlay input[name=len]', '9');
+    ok(await page.inputValue('.overlay input[name=pattern]') === '^\\d{9}$', '"Use the generated pattern" returns to the builder');
+    await saving(() => act('save'));
     await page.click('[data-dedit]');
     await page.selectOption('.overlay select[name=avail]', 'example');
     await page.selectOption('.overlay select[name=sensitivity]', 'pii');
@@ -564,8 +698,56 @@ const docsOf = st => st.docs;
     const wid = 'wi-e2e-' + Math.random().toString(36).slice(2, 8);
     ok(await putDoc('workItem', wid, { id: wid, projectId: prjId, pid: impPid, step: flat(imp.tobe)[0].id, title: 'Connect the E2E feed', owner: me, status: 'done', start: st.today, due: st.today, doneAt: st.today, deps: [], resolves: msId, kind: 'access' }, 'Test fixture: resolver done') === 200, 'fixture: done resolver');
     await nav(`/data/${msId}`);
-    ok(await page.isVisible('.hdr [data-eff="live"]') && !(await page.$('[data-noplan]')), 'resolver done: effectively live, no "No resolution plan"');
+    console.log('# R4: pending until the data owner confirms live');
+    ok(ENG.effectiveAvail((await state()).docs, msId) === 'pending', 'engine: resolver done -> pending');
+    ok(await page.isVisible('.hdr [data-eff="pending"]:has-text("Fix done, awaiting owner confirmation")') && !(await page.$('[data-noplan]')), 'resolver done: header shows amber "Fix done, awaiting owner confirmation"');
+    ok(await page.isVisible(`[data-resolution="pending"] .d-b-amber:has-text("awaiting ${meName} to confirm")`), `resolution plan: "awaiting ${meName} to confirm"`);
+    ok(await page.isVisible('[data-confirm-card] [data-confirm-live]:not([disabled])'), 'owner sees "Confirm live"');
+    /* the pending element on a map step: card, step page, side panel, index */
+    const ip = await getProc(impPid); const pstep = flat(ip.tobe)[0]; pstep.data = [...new Set([...(pstep.data || []), msId])];
+    ok(await putDoc('process', impPid, ip, 'Test fixture: tag pending data') === 200, 'fixture: step uses the pending element');
+    await nav(`/process/${impPid}?mode=tobe`);
+    ok(/1 awaiting confirmation/.test(await page.textContent(`#canvas .node[data-step="${pstep.id}"] .d-pend`)), 'map card: amber "1 awaiting confirmation"');
+    ok(await page.isVisible('[data-pend-steps]:has-text("Fix done, awaiting owner confirmation")'), 'process panel: pending section');
+    ok(await page.isVisible(`[data-hl="${msId}"] .r a:has-text("Pending")`), 'process panel data row: Pending');
+    await shot('process-pending');
+    await nav(`/process/${impPid}/step/${pstep.id}`);
+    ok(await page.isVisible(`.d-pend-s:has-text("Fix done, awaiting ${meName} to confirm")`) && await page.isVisible('[data-eff="pending"]:has-text("Pending")'), 'step page: pending chip and "awaiting <owner> to confirm"');
+    await nav('/processes');
+    const pcount = await page.getAttribute(`[data-prow="${impPid}"] [data-datacounts]`, 'data-datacounts');
+    ok(pcount.split('/')[1] === '1', 'process index: 1 pending element (' + pcount + ')');
+    /* non-owner cannot confirm */
+    await nav(`/data/${msId}`);
+    await page.selectOption('#persona', other.id);
+    await page.waitForSelector('[data-confirm-live][disabled]');
+    ok(await page.isVisible(`.d-only:has-text("Only ${meName} (data owner) can confirm")`), 'non-owner: Confirm live disabled with the owner named');
+    await page.selectOption('#persona', me);
+    await page.waitForSelector('[data-confirm-live]:not([disabled])');
+    await page.click('[data-confirm-live]');
+    await page.waitForSelector('.overlay [data-confprof]');
+    ok(/No profile yet/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog: no profile yet');
+    await page.fill('.overlay input[name=source]', '');
+    await act('confirm');
+    await page.waitForSelector('.overlay .d-err');
+    ok(/Name the live source/.test(await page.textContent('.overlay .d-err')), 'confirm live requires a source');
+    await page.fill('.overlay input[name=source]', 'Northwind ERP vendor API (read)');
+    await page.screenshot({ path: `${OUT}/confirm-live.png` });
+    await saving(() => act('confirm'));
+    const conf = await getData(msId);
+    ok(conf.avail === 'live' && conf.liveConfirmedBy === me && conf.liveSource === 'Northwind ERP vendor API (read)' && !!conf.liveConfirmedAt, 'confirm sets avail live, liveConfirmedBy, liveConfirmedAt, liveSource');
+    ok(ENG.effectiveAvail((await state()).docs, msId) === 'live', 'engine: confirmed element is live');
+    await nav(`/data/${msId}`);
+    ok(await page.isVisible('.hdr [data-eff="live"]') && await page.isVisible(`[data-confirmed]:has-text("Confirmed live by ${meName}")`) && !(await page.$('[data-confirm-card]')), 'after reload: live, "Confirmed live by <owner>", no confirm card');
     ok(await page.isVisible('.d-resolve .badge.b-done:has-text("Ready")'), 'resolution plan shows Ready');
+    await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' live \(source: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
+    await page.click('[data-dedit]');
+    ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.value).join(',')) === 'live,example,missing', 'edit dialog keeps "live" only for a live element');
+    await act('cancel');
+    await nav(`/data/${exId}`);
+    await page.click('[data-dedit]');
+    ok(!(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.value))).includes('live'), 'edit dialog cannot set live directly (Confirm live only)');
+    await act('cancel');
     const prof = (st.docs.dataElement || []).map(d => d.data).find(d => d.sampleCsv && (d.fields || []).length);
     ok(!!prof, 'seed has a data element with a sample extract');
     if (prof) {
@@ -577,6 +759,16 @@ const docsOf = st => st.docs;
       const card = await page.$eval('.d-prof', t => t.closest('.card').textContent);
       ok(!/undefined|missing-column|required-nulls|length-mismatch|non-digit|unexpected-specials|type-mismatch|out-of-range|pattern-mismatch|\{\d+\}/.test(card), 'spec drift messages are plain English');
       await shot('data-profile'); await overflow('data profile @1440'); await iconCheck('data page');
+      const profD = await getData(prof.id);
+      if (ENG.effectiveAvail((await state()).docs, prof.id) !== 'live') {
+        await page.selectOption('#persona', profD.owner);
+        await page.waitForSelector('[data-confirm-live]:not([disabled])');
+        await page.click('[data-confirm-live]');
+        await page.waitForSelector('.overlay [data-confprof]');
+        ok(/Latest profile · 40 rows/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog shows the latest profile summary: ' + (await page.textContent('.overlay [data-confprof]')).trim().slice(0, 70));
+        await act('cancel');
+        await page.selectOption('#persona', me);
+      } else ok(true, 'profiled element is already live (confirm dialog profile check skipped)');
     }
     const exStep = flat(seedP.tobe).find(n => (n.data || []).some(d => ENG.effectiveAvail(D0(), d) === 'example'));
     if (exStep) { await nav(`/process/${pid}/step/${exStep.id}`); ok(await page.isVisible('.d-needlive-s:has-text("Needs a live source before go-live")'), 'step page: examples-only data marked amber'); await iconCheck('step page'); }
@@ -598,6 +790,9 @@ const docsOf = st => st.docs;
     await nav(`/data/${did}`); await overflow('data @390'); await shot('phone-data');
     await nav(`/data/${seedData.id}`); await overflow('data seed @390');
     await nav(`/process/${impPid}?mode=edit`); await overflow('imported edit @390'); await shot('phone-imported-edit');
+    await nav('/processes'); await overflow('processes @390'); await shot('phone-processes');
+    await nav(`/data/${did}`); await page.click('[data-fedit="0"]'); await page.waitForSelector('.overlay .d-fmts'); await overflow('spec builder @390'); await page.screenshot({ path: `${OUT}/phone-spec-builder.png` }); await act('cancel');
+    if (stepWithWork) { await nav(`/process/${pid}/step/${stepWithWork.step}`); await page.click('.d-why summary'); await overflow('step why @390'); await shot('phone-step-why'); }
     await nav(`/process/${impPid}?mode=tobe`); await page.click('[data-start-project]'); await page.waitForSelector('.overlay input[name=target]');
     await overflow('start project modal @390'); await page.screenshot({ path: `${OUT}/phone-start-project.png` }); await act('cancel');
     if (prof) { await nav(`/data/${prof.id}`); await overflow('data profile @390'); await shot('phone-data-profile'); }

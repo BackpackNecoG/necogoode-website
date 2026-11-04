@@ -31,7 +31,7 @@ async function call(method, p, body, query, ip) {
 }
 async function newWs() {
   const hash = 'test-' + rnd();
-  const ws = await store.createWorkspace(hash, { id: 'test' + rnd() + rnd() });
+  const ws = await store.createWorkspace(hash, { id: 'tsta' + rnd() + rnd() });   /* stream-A prefix; cleanup deletes only ids tracked in `created` */
   created.push([ws.id, hash]);
   return ws.id;
 }
@@ -283,6 +283,14 @@ test('seed: relative dates, edge-case CSVs, fictional data', () => {
 });
 
 const allIds = docs => new Set(Object.values(docs).flat().map(d => d.id).filter(id => id.length >= 2));
+/* R4: the cutover check needs at least one runbook task; the seed leaves it for the user to add. */
+async function addRunbook(ws) {
+  const st = await state(ws);
+  const pr = st.docs.project.find(d => d.id === 'access-review-automation').data;
+  await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, {
+    tasks: [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'dk', planned: '08:00', gonogo: true, done: false }] }) }) });
+}
+
 function assertNoIds(value, docs, where) {
   const ids = allIds(docs);
   const text = JSON.stringify(value);
@@ -301,6 +309,7 @@ test('go-live: refused with 409 + reasons; passes end to end; keeps v1; rollback
   r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta' });
   assert.equal(r.status, 409, 'rollback only when live');
 
+  await addRunbook(ws);
   let st = await state(ws);
   const v1 = find(st, 'process', 'access-review').data;
   /* access-review: finish A4, then Compliance signs off (A4's edit makes any older Compliance approval stale) */
@@ -431,7 +440,7 @@ test('SOP import rules parser (grader cases 5 and 6)', () => {
     '   - Confirm the payment file totals',
   ].join('\n');
   const r = ai.sopRules(sop, docs);
-  assert.deepEqual(r.nodes[0], { type: 'trigger', title: 'Process starts' });
+  assert.deepEqual(r.nodes[0], { id: 'k', type: 'trigger', title: 'Process starts' });
   const rs = r.nodes.slice(1);
   const titles = rs.map(n => n.title);
   assert.equal(rs.length, 5, JSON.stringify(titles));
@@ -465,16 +474,30 @@ test('SOP import rules parser (grader cases 5 and 6)', () => {
 /* ------------------------------ Round 3 ------------------------------ */
 const hasR3Engine = !!(engine && typeof engine.effectiveAvail === 'function');
 
-test('R3 go-live: resolved data set live, checks stored, promotion does not stale approvals', { skip: !hasR3Engine && 'R3 engine (effectiveAvail) not present yet' }, async () => {
+const isR4Engine = () => !!(engine && typeof engine.sprints === 'function');
+
+test('R4 go-live: never flips data live; owner confirmation is what counts; checks stored; no stale approvals', { skip: !hasR3Engine && 'engine without effectiveAvail' }, async () => {
   const ws = await newWs();
+  await addRunbook(ws);
   let st = await state(ws);
-  /* make D7 examples-only with a done resolver (A1); keep A1's old updatedAt so IT's approval stays fresh */
-  await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: Object.assign({}, find(st, 'dataElement', 'D7').data, { avail: 'example' }) });
+  /* D7 examples-only with a finished resolver (A1); keep A1's old updatedAt so IT's approval stays fresh */
+  const d7 = Object.assign({}, find(st, 'dataElement', 'D7').data, { avail: 'example' });
+  delete d7.liveConfirmedBy; delete d7.liveConfirmedAt; delete d7.liveSource;
+  await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: d7 });
   await call('PUT', `ws/${ws}/doc/workItem/A1`, { actor: 'dk', data: Object.assign({}, find(st, 'workItem', 'A1').data, { resolves: 'D7', updatedAt: '2020-01-01T00:00:00.000Z' }) });
   const a4 = find(st, 'workItem', 'A4').data;
   await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today }) });
   const at = new Date(Date.now() + 1000).toISOString();
   await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  st = await state(ws);
+  if (isR4Engine()) {
+    assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'pending', 'a finished fix awaits the owner');
+    const r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+    assert.equal(r.status, 409);
+    assert.ok(r.body.reasons.some(x => /Approver matrix/.test(x)), JSON.stringify(r.body.reasons));
+  }
+  /* the data owner confirms the live source */
+  await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: Object.assign({}, d7, { liveConfirmedBy: 'dk', liveConfirmedAt: new Date().toISOString(), liveSource: 'HR directory nightly sync' }) });
   st = await state(ws);
   assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'live');
   const gate = engine.readiness(st.docs, 'access-review-automation', st.today);
@@ -484,12 +507,11 @@ test('R3 go-live: resolved data set live, checks stored, promotion does not stal
   assert.ok(Array.isArray(r.body.release.checks) && r.body.release.checks.length >= 6);
   assert.ok(r.body.release.checks.every(c => c.id === 'exceptions' || c.pass));
   st = await state(ws);
-  assert.equal(find(st, 'dataElement', 'D7').data.avail, 'live');
+  assert.equal(find(st, 'dataElement', 'D7').data.avail, 'example', 'go-live does not flip data to live');
   assert.equal(find(st, 'process', 'access-review').data.updatedAt, undefined, 'promotion is not stamped as an edit');
-  const after = engine.readiness(st.docs, 'access-review-automation', st.today);
-  assert.equal(after.pass, true);
-  const ev = await call('GET', `ws/${ws}/events`, null, { ref: 'dataElement:D7' });
-  assert.match(ev.body.events[0].summary, /^Approver matrix set live/);
+  assert.equal(engine.readiness(st.docs, 'access-review-automation', st.today).pass, true);
+  const ev = (await call('GET', `ws/${ws}/events`, null, { ref: 'dataElement:D7' })).body.events;
+  assert.ok(!ev.some(e => /set live at go-live/.test(e.summary)));
 });
 
 test('R3 status report: RAG agrees with the headline; risk reconciliation', async () => {
@@ -575,7 +597,7 @@ test('R3 SOP rules parser: reviewer repro, else->No, parallel, role aliases, sys
   assert.deepEqual(n[3].branches[0].nodes.map(x => x.title), ['Finance Director approves'], 'conditional action is kept');
   assert.deepEqual(n[3].branches[1].nodes, []);
   assert.equal(n[4].owner, 'ar', 'AP clerk -> Accounts Payable');
-  assert.deepEqual(n[0], { type: 'trigger', title: 'Process starts' }, 'no stated start: generic trigger, not step 1');
+  assert.deepEqual(n[0], { id: 'k', type: 'trigger', title: 'Process starts' }, 'no stated start: generic trigger, not step 1');
   /* else -> No, stated trigger, systems, aliases, parallel */
   r = ai.sopRules([
     'Invoice Approval SOP',
@@ -589,7 +611,7 @@ test('R3 SOP rules parser: reviewer repro, else->No, parallel, role aliases, sys
     '7. Else, close the request in DocuSign',
   ].join('\n'), docs);
   n = r.nodes;
-  assert.deepEqual(n[0], { type: 'trigger', title: 'An invoice arrives in the AP inbox' });
+  assert.deepEqual(n[0], { id: 'k', type: 'trigger', title: 'An invoice arrives in the AP inbox' });
   assert.equal(n[1].system, 'NetSuite');
   assert.equal(n[1].owner, 'ar');
   assert.equal(n[2].type, 'decision');
@@ -609,4 +631,82 @@ test('R3 SOP rules parser: reviewer repro, else->No, parallel, role aliases, sys
   r = ai.sopRules('1. Vendor signs the contract\n2. In parallel:\n   a. Treasury sets up the bank account\n   b. Procurement activates the contract', docs);
   assert.equal(r.nodes[2].type, 'parallel');
   assert.deepEqual(r.nodes[2].branches.map(b => b.label), ['Treasury', 'Procurement']);
+});
+
+/* ------------------------------ Round 4 ------------------------------ */
+test('R4 report wording: late-by is days past due, slip separate, correct plurals', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  const all = [r.body.headline, r.body.summary, ...r.body.highlights, ...r.body.risks, ...r.body.asks].join('\n');
+  assert.ok(!/\(s\)/.test(all), 'no "(s)" placeholders');
+  assert.ok(!/\b1 days\b|\b1 items\b|\b1 work items\b|\b(?:[02-9]|\d{2,}) day\b/.test(all), 'plurals agree with counts');
+  const w6 = r.body.risks.find(x => x.startsWith('"Stand up structured bank capture"'));
+  const w6due = find(st, 'workItem', 'W6').data.due;
+  const pastDue = Math.round((Date.parse(st.today + 'T12:00:00Z') - Date.parse(w6due + 'T12:00:00Z')) / 86400000);
+  assert.ok(w6.includes(`late by ${pastDue} day${pastDue === 1 ? '' : 's'}`), w6);
+  const fcW6 = r.body.facts.atRisk.find(x => x.title === 'Stand up structured bank capture');
+  if (fcW6.slipDays && fcW6.slipDays !== pastDue) assert.ok(w6.includes(`${fcW6.slipDays} days behind plan`), 'slip reported separately');
+  const slipping = r.body.risks.filter(x => / is slipping/.test(x));
+  assert.ok(slipping.length >= 1 && slipping.every(x => !/late by/.test(x)));
+  assert.match(r.body.summary, /\b1 item is past due\b/);
+});
+
+test('R4 SOP parser: otherwise/else -> No, resubmit and return-to-step -> goto, no truncation, no default owner', () => {
+  const docs = seed('2026-11-04').docs;
+  const longSub = 'Attach every itemized receipt, including scanned paper receipts from travel and the hotel folio for overnight stays abroad';
+  const r = ai.sopRules([
+    '1. Employee submits the expense report with all itemized receipts attached and coded to the right cost center for the month',
+    '   a. ' + longSub,
+    '2. Manager reviews the report. If approved, AP clerk pays it. Otherwise, the employee corrects it and resubmits.',
+    '3. If the receipts are missing, return to step 1',
+    '4. If the amount is over $500, return to step 6',
+    '5. Treasury releases payment',
+    '6. If the bank rejects the payment, go back to step 5. Else, AP clerk closes the claim.',
+    '7. Supervisor signs off',
+  ].join('\n'), docs);
+  const n = r.nodes;
+  const ids = [];
+  const walk = ns => ns.forEach(x => { ids.push(x.id); (x.branches || []).forEach(b => walk(b.nodes)); });
+  walk(n);
+  assert.equal(new Set(ids).size, ids.length, 'unique node ids');
+  assert.ok(ids.every(Boolean));
+  assert.equal(n[1].title, 'Employee submits the expense report with all itemized receipts attached and coded to the right cost center for the month');
+  assert.equal(n[1].subs[0].title, longSub, 'sub-steps are never truncated');
+  assert.ok(!JSON.stringify(n).includes('…'));
+  const approve = n[3];
+  assert.equal(approve.type, 'decision');
+  assert.equal(approve.branches[1].nodes[0].title, 'The employee corrects it and resubmits', 'otherwise -> No');
+  assert.equal(approve.branches[1].goto, n[1].id, 'resubmit loops back to the submission step');
+  assert.equal(n[4].branches[0].goto, n[1].id, 'return to step 1');
+  assert.deepEqual(n[4].branches[0].nodes, []);
+  assert.equal(n[5].branches[0].goto, n[7].id, 'forward reference to step 6 resolves');
+  assert.equal(n[7].branches[0].goto, n[6].id, 'go back to step 5');
+  assert.equal(n[7].branches[1].nodes[0].title, 'AP clerk closes the claim', 'else -> No');
+  assert.equal(n[7].branches[1].nodes[0].owner, 'ar');
+  assert.equal(n[8].title, 'Supervisor signs off');
+  assert.equal(n[8].owner, undefined, 'no match -> no owner (never a default person)');
+  assert.equal(n[2].owner, undefined, '"Manager" is not a role alias or BU');
+  if (engine && engine.readiness) {
+    /* the parsed flow is a valid process for the engine's process-valid rule (gotos resolve) */
+    const ok = (nodes) => nodes.every(x => !x.branches || x.branches.every(b => !b.goto || ids.includes(b.goto)));
+    assert.ok(ok(n));
+  }
+});
+
+test('R4 seed: owner confirmations, BU touches, sprints', () => {
+  const s = seed('2026-11-04');
+  const live = s.docs.dataElement.map(d => d.data).filter(d => d.avail === 'live');
+  assert.ok(live.length >= 3);
+  for (const d of live) { assert.equal(d.liveConfirmedBy, d.owner); assert.ok(d.liveSource && d.liveConfirmedAt); }
+  for (const d of s.docs.dataElement.map(x => x.data).filter(x => x.avail !== 'live')) assert.equal(d.liveConfirmedBy, undefined);
+  const bus = new Set(s.people.map(p => p.bu));
+  const people = Object.fromEntries(s.people.map(p => [p.id, p]));
+  const touchesOtherBu = s.docs.process.flatMap(p => p.data.tobe).filter(n => n.owner && (n.touches || []).some(t => bus.has(t) && t !== people[n.owner].bu));
+  assert.ok(touchesOtherBu.length >= 2, 'some steps touch another BU');
+  const vm = s.docs.project.find(d => d.id === 'vendor-modernization').data;
+  assert.equal(vm.sprints.length, 6);
+  assert.ok(vm.sprints.every(sp => new Date(sp.start + 'T12:00:00Z').getUTCDay() === 1 && new Date(sp.end + 'T12:00:00Z').getUTCDay() === 5));
+  assert.equal(s.docs.project.find(d => d.id === 'access-review-automation').data.sprints, undefined, 'auto-built sprints there');
+  assert.equal(s.docs.notification.find(d => d.id === 'N2').data.to, 'lp');
 });

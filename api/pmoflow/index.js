@@ -164,18 +164,7 @@ async function goLive(wsId, docs, project, actor, today) {
     await store.putDoc(wsId, 'grant', g.id, g);
     events.push({ action: 'update', ref: 'grant:' + g.id, summary: `${describe('grant', g, docs)} ${next} at go-live` });
   }
-  /* R3: data whose resolver is done becomes live (the data element is the single source of truth) */
-  const promotedData = [];
-  for (const dd of (docs.dataElement || [])) {
-    const eff = typeof eng.effectiveAvail === 'function' ? eng.effectiveAvail(docs, dd.id)
-      : (dd.data.avail === 'live' || (docs.workItem || []).some(w => w.data.resolves === dd.id && w.data.status === 'done') ? 'live' : dd.data.avail);
-    if (eff === 'live' && dd.data.avail !== 'live') {
-      const d = Object.assign({}, dd.data, { avail: 'live' });
-      await store.putDoc(wsId, 'dataElement', d.id, d);
-      promotedData.push(d.name);
-      events.push({ action: 'update', ref: 'dataElement:' + d.id, summary: `${d.name} set live at go-live (its resolver is done)` });
-    }
-  }
+  /* R4: go-live never flips data to live; only the data owner's confirmation (liveConfirmedBy + liveSource) does */
   const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
   const approvers = [...new Set((docs.approval || []).map(d => d.data)
     .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
@@ -189,7 +178,6 @@ async function goLive(wsId, docs, project, actor, today) {
         detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
     exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')),
     checks: JSON.parse(JSON.stringify(gate.checks)),
-    dataSetLive: promotedData,
     snapshot,
   };
   await store.putDoc(wsId, 'release', relId, release);

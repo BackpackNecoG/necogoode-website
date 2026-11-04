@@ -151,7 +151,7 @@ function processes() {
       ],
       tobe: [
         { id: 'k', type: 'trigger', title: 'Vendor request submitted', owner: 'mc', data: [], touches: ['Procurement', 'Request portal'], from: 'k' },
-        { id: 's1', type: 'step', title: 'Collect vendor information', owner: 'mc', data: ['D1', 'D3'], touches: ['Procurement', 'Vendor portal'], from: 'a1',
+        { id: 's1', type: 'step', title: 'Collect vendor information', owner: 'mc', data: ['D1', 'D3'], touches: ['Procurement', 'Vendor portal', 'Compliance'], from: 'a1',
           subs: [sub('Vendor receives portal invite', []), sub('Vendor uploads W-9 and COI', ['D1', 'D3']), sub('Completeness check', ['D1', 'D3'])] },
         { id: 's2', type: 'step', title: 'Sanctions & risk screening', owner: 'ps', data: ['D1', 'D5', 'D8'], touches: ['Compliance', 'Screening service'], from: 'a2',
           subs: [sub('Read vendor identity from W-9', ['D1']), sub('Screen against sanctions lists', ['D5']), sub('Assign risk tier', ['D8']), sub('Record result on vendor file', ['D5'])] },
@@ -161,7 +161,7 @@ function processes() {
           { label: 'Standard', nodes: [] }] },
         { id: 's3', type: 'step', title: 'Capture banking details', owner: 'lp', data: ['D2'], touches: ['Treasury', 'Treasury portal'], from: 'a3',
           subs: [sub('Vendor enters bank details in portal', ['D2']), sub('Micro-deposit verification', ['D2']), sub('Dual approval', [])] },
-        { id: 's4', type: 'step', title: 'Create vendor master record', owner: 'ar', data: ['D1', 'D2', 'D4'], touches: ['Accounts Payable', 'ERP'], from: 'a4',
+        { id: 's4', type: 'step', title: 'Create vendor master record', owner: 'ar', data: ['D1', 'D2', 'D4'], touches: ['Accounts Payable', 'ERP', 'Treasury'], from: 'a4',
           subs: [sub('Record written to ERP via API', ['D4']), sub('Remit-to linked to verified bank', ['D2']), sub('W-9 and COI attached', ['D1', 'D3'])] },
         { id: 's5', type: 'step', title: 'Activate contract', owner: 'mc', data: ['D6', 'D4'], touches: ['Procurement', 'Contract repository'], from: 'a5',
           subs: [sub('Link contract to vendor ID', ['D6', 'D4']), sub('Renewal reminder set', ['D6'])] },
@@ -181,7 +181,7 @@ function processes() {
       ],
       tobe: [
         { id: 'k', type: 'trigger', title: 'Invoice received', owner: 'ar', data: [], touches: ['Accounts Payable', 'AP inbox'], from: 'k' },
-        { id: 'i1', type: 'step', title: 'Match to PO & vendor master', owner: 'ar', data: ['D4', 'D2'], touches: ['Accounts Payable', 'ERP'], from: 'b1',
+        { id: 'i1', type: 'step', title: 'Match to PO & vendor master', owner: 'ar', data: ['D4', 'D2'], touches: ['Accounts Payable', 'ERP', 'Treasury'], from: 'b1',
           subs: [sub('Read vendor master', ['D4']), sub('3-way match', ['D4']), sub('Confirm remit-to account', ['D2'])] },
         { id: 'p1', type: 'parallel', title: 'Approve and prepare payment in parallel', branches: [
           { label: 'Approval', nodes: [{ id: 'i2', type: 'step', title: 'Route for approval', owner: 'dk', data: ['D7'], touches: ['IT', 'Approvals'], from: 'b2',
@@ -370,6 +370,10 @@ function enrichR2(docs, day, at) {
   /* W1 was edited after Procurement signed off, so the gate shows a re-approval exception */
   byId('workItem').W1.updatedAt = at(-1, 11);
   docs.dataElement.forEach(d => { d.data.sensitivity = SENSITIVITY[d.id] || 'internal'; });
+  /* R4: live elements carry the data owner's confirmation and the confirmed source */
+  docs.dataElement.filter(d => d.data.avail === 'live').forEach(d => {
+    Object.assign(d.data, { liveConfirmedBy: d.data.owner, liveConfirmedAt: at(-20, 10), liveSource: d.data.source });
+  });
   byId('dataElement').D2.discovered = [{ text: 'Account holder must be required: the capture form accepted a blank value (dev run, case "Account holder blank").',
     fromRun: 'TR1', at: at(-1, 18) }];
   const walk = (pid, nodes) => (nodes || []).forEach(n => {
@@ -380,6 +384,11 @@ function enrichR2(docs, day, at) {
   docs.risk.forEach(d => { d.data.workItems = RISK_WORK[d.id] || []; });
   docs.approval.forEach(d => { d.data.snapshotAt = d.data.at; });
 
+  /* R4: explicit two-week sprints on vendor-modernization (access-review uses the auto-built ones) */
+  const vm = byId('project')['vendor-modernization'];
+  const dow = new Date(addDays(day, -28) + 'T12:00:00Z').getUTCDay();
+  const sprint0 = addDays(day, -28 - ((dow + 6) % 7));                     /* Monday on or before seed-28 */
+  vm.sprints = [0, 1, 2, 3, 4, 5].map(i => ({ id: 'sp' + (i + 1), name: 'Sprint ' + (i + 1), start: addDays(sprint0, i * 14), end: addDays(sprint0, i * 14 + 11) }));
   const ar = byId('project')['access-review-automation'];
   ar.cutover = { window: addDays(day, 10) + ' 08:00–10:00 (after quarter close)', rollbackOwner: 'dk',
     rollbackPlan: 'Disable the auto-removal job and fall back to the spreadsheet campaign for this quarter.',

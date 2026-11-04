@@ -1,9 +1,9 @@
 /* Testing page (stream R): data profiling (statistics only), spec drift, generated test cases, process UAT scripts,
    step-level test runs with evidence and defects, discovered requirements. Route: /testing/:prj */
 import { store } from '../store.js';
-import { E, esc, fmt, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity } from '../ui.js';
+import { E, esc, fmt, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues } from '../ui.js';
 
-const ui = { sel: {}, paste: '', pasteOpen: false, busy: false, runOpen: new Set(), scriptOpen: new Set() };
+const ui = { sel: {}, paste: '', pasteOpen: false, busy: false, runOpen: new Set(), scriptOpen: new Set(), origin: 'all' };
 
 function flat(nodes) { const e = E(); return e && e.flatSteps ? e.flatSteps(nodes || []) : (nodes || []).filter(n => n.type === 'step'); }
 function projectData(prj) {
@@ -68,13 +68,49 @@ function firstStepUsing(prj, dataId) {
   return { pid: (prj.processes || [])[0] || '', step: '' };
 }
 
+/* Coverage (R4): each case or script's outcome in an env is its latest result across ALL of this project's runs in that env,
+   so a partial CI import keeps earlier passes. */
+function latestBy(prjId, env, runFilter) {
+  const by = {};
+  runsFor(prjId).filter(r => r.env === env && (!runFilter || runFilter(r))).slice().reverse().forEach(r => (r.results || []).forEach(x => { const k = rid(x); if (k) by[k] = Object.assign({ runId: r.id, at: r.at }, x); }));
+  return by;
+}
+function coverageOf(by, ids) {
+  const covered = ids.filter(id => by[id]).length;
+  const o = id => by[id] && by[id].outcome;
+  return { covered, total: ids.length, fails: ids.filter(id => o(id) === 'fail').length, blocked: ids.filter(id => o(id) === 'blocked').length, pass: ids.filter(id => o(id) === 'pass').length };
+}
+/* One run on its own (the run header's "covers x/y"). */
 function coverage(run, ids) {
   if (!run) return null;
-  const by = {}; (run.results || []).forEach(x => { by[rid(x)] = x.outcome; });
-  const covered = ids.filter(id => by[id]).length;
-  const fails = ids.filter(id => by[id] === 'fail').length, blocked = ids.filter(id => by[id] === 'blocked').length;
-  return { covered, total: ids.length, fails, blocked, pass: ids.filter(id => by[id] === 'pass').length };
+  const by = {}; (run.results || []).forEach(x => { by[rid(x)] = x; });
+  return coverageOf(by, ids);
 }
+/* Dialogs never lose input on a validation error: block the close and show the error inline (values stay as typed). */
+function guard(validate) {
+  const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1]; if (!ov) return;
+  const mb = ov.querySelector('.mb');
+  const box = document.createElement('div'); box.className = 'rl-err'; box.setAttribute('role', 'alert'); box.dataset.err = ''; box.hidden = true;
+  mb.prepend(box);
+  ov.addEventListener('click', e => {
+    const b = e.target.closest('[data-act]'); if (!b || b.dataset.act === 'cancel') return;
+    mb.querySelectorAll('[aria-invalid]').forEach(x => x.removeAttribute('aria-invalid'));
+    const res = validate(formValues(mb), b.dataset.act, mb); if (!res) return;
+    e.stopPropagation();
+    const r = typeof res === 'string' ? { msg: res } : res;
+    box.hidden = false; box.textContent = r.msg;
+    const f = r.field && mb.querySelector(`[name="${r.field}"]`);
+    if (f) { f.setAttribute('aria-invalid', 'true'); f.focus(); }
+  }, true);
+}
+function effAvail(dataId) {
+  const e = E(); const de = store.get('dataElement', dataId);
+  if (e && e.effectiveAvail) { try { return e.effectiveAvail(store.state.docs, dataId); } catch (err) { /* fall through */ } }
+  return (de && de.avail) || 'missing';
+}
+const cyclesOf = prj => Array.isArray(prj.testCycles) ? prj.testCycles : [];
+const testerSel = (name, v, label) => `<select name="${name}" aria-label="${esc(label || 'Tester')}"><option value="">Unassigned</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
+const testerChip = id => id ? `<span class="ts-tester" data-tester="${esc(id)}">${av(id)} ${esc(pname(id))}</span>` : '<span class="hint">Unassigned</span>';
 
 export function render(params) {
   const prjId = params.prj;
@@ -89,10 +125,10 @@ export function render(params) {
   const de = did ? store.get('dataElement', did) : null;
   const tc = testsCheck(prjId);
   const runs = runsFor(prjId);
-  const lastDev = runs.find(r => r.env === 'dev'), lastUat = runs.find(r => r.env === 'uat');
   const caseIds = []; des.forEach(d => casesFor(d.id).forEach(c => caseIds.push(c.id)));
   const sc = scriptsFor(prj);
-  const devCov = coverage(lastDev, caseIds), uatCov = coverage(lastUat, caseIds.concat(sc.list.map(x => x.id)));
+  const devCov = runs.some(r => r.env === 'dev') ? coverageOf(latestBy(prjId, 'dev'), caseIds) : null;
+  const uatCov = runs.some(r => r.env === 'uat') ? coverageOf(latestBy(prjId, 'uat'), caseIds.concat(sc.list.map(x => x.id))) : null;
   const covKpi = (label, cov, attr) => { const full = cov && cov.covered === cov.total && !cov.fails && !cov.blocked;
     return `<div class="kpi" data-cov="${attr}"><b class="${cov ? (full ? 'pass' : 'fail') : ''}">${cov ? `${cov.covered}/${cov.total}` : '—'}</b><span>${label}${cov && cov.fails ? ` · ${cov.fails} fail` : ''}</span></div>`; };
   const openDefects = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done').length;
@@ -100,19 +136,19 @@ export function render(params) {
   const header = `<section class="hdr"><div>
       <div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
       <div class="rl-title"><h1>Testing</h1><select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
-      <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div>${covKpi('Dev coverage · cases', devCov, 'dev')}${covKpi('UAT coverage · cases + scripts', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
+      <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch. Coverage counts each item's latest result across every run in that environment.</p></div>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div>${covKpi('Dev coverage · latest per case', devCov, 'dev')}${covKpi('UAT coverage · latest per item', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
     ${tc ? `<div class="ts-strip ${tc.pass ? 'pass' : 'fail'}" data-tests-check="${tc.pass ? 'pass' : 'fail'}"><span class="rl-ic ${tc.pass ? 'pass' : 'fail'}">${tc.pass ? '✓' : '✕'}</span>
       <div><b>Go-live check: ${esc(tc.label)}</b> — ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}`;
 
-  const projectCards = `<div class="ts-proj">${coverageCard(prj, des, runs, sc)}${scriptsCard(prj, sc, lastUat)}${runsCard(prj, des, runs, caseIds, sc)}
+  const projectCards = `<div class="ts-proj">${coverageCard(prj, des, runs, sc)}${cyclesCard(prj, des, sc)}${scriptsCard(prj, sc)}${runsCard(prj, des, runs, caseIds, sc)}
     <div class="card"><h3>Test history</h3><div data-ts-history><div class="hint">Loading…</div></div></div></div>`;
 
   if (!des.length) return header + `<div class="card" style="margin-top:16px"><div class="empty">This project's processes use no data elements yet. Add data to the to-be steps to test it.</div></div>` + projectCards;
 
   const list = `<nav class="ts-list" aria-label="Data elements">${des.map(d => {
     const p = latestProfile(d.id); const n = casesFor(d.id).length; const openReq = (d.discovered || []).filter(x => !x.resolved).length;
-    return `<a href="${link('/testing/' + prjId + '?de=' + d.id)}" data-de="${esc(d.id)}" class="${d.id === did ? 'on' : ''}"><span class="ts-dot ${esc(d.avail || 'missing')}"></span><span class="ts-nm">${esc(d.name)}</span><small>${n} case${n === 1 ? '' : 's'}${p ? ' · profiled' : ''}${openReq ? ` · <b class="ts-open">${openReq} open req${openReq === 1 ? '' : 's'}</b>` : ''}</small></a>`;
+    return `<a href="${link('/testing/' + prjId + '?de=' + d.id)}" data-de="${esc(d.id)}" class="${d.id === did ? 'on' : ''}"><span class="ts-dot ${esc(effAvail(d.id))}" title="${esc({ live: 'Live', pending: 'Fix done, awaiting owner confirmation', example: 'Examples only', missing: 'Missing' }[effAvail(d.id)] || '')}"></span><span class="ts-nm">${esc(d.name)}</span><small>${n} case${n === 1 ? '' : 's'}${p ? ' · profiled' : ''}${openReq ? ` · <b class="ts-open">${openReq} open req${openReq === 1 ? '' : 's'}</b>` : ''}</small></a>`;
   }).join('')}</nav>`;
 
   return header + `<div class="ts-layout">${list}<div class="ts-main">${profileCard(de)}${casesCard(de)}${discoveredCard(de)}
@@ -150,18 +186,25 @@ function profileCard(de) {
       : `<div class="empty">No profile yet. ${de.sampleCsv ? 'Profile the sample extract to compare real data with the spec.' : 'Upload or paste a CSV extract to profile it.'}</div>`}</div>`;
 }
 
+const ORIGIN_TXT = { spec: 'From the spec', profile: 'From the profile (observed shapes, synthetic values)', user: 'Added by a person' };
 function casesCard(de) {
-  const cases = casesFor(de.id).sort((a, b) => (a.field + a.kind).localeCompare(b.field + b.kind));
-  return `<div class="card"><h3>Test cases<span class="n">${cases.length}</span></h3>
-    <div class="ts-prof-tools"><button class="btn sm primary" data-gen>Generate test cases</button><button class="btn sm" data-add-case>Add custom case</button>
-      <span class="hint">Generated from the spec${latestProfile(de.id) ? ' and the latest profile' : ''}. Duplicates are skipped.</span></div>
-    ${cases.length ? `<div class="tbl-wrap ts-scroll"><table class="ts-tbl"><thead><tr><th>Field</th><th>Kind</th><th>Input</th><th>Expect</th><th>Origin</th><th></th></tr></thead><tbody>
-      ${cases.map(c => `<tr data-case="${esc(c.id)}"><td>${esc(c.field)}</td><td>${badge(c.kind, KIND_CLS[c.kind])}</td><td><code class="ts-in" title="${esc(c.input)}">${c.input === '' ? '<i>(empty)</i>' : short(c.input)}</code>${c.note ? `<div class="hint">${esc(c.note)}</div>` : ''}</td>
-        <td>${badge(c.expect, c.expect === 'accept' ? 'b-done' : 'b-late')}</td><td><span class="chip">${esc(c.origin)}</span></td>
-        <td class="rl-acts"><button class="btn sm" data-edit-case="${esc(c.id)}">Edit</button><button class="btn sm danger" data-del-case="${esc(c.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
-      : '<div class="empty">No test cases yet. Generate them from the spec and profile.</div>'}</div>`;
+  const all = casesFor(de.id).sort((a, b) => (a.field + a.kind).localeCompare(b.field + b.kind));
+  const n = o => all.filter(c => (c.origin || 'user') === o).length;
+  const cases = ui.origin === 'all' ? all : all.filter(c => (c.origin || 'user') === ui.origin);
+  const unassigned = all.filter(c => !c.tester).length;
+  const noSpec = !(de.fields || []).length;
+  return `<div class="card" id="cases"><h3>Test cases<span class="n">${all.length}</span></h3>
+    <div class="ts-prof-tools"><button class="btn sm primary" data-gen ${noSpec && !latestProfile(de.id) ? 'disabled title="Add a spec or a profile first"' : ''}>Generate test cases</button><button class="btn sm" data-add-case>Add custom case</button>
+      <span class="hint">${noSpec ? 'No spec yet: add custom cases by field name, or write the spec on the data page.' : `Generated from the spec${latestProfile(de.id) ? ' and the latest profile' : ''}. Duplicates are skipped.`}</span></div>
+    ${all.length ? `<div class="ts-filters" role="group" aria-label="Filter by origin">${[['all', 'All', all.length], ['spec', 'Spec', n('spec')], ['profile', 'Profile', n('profile')], ['user', 'Custom', n('user')]].map(([k, l, c]) => `<button class="ts-fb ${ui.origin === k ? 'on' : ''}" data-origin="${k}" aria-pressed="${ui.origin === k}">${l} <b>${c}</b></button>`).join('')}
+      <span class="ts-assign">${unassigned ? `<label class="hint">${unassigned} unassigned · assign to</label>${testerSel('bulkTester', '', 'Assign unassigned cases to')}<button class="btn sm" data-bulk-assign>Assign</button>` : '<span class="hint">Every case has a tester.</span>'}</span></div>
+      ${n('profile') ? `<div class="hint ts-profnote" data-profile-cases="${n('profile')}">${n('profile')} case${n('profile') === 1 ? '' : 's'} reproduce shapes observed in the profiled extract (lengths, characters, blanks). Inputs are synthetic, never raw values.</div>` : ''}
+      <div class="tbl-wrap ts-scroll"><table class="ts-tbl"><thead><tr><th>ID</th><th>Field</th><th>Kind</th><th>Input</th><th>Expect</th><th>Origin</th><th>Tester</th><th></th></tr></thead><tbody>
+      ${cases.map(c => `<tr data-case="${esc(c.id)}" data-origin-row="${esc(c.origin || 'user')}"><td><code class="ts-id">${esc(c.id)}</code></td><td>${esc(c.field)}</td><td>${badge(c.kind, KIND_CLS[c.kind])}</td><td><code class="ts-in" title="${esc(c.input)}">${c.input === '' ? '<i>(empty)</i>' : short(c.input)}</code>${c.note ? `<div class="hint">${esc(c.note)}</div>` : ''}</td>
+        <td>${badge(c.expect, c.expect === 'accept' ? 'b-done' : 'b-late')}</td><td><span class="chip ts-org ${esc(c.origin || 'user')}" title="${esc(ORIGIN_TXT[c.origin || 'user'] || '')}">${esc(c.origin || 'user')}</span></td><td>${testerChip(c.tester)}</td>
+        <td class="rl-acts"><button class="btn sm" data-edit-case="${esc(c.id)}">Edit</button><button class="btn sm danger" data-del-case="${esc(c.id)}">Delete</button></td></tr>`).join('') || `<tr><td colspan="8" class="hint">No ${esc(ui.origin)} cases.</td></tr>`}</tbody></table></div>`
+      : `<div class="empty">No test cases yet. ${noSpec ? 'Add a custom case by field name.' : 'Generate them from the spec and profile.'}</div>`}</div>`;
 }
-
 
 /* Step-by-step scripts. Legacy scripts (given/when/then only) read as one step: when -> then. */
 function scriptSteps(s) {
@@ -178,8 +221,8 @@ function scriptOutcome(stepOutcomes) {
   return 'pass';
 }
 
-function scriptsCard(prj, sc, lastUat) {
-  const resBy = {}; (lastUat ? lastUat.results || [] : []).forEach(x => { if (x.scriptId) resBy[x.scriptId] = x; });
+function scriptsCard(prj, sc) {
+  const resBy = latestBy(prj.id, 'uat');
   const gen = sc.adopted ? generated(prj.id) : [];
   const have = new Set(sc.list.map(x => x.id));
   const fresh = gen.filter(x => !have.has(x.id));
@@ -189,11 +232,12 @@ function scriptsCard(prj, sc, lastUat) {
     const steps = scriptSteps(s);
     return `<details class="ts-script" data-script="${esc(s.id)}" ${ui.scriptOpen.has(s.id) ? 'open' : ''}>
       <summary><span class="ts-script-h"><b>${esc(s.title)}</b>${o ? badge(o, OUT_CLS[o]) : badge('not run', 'b-idle')}</span>
-      <span class="hint">${esc(lb.proc)} · ${esc(lb.step)}${lb.owner ? ' · ' + esc(pname(lb.owner)) : ''} · ${steps.length} step${steps.length === 1 ? '' : 's'}</span></summary>
+      <span class="hint"><code class="ts-id">${esc(s.id)}</code> · ${esc(lb.proc)} · ${esc(lb.step)}${lb.owner ? ' · ' + esc(pname(lb.owner)) : ''} · ${steps.length} step${steps.length === 1 ? '' : 's'}</span>
+      <span class="ts-script-t">Tester: ${testerChip(s.tester)}</span></summary>
       <div class="ts-script-b"><div class="ts-given"><span>Given</span> ${esc(s.given)}</div>
         <ol class="ts-ssteps">${steps.map(x => `<li data-sstep="${x.n}"><div><b>${esc(x.action)}</b><div class="ts-exp"><span>Expected</span> ${esc(x.expected)}</div></div>${so[x.n] ? badge(so[x.n], OUT_CLS[so[x.n]]) : ''}</li>`).join('')}</ol>
         ${(s.data || []).length ? `<div class="chips">${(s.data || []).map(d => `<span class="chip">${esc((store.get('dataElement', d) || {}).name || d)}</span>`).join(' ')}</div>` : ''}
-        <div class="ts-script-a"><a class="rl-go" href="${link(`/process/${s.pid}?mode=diff`)}" data-link>Open step in the process ›</a>${sc.adopted ? `<button class="btn sm" data-edit-script="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-script="${esc(s.id)}">Delete</button>` : ''}</div></div></details>`;
+        <div class="ts-script-a"><a class="rl-go" href="${link(`/process/${s.pid}?mode=diff`)}" data-link>Open step in the process ›</a>${sc.adopted ? `<span class="ts-sassign">${testerSel('st_' + s.id, s.tester, 'Tester for ' + s.title).replace('<select ', `<select data-script-tester="${esc(s.id)}" `)}</span><button class="btn sm" data-edit-script="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-script="${esc(s.id)}">Delete</button>` : '<span class="hint">Adopt the scripts to assign testers and edit steps.</span>'}</div></div></details>`;
   }).join('');
   return `<div class="card" id="uat-scripts"><h3>Process UAT scripts<span class="n">${sc.list.length}${sc.adopted ? ' · adopted' : ' · generated'}</span></h3>
     ${sc.adopted
@@ -203,11 +247,10 @@ function scriptsCard(prj, sc, lastUat) {
 }
 
 /* Aggregate outcome of a set of ids in a run: fail > blocked > partial > pass. */
-function aggOutcome(run, ids) {
+function aggOutcome(byMap, ids) {
   if (!ids.length) return { cls: 'none', text: '—' };
-  if (!run) return { cls: 'norun', text: 'no run' };
-  const by = {}; (run.results || []).forEach(x => { by[rid(x)] = x.outcome; });
-  const out = ids.map(id => by[id]);
+  if (!byMap) return { cls: 'norun', text: 'no run' };
+  const out = ids.map(id => byMap[id] && byMap[id].outcome);
   const f = out.filter(o => o === 'fail').length, b = out.filter(o => o === 'blocked').length, p = out.filter(o => o === 'pass').length;
   if (f) return { cls: 'fail', text: `${f} fail` };
   if (b) return { cls: 'blocked', text: `${b} blocked` };
@@ -215,7 +258,7 @@ function aggOutcome(run, ids) {
   return { cls: 'pass', text: `${p}/${ids.length} pass` };
 }
 function coverageCard(prj, des, runs, sc) {
-  const lastDev = runs.find(r => r.env === 'dev'), lastUat = runs.find(r => r.env === 'uat');
+  const lastDev = runs.some(r => r.env === 'dev') ? latestBy(prj.id, 'dev') : null, lastUat = runs.some(r => r.env === 'uat') ? latestBy(prj.id, 'uat') : null;
   const openDef = store.list('workItem', w => w.projectId === prj.id && w.kind === 'defect' && w.status !== 'done');
   const e = E();
   const cell = o => `<td><span class="ts-o ${o.cls}">${esc(o.text)}</span></td>`;
@@ -241,20 +284,52 @@ function coverageCard(prj, des, runs, sc) {
   });
   const zero = rows.filter(r => r.startsWith('<tr class="ts-zero"')).length;
   return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n">${zero ? `${zero} uncovered` : 'all covered'}</span></h3>
-    <div class="hint" style="margin-bottom:8px">Rows are the project's data elements and to-be steps. Red rows have no test coverage. Dev runs cover data cases; UAT covers cases and scripts.</div>
-    <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step</th><th>Cases / scripts</th><th>Latest dev</th><th>Latest UAT</th><th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;
+    <div class="hint" style="margin-bottom:8px">Rows are the project's data elements and to-be steps. Red rows have no test coverage. Each cell is the latest result per item across every run in that environment, so a partial CI import keeps earlier passes.</div>
+    <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step</th><th>Cases / scripts</th><th>Dev (latest)</th><th>UAT (latest)</th><th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;
+}
+
+/* ---------- planned test cycles (R4): project.testCycles = [{id, name, env, start, end, testers:[personId]}]; runs carry cycleId ---------- */
+function envItems(prj, des, sc, env) {
+  const items = []; des.forEach(d => casesFor(d.id).forEach(c => items.push({ id: c.id, tester: c.tester })));
+  if (env === 'uat') sc.list.forEach(x => items.push({ id: x.id, tester: x.tester }));
+  return items;
+}
+function cycleState(c) { const t = store.state.today; return c.start && t < c.start ? 'planned' : c.end && t > c.end ? 'closed' : 'active'; }
+function cycleProgress(prj, c, des, sc) {
+  const items = envItems(prj, des, sc, c.env);
+  const by = latestBy(prj.id, c.env, r => r.cycleId === c.id);
+  const cov = coverageOf(by, items.map(x => x.id));
+  const per = (c.testers || []).map(t => { const mine = items.filter(x => x.tester === t); return { t, total: mine.length, run: mine.filter(x => by[x.id]).length }; });
+  const runs = runsFor(prj.id).filter(r => r.cycleId === c.id).length;
+  return { cov, per, runs };
+}
+function cyclesCard(prj, des, sc) {
+  const cyc = cyclesOf(prj).slice().sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+  const ST = { planned: ['Planned', 'b-idle'], active: ['In progress', 'b-prog'], closed: ['Window closed', 'b-soon'] };
+  return `<div class="card" id="cycles"><h3>Test cycles<span class="n">${cyc.length}</span></h3>
+    <div class="ts-prof-tools"><button class="btn sm primary" data-add-cycle>Plan a test cycle</button><span class="hint">A cycle is a planned window in one environment with named testers. Runs recorded in a cycle count toward its progress.</span></div>
+    ${cyc.length ? cyc.map(c => {
+      const pr = cycleProgress(prj, c, des, sc); const cv = pr.cov; const st = cycleState(c);
+      const pct = x => cv.total ? Math.round(100 * x / cv.total) : 0;
+      return `<div class="ts-cyc" data-cycle-id="${esc(c.id)}"><div class="ts-cyc-h"><b>${esc(c.name)}</b><span class="chip">${esc(String(c.env).toUpperCase())}</span>${badge(ST[st][0], ST[st][1])}
+          <span class="hint">${esc(fmt(c.start))} – ${esc(fmt(c.end))} · ${pr.runs} run${pr.runs === 1 ? '' : 's'}</span></div>
+        <div class="ts-cbar" aria-label="${cv.covered} of ${cv.total} run"><i class="p" style="width:${pct(cv.pass)}%"></i><i class="f" style="width:${pct(cv.fails)}%"></i><i class="b" style="width:${pct(cv.blocked)}%"></i></div>
+        <div class="ts-cyc-s" data-cycle-progress><b>${cv.covered}/${cv.total}</b> run · ${cv.pass} pass${cv.fails ? ` · <b class="ts-open">${cv.fails} fail</b>` : ''}${cv.blocked ? ` · ${cv.blocked} blocked` : ''}</div>
+        <div class="ts-cyc-t">${pr.per.map(x => `<span class="ts-tprog" data-tester-progress="${esc(x.t)}">${av(x.t)} ${esc(pname(x.t))} <b>${x.run}/${x.total}</b></span>`).join('') || '<span class="hint">No testers named.</span>'}</div>
+        <div class="ts-script-a"><button class="btn sm primary" data-cycle-run="${esc(c.id)}">Record run in this cycle</button><button class="btn sm" data-edit-cycle="${esc(c.id)}">Edit</button><button class="btn sm danger" data-del-cycle="${esc(c.id)}">Delete</button></div></div>`;
+    }).join('') : '<div class="empty">No test cycles planned. Plan one to give testers a window and track progress per tester.</div>'}</div>`;
 }
 
 /* The items to retest: failed or blocked in the latest run of that env. */
-function retestIds(run) { return run ? (run.results || []).filter(x => x.outcome === 'fail' || x.outcome === 'blocked').map(rid) : []; }
+function retestIds(prjId, env) { const by = latestBy(prjId, env); return Object.keys(by).filter(k => by[k].outcome === 'fail' || by[k].outcome === 'blocked'); }
 
 function runsCard(prj, des, runs, caseIds, sc) {
   const caseIdx = {}; des.forEach(d => casesFor(d.id).forEach(c => caseIdx[c.id] = c));
   const scIdx = {}; sc.list.forEach(s => scIdx[s.id] = s);
   const me = store.state.me;
-  const retest = ['dev', 'uat'].map(env => { const r = runs.find(x => x.env === env); const ids = retestIds(r); return ids.length ? `<button class="btn sm" data-retest="${env}">Retest failures · ${env.toUpperCase()} (${ids.length})</button>` : ''; }).join('');
+  const retest = ['dev', 'uat'].map(env => { const ids = retestIds(prj.id, env); return ids.length ? `<button class="btn sm" data-retest="${env}">Retest failures · ${env.toUpperCase()} (${ids.length})</button>` : ''; }).join('');
   return `<div class="card" id="runs"><h3>Test runs<span class="n">${runs.length}</span></h3>
-    <div class="ts-prof-tools"><button class="btn sm primary" data-record>Record test run</button>${retest}<button class="btn sm" data-ci>Import CI results (JUnit)</button><span class="hint">Every row starts as not run. A fail needs a note. Retests carry earlier passes forward and record the cycle.</span></div>
+    <div class="ts-prof-tools"><button class="btn sm primary" data-record>Record test run</button>${retest}<button class="btn sm" data-ci>Import CI results (JUnit)</button><span class="hint">Every row starts as not run. A fail needs a note. Retests run only what failed; coverage keeps each item's latest result.</span></div>
     ${runs.length ? runs.map(r => {
       const ids = r.env === 'uat' ? caseIds.concat(sc.list.map(x => x.id)) : caseIds;
       const cov = coverage(r, ids);
@@ -263,9 +338,9 @@ function runsCard(prj, des, runs, caseIds, sc) {
       const carried = (r.results || []).filter(x => x.carriedFrom).length;
       const rows = (r.results || []).filter(x => !x.carriedFrom && (x.outcome !== 'pass' || x.defectId));
       const passEv = (r.results || []).filter(x => !x.carriedFrom && x.outcome === 'pass' && !x.defectId && (x.evidence || x.note));
-      const partial = cov && cov.covered < cov.total;
+      const partial = cov && cov.covered < cov.total && !r.retestOf;
       return `<div class="ts-run" data-run="${esc(r.id)}"><div class="ts-run-h" data-run-toggle="${esc(r.id)}" role="button" tabindex="0" aria-expanded="${open}" aria-label="${esc(String(r.env).toUpperCase())} run ${esc(fmtTime(r.at))}: show details"><span class="chip">${esc(String(r.env).toUpperCase())}</span>
-        ${r.cycle > 1 ? `<span class="chip ts-cycle" data-cycle="${esc(r.cycle)}">Cycle ${esc(r.cycle)} retest</span>` : ''}${r.source === 'ci' ? '<span class="chip ts-ci" data-source="ci">CI import</span>' : ''}
+        ${r.cycle > 1 ? `<span class="chip ts-cycle" data-cycle="${esc(r.cycle)}">Cycle ${esc(r.cycle)} retest</span>` : ''}${r.cycleId ? `<span class="chip ts-cname" data-run-cycle="${esc(r.cycleId)}">${esc((cyclesOf(prj).find(c => c.id === r.cycleId) || { name: 'Deleted cycle' }).name)}</span>` : ''}${r.source === 'ci' ? '<span class="chip ts-ci" data-source="ci">CI import</span>' : ''}
         <b>${esc(fmtTime(r.at))}</b><span class="hint">${av(r.by)} ${esc(pname(r.by))}</span>
         <span class="ts-cov ${partial ? 'partial' : 'full'}" data-run-cov>covers ${cov ? cov.covered : 0}/${cov ? cov.total : 0} ${r.env === 'uat' ? 'cases + scripts' : 'cases'}</span>
         <span class="ts-counts">${badge((c.pass || 0) + ' pass', 'b-done')}${c.fail ? badge(c.fail + ' fail', 'b-late') : ''}${c.blocked ? badge(c.blocked + ' blocked', 'b-soon') : ''}</span><span class="rl-chev" aria-hidden="true">${open ? '▾' : '▸'}</span></div>
@@ -354,6 +429,8 @@ export function bind(root, params) {
     } finally { ui.genBusy = false; }
   };
   const add = root.querySelector('[data-add-case]'); if (add) add.onclick = () => editCase(de, null);
+  root.querySelectorAll('[data-origin]').forEach(b => b.onclick = () => { ui.origin = b.dataset.origin; store.emit(); });
+  const ba = root.querySelector('[data-bulk-assign]'); if (ba) ba.onclick = () => bulkAssign(de, root.querySelector('select[name=bulkTester]').value);
   root.querySelectorAll('[data-edit-case]').forEach(b => b.onclick = () => editCase(de, store.get('testCase', b.dataset.editCase)));
   root.querySelectorAll('[data-del-case]').forEach(b => b.onclick = async () => {
     const c = store.get('testCase', b.dataset.delCase); if (!c) return;
@@ -370,7 +447,12 @@ export function bind(root, params) {
 function bindProject(root, prj) {
   const rec = root.querySelector('[data-record]'); if (rec) rec.onclick = () => recordRun(prj);
   root.querySelectorAll('[data-run-toggle]').forEach(h => { const t = () => { const id = h.dataset.runToggle; ui.runOpen.has(id) ? ui.runOpen.delete(id) : ui.runOpen.add(id); store.emit(); }; h.onclick = t; h.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
-  root.querySelectorAll('[data-retest]').forEach(b => b.onclick = () => { const run = runsFor(prj.id).find(x => x.env === b.dataset.retest); if (run) recordRun(prj, { retestOf: run }); });
+  root.querySelectorAll('[data-retest]').forEach(b => b.onclick = () => recordRun(prj, { retestEnv: b.dataset.retest }));
+  const ac = root.querySelector('[data-add-cycle]'); if (ac) ac.onclick = () => editCycle(prj, null);
+  root.querySelectorAll('[data-edit-cycle]').forEach(b => b.onclick = () => editCycle(prj, b.dataset.editCycle));
+  root.querySelectorAll('[data-del-cycle]').forEach(b => b.onclick = () => deleteCycle(prj, b.dataset.delCycle));
+  root.querySelectorAll('[data-cycle-run]').forEach(b => b.onclick = () => recordRun(prj, { cycleId: b.dataset.cycleRun }));
+  root.querySelectorAll('[data-script-tester]').forEach(sel => { sel.onclick = e => e.stopPropagation(); sel.onchange = () => assignScript(prj, sel.dataset.scriptTester, sel.value); });
   const ci = root.querySelector('[data-ci]'); if (ci) ci.onclick = () => importCi(prj);
   root.querySelectorAll('[data-discover]').forEach(b => b.onclick = e => { e.stopPropagation(); const [runId, caseId] = b.dataset.discover.split('|'); logDiscovered(runId, caseId); });
   root.querySelectorAll('[data-mk-defect]').forEach(b => b.onclick = async e => { e.stopPropagation(); const [runId, id] = b.dataset.mkDefect.split('|'); await createDefects(prj, runId, [id]); });
@@ -382,7 +464,17 @@ function bindProject(root, prj) {
   root.querySelectorAll('[data-del-script]').forEach(b => b.onclick = () => deleteScript(prj, b.dataset.delScript));
   const hb = root.querySelector('[data-ts-history]');
   if (hb) (async () => {
-    const raw = (await store.events(null, 200)).filter(e => /^(testRun|testCase|profile):/.test(e.ref || '') || /^Profiled |UAT script|defect/i.test(e.summary || ''));
+    /* this project only: its runs, cases and profiles of its data, its defects, and its script/cycle edits */
+    const dataIds = new Set(projectData(prj).map(d => d.id));
+    const mine = ref => { const m = /^(\w+):(.+)$/.exec(ref || ''); if (!m) return false; const [, t, id] = m;
+      if (t === 'testRun') { const r = store.get('testRun', id); return r ? r.projectId === prj.id : false; }
+      if (t === 'testCase') { const c = store.get('testCase', id); return c ? dataIds.has(c.dataId) : false; }
+      if (t === 'profile') { const pf = store.get('profile', id); return pf ? dataIds.has(pf.dataId) : false; }
+      if (t === 'workItem') { const w = store.get('workItem', id); return !!w && w.projectId === prj.id && w.kind === 'defect'; }
+      if (t === 'dataElement') return dataIds.has(id);
+      if (t === 'project') return id === prj.id;
+      return false; };
+    const raw = (await store.events(null, 300)).filter(e => mine(e.ref) && (/^(testRun|testCase|profile):/.test(e.ref) || /^Profiled |UAT script|test cycle|defect|discovered requirement/i.test(e.summary || '')));
     /* collapse bursts of generated cases into one line */
     const evs = [];
     raw.forEach(e => { const g = /^Generated \w+ test for (.+)\.[^.]+$/.exec(e.summary || ''); const last = evs[evs.length - 1];
@@ -396,22 +488,79 @@ function bindProject(root, prj) {
 
 async function editCase(de, c) {
   const fields = (de.fields || []).map(x => x.name);
-  const r = await modal({
+  const p = modal({
     title: c ? 'Edit test case' : 'Add custom test case',
-    body: `<div class="frow"><div class="field"><label>Field</label><select name="field">${fields.map(n => `<option ${c && c.field === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+    body: `<div class="frow"><div class="field"><label>Field</label><input name="field" list="ts-fields" value="${esc(c ? c.field : fields[0] || '')}" placeholder="${fields.length ? 'Pick or type a field' : 'Field name, e.g. Vendor email'}" autocomplete="off">
+        <datalist id="ts-fields">${fields.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist></div>
       <div class="field"><label>Kind</label><select name="kind">${['custom', 'valid', 'boundary', 'invalid', 'edge'].map(k => `<option ${(c ? c.kind : 'custom') === k ? 'selected' : ''}>${k}</option>`).join('')}</select></div></div>
+      ${fields.length ? '' : `<div class="hint" data-nospec>${esc(de.name)} has no spec yet, so type the field name. Write the spec on the data page to generate cases automatically.</div>`}
       <div class="field"><label>Input</label><input name="input" value="${esc(c ? c.input : '')}" placeholder="Value to test (fictional)"></div>
-      <div class="field"><label>Expect</label><select name="expect"><option value="accept" ${c && c.expect === 'accept' ? 'selected' : ''}>Accept</option><option value="reject" ${c && c.expect === 'reject' ? 'selected' : ''}>Reject</option></select></div>
+      <div class="frow"><div class="field"><label>Expect</label><select name="expect"><option value="accept" ${c && c.expect === 'accept' ? 'selected' : ''}>Accept</option><option value="reject" ${c && c.expect === 'reject' ? 'selected' : ''}>Reject</option></select></div>
+        <div class="field"><label>Tester</label>${testerSel('tester', c ? c.tester : '')}</div></div>
       <div class="field"><label>Note</label><input name="note" value="${esc(c ? c.note || '' : '')}"></div>
       <div class="hint">Use made-up values only. Never paste real customer data into a test case.</div>`,
     actions: [{ id: 'save', label: c ? 'Save' : 'Add case', primary: true }],
   });
+  guard(f => !String(f.field || '').trim() ? { msg: 'Name the field this case tests.', field: 'field' } : null);
+  const r = await p;
   if (r.action !== 'save') return;
-  if (!fields.length) { toast('This data element has no fields in its spec yet.'); return; }
   const id = c ? c.id : store.newId('tc');
-  const data = Object.assign({}, c || { origin: 'user' }, { id, dataId: de.id, field: r.form.field, kind: r.form.kind, input: r.form.input, expect: r.form.expect, note: r.form.note });
-  await store.save('testCase', id, data, `${c ? 'Edited' : 'Added custom'} test for ${de.name}.${data.field}`);
+  const data = Object.assign({}, c || { origin: 'user' }, { id, dataId: de.id, field: r.form.field.trim(), kind: r.form.kind, input: r.form.input, expect: r.form.expect, note: r.form.note, tester: r.form.tester || undefined });
+  await store.save('testCase', id, data, `${c ? 'Edited' : 'Added custom'} test for ${de.name}.${data.field}${data.tester && (!c || c.tester !== data.tester) ? `; tester ${pname(data.tester)}` : ''}`);
   toast(c ? 'Test case saved' : 'Custom case added');
+}
+
+/* ---------- testers and cycles ---------- */
+async function bulkAssign(de, tester) {
+  if (!tester) { toast('Pick a tester first.'); return; }
+  const list = casesFor(de.id).filter(c => !c.tester);
+  for (const c of list) await store.save('testCase', c.id, Object.assign({}, c, { tester }), `Assigned ${de.name}.${c.field} ${c.kind} test to ${pname(tester)}`);
+  toast(`${list.length} case${list.length === 1 ? '' : 's'} assigned to ${pname(tester)}`);
+}
+async function assignScript(prj, sid, tester) {
+  const cur = store.get('project', prj.id) || prj;
+  const s = (cur.uatScripts || []).find(x => x.id === sid); if (!s) return;
+  const next = cur.uatScripts.map(x => x.id === sid ? Object.assign({}, x, { tester: tester || undefined }) : x);
+  await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), tester ? `Assigned UAT script “${s.title}” to ${pname(tester)}` : `Unassigned UAT script “${s.title}”`);
+  toast(tester ? `Script assigned to ${pname(tester)}` : 'Script unassigned');
+}
+async function editCycle(prj, cid) {
+  const cur = store.get('project', prj.id) || prj;
+  const c = cyclesOf(cur).find(x => x.id === cid) || null;
+  const today = store.state.today;
+  const p = modal({
+    title: c ? 'Edit test cycle' : 'Plan a test cycle',
+    body: `<div class="field"><label>Name</label><input name="name" value="${esc(c ? c.name : '')}" placeholder="e.g. UAT cycle 1: vendor onboarding"></div>
+      <div class="frow"><div class="field"><label>Environment</label><select name="env"><option value="dev" ${c && c.env === 'dev' ? 'selected' : ''}>Dev</option><option value="uat" ${!c || c.env === 'uat' ? 'selected' : ''}>UAT</option></select></div><div></div></div>
+      <div class="frow"><div class="field"><label>Start</label><input type="date" name="start" value="${esc(c ? c.start : today)}"></div><div class="field"><label>End</label><input type="date" name="end" value="${esc(c ? c.end : addDays(today, 7))}"></div></div>
+      <div class="field"><label>Testers</label><div class="ts-dpick">${store.state.people.map(p => `<label><input type="checkbox" name="testers" value="${esc(p.id)}" ${c && (c.testers || []).includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</div></div>
+      <div class="hint">Testers see the cases and scripts assigned to them. Runs recorded in this cycle count toward its progress.</div>`,
+    actions: [{ id: 'save', label: c ? 'Save cycle' : 'Plan cycle', primary: true }],
+  });
+  guard(f => {
+    if (!String(f.name || '').trim()) return { msg: 'Name the cycle.', field: 'name' };
+    if (!f.start || !f.end) return { msg: 'Set a start and an end date.', field: f.start ? 'end' : 'start' };
+    if (f.end < f.start) return { msg: 'The end date is before the start date.', field: 'end' };
+    if (!(f.testers || []).length) return 'Name at least one tester.';
+    return null;
+  });
+  const r = await p;
+  if (r.action !== 'save') return;
+  const f = r.form;
+  const next = { id: c ? c.id : store.newId('cyc'), name: f.name.trim(), env: f.env === 'dev' ? 'dev' : 'uat', start: f.start, end: f.end, testers: f.testers || [] };
+  const latest = store.get('project', prj.id) || cur;
+  const list = cyclesOf(latest).filter(x => x.id !== next.id).concat([next]);
+  await store.save('project', prj.id, Object.assign({}, latest, { testCycles: list }), `${c ? 'Edited' : 'Planned'} test cycle “${next.name}” (${next.env.toUpperCase()}, ${fmt(next.start)}–${fmt(next.end)}, ${next.testers.map(pname).join(', ')})`);
+  await store.notify(next.testers, `${pname(store.state.me)} named you as a tester in “${next.name}” for ${prj.name}`, 'project:' + prj.id);
+  toast(c ? 'Cycle saved' : 'Cycle planned');
+}
+async function deleteCycle(prj, cid) {
+  const cur = store.get('project', prj.id) || prj;
+  const c = cyclesOf(cur).find(x => x.id === cid); if (!c) return;
+  const r = await modal({ title: 'Delete test cycle?', body: `<p style="margin:0">${esc(c.name)}. Runs recorded in it are kept.</p>`, actions: [{ id: 'del', label: 'Delete', danger: true }] });
+  if (r.action !== 'del') return;
+  await store.save('project', prj.id, Object.assign({}, cur, { testCycles: cyclesOf(cur).filter(x => x.id !== cid) }), `Deleted test cycle “${c.name}”`);
+  toast('Cycle deleted');
 }
 
 
@@ -419,23 +568,26 @@ async function editCase(de, c) {
 async function recordRun(prj, opts) {
   opts = opts || {};
   const des = projectData(prj);
-  const prev = opts.retestOf || null;
-  const only = prev ? new Set(retestIds(prev)) : null;
+  const prev = opts.retestEnv ? runsFor(prj.id).find(r => r.env === opts.retestEnv) || null : null;
+  const only = prev ? new Set(retestIds(prj.id, prev.env)) : null;
+  const cycles = cyclesOf(prj);
+  const cyc0 = opts.cycleId || (prev && prev.cycleId) || '';
   const cases = []; des.forEach(d => casesFor(d.id).forEach(c => { if (!only || only.has(c.id)) cases.push({ c, d }); }));
   const scripts = scriptsFor(prj).list.filter(s => !only || only.has(s.id));
   if (!cases.length && !scripts.length) { toast(only ? 'Nothing to retest.' : 'Generate test cases or UAT scripts first.'); return; }
-  const env0 = prev ? prev.env : (opts.env || 'dev');
+  const env0 = prev ? prev.env : (opts.env || (cycles.find(c => c.id === cyc0) || {}).env || 'dev');
   const sel = (name, label) => `<select name="${name}" aria-label="${esc(label)}"><option value="">Not run</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="blocked">Blocked</option></select>`;
-  const caseRow = ({ c, d }) => { const k = 'c:' + c.id; return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t"><b>${esc(d.name)} · ${esc(c.field)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small>expect ${esc(c.expect)}</small></div>
+  const caseRow = ({ c, d }) => { const k = 'c:' + c.id; return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t"><b>${esc(d.name)} · ${esc(c.field)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small>expect ${esc(c.expect)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small></div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
-  const scriptRow = s => { const k = 's:' + s.id; return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row><div class="ts-case-t"><b>${esc(s.title)}</b><div class="ts-gwt-i"><span>Given</span> ${esc(s.given)}</div></div>
+  const scriptRow = s => { const k = 's:' + s.id; return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row><div class="ts-case-t"><b>${esc(s.title)}</b>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}<div class="ts-gwt-i"><span>Given</span> ${esc(s.given)}</div></div>
     <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(x.action)}<small>Expected: ${esc(x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Script note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({
-    title: prev ? `Retest failures · ${String(prev.env).toUpperCase()} cycle ${(prev.cycle || 1) + 1}` : 'Record test run',
+    title: prev ? `Retest failures · ${String(prev.env).toUpperCase()} retest ${(prev.cycle || 1) + 1}` : 'Record test run',
     body: `<div class="frow"><div class="field"><label>Environment</label><select name="env" data-env ${prev ? 'disabled' : ''}><option value="dev" ${env0 === 'dev' ? 'selected' : ''}>Dev</option><option value="uat" ${env0 === 'uat' ? 'selected' : ''}>UAT</option></select></div>
-      <div class="field"><label>Rows</label><div class="ts-setall"><button type="button" class="btn sm" data-reset>Reset to not run</button></div></div></div>
-      ${prev ? `<div class="hint">Only the ${only.size} item${only.size === 1 ? '' : 's'} that failed or were blocked in the ${esc(fmtTime(prev.at))} run. Earlier passes are carried forward.</div>` : ''}
+      <div class="field"><label>Test cycle</label><select name="cycleId" data-cycle-sel><option value="">No planned cycle</option>${cycles.map(c => `<option value="${esc(c.id)}" data-cenv="${esc(c.env)}" ${c.id === cyc0 ? 'selected' : ''}>${esc(c.name)} · ${esc(String(c.env).toUpperCase())}</option>`).join('')}</select></div></div>
+      <div class="ts-setall"><button type="button" class="btn sm" data-reset>Reset to not run</button></div>
+      ${prev ? `<div class="hint">Only the ${only.size} item${only.size === 1 ? '' : 's'} whose latest ${esc(String(prev.env).toUpperCase())} result failed or was blocked. Earlier passes still count toward coverage.</div>` : ''}
       <div class="ts-cov-live hint" data-cov-live></div><div class="ts-err" data-err hidden></div>
       <div class="ts-cases">
         ${cases.length ? `<div class="ts-grp">Data cases · ${cases.length}</div>${cases.map(caseRow).join('')}` : ''}
@@ -449,6 +601,8 @@ async function recordRun(prj, opts) {
   /* validation: a fail needs a note; a script is recorded step by step, all or none */
   const problems = () => {
     const out = [];
+    const cs = ov.querySelector('[data-cycle-sel]'); const cy = cs && cycles.find(c => c.id === cs.value);
+    if (cy && cy.env !== envOf()) out.push(`“${cy.name}” is a ${String(cy.env).toUpperCase()} cycle. Pick a ${envOf().toUpperCase()} cycle or switch the environment.`);
     ov.querySelectorAll('.ts-case').forEach(row => {
       if (row.closest('[hidden]')) return;
       const k = row.dataset.row;
@@ -494,7 +648,6 @@ async function recordRun(prj, opts) {
   });
   if (!results.length) { toast('Nothing recorded: every row was left as Not run.'); return; }
   const fresh = new Set(results.map(rid));
-  if (prev) (prev.results || []).forEach(x => { if (!fresh.has(rid(x))) results.push(Object.assign({}, x, { carriedFrom: x.carriedFrom || prev.id, defectId: x.defectId })); });
   const scriptN = env === 'uat' ? scriptsFor(prj).list.length : 0;
   const total = des.reduce((n, d) => n + casesFor(d.id).length, 0) + scriptN;
   const id = store.newId('run');
@@ -503,11 +656,40 @@ async function recordRun(prj, opts) {
   ui.runOpen.add(id);
   const doc = { id, projectId: prj.id, env, at: new Date().toISOString(), by: store.state.me, cycle, results };
   if (prev) doc.retestOf = prev.id;
+  const cyc = cycles.find(c => c.id === r.form.cycleId && c.env === env);
+  if (cyc) doc.cycleId = cyc.id;
   await store.save('testRun', id, doc,
     prev ? `Recorded ${env.toUpperCase()} retest (cycle ${cycle}) for ${prj.name}: ${fresh.size} retested, ${fails.length} still failing`
-      : `Recorded ${env.toUpperCase()} test run for ${prj.name}: ${results.length} of ${total} run, ${fails.length} failed`);
+      : `Recorded ${env.toUpperCase()} test run for ${prj.name}${cyc ? ` in “${cyc.name}”` : ''}: ${results.length} of ${total} run, ${fails.length} failed`);
   toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : `${env.toUpperCase()} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
+  await offerCloseDefects(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
+}
+
+/* A passing retest offers to close the defects linked to the items that now pass. */
+async function offerCloseDefects(prj, runId) {
+  const run = store.get('testRun', runId); if (!run) return;
+  const passed = new Set((run.results || []).filter(x => x.outcome === 'pass').map(rid));
+  const defs = store.list('workItem', w => w.projectId === prj.id && w.kind === 'defect' && w.status !== 'done' && w.testRef && passed.has(w.testRef.caseId || w.testRef.scriptId));
+  if (!defs.length) return;
+  const me = store.state.me;
+  const can = w => me === w.owner || me === prj.owner;
+  const r = await modal({
+    title: `Retest passed: close ${defs.length} linked defect${defs.length === 1 ? '' : 's'}?`,
+    body: `<p style="margin:0 0 8px">These defects were raised on items that just passed in the ${esc(String(run.env).toUpperCase())} run. Closing records the passing run as the proof of the fix.</p>
+      <div class="ts-mk" data-close-offer>${defs.map(w => `<label class="ts-mk-r"><input type="checkbox" name="close" value="${esc(w.id)}" ${can(w) ? 'checked' : 'disabled'}><span><b>${esc(w.title)}</b><small>owner ${esc(pname(w.owner))}${can(w) ? '' : ` · only ${esc(pname(w.owner))} or the project owner can close it`}</small></span></label>`).join('')}</div>`,
+    actions: [{ id: 'close', label: 'Close selected', primary: true }],
+  });
+  if (r.action !== 'close') return;
+  const pick = new Set(r.form.close || []);
+  let n = 0;
+  for (const w of defs) {
+    if (!pick.has(w.id) || !can(w)) continue;
+    const note = `Retest passed in the ${String(run.env).toUpperCase()} run, ${fmt(run.at)}`;
+    await store.save('workItem', w.id, Object.assign({}, w, { status: 'done', doneAt: store.state.today, updatedAt: new Date().toISOString(), fixNote: note, closedByRun: runId }), `Closed ${w.title}: ${note}`);
+    n++;
+  }
+  if (n) toast(`${n} defect${n === 1 ? '' : 's'} closed`);
 }
 
 /* ---------- CI import: JUnit XML parsed in the browser. In the product this arrives from the customer's pipeline. ---------- */
@@ -523,14 +705,21 @@ export function parseJUnit(xml) {
     return { name: t.getAttribute('name') || '', classname: t.getAttribute('classname') || '', outcome: fl ? 'fail' : sk ? 'skip' : 'pass', message: msg.slice(0, 240) };
   }) };
 }
-function matchCiTest(t, cases, scripts) {
+/* JUnit match (R4): by id (in name or classname), or by title. Titles are normalized (case and punctuation ignored):
+   a case's title is "<field> <kind>" (optionally prefixed by the data element name), a script's title is its title.
+   Several cases can share a title, so each matched item is used once, in table order. */
+export function matchCiTest(t, cases, scripts, used) {
+  used = used || new Set();
   const text = `${t.classname} ${t.name}`;
-  const byId = [...cases.map(c => c.id), ...scripts.map(s => s.id)].find(id => new RegExp('(^|[^\\w-])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^\\w-])').test(text));
-  if (byId) return cases.some(c => c.id === byId) ? { caseId: byId } : { scriptId: byId };
-  const nm = norm(t.name);
-  const sc = scripts.find(s => norm(s.title) === nm); if (sc) return { scriptId: sc.id };
-  const cs = cases.find(c => { const de = store.get('dataElement', c.dataId) || {}; return norm(`${de.name} ${c.field} ${c.input}`) === nm || norm(`${c.field} ${c.input}`) === nm; });
-  return cs ? { caseId: cs.id } : null;
+  const esc_ = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const byId = [...cases.map(c => c.id), ...scripts.map(s => s.id)].find(id => !used.has(id) && new RegExp('(^|[^\\w-])' + esc_(id) + '($|[^\\w-])', 'i').test(text));
+  if (byId) return cases.some(c => c.id === byId) ? { caseId: byId, how: 'id' } : { scriptId: byId, how: 'id' };
+  const names = [norm(t.name), norm(text)];
+  const hit = k => names.includes(k);
+  const sc = scripts.find(s => !used.has(s.id) && hit(norm(s.title))); if (sc) return { scriptId: sc.id, how: 'title' };
+  const cs = cases.find(c => { if (used.has(c.id)) return false; const de = store.get('dataElement', c.dataId) || {};
+    return [`${c.field} ${c.kind}`, `${de.name} ${c.field} ${c.kind}`, `${c.field} ${c.input}`, `${de.name} ${c.field} ${c.input}`].some(x => hit(norm(x))); });
+  return cs ? { caseId: cs.id, how: 'title' } : null;
 }
 async function importCi(prj) {
   const des = projectData(prj);
@@ -538,7 +727,7 @@ async function importCi(prj) {
   const scripts = scriptsFor(prj).list;
   const p = modal({
     title: 'Import CI results (JUnit XML)',
-    body: `<p style="margin:0 0 8px" class="hint">Paste or upload a JUnit XML report. Each <code>testcase</code> is matched to a data case or UAT script by id (in its name or classname) or by title. In the product, results arrive from the customer's pipeline automatically.</p>
+    body: `<p style="margin:0 0 8px" class="hint">Paste or upload a JUnit XML report. Each <code>testcase</code> is matched to a data case or UAT script by id (in its name or classname) or by title: “field kind” for a case (e.g. <i>Routing number boundary</i>) or the script title. Case and punctuation are ignored. Ids are shown in the case and script lists. In the product, results arrive from the customer's pipeline automatically.</p>
       <div class="field"><label>JUnit XML</label><textarea name="xml" data-ci-xml class="ts-xml" placeholder="&lt;testsuite name=&quot;vendor-api&quot;&gt;&lt;testcase name=&quot;TC1 routing number&quot;/&gt;…"></textarea></div>
       <label class="btn sm ts-file">Upload .xml<input type="file" accept=".xml,text/xml,application/xml" data-ci-file hidden></label>`,
     actions: [{ id: 'import', label: 'Import as dev run', primary: true }],
@@ -550,21 +739,25 @@ async function importCi(prj) {
   if (r.action !== 'import') return;
   let parsed;
   try { parsed = parseJUnit(r.form.xml); } catch (e) { toast('Could not read the report: ' + e.message); return; }
-  const results = []; let unmatched = 0; const seen = new Set();
+  const results = []; let unmatched = 0; const seen = new Set(); let byTitle = 0;
   parsed.tests.forEach(t => {
     if (t.outcome === 'skip') return;
-    const m = matchCiTest(t, cases, scripts);
+    const m = matchCiTest(t, cases, scripts, seen);
     if (!m) { unmatched++; return; }
-    const key = m.caseId || m.scriptId; if (seen.has(key)) return; seen.add(key);
-    results.push(Object.assign(m, { outcome: t.outcome, note: t.outcome === 'fail' ? (t.message || 'CI reported a failure') : '', evidence: `CI ${parsed.suite}: ${t.classname ? t.classname + '.' : ''}${t.name}` }));
+    const key = m.caseId || m.scriptId; seen.add(key);
+    if (m.how === 'title') byTitle++;
+    const x = { outcome: t.outcome, note: t.outcome === 'fail' ? (t.message || 'CI reported a failure') : '', evidence: `CI ${parsed.suite}: ${t.classname ? t.classname + '.' : ''}${t.name}`, matchedBy: m.how };
+    if (m.caseId) x.caseId = m.caseId; else x.scriptId = m.scriptId;
+    results.push(x);
   });
   if (!results.length) { toast(`No test in the report matched a case or script (${unmatched} unmatched).`); return; }
   const id = store.newId('run');
   const fails = results.filter(x => x.outcome === 'fail');
   ui.runOpen.add(id);
   await store.save('testRun', id, { id, projectId: prj.id, env: 'dev', at: new Date().toISOString(), by: store.state.me, source: 'ci', ciSuite: parsed.suite, ciUnmatched: unmatched, cycle: 1, results },
-    `Imported CI results (${parsed.suite}) as a dev run for ${prj.name}: ${results.length} matched, ${fails.length} failed, ${unmatched} unmatched`);
-  toast(`CI import: ${results.length} matched · ${fails.length} fail · ${unmatched} unmatched`);
+    `Imported CI results (${parsed.suite}) as a dev run for ${prj.name}: ${results.length} matched (${byTitle} by title), ${fails.length} failed, ${unmatched} unmatched`);
+  toast(`CI import: ${results.length} matched (${byTitle} by title) · ${fails.length} fail · ${unmatched} unmatched`);
+  await offerCloseDefects(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
 }
 
@@ -630,7 +823,9 @@ async function adoptScripts(prj, onlyNew) {
   const have = Array.isArray(cur.uatScripts) ? cur.uatScripts : [];
   const add = onlyNew ? gen.filter(g => !have.some(h => h.id === g.id)) : gen;
   if (!add.length) { toast('No generated scripts to add.'); return; }
-  const next = (onlyNew ? have : []).concat(add.map(s => ({ id: s.id, pid: s.pid, step: s.step, title: s.title, given: s.given, when: s.when, then: s.then, data: (s.data || []).slice() })));
+  const next = (onlyNew ? have : []).concat(add.map(s => { const x = { id: s.id, pid: s.pid, step: s.step, title: s.title, given: s.given, when: s.when, then: s.then, data: (s.data || []).slice() };
+    if (Array.isArray(s.steps) && s.steps.length) x.steps = s.steps.map((y, i) => ({ n: i + 1, action: String(y.action || ''), expected: String(y.expected || '') }));
+    if (s.tester) x.tester = s.tester; return x; }));
   await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), onlyNew ? `Added ${add.length} generated UAT script${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} generated UAT scripts for ${prj.name}`);
   toast(onlyNew ? `${add.length} script${add.length === 1 ? '' : 's'} added` : `${add.length} UAT scripts adopted. You can edit them now.`);
 }
@@ -646,6 +841,7 @@ async function editScript(prj, sid) {
       <div class="field"><label>Given (precondition)</label><textarea name="given">${esc(s.given)}</textarea></div>
       <div class="field"><label>Steps · action and expected result</label><div class="ts-srows" data-srows>${scriptSteps(s).map(srow).join('')}</div>
         <div><button type="button" class="btn sm" data-sadd>+ Add step</button></div></div>
+      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>
       <div class="field"><label>Test data</label><div class="ts-dpick">${des.map(d => `<label><input type="checkbox" name="data" value="${esc(d.id)}" ${(s.data || []).includes(d.id) ? 'checked' : ''}> ${esc(d.name)}</label>`).join('') || '<span class="hint">No project data elements.</span>'}</div></div>`,
     actions: [{ id: 'save', label: 'Save script', primary: true }],
   });
@@ -657,14 +853,19 @@ async function editScript(prj, sid) {
     ov.querySelector('[data-sadd]').onclick = e => { e.stopPropagation(); box.insertAdjacentHTML('beforeend', srow({ action: '', expected: '' }, box.children.length)); wire(); box.lastElementChild.querySelector('[data-sa]').focus(); };
     wire();
   }
+  const stepsOf = root => [...root.querySelectorAll('[data-srow]')].map(row => ({ action: row.querySelector('[data-sa]').value.trim(), expected: row.querySelector('[data-sx]').value.trim() })).filter(x => x.action);
+  guard((f, act, mb) => {
+    const st = stepsOf(mb);
+    if (!(f.title || '').trim()) return { msg: 'A script needs a title.', field: 'title' };
+    if (!st.length) return 'A script needs at least one step with an action.';
+    if (st.some(x => !x.expected)) return 'Every step needs an expected result.';
+    return null;
+  });
   const r = await p;
   if (r.action !== 'save') return;
   const f = r.form;
-  const steps = [...r.root.querySelectorAll('[data-srow]')].map(row => ({ action: row.querySelector('[data-sa]').value.trim(), expected: row.querySelector('[data-sx]').value.trim() })).filter(x => x.action);
-  if (!(f.title || '').trim()) { toast('A script needs a title.'); return; }
-  if (!steps.length) { toast('A script needs at least one step with an action.'); return; }
-  if (steps.some(x => !x.expected)) { toast('Every step needs an expected result.'); return; }
-  const next = cur.uatScripts.map(x => x.id === sid ? Object.assign({}, x, { title: f.title.trim(), given: (f.given || '').trim(), steps: steps.map((y, i) => ({ n: i + 1, action: y.action, expected: y.expected })), when: steps[0].action, then: steps[steps.length - 1].expected, data: f.data || [] }) : x);
+  const steps = stepsOf(r.root);
+  const next = cur.uatScripts.map(x => x.id === sid ? Object.assign({}, x, { title: f.title.trim(), given: (f.given || '').trim(), steps: steps.map((y, i) => ({ n: i + 1, action: y.action, expected: y.expected })), when: steps[0].action, then: steps[steps.length - 1].expected, data: f.data || [], tester: f.tester || undefined }) : x);
   await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), `Edited UAT script “${f.title.trim()}” (${steps.length} step${steps.length === 1 ? '' : 's'})`);
   toast('Script saved');
 }
@@ -683,10 +884,11 @@ async function resolveReq(dataId, i) {
   const de = store.get('dataElement', dataId); if (!de) return;
   if (de.owner !== store.state.me) { toast(`Only the data owner (${pname(de.owner)}) can resolve this.`); return; }
   const d = (de.discovered || [])[i]; if (!d || d.resolved) return;
-  const r = await modal({ title: 'Resolve discovered requirement', body: `<p style="margin:0 0 8px">${esc(d.text)}</p><div class="field"><label>Resolution note</label><textarea name="note" placeholder="Spec updated, rule added, or why no change is needed"></textarea></div>`, actions: [{ id: 'resolve', label: 'Resolve', primary: true }] });
+  const p = modal({ title: 'Resolve discovered requirement', body: `<p style="margin:0 0 8px">${esc(d.text)}</p><div class="field"><label>Resolution note</label><textarea name="note" placeholder="Spec updated, rule added, or why no change is needed"></textarea></div>`, actions: [{ id: 'resolve', label: 'Resolve', primary: true }] });
+  guard(f => !(f.note || '').trim() ? { msg: 'Add a note so testers know what changed.', field: 'note' } : null);
+  const r = await p;
   if (r.action !== 'resolve') return;
   const note = (r.form.note || '').trim();
-  if (!note) { toast('Add a note so testers know what changed.'); return; }
   const discovered = (de.discovered || []).map((x, j) => j === i ? Object.assign({}, x, { resolved: { by: store.state.me, at: new Date().toISOString(), note } }) : x);
   await store.save('dataElement', de.id, Object.assign({}, de, { discovered }), `Resolved a discovered requirement on ${de.name}: ${note.slice(0, 80)}`);
   toast('Requirement resolved');

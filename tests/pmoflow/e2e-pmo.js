@@ -122,7 +122,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { red: ids('.canvas.pm .chip.block').map(d => E.effectiveAvail(store.state.docs, d)), amber: ids('.canvas.pm .chip.pmo-amber').map(d => E.effectiveAvail(store.state.docs, d)) }; }, STORE);
   check('map shows data chips (red or amber)', mapData.red.length + mapData.amber.length > 0, mapData);
   check('map red "Waiting on" only for effectively missing data', mapData.red.every(e => e === 'missing'), mapData.red);
-  check('map amber chips only for examples-only data', mapData.amber.every(e => e === 'example'), mapData.amber);
+  check('map amber chips only for examples-only or pending data', mapData.amber.every(e => e === 'example' || e === 'pending'), mapData.amber);
   const noPlan = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
     return [...document.querySelectorAll('.side .row')].filter(r => r.querySelector('.pmo-noplan')).map(r => { const d = r.dataset.go.split('/data/')[1]; return { d, eff: E.effectiveAvail(store.state.docs, d), res: store.list('workItem', w => w.resolves === d).length }; }); }, STORE);
   check('"No resolution plan" only for missing/example data without a resolver', noPlan.every(x => x.eff !== 'live' && x.res === 0), noPlan);
@@ -287,6 +287,249 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
 
   /* push an open item's due out by editing it, so baseline variance has something to show (after baseline below) */
+  /* ================= ROUND 4: views of the same work items ================= */
+  const PRJ = decodeURIComponent(prjPath.split('/project/')[1]);
+  const prjGo = async (q, sel) => { await page.goto(ROOT + '/project/' + encodeURIComponent(PRJ) + (q || '')); await page.waitForSelector(sel || '.pmo-toolbar'); await settle(); };
+  const feedText = async () => { await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {}); return page.locator('[data-feed="prj-work"]').innerText(); };
+  const isWkend = s => { const g = new Date(s + 'T12:00:00').getDay(); return g === 0 || g === 6; };
+  /* synthetic HTML5 drag-and-drop (for targets that are off-screen, where a mouse drag can't reach) */
+  const dnd = async (src, dst) => { const dt = await page.evaluateHandle(() => new DataTransfer());
+    await page.dispatchEvent(src, 'dragstart', { dataTransfer: dt }); await page.dispatchEvent(dst, 'dragenter', { dataTransfer: dt });
+    await page.dispatchEvent(dst, 'dragover', { dataTransfer: dt }); await page.dispatchEvent(dst, 'drop', { dataTransfer: dt }); await page.dispatchEvent(src, 'dragend', { dataTransfer: dt }); await settle(); };
+  const todayStr = await page.evaluate(async u => (await import(u)).store.state.today, STORE);
+
+  /* ---- header RAG pill ---- */
+  console.log('R4 header + map gateways');
+  await prjGo('', '.canvas.pm .node');
+  const ragK = await page.getAttribute('.pmo-hrag', 'data-rag');
+  check('header shows a red/amber/green pill', ['red', 'amber', 'green'].includes(ragK) && await page.locator('.hdr h1 .rag').count() === 1, ragK);
+  check('project tabs: Map | Timeline | Board | Sprints | Work', (await page.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Map|Timeline|Board|Sprints|Work');
+  const gwExp = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
+    return prj.processes.flatMap(pid => { const p = store.get('process', pid); const dp = E.diffProcess(p); return E.flatGateways(p.tobe).filter(g => dp.nodes[g.id] === 'new').map(g => g.id); }); }, STORE);
+  const gwShown = await page.locator('[data-gateway]:has([data-gw-diff="new"])').evaluateAll(xs => xs.map(x => x.dataset.gateway));
+  check('map marks new gateways NEW', gwExp.length > 0 && gwExp.every(id => gwShown.includes(id)) && gwShown.length === gwExp.length, { gwExp, gwShown });
+
+  /* ---- Board ---- */
+  console.log('R4 board');
+  await page.click('.pmo-tabs a[data-tab="board"]'); await page.waitForSelector('[data-board]'); await settle();
+  check('board: three columns', (await page.locator('.pmo-col-h b').allInnerTexts()).join('|') === 'Not started|In progress|Done');
+  const nItems = await page.evaluate(async ([u, id]) => (await import(u)).store.list('workItem', w => w.projectId === id).length, [STORE, PRJ]);
+  check('board: one card per work item', await page.locator('.pmo-board .pmo-card').count() === nItems, nItems);
+  const card0 = page.locator('.pmo-board .pmo-card').first();
+  check('board card: owner avatar, title, step, due/forecast badge', await card0.locator('.av').count() === 1 && await card0.locator('.pmo-card-t').count() === 1 && await card0.locator('.pmo-card-s').count() === 1 && await card0.locator('.badge').count() >= 1 && await card0.locator('.pmo-card-due').count() === 1);
+  check('board: data-blocker chips and risk badges shown', await page.locator('.pmo-board [data-blocker]').count() > 0 && await page.locator('.pmo-board [data-risk]').count() > 0);
+  const blkOk = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('.pmo-board [data-blocker]')].every(c => ['missing', 'pending'].includes(E.effectiveAvail(store.state.docs, c.dataset.blocker))); }, STORE);
+  check('board: blocker chips only for missing/pending data', blkOk);
+  check('board: PM can drag every card', await page.locator('.pmo-board .pmo-card:not([draggable="true"])').count() === 0);
+  check('board no overflow @1440', await noOverflow());
+  await shot('20-board-1440');
+  const idleCard = page.locator('.pmo-col[data-col="idle"] .pmo-card').first();
+  const bId = await idleCard.getAttribute('data-card');
+  await idleCard.dragTo(page.locator('.pmo-col[data-col="prog"] .pmo-col-b')); await settle();
+  const bDoc = await getDoc('workItem', bId);
+  check('board drag Not started -> In progress sets status + updatedAt', bDoc.status === 'prog' && !!bDoc.updatedAt && !bDoc.doneAt, bDoc);
+  check('board: card now in In progress column', await page.locator(`.pmo-col[data-col="prog"] [data-card="${bId}"]`).count() === 1);
+  await page.locator(`.pmo-card[data-card="${bId}"]`).dragTo(page.locator('.pmo-col[data-col="done"] .pmo-col-b')); await settle();
+  const bDone = await getDoc('workItem', bId);
+  check('board drag -> Done sets doneAt to today', bDone.status === 'done' && bDone.doneAt === todayStr, bDone);
+  /* keyboard alternative: focus a card, Tab to its status select */
+  const kCard = page.locator('.pmo-col[data-col="idle"] .pmo-card').first();
+  const kId = await kCard.getAttribute('data-card');
+  await kCard.focus(); await page.keyboard.press('Tab');
+  check('keyboard: Tab from a card reaches its status select', await page.evaluate(id => document.activeElement && document.activeElement.dataset.status === id, kId));
+  check('keyboard: select visible on the focused card', await page.locator(`.pmo-card[data-card="${kId}"] select[data-status]`).isVisible());
+  await page.selectOption(`.pmo-card[data-card="${kId}"] select[data-status]`, 'prog'); await settle();
+  check('keyboard: status changed from the card select', (await getDoc('workItem', kId)).status === 'prog');
+  await dnd(`.pmo-card[data-card="${bId}"]`, '.pmo-col[data-col="idle"] .pmo-col-b');
+  check('board drag Done -> Not started clears doneAt', (await getDoc('workItem', bId)).status === 'idle' && !(await getDoc('workItem', bId)).doneAt);
+  check('history: board moves summarised', /Not started → In progress/.test(await feedText()));
+  await asPersona('^Leo Park'); await page.waitForSelector('[data-board]');
+  const lpDrag = await page.evaluate(async u => { const { store } = await import(u); const me = store.state.me; return [...document.querySelectorAll('.pmo-board .pmo-card')].map(c => [store.get('workItem', c.dataset.card).owner === me, c.getAttribute('draggable') === 'true']); }, STORE);
+  check('board: non-PM can drag only own cards', lpDrag.length > 0 && lpDrag.every(([own, d]) => own === d) && lpDrag.some(([o]) => !o), lpDrag.length);
+  await asPersona('Project Manager'); await page.waitForSelector('[data-board]');
+
+  /* ---- Why this date? ---- */
+  console.log('R4 why this date');
+  const whyBtnL = page.locator('.pmo-board [data-why]').first();
+  const whyId = await whyBtnL.getAttribute('data-why');
+  await whyBtnL.click(); await page.waitForSelector('.pmo-pop');
+  const expLines = await page.evaluate(async ([u, id]) => { const { store } = await import(u); return window.PMOEngine.explainForecast(store.state.docs, id, store.state.today).map(x => x.text); }, [STORE, whyId]);
+  const popLines = await page.locator('.pmo-pop li').allInnerTexts();
+  check('"Why this date?" popover shows E().explainForecast chain', expLines.length > 0 && JSON.stringify(expLines) === JSON.stringify(popLines), { expLines, popLines });
+  check('why popover: no modal / navigation', await page.locator('.overlay').count() === 0 && /mode=board/.test(page.url()));
+  await shot('21-why-popover-1440', false);
+  await page.keyboard.press('Escape');
+  check('why popover closes on Escape', await page.locator('.pmo-pop').count() === 0);
+
+  /* ---- Sprints ---- */
+  console.log('R4 sprints');
+  await page.click('.pmo-tabs a[data-tab="sprints"]'); await page.waitForSelector('[data-sprints]'); await settle();
+  const engSprints = await page.evaluate(async ([u, id]) => { const { store } = await import(u); return window.PMOEngine.sprints(store.get('project', id), store.state.today, store.state.docs); }, [STORE, PRJ]);
+  check('sprints: one column per E().sprints with dates', engSprints.length > 0 && await page.locator('.pmo-spr[data-sprint]').count() === engSprints.length
+    && (await page.locator('.pmo-spr[data-sprint] .pmo-spr-h .hint').first().innerText()).includes('–'), engSprints.length);
+  const capOk = await page.evaluate(async u => { const { store } = await import(u); return [...document.querySelectorAll('.pmo-spr[data-sprint]')].map(col => {
+    const ids = [...col.querySelectorAll('.pmo-card')].map(c => c.dataset.card); const items = ids.map(i => store.get('workItem', i));
+    const eff = items.reduce((a, w) => a + (w.effortDays > 0 ? w.effortDays : 1), 0); const t = col.querySelector('[data-cap-line] span').textContent;
+    const [, e, c] = t.match(/([\d.]+)d effort \/ ([\d.]+)d capacity/) || [];
+    return Math.abs(Number(e) - eff) < 0.05 && (Number(e) > Number(c)) === !!col.querySelector('[data-over]'); }); }, STORE);
+  check('sprints: effort vs capacity per sprint, over-capacity flagged consistently', capOk.length > 0 && capOk.every(Boolean), capOk);
+  await shot('22-sprints-1440');
+  const sCols = await page.locator('.pmo-spr[data-sprint]').evaluateAll(cs => cs.map(c => c.dataset.sprint));
+  const target = engSprints[engSprints.length - 2] || engSprints[engSprints.length - 1];
+  const mover = page.locator(`.pmo-spr[data-sprint]:not([data-sprint="${target.id}"]) .pmo-card.st-idle[draggable="true"]`).first();
+  const mId = await mover.getAttribute('data-card'); const mBefore = await getDoc('workItem', mId);
+  await dnd(`.pmo-card[data-card="${mId}"]`, `.pmo-spr[data-sprint="${target.id}"] .pmo-spr-b`);
+  const mAfter = await getDoc('workItem', mId);
+  check('sprint drag: sets sprintId', mAfter.sprintId === target.id, { mAfter, target });
+  check('sprint drag: due moved inside the sprint', mAfter.due >= target.start && mAfter.due <= target.end, { due: mAfter.due, target });
+  check('sprint drag: duration kept', shift(mAfter.start, mAfter.due) === shift(mBefore.start || mBefore.due, mBefore.due), { mBefore, mAfter });
+  check('sprint drag: card shows in target sprint', await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-card="${mId}"]`).count() === 1);
+  check('history: sprint move summarised', new RegExp(`Planned “.+” in ${target.name}`).test(await feedText()));
+  /* keyboard alternative + over-capacity: pile one owner's open work into the same sprint */
+  for (let k = 0; k < 6 && !(await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-over]`).count()); k++) {
+    const sel = page.locator(`.pmo-spr[data-sprint]:not([data-sprint="${target.id}"]) select[data-sprint-pick]:not([disabled])`).first();
+    if (!await sel.count()) break;
+    await sel.selectOption(target.id); await settle();
+  }
+  check('sprints: over-capacity sprint flagged', await page.locator(`.pmo-spr[data-sprint="${target.id}"].over [data-over]`).count() === 1);
+  check('sprints: keyboard select moved items too', await page.locator(`.pmo-spr[data-sprint="${target.id}"] .pmo-card`).count() >= 2);
+  await shot('23-sprints-over-1440');
+  /* Plan sprints: cadence saved as project.sprints */
+  await page.click('[data-plan-sprints]'); await modalOpen();
+  await page.fill('.overlay input[name="length"]', '3'); await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
+  check('plan sprints: validation keeps the dialog', (await page.locator('.overlay .banner').innerText()).includes('between 5 and 42'));
+  const spStart = await page.evaluate(t => { const d = new Date(t + 'T12:00:00'); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 14); return d.toISOString().slice(0, 10); }, todayStr);
+  await page.fill('.overlay input[name="start"]', spStart); await page.fill('.overlay input[name="length"]', '7');
+  await act('save'); await settle();
+  const pj = await getDoc('project', PRJ);
+  check('plan sprints: project.sprints saved with the cadence', Array.isArray(pj.sprints) && pj.sprints[0].start === spStart && pj.sprints.every((s, i) => shift(s.start, s.end) === 6 && (!i || shift(pj.sprints[i - 1].start, s.start) === 7)), pj.sprints && pj.sprints.slice(0, 2));
+  check('plan sprints: columns follow the new cadence', await page.locator('.pmo-spr[data-sprint]').count() === pj.sprints.length);
+  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('history: sprint cadence change', (await page.locator('[data-history]').innerText()).includes('Sprint cadence: 7-day sprints'));
+
+  /* ---- shared filter bar + saved views ---- */
+  console.log('R4 filters + saved views');
+  for (const m of ['board', 'sprints', 'timeline', 'work']) { await prjGo('?mode=' + m, '[data-fbar]'); check(`filter bar on ${m}`, await page.locator('[data-fbar] [data-f]').count() === 6); }
+  await prjGo('?mode=work', 'table.pmo-work');
+  const ownerPick = await page.$eval('[data-fbar] select[data-f="owner"]', s => s.options[1].value);
+  await page.selectOption('[data-fbar] select[data-f="owner"]', ownerPick); await settle();
+  check('filter owner: URL query + rows', new URL(page.url()).searchParams.get('owner') === ownerPick && await page.evaluate(async ([u, o]) => { const { store } = await import(u); return [...document.querySelectorAll('tr[data-wid]')].every(r => store.get('workItem', r.dataset.wid).owner === o); }, [STORE, ownerPick]));
+  await page.selectOption('[data-fbar] select[data-f="owner"]', ''); await settle();
+  await page.selectOption('[data-fbar] select[data-f="status"]', 'open'); await settle();
+  check('filter status: no done rows', await page.locator('tr[data-wid] select[data-status] option[value="done"]:checked').count() === 0 && await page.locator('tr[data-wid]').count() > 0);
+  await page.check('[data-fbar] input[data-f="late"]'); await settle();
+  const lateOk = await page.evaluate(async u => { const { store } = await import(u); const fc = window.PMOEngine.forecastAll(store.state.docs, store.state.today); const ids = [...document.querySelectorAll('tr[data-wid]')].map(r => r.dataset.wid); return ids.length > 0 && ids.every(i => ['late', 'slip'].includes(fc[i].sched)); }, STORE);
+  check('filter late or slipping', lateOk);
+  const stepPick = await page.$eval('[data-fbar] select[data-f="step"]', s => [...s.options].find(o => o.value.includes('::')).value);
+  await page.selectOption('[data-fbar] select[data-f="step"]', stepPick); await settle();
+  check('filter step: rows on that step only', await page.evaluate(async ([u, sp]) => { const { store } = await import(u); const [pid, sid] = sp.split('::'); return [...document.querySelectorAll('tr[data-wid]')].every(r => { const w = store.get('workItem', r.dataset.wid); return w.pid === pid && w.step === sid; }); }, [STORE, stepPick]));
+  await page.click('[data-fbar] [data-fclear]'); await settle();
+  check('clear filters: all rows back', await page.locator('tr[data-wid]').count() === nItems + 0 || await page.locator('tr[data-wid]').count() >= nItems);
+  const dPick = await page.$eval('[data-fbar] select[data-f="data"]', s => s.options[1].value);
+  await page.selectOption('[data-fbar] select[data-f="data"]', dPick); await settle();
+  check('filter data element', await page.evaluate(async ([u, d]) => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('tr[data-wid]')].every(r => { const w = store.get('workItem', r.dataset.wid);
+    const n = E.flatSteps(store.get('process', w.pid).tobe).concat(E.flatGateways(store.get('process', w.pid).tobe)).find(s => s.id === w.step) || {}; return w.resolves === d || [...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])].includes(d); }); }, [STORE, dPick]));
+  await page.click('[data-fbar] [data-fclear]'); await settle();
+  await page.selectOption('[data-fbar] select[data-f="status"]', 'open'); await settle();
+  await page.check('[data-fbar] input[data-f="late"]'); await settle();
+  await page.fill('[data-fbar] input[data-f="q"]', 'bank'); await sleep(700); await settle();
+  const qFocus = await page.evaluate(() => !!document.activeElement && document.activeElement.dataset.f === 'q');
+  const qRows = await page.locator('tr[data-wid]').allInnerTexts();
+  check('text search keeps focus and filters (title, step, data)', qFocus && new URL(page.url()).searchParams.get('q') === 'bank' && qRows.length > 0 && qRows.every(t => /bank/i.test(t)), { qFocus, qRows: qRows.map(t => t.slice(0, 60)) });
+  await page.fill('[data-fbar] input[data-f="q"]', ''); await sleep(700); await settle();
+  const filtered = await page.locator('tr[data-wid]').count();
+  check('late+open filter shows a subset', filtered > 0 && filtered < nItems, { filtered, nItems });
+  await page.click('[data-save-view]'); await modalOpen();
+  await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
+  check('save view: name required, dialog kept', (await page.locator('.overlay .banner').innerText()).includes('name'));
+  await page.fill('.overlay input[name="name"]', 'E2E late open work'); await act('save'); await settle();
+  const pv = await getDoc('project', PRJ);
+  const sv = (pv.views || []).find(v => v.name === 'E2E late open work');
+  check('saved view stored in project.views', sv && sv.filters.status === 'open' && sv.filters.late === '1', pv.views);
+  check('saved view selected in picker + URL', await page.inputValue('[data-view-pick]') === sv.id && new URL(page.url()).searchParams.get('view') === sv.id);
+  await page.click('.pmo-tabs a[data-tab="board"]'); await page.waitForSelector('[data-board]'); await settle();
+  check('switching view tab keeps the filters', new URL(page.url()).searchParams.get('late') === '1' && await page.locator('.pmo-board .pmo-card').count() === filtered);
+  await page.click('[data-fbar] [data-fclear]'); await settle();
+  check('board unfiltered again', await page.locator('.pmo-board .pmo-card').count() === nItems);
+  await page.selectOption('[data-view-pick]', sv.id); await settle();
+  check('view picker re-applies the saved filters', await page.locator('.pmo-board .pmo-card').count() === filtered && new URL(page.url()).searchParams.get('status') === 'open');
+  await sleep(800); await page.reload(); await page.waitForSelector('[data-board]'); await settle();
+  check('reload: filters persist from the URL', await page.locator('.pmo-board .pmo-card').count() === filtered && await page.isChecked('[data-fbar] input[data-f="late"]'));
+  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('history: saved view', (await page.locator('[data-history]').innerText()).includes('Saved view “E2E late open work”'));
+  await page.selectOption('[data-fbar] select[data-f="owner"]', ownerPick); await settle();
+  await page.click('[data-save-view]'); await modalOpen(); await page.fill('.overlay input[name="name"]', 'E2E throwaway view'); await act('save'); await settle();
+  await page.click('[data-del-view]'); await modalOpen(); await act('delete'); await settle();
+  check('saved view deleted', !((await getDoc('project', PRJ)).views || []).some(v => v.name === 'E2E throwaway view') && ((await getDoc('project', PRJ)).views || []).some(v => v.name === 'E2E late open work'));
+  await shot('24-board-filtered-1440');
+
+  /* ---- dependency type + lag in the work item modal ---- */
+  console.log('R4 dependency type/lag');
+  await prjGo('?mode=work', 'table.pmo-work');
+  const T5 = 'E2E SS-lag item';
+  await page.click('[data-add-work]'); await modalOpen();
+  await page.fill('.overlay input[name="title"]', T5);
+  const depBoxes = page.locator('.overlay input[name="deps"]');
+  const dep0 = await depBoxes.nth(0).getAttribute('value'), dep1 = await depBoxes.nth(1).getAttribute('value');
+  await depBoxes.nth(0).check(); await page.selectOption(`.overlay select[name="dt_${dep0}"]`, 'SS'); await page.fill(`.overlay input[name="dl_${dep0}"]`, '2');
+  await depBoxes.nth(1).check();
+  await act('save'); await settle();
+  const t5 = await page.evaluate(async ([u, t]) => (await import(u)).store.list('workItem', w => w.title === t)[0], [STORE, T5]);
+  check('deps saved as {id, type, lag} (FS lag 0 stays a plain id)', t5 && t5.deps.some(d => typeof d === 'object' && d.id === dep0 && d.type === 'SS' && d.lag === 2) && t5.deps.includes(dep1), t5 && t5.deps);
+  check('work row shows the dependency type', (await workRow(T5).locator('.pmo-deps').innerText()).includes('SS +2d'));
+  await workRow(T5).locator('[data-edit-work]').click(); await modalOpen();
+  check('modal re-opens with type + lag', await page.inputValue(`.overlay select[name="dt_${dep0}"]`) === 'SS' && await page.inputValue(`.overlay input[name="dl_${dep0}"]`) === '2');
+  await page.selectOption(`.overlay select[name="dt_${dep0}"]`, 'FF'); await page.fill(`.overlay input[name="dl_${dep0}"]`, '99');
+  await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
+  check('lag validation keeps input', (await page.locator('.overlay .banner').innerText()).includes('Lag') && await page.inputValue('.overlay input[name="title"]') === T5);
+  await page.fill(`.overlay input[name="dl_${dep0}"]`, '1'); await act('save'); await settle();
+  check('dep type changed to FF +1', (await page.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id), [STORE, t5.id])).deps.some(d => d.type === 'FF' && d.lag === 1));
+  check('history: dependency type change', /dependency on .+ now FF \+1d lag/.test(await feedText()));
+  await page.click('.pmo-tabs a[data-tab="timeline"]'); await page.waitForSelector('.tl .tbar'); await sleep(400);
+  check('timeline arrow carries the dependency type', await page.locator(`svg.pmo-arrows path[data-to="${t5.id}"][data-type="FF"]`).count() === 1);
+  const whyTl = await page.evaluate(async ([u, id]) => window.PMOEngine.explainForecast((await import(u)).store.state.docs, id, (await import(u)).store.state.today).length, [STORE, t5.id]);
+  check('engine explains the FF item', whyTl > 0);
+
+  /* ---- status report on the project page ---- */
+  console.log('R4 report');
+  await prjGo('?mode=work', 'table.pmo-work');
+  const ragK2 = await page.getAttribute('.pmo-hrag', 'data-rag');
+  await page.click('[data-report]');
+  await page.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 });
+  check('report: headline + RAG pill', (await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim().length > 5 && await page.locator(`[data-prj-rep] .rag-${ragK2}`).count() === 1);
+  const mail = await page.getAttribute('[data-rep-mail]', 'href');
+  const mailU = new URL(mail);
+  check('email draft: mailto with subject + plain-text body', mail.startsWith('mailto:?subject=') && mailU.searchParams.get('subject').includes('status') && mailU.searchParams.get('body').includes((await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim()), mail.slice(0, 120));
+  await page.evaluate(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
+  await page.click('[data-rep-print]');
+  check('Print / PDF calls window.print', await page.evaluate(() => window.__printed) === 1);
+  await page.emulateMedia({ media: 'print' });
+  check('print stylesheet: only the report prints', await page.locator('[data-prj-rep]').isVisible() && !(await page.locator('.pmo-grid').isVisible()) && !(await page.locator('header.top').isVisible()) && !(await page.locator('.pmo-rep-acts').isVisible()));
+  await shot('25-report-print', true);
+  await page.emulateMedia({ media: 'screen' });
+  await shot('26-report-1440');
+  await page.click('[data-rep-close]'); await settle();
+  check('report closes', await page.locator('[data-prj-rep]').count() === 0);
+
+  /* ---- empty project + cross-project conflicts (the project created above) ---- */
+  console.log('R4 empty project + conflicts');
+  await page.goto(ROOT + '/project/' + encodeURIComponent(npId)); await page.waitForSelector('.canvas.pm'); await settle();
+  check('zero items: never "All work is done"', !(await page.locator('.side').innerText()).includes('All work is done'));
+  check('zero items: "No work planned yet — Suggest work from diff"', (await page.locator('[data-upnext] [data-nowork]').innerText()).includes('No work planned yet') && await page.locator('[data-upnext] [data-suggest]').count() === 1);
+  const expConf = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', id);
+    const steps = new Set(j.processes.flatMap(pid => [...E.flatSteps(store.get('process', pid).tobe), ...E.flatGateways(store.get('process', pid).tobe)].map(s => pid + '::' + s.id)));
+    const data = new Set(j.processes.flatMap(pid => E.flatSteps(store.get('process', pid).tobe).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
+    return store.list('project', p => p.id !== id && p.status !== 'live').filter(p => store.list('workItem', w => w.projectId === p.id && w.status !== 'done' && (steps.has(w.pid + '::' + w.step) || (w.resolves && data.has(w.resolves)))).length).map(p => p.id); }, [STORE, npId]);
+  const shownConf = await page.locator('[data-conflicts] [data-conflict]').evaluateAll(xs => xs.map(x => x.dataset.conflict));
+  check('conflict banner lists every overlapping active project', expConf.length > 0 && JSON.stringify(expConf.sort()) === JSON.stringify(shownConf.sort()), { expConf, shownConf });
+  check('conflict banner links to the other project', await page.locator(`[data-conflicts] a[href*="/project/${expConf[0]}"]`).count() >= 1);
+  await shot('27-conflict-empty-1440');
+  await page.click('.pmo-tabs a[data-tab="board"]'); await page.waitForSelector('[data-nowork]');
+  check('empty board: suggest-work empty state', (await page.locator('.pmo-main [data-nowork]').innerText()).includes('No work planned yet'));
+  await page.click(`[data-conflicts] a[href*="/project/${expConf[0]}"]`); await page.waitForSelector('table.pmo-work');
+  check('conflict link opens the other project', page.url().includes('/project/' + expConf[0]));
+  await prjGo('?mode=work', 'table.pmo-work');
+
   /* ---------------- baseline ---------------- */
   console.log('baseline');
   await page.click('[data-baseline]'); await modalOpen();
@@ -324,7 +567,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('each suggestion shows owner, effort, start, due, deps', nSugg > 0 && await page.locator('.overlay .pmo-sg select[name^="o_"]').count() === nSugg && await page.locator('.overlay .pmo-sg input[name^="e_"]').count() === nSugg
     && await page.locator('.overlay .pmo-sg input[name^="s_"]').count() === nSugg && await page.locator('.overlay .pmo-sg input[name^="d_"]').count() === nSugg && await page.locator('.overlay .pmo-sg-deps').count() === nSugg);
   const starts = await page.locator('.overlay .pmo-sg input[name^="s_"]').evaluateAll(xs => xs.map(x => x.value));
-  check('suggestions chained in order (starts non-decreasing)', starts.every((v, i) => !i || v >= starts[i - 1]), starts);
+  const dues = await page.locator('.overlay .pmo-sg input[name^="d_"]').evaluateAll(xs => xs.map(x => x.value));
+  if (/Rules/.test(src)) {
+    check('suggestions: business-day dates (no weekend starts/dues)', [...starts, ...dues].every(d => !isWkend(d)), { starts, dues });
+    check('suggestions: gateway targets labelled', await page.locator('.overlay [data-sg-gateway]').count() > 0);
+    const depSrc = await page.evaluate(() => [...document.querySelectorAll('.overlay .pmo-sg')].flatMap(sg => [...sg.querySelectorAll('input[name^="dep_"]:checked')].map(i => i.value)).filter(v => v.startsWith('S:'))
+      .map(v => document.querySelector(`.overlay .pmo-sg[data-sg="${v.slice(2)}"] .hint`).textContent));
+    check('suggestions: dependencies come from data resolvers', depSrc.every(t => t.includes('resolves')), depSrc);
+  }
   await shot('06-suggest-modal-1440', false);
   if (nSugg > 1) {
     for (let i = 2; i < nSugg; i++) await page.locator('.overlay input[name="pick"]').nth(i).uncheck();
@@ -497,7 +747,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('phone 390');
   await page.setViewportSize({ width: 390, height: 844 });
   const phone = [['/', '10-home-390', '.pmo-attn'], [prjPath + '?mode=map', '11-project-map-390', '.canvas.pm .node'], [prjPath + '?mode=timeline', '12-project-timeline-390', '.tl .tbar'],
-    [prjPath + '?mode=work', '13-project-work-390', 'table.pmo-work'], ['/portfolio', '14-portfolio-390', '.pmo-ptable']];
+    [prjPath + '?mode=work', '13-project-work-390', 'table.pmo-work'], ['/portfolio', '14-portfolio-390', '.pmo-ptable'],
+    [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]']];
   for (const [p, name, sel] of phone) {
     await page.goto(ROOT + p.replace(/^\/concepts\/pmoflow/, '')); await page.waitForSelector(sel); await sleep(300);
     const label = p.replace(/^.*\/project\/[^?]+/, '/project');

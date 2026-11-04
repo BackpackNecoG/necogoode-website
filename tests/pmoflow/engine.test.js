@@ -120,7 +120,7 @@ function readyDocs() {
   d.workItem.forEach(e => { e.data.status = 'done'; });
   d.dataElement.forEach(e => { e.data.avail = 'live'; });
   const bus = ['Procurement', 'Compliance', 'Treasury', 'Accounts Payable', 'IT'];
-  d.approval = bus.map((bu, i) => ({ id: 'AP' + i, data: { id: 'AP' + i, projectId: PRJ, bu, approver: i % 2 ? 'ta' : 'mc', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true, note: '' } }));
+  d.approval = bus.map((bu, i) => ({ id: 'AP' + i, data: { id: 'AP' + i, projectId: PRJ, bu, approver: i % 2 ? 'ar' : 'mc', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true, note: '' } }));
   d.testCase = wrap([
     { id: 'T1', dataId: 'D2', field: 'Routing number', kind: 'valid', input: '123456789', expect: 'accept', origin: 'spec' },
     { id: 'T2', dataId: 'D2', field: 'Routing number', kind: 'boundary', input: '12345678', expect: 'reject', origin: 'spec' },
@@ -134,7 +134,7 @@ function readyDocs() {
   ]);
   d.testCase.filter(e => e.id.startsWith('C')).forEach(e => { d.testRun[0].data.results.push({ caseId: e.id, outcome: 'pass' }); d.testRun[1].data.results.push({ caseId: e.id, outcome: 'pass' }); });
   E.generateUatScripts(d, PRJ).forEach(sc => d.testRun[1].data.results.push({ scriptId: sc.id, outcome: 'pass', evidence: 'screenshot' }));
-  d.project[0].data.cutover = { window: 'Sat 06:00-10:00', rollbackOwner: 'dk', rollbackPlan: 'Restore v1 as-is', hypercareDays: 10, hypercareOwner: 'ta', comms: 'Teams' };
+  d.project[0].data.cutover = { window: 'Sat 06:00-10:00', rollbackOwner: 'dk', rollbackPlan: 'Restore v1 as-is', hypercareDays: 10, hypercareOwner: 'ta', comms: 'Teams', tasks: [{ id: 'CT1', order: 1, task: 'Switch over', owner: 'dk', planned: '06:00', gonogo: true, done: false }] };
   d.grant = wrap([{ id: 'G1', projectId: PRJ, dataId: 'D2', env: 'uat', access: 'read', reason: 'UAT', requestedBy: 'dk', status: 'active', expires: '2026-12-01', log: [] }]);
   return d;
 }
@@ -153,13 +153,14 @@ test('forecast: slip ripples from W6 through dependents with D2 as root cause', 
   assert.equal(fc.W7.cause, 'D2');                      // W6 resolves D2
   assert.equal(fc.W7.causeWork, 'W6');
   assert.equal(fc.W8.sched, 'slip');
-  assert.equal(fc.W8.forecast, '2026-11-23');
-  assert.equal(fc.W10.forecast, '2026-11-28');         // binding constraint is W8
+  assert.equal(fc.W8.forecast, '2026-11-24');                   // R4: business days (11-11 + 9 bd)
+  assert.equal(fc.W10.forecast, '2026-12-01');         // binding constraint is W8 (R4: business days)
   assert.equal(fc.W10.sched, 'slip');
   assert.equal(fc.W10.cause, 'D2');                     // root cause traced through W8 to W6
-  assert.equal(fc.W10.slipDays, 8);
+  assert.equal(fc.W10.slipDays, 11);
   assert.equal(fc.W1.sched, 'done');
-  assert.equal(fc.W4.sched, 'soon');
+  assert.equal(fc.W4.sched, 'slip');                    // R4: implicit data blocker (D5 resolver W2 + 5 bd)
+  assert.equal(fc.W4.cause, 'D5');
   assert.equal(fc.W3.sched, 'ok');
   assert.deepEqual(E.dependents(docs, 'W6').sort(), ['W10', 'W7', 'W8']);
 });
@@ -188,8 +189,8 @@ test('stepState, projectStats, dataReady, impactOfData, flatSteps', () => {
   assert.deepEqual(s6.blockers, []);
   assert.equal(E.stepState(docs, PRJ, 'vendor-onboarding', 's5', TODAY).status, 'none');
   const st = E.projectStats(docs, PRJ, TODAY);
-  assert.deepEqual([st.total, st.done, st.pct, st.late, st.slip], [11, 2, 18, 1, 3]);
-  assert.equal(st.finish, '2026-11-28');
+  assert.deepEqual([st.total, st.done, st.pct, st.late, st.slip], [11, 2, 18, 1, 5]);
+  assert.equal(st.finish, '2026-12-01');
   assert.equal(st.onTrack, true);
   assert.equal(E.dataReady(docs, 'D4'), true);
   assert.equal(E.dataReady(docs, 'D2'), false);
@@ -402,7 +403,7 @@ test('workload, baselineVariance, suggestWorkFromDiff', () => {
   assert.deepEqual(E.workload(docs, TODAY), wl);           // projectId optional
   const bv = E.baselineVariance(docs, PRJ, 'b1', TODAY);
   assert.deepEqual(bv.find(r => r.workId === 'W6'), { workId: 'W6', plannedDue: '2026-11-03', forecast: '2026-11-11', varianceDays: 8 });
-  assert.equal(bv.find(r => r.workId === 'W10').varianceDays, 8);
+  assert.equal(bv.find(r => r.workId === 'W10').varianceDays, 11);   // R4: business-day forecast Dec 1
   assert.equal(bv.find(r => r.workId === 'W1').plannedDue, null);
   const sug = E.suggestWorkFromDiff(docs, PRJ);
   assert.ok(sug.some(s => s.step === 's5' && s.pid === 'vendor-onboarding' && !s.resolves));
@@ -446,11 +447,11 @@ test('R2: open-work finish ignores done items; projectSlipDays on the scenario',
   const d = baseDocs();
   d.workItem.find(e => e.id === 'W9').data.doneAt = '2026-12-31';   // a late-recorded done item must not drive the open forecast
   const st = E.projectStats(d, PRJ, TODAY);
-  assert.equal(st.finish, '2026-11-28');
+  assert.equal(st.finish, '2026-12-01');
   assert.equal(st.actualFinish, undefined);
   const bv = E.baselineVariance(deepFreeze(baseDocs()), PRJ, 'b1', TODAY);
   const sum = bv.reduce((a, r) => a + Math.max(0, r.varianceDays || 0), 0);
-  assert.equal(bv.projectSlipDays, 8);                          // 11-28 − 11-20
+  assert.equal(bv.projectSlipDays, 11);                         // 12-01 − 11-20
   assert.notEqual(bv.projectSlipDays, sum);
   assert.ok(Array.isArray(bv) && bv.length === 11);
 });
@@ -503,9 +504,9 @@ test('R2 readiness: stricter tests-passed', () => {
   d = readyDocs(); const firstScript = d.testRun[1].data.results.find(x => x.scriptId).scriptId;
   d.testRun[1].data.results = d.testRun[1].data.results.filter(x => x.scriptId !== firstScript);
   assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').unrun, [firstScript]);
-  d = readyDocs();                                                                 // an older complete UAT run doesn't count
+  d = readyDocs();                                                                 // R4: a later partial UAT run carries earlier passes forward
   d.testRun.push({ id: 'R3', data: { id: 'R3', projectId: PRJ, env: 'uat', at: '2026-11-03T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }] } });
-  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, false);
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
   d = readyDocs();
   d.workItem.push({ id: 'W12', data: { id: 'W12', projectId: PRJ, pid: 'vendor-onboarding', step: 's3', title: 'Fix routing check', owner: 'dk', status: 'prog', start: TODAY, due: TODAY, kind: 'defect', testRef: { runId: 'R2', caseId: 'T2' } } });
   assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').defects, ['W12']);
@@ -617,7 +618,7 @@ test('R3 effectiveAvail drives blockers (missing only) and data-live (fails on e
   assert.equal(E.effectiveAvail(docs, 'D2'), 'missing');
   assert.equal(E.effectiveAvail(docs, 'nope'), 'missing');
   const d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.status = 'done';
-  assert.equal(E.effectiveAvail(d, 'D2'), 'live');
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');            // R4: fix done, awaiting owner confirmation
   const s2 = E.stepState(docs, PRJ, 'vendor-onboarding', 's2', TODAY);
   assert.deepEqual(s2.blockers, ['D5']);                        // red: missing only
   assert.deepEqual(s2.needsLive, ['D1', 'D8']);                 // amber: examples only
@@ -675,13 +676,13 @@ test('R3 check status and summary counts', () => {
 });
 
 test('R3 two-person counts approved non-stale approvals only', () => {
-  const d = readyDocs();                                          // ta approved Compliance and Accounts Payable
+  const d = readyDocs();                                          // ar approved Compliance and Accounts Payable
   d.workItem.find(e => e.id === 'W2').data.updatedAt = '2026-11-02T00:00:00Z';   // Compliance section
   d.workItem.find(e => e.id === 'W10').data.updatedAt = '2026-11-02T00:00:00Z';  // Accounts Payable section
   const c = check(E.readiness(d, PRJ, TODAY), 'two-person');
   assert.equal(c.pass, false); assert.deepEqual(c.items, ['mc']);
   assert.equal(c.detail, 'Only Maya Chen has a current approval; a second approver is needed.');
-  assert.equal(check(E.readiness(readyDocs(), PRJ, TODAY), 'two-person').detail, 'Approved by Tom Alvarez and Maya Chen.');
+  assert.equal(check(E.readiness(readyDocs(), PRJ, TODAY), 'two-person').detail, 'Approved by Ana Ruiz and Maya Chen.');
 });
 
 test('R3 details are plain English with names, never ids', () => {
@@ -691,7 +692,7 @@ test('R3 details are plain English with names, never ids', () => {
   variants.push(v);
   variants.forEach(d => E.readiness(d, PRJ, TODAY).checks.forEach(c => assert.ok(!IDS.test(c.detail) && !/undefined/.test(c.detail), c.id + ': ' + c.detail)));
   const r = E.readiness(baseDocs(), PRJ, TODAY);
-  assert.equal(check(r, 'cutover-plan').detail, 'Rollback owner, rollback plan and hypercare owner are not set.');
+  assert.equal(check(r, 'cutover-plan').detail, 'A runbook task, rollback owner, rollback plan and hypercare owner are not set.');
   assert.match(check(r, 'work-done').detail, /^9 of 11 work items are still open: Sign screening vendor contract, /);
   assert.match(check(r, 'data-live').detail, /Sanctions screening result, Bank remittance details and Payment hold list are missing\./);
   assert.match(check(E.readiness(v, PRJ, TODAY), 'grants-closed').detail, /Still requested: Bank remittance details \(DEV, write\)/);
@@ -745,27 +746,230 @@ test('R3 specDrift plain English; row count from the profile doc; humanPattern',
   assert.equal(E.humanPattern('A{2}9{4}'), '2 capital letters, 4 digits');
 });
 
-test('R3 suggestWorkFromDiff: map order, owners, effort, chained dates and deps', () => {
+test('R4 suggestWorkFromDiff: data-driven deps, gateways, all non-live data, business days', () => {
   const docs = deepFreeze(baseDocs());
   const sug = E.suggestWorkFromDiff(docs, PRJ, TODAY);
   assert.deepEqual(sug.map(s => [s.key, s.step, s.resolves || null]), [
-    ['sug-1', 's1', 'D1'], ['sug-2', 's1', 'D3'], ['sug-3', 's2', 'D8'], ['sug-4', 's5', null], ['sug-5', 'i4', 'D9'], ['sug-6', 'i4', null]]);
-  assert.equal(sug[0].title, 'Connect a live source for Vendor legal name & Tax ID');   // examples-only data gets a resolver too
-  assert.equal(sug[4].title, 'Make Payment hold list available');
-  assert.equal(sug[4].owner, 'ar');                              // data owner for resolvers
-  assert.equal(sug[5].owner, 'ps');                              // step owner otherwise
-  assert.deepEqual(sug[5].deps, ['sug-5']);
+    ['sug-1', 's1', 'D1'], ['sug-2', 's1', 'D3'], ['sug-3', 's2', 'D8'], ['sug-4', 'd1', null], ['sug-5', 's5', null], ['sug-6', 'i4', 'D9'], ['sug-7', 'i4', null]]);
+  assert.equal(sug[0].title, 'Connect a live source for Vendor legal name & Tax ID');
+  assert.equal(sug[3].title, 'Configure routing: Risk tier?');        // new gateway
+  assert.equal(sug[5].title, 'Make Payment hold list available');
+  assert.equal(sug[5].owner, 'ar');                                 // data owner for resolvers
+  assert.equal(sug[6].owner, 'ps');                                 // step owner otherwise
+  assert.deepEqual(sug[6].deps, ['sug-6']);
+  assert.deepEqual(sug[4].deps, []);                                // no chaining by map order
   assert.ok(sug.every(s => s.effortDays === 2));
-  assert.deepEqual(sug.map(s => [s.start, s.due]), [
-    ['2026-11-04', '2026-11-06'], ['2026-11-06', '2026-11-08'], ['2026-11-08', '2026-11-10'],
-    ['2026-11-10', '2026-11-12'], ['2026-11-12', '2026-11-14'], ['2026-11-14', '2026-11-16']]);
-  // a step needing an unfinished existing resolver depends on it and starts after its forecast (W6 → Nov 11)
-  const d = baseDocs();
-  d.process[1].data.tobe.splice(1, 0, { id: 'i0', title: 'Check bank on file', owner: 'lp', data: ['D2'] });
-  d.dataElement.forEach(e => { if (e.data.avail === 'example') e.data.avail = 'live'; });
-  const s2 = E.suggestWorkFromDiff(d, PRJ, TODAY).find(s => s.step === 'i0');
+  assert.deepEqual(sug.slice(0, 6).map(s => [s.start, s.due]), Array(6).fill(['2026-11-04', '2026-11-06']));
+  assert.deepEqual([sug[6].start, sug[6].due], ['2026-11-06', '2026-11-10']);   // Fri + 2 business days = Tue
+  // resolvers for non-live data used by ANY to-be step, even unchanged ones
+  const d = baseDocs(); d.dataElement.push({ id: 'DZ', data: { id: 'DZ', name: 'Bank cut-off calendar', owner: 'lp', avail: 'missing', fields: [] } });
+  d.process[1].data.tobe.find(n => n.id === 'i3').data = ['D2', 'D4', 'DZ'];
+  d.process[1].data.asis.find(n => n.id === 'b3').data = ['D2', 'D4', 'DZ'];                  // i3 stays unchanged ("same")
+  const s3 = E.suggestWorkFromDiff(d, PRJ, TODAY);
+  assert.ok(s3.some(x => x.resolves === 'DZ' && x.step === 'i3'));
+  assert.ok(!s3.some(x => x.step === 'i3' && !x.resolves));
+  // a step needing an unfinished existing resolver depends on it and starts at its forecast (W6 → Nov 11)
+  const e = baseDocs();
+  e.process[1].data.tobe.splice(1, 0, { id: 'i0', title: 'Check bank on file', owner: 'lp', data: ['D2'] });
+  const s2 = E.suggestWorkFromDiff(e, PRJ, TODAY).find(x => x.step === 'i0');
   assert.deepEqual(s2.deps, ['W6']);
-  assert.ok(s2.start >= '2026-11-11', s2.start);
-  // without a today argument dates anchor on the project's latest due date
-  assert.equal(E.suggestWorkFromDiff(docs, PRJ)[0].start, '2026-11-20');
+  assert.deepEqual([s2.start, s2.due], ['2026-11-11', '2026-11-13']);
+  assert.equal(E.suggestWorkFromDiff(docs, PRJ)[0].start, '2026-11-20');   // anchor: latest project due
+  // weekend anchor rolls to Monday
+  assert.equal(E.suggestWorkFromDiff(docs, PRJ, '2026-11-07')[0].start, '2026-11-09');
+});
+
+/* ================================ Round 4 ================================ */
+test('R4 effectiveAvail: pending until the data owner confirms', () => {
+  const d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.status = 'done';
+  const d2 = d.dataElement.find(e => e.id === 'D2').data;
+  d2.owner = 'lp';
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+  assert.equal(E.dataReady(d, 'D2'), false);
+  const s3 = E.stepState(d, PRJ, 'vendor-onboarding', 's3', TODAY);
+  assert.deepEqual(s3.blockers, []); assert.deepEqual(s3.pending, ['D2']); assert.ok(s3.needsLive.includes('D2'));
+  d2.liveConfirmedBy = 'dk'; d2.liveSource = 'Treasury API';      // not the owner
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+  d2.liveConfirmedBy = 'lp'; d2.liveSource = '';                  // owner but no source
+  assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
+  d2.liveSource = 'Treasury portal API';
+  assert.equal(E.effectiveAvail(d, 'D2'), 'live');
+  const e = baseDocs(); e.dataElement.find(x => x.id === 'D1').data.owner = 'mc';
+  Object.assign(e.dataElement.find(x => x.id === 'D1').data, { liveConfirmedBy: 'mc', liveSource: 'Vendor portal' });
+  assert.equal(E.effectiveAvail(e, 'D1'), 'live');                // examples element confirmed live by its owner
+  // gate: pending fails data-live with "awaiting <owner> to confirm"
+  const r = readyDocs(); const rd2 = r.dataElement.find(x => x.id === 'D2').data;
+  rd2.avail = 'missing'; rd2.owner = 'lp';
+  const c = check(E.readiness(r, PRJ, TODAY), 'data-live');
+  assert.equal(c.pass, false); assert.deepEqual(c.pending, ['D2']);
+  assert.equal(c.awaiting[0].text, 'awaiting Leo Park to confirm');
+  assert.match(c.detail, /Bank remittance details: fix done, awaiting Leo Park to confirm it is live\./);
+});
+
+test('R4 sign-off: sections from touches, project owner excluded, signoffOpen', () => {
+  let d = readyDocs();
+  d.process[0].data.tobe.find(n => n.id === 's1').touches = ['Procurement', 'pmo'];   // PMO named in a tag (case-insensitive)
+  let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.ok(bu.sections.includes('PMO')); assert.deepEqual(bu.unsigned, ['PMO']);
+  d.approval.push({ id: 'AP7', data: { id: 'AP7', projectId: PRJ, bu: 'PMO', approver: 'ta', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true } });
+  let r = E.readiness(d, PRJ, TODAY);
+  assert.deepEqual(check(r, 'bu-signoff').unsigned, ['PMO']);      // ta is the project owner: doesn't count
+  assert.match(check(r, 'bu-signoff').detail, /Approvals by the project owner \(Tom Alvarez\) do not count\./);
+  assert.equal(check(r, 'bu-signoff').excludedApprover, 'ta');
+  d.approval.find(a => a.id === 'AP7').data.approver = 'ps';
+  assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
+  // owner approvals don't count toward two-person either
+  d = readyDocs(); d.approval.forEach(a => { if (a.data.approver === 'ar') a.data.approver = 'ta'; });
+  r = E.readiness(d, PRJ, TODAY);
+  assert.equal(check(r, 'two-person').pass, false);
+  assert.match(check(r, 'two-person').detail, /The project owner \(Tom Alvarez\) does not count\./);
+  // signoffOpen
+  assert.equal(E.readiness(readyDocs(), PRJ, TODAY).signoffOpen, true);
+  assert.equal(E.readiness(baseDocs(), PRJ, TODAY).signoffOpen, false);
+  d = readyDocs(); d.approval = [];
+  r = E.readiness(d, PRJ, TODAY);
+  assert.equal(r.pass, false); assert.equal(r.signoffOpen, true);  // only sign-off missing
+});
+
+test('R4 exceptions include process edits, with names', () => {
+  const d = readyDocs(); d.process[1].data.updatedAt = '2026-11-03T00:00:00Z';
+  const ex = check(E.readiness(d, PRJ, TODAY), 'exceptions');
+  assert.deepEqual(ex.items, ['process:invoice-approval']);
+  assert.equal(ex.detail, 'The Invoice Approval process was changed after sign-off; its section needs re-approval.');
+});
+
+function depDocs(extra) {
+  const W = (id, start, due, more) => ({ id, data: Object.assign({ id, projectId: 'P', pid: 'x', step: 'y', title: 'Item ' + id, owner: 'mc', status: 'idle', start, due, deps: [] }, more) });
+  return { workItem: [
+    W('A', '2026-11-04', '2026-11-10', { effortDays: 3 }),
+    W('B', '2026-11-04', '2026-11-06', { effortDays: 2, deps: [{ id: 'A', type: 'SS', lag: 1 }] }),
+    W('C', '2026-11-04', '2026-11-06', { effortDays: 2, deps: [{ id: 'A', type: 'FF', lag: 2 }] }),
+    W('D', '2026-11-04', '2026-11-06', { effortDays: 1, deps: [{ id: 'A', type: 'FS', lag: 1 }] }),
+    W('E', '2026-11-04', '2026-11-06', { effortDays: 1, deps: ['A'] }),
+  ].concat(extra || []), project: [{ id: 'P', data: { id: 'P', processes: [], target: '2026-12-31' } }] };
+}
+test('R4 dependency types FS/SS/FF with lag (business days)', () => {
+  const docs = deepFreeze(depDocs());
+  const fc = E.forecastAll(docs, TODAY);
+  assert.equal(fc.A.forecast, '2026-11-10'); assert.equal(fc.A.start, '2026-11-05');
+  assert.equal(fc.B.forecast, '2026-11-10');   // SS: A start Nov 5 + 1 lag = Nov 6, + 2 effort = Nov 10
+  assert.equal(fc.C.forecast, '2026-11-12');   // FF: A finish Nov 10 + 2 lag
+  assert.equal(fc.D.forecast, '2026-11-12');   // FS: Nov 10 + 1 lag + 1 effort
+  assert.equal(fc.E.forecast, '2026-11-11');   // string dep = FS, lag 0
+  assert.deepEqual(fc.B.basis, { kind: 'dep', ref: 'A', type: 'SS', lag: 1, from: '2026-11-05', dur: 2 });
+  assert.deepEqual(E.dependents(docs, 'A').sort(), ['B', 'C', 'D', 'E']);
+  assert.equal(E.projectStats(docs, 'P', TODAY).blocked, 4);
+  assert.match(E.explainForecast(docs, 'B', TODAY)[1].text, /^Starts with "Item A" \(starting Nov 5\) \+ 1 business day lag → \+2 business days effort → Nov 10$/);
+  assert.match(E.explainForecast(docs, 'C', TODAY)[1].text, /^Finishes with "Item A" \(forecast Nov 10\) \+ 2 business days lag → Nov 12$/);
+});
+
+test('R4 implicit data blocker, effortDays duration, moved-due-date fix', () => {
+  const fc = E.forecastAll(deepFreeze(baseDocs()), TODAY);
+  assert.deepEqual([fc.W4.basis.kind, fc.W4.cause, fc.W4.causeWork, fc.W4.via], ['data', 'D5', 'W2', 'W2']);
+  assert.equal(fc.W4.forecast, '2026-11-17');                    // W2 forecast Nov 10 + 5 business days
+  let d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.effortDays = 2;
+  assert.equal(E.forecastAll(d, TODAY).W6.forecast, '2026-11-06');   // today + 2 business days
+  // moving the due date later clears the old slip (no effortDays)
+  d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.due = '2026-11-20';
+  let f = E.forecastAll(d, TODAY).W6;
+  assert.deepEqual([f.forecast, f.sched, f.slipDays], ['2026-11-20', 'ok', 0]);
+  // with effortDays: forecast = max(due, today + effort)
+  d.workItem.find(e => e.id === 'W6').data.effortDays = 3;
+  assert.equal(E.forecastAll(d, TODAY).W6.forecast, '2026-11-20');
+  d.workItem.find(e => e.id === 'W6').data.due = '2026-11-05';
+  f = E.forecastAll(d, TODAY).W6;
+  assert.deepEqual([f.forecast, f.sched], ['2026-11-09', 'slip']);  // Wed + 3 business days = Mon
+});
+
+test('R4 business days helpers', () => {
+  assert.equal(E.addBusinessDays('2026-11-06', 1), '2026-11-09');   // Fri → Mon
+  assert.equal(E.addBusinessDays('2026-11-07', 0), '2026-11-09');   // Sat rolls to Mon
+  assert.equal(E.addBusinessDays('2026-11-09', -1), '2026-11-06');
+  assert.equal(E.businessDaysBetween('2026-11-06', '2026-11-09'), 1);
+  assert.equal(E.businessDaysBetween('2026-11-09', '2026-11-06'), -1);
+  let n = 0; for (let ms = Date.UTC(2026, 0, 2); ms <= Date.UTC(2026, 11, 31); ms += 86400000) { const w = new Date(ms).getUTCDay(); if (w && w !== 6) n++; }
+  assert.equal(E.businessDaysBetween('2026-01-01', '2026-12-31'), n);
+  assert.equal(E.businessDaysBetween('2026-01-01', '2026-12-31'), 260);
+});
+
+test('R4 explainForecast: human chain with names', () => {
+  const lines = E.explainForecast(deepFreeze(baseDocs()), 'W10', TODAY).map(l => l.text);
+  assert.deepEqual(lines, [
+    '"Stand up structured bank capture" has not started and its start date (Oct 27) has passed → today (Nov 4) + 5 business days effort → Nov 11',
+    'Waits for "Stand up structured bank capture" (forecast Nov 11) → +9 business days effort → Nov 24',
+    'Waits for "ERP vendor write integration" (forecast Nov 24) → +5 business days effort → Dec 1',
+    'Due Nov 20; forecast Dec 1 (7 business days late)',
+  ]);
+  assert.match(E.explainForecast(baseDocs(), 'W4', TODAY)[1].text, /^Needs Sanctions screening result, which "Sign screening vendor contract" makes available \(forecast Nov 10\)/);
+  assert.match(E.explainForecast(baseDocs(), 'W11', TODAY).slice(-1)[0].text, /\(on plan\)$/);
+  assert.equal(E.explainForecast(baseDocs(), 'W1', TODAY)[0].text, '"Launch vendor portal upload" finished on Oct 20');
+  assert.deepEqual(E.explainForecast(baseDocs(), 'nope', TODAY), []);
+});
+
+test('R4 sprints and sprintOf', () => {
+  const docs = deepFreeze(baseDocs());
+  const project = docs.project[0].data;
+  const sp = E.sprints(Object.assign({ id: PRJ }, project), TODAY, docs);
+  assert.deepEqual(sp[0], { id: 'S1', name: 'Sprint 1', start: '2026-10-05', end: '2026-10-18' });   // Monday before W1 start
+  assert.equal(sp.length, 6);
+  assert.deepEqual(sp[5], { id: 'S6', name: 'Sprint 6', start: '2026-12-14', end: '2026-12-27' });   // covers target Dec 15
+  const p = Object.assign({ id: PRJ }, project);
+  assert.equal(E.sprintOf(p, { due: '2026-11-03' }, docs, TODAY), 'S3');
+  assert.equal(E.sprintOf(p, { due: '2026-11-03', sprintId: 'S5' }, docs, TODAY), 'S5');
+  assert.equal(E.sprintOf(p, { due: '2026-11-03', sprintId: 'gone' }, docs, TODAY), 'S3');
+  const explicit = { id: 'X', sprints: [{ id: 'a', name: 'Alpha', start: '2026-11-01', end: '2026-11-14' }] };
+  assert.deepEqual(E.sprints(explicit, TODAY), [{ id: 'a', name: 'Alpha', start: '2026-11-01', end: '2026-11-14' }]);
+  assert.equal(E.sprintOf(explicit, { due: '2026-11-20' }), null);
+  assert.deepEqual(E.sprints({ id: 'Y', target: '2026-11-30' }, TODAY).map(x => x.start), ['2026-11-02', '2026-11-16', '2026-11-30']);   // no docs: from today's week
+});
+
+test('R4 profile-derived test cases reproduce observed shapes synthetically', () => {
+  const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
+  const prof = E.profileCsv(CSV, {});
+  const cases = E.generateTests(d2, prof).filter(c => c.origin === 'profile');
+  const rt = cases.filter(c => c.field === 'Routing number');
+  const eight = rt.find(c => /^Observed shape: 8 digits/.test(c.note));
+  assert.ok(eight && /^\d{8}$/.test(eight.input) && eight.expect === 'reject');
+  const nine = rt.find(c => /^Observed shape: 9 digits/.test(c.note));
+  assert.ok(nine && aba(nine.input) && nine.expect === 'accept');
+  const blank = E.generateTests(d2, prof).find(c => c.field === 'Bank name' && c.input === '');   // blanks observed: deduped into the spec case
+  assert.ok(blank.observed && blank.expect === 'reject' && /also observed in the extract: empty values observed \(1\)/.test(blank.note), blank.note);
+  assert.ok(cases.some(c => c.field === 'Account holder' && /Unicode/.test(c.note)));
+  assert.ok(cases.some(c => /Longest observed length/.test(c.note)));
+  const raws = RAW_ROWS.flat().filter(v => v.length >= 3);
+  cases.forEach(c => assert.ok(!raws.some(r => c.input.includes(r)), 'raw value: ' + c.input));
+  assert.ok(cases.every(c => !/undefined/.test(c.note)));
+});
+
+test('R4 UAT scripts: multi-step, names only', () => {
+  const scripts = E.generateUatScripts(deepFreeze(baseDocs()), PRJ);
+  const s1 = scripts.find(x => x.id === 'uat-vendor-onboarding-s1');
+  assert.deepEqual(s1.steps, [{ action: 'Maya Chen: Vendor uploads W-9 and COI using Vendor legal name & Tax ID and Certificate of insurance', expected: 'Vendor legal name & Tax ID and Certificate of insurance are recorded correctly' }]);
+  const s3 = scripts.find(x => x.id === 'uat-vendor-onboarding-s3');
+  assert.deepEqual(s3.steps, [{ action: 'Leo Park: Capture banking details using Bank remittance details', expected: 'Bank remittance details is recorded correctly' }]);
+  const s6 = scripts.find(x => x.id === 'uat-vendor-onboarding-s6');
+  assert.match(s6.then, /Dev Kumar now owns the step instead of Maya Chen/);
+  const br = scripts.find(x => x.id === 'uat-vendor-onboarding-d1-high');
+  assert.equal(br.steps.length, 2);
+  assert.equal(br.steps[1].action, 'Priya Shah: Enhanced due diligence');
+  scripts.forEach(sc => {
+    const text = [sc.title, sc.given, sc.when, sc.then].concat(sc.steps.flatMap(x => [x.action, x.expected])).join(' | ');
+    assert.ok(!IDS.test(text) && !/undefined/.test(text), sc.id + ': ' + text);
+  });
+});
+
+test('R4 coverage: latest result per item across all runs in the env, by project', () => {
+  let d = readyDocs();
+  // partial CI import: newer UAT run has only T1; T2 and the scripts carry forward from the earlier run
+  d.testRun.push({ id: 'R5', data: { id: 'R5', projectId: PRJ, env: 'uat', at: '2026-11-03T09:00:00Z', results: [{ caseId: 'T1', outcome: 'pass' }] } });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
+  // a newer failure overrides an earlier pass for that item only
+  d.testRun.push({ id: 'R6', data: { id: 'R6', projectId: PRJ, env: 'uat', at: '2026-11-03T10:00:00Z', results: [{ caseId: 'T2', outcome: 'fail' }] } });
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').failing, ['T2']);
+  // and a later pass clears it
+  d.testRun.push({ id: 'R7', data: { id: 'R7', projectId: PRJ, env: 'uat', at: '2026-11-03T11:00:00Z', results: [{ caseId: 'T2', outcome: 'pass' }] } });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
+  // runs of another project are ignored
+  d.testRun.push({ id: 'R8', data: { id: 'R8', projectId: 'other', env: 'uat', at: '2026-11-04T09:00:00Z', results: [{ caseId: 'T1', outcome: 'fail' }] } });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
 });
