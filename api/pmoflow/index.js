@@ -477,11 +477,13 @@ module.exports = async function (context, req) {
       if (!de) return fail(404, 'unknown data element');
       const at = new Date().toISOString();
       const source = String(de.source || '').trim();
-      const ok = !!source && de.avail !== 'missing';
+      /* A finished resolver means the integration was built, so the probe can reach it even while avail still reads 'missing'. */
+      const resolverDone = (st.docs.workItem || []).some(w => w.data && w.data.resolves === dataId && w.data.status === 'done');
+      const ok = !!source && (de.avail !== 'missing' || resolverDone);
       const detail = ok
         ? `Simulated in-tenant probe reached ${source} and read one ${de.name} record (field names only; no values kept).`
         : !source ? `No source is recorded for ${de.name}, so there is nothing to probe. Add the source system first.`
-          : `Simulated in-tenant probe found no integration for ${de.name} at ${source}; it is still marked missing.`;
+          : `Simulated in-tenant probe found no integration for ${de.name} at ${source}: it is marked missing and its fix isn't done yet.`;
       const check = { ok, at, detail, by: actorOf(body) };
       await store.putDoc(wsId, 'dataElement', dataId, Object.assign({}, de, { check }));
       await store.appendEvent(wsId, { actor: actorOf(body), action: 'check', ref: 'dataElement:' + dataId,

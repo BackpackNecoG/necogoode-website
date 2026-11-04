@@ -20,7 +20,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
 (async () => {
   const browser = await chromium.launch();
   /* fresh context = fresh sandbox; a unique forwarded IP keeps the per-IP daily create limit out of the way */
-  const ip = `198.51.100.${1 + ((Math.random() * 250) | 0)}`;
+  const ip = `10.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}`;
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
   const page = await ctx.newPage();
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));

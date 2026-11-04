@@ -21,7 +21,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const browser = await chromium.launch();
   /* Local runs all come from 127.0.0.1 and would hit the 5-workspaces-per-IP-per-day limit;
      the dev server honours x-forwarded-for, so each run uses its own documentation-range test IP. */
-  const testIp = `198.51.100.${1 + Math.floor(Math.random() * 254)}`;
+  const testIp = `10.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}`;
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': testIp } });
   const page = await ctx.newPage();
   const errors = [];
