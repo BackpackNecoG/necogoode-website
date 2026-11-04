@@ -11,11 +11,12 @@ const ROUTES = [
   [/^\/data\/([\w-]+)$/, 'data', m => ({ did: m[1] })],
   [/^\/project\/([\w-]+)$/, 'project', m => ({ prj: m[1] })],
   [/^\/portfolio$/, 'portfolio', () => ({})],
+  [/^\/dashboard$/, 'dashboard', () => ({})],
   [/^\/release\/([\w-]+)$/, 'release', m => ({ prj: m[1] })],
   [/^\/testing\/([\w-]+)$/, 'testing', m => ({ prj: m[1] })],
   [/^\/import$/, 'importsop', () => ({})],
 ];
-const NAV = { home: 'home', processes: 'process', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', release: 'release', testing: 'testing', importsop: 'process' };
+const NAV = { home: 'home', processes: 'process', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process' };
 
 const pageCache = {};
 async function loadPage(name) {
@@ -36,7 +37,7 @@ function firstProcess() { const p = store.list('process')[0]; return p ? p.id : 
 function renderChrome(active) {
   const prj = firstProject(), proc = firstProcess();
   const items = [['home', '/', 'Workspace'], ['process', '/processes', 'Processes'], ['project', '/project/' + prj, 'Project'],
-    ['release', '/release/' + prj, 'Release'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio']];
+    ['release', '/release/' + prj, 'Release'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio'], ['dashboard', '/dashboard', 'Dashboard']];
   document.getElementById('nav').innerHTML = items.map(([k, p, l]) => `<a href="${link(p)}" data-link class="${active === k ? 'on' : ''}">${l}</a>`).join('');
   document.getElementById('brand').setAttribute('href', link('/'));
   const sel = document.getElementById('persona');
