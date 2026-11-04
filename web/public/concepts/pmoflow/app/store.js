@@ -70,6 +70,7 @@ export const store = {
     if (store.state.offline) return data;
     try { await http('PUT', `/ws/${store.state.ws}/doc/${type}/${encodeURIComponent(id)}`, { data, actor: store.state.me, summary: summary || `Updated ${type}` }); }
     catch (e) { store.state.error = e.message; await store.load(); throw e; }
+    store.emit(); /* re-render after the server has the event, so history panels refresh immediately */
     return data;
   },
 
@@ -79,6 +80,7 @@ export const store = {
     if (store.state.offline) return;
     try { await http('DELETE', `/ws/${store.state.ws}/doc/${type}/${encodeURIComponent(id)}`, { actor: store.state.me, summary: summary || `Deleted ${type}` }); }
     catch (e) { store.state.error = e.message; await store.load(); throw e; }
+    store.emit();
   },
 
   async events(ref, limit) {
