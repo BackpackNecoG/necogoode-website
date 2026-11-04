@@ -22,13 +22,32 @@
       "statusCode": 301
     },
     {
+      "route": "/concepts/pmoflow",
+      "redirect": "/concepts/pmoflow/",
+      "statusCode": 301
+    },
+    {
+      "route": "/concepts/pmoflow/*",
+      "rewrite": "/concepts/pmoflow/index.html",
+      "headers": {
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
       "route": "/api/bst/*",
-      "allowedRoles": ["anonymous"],
-      "headers": { "Cache-Control": "no-store" }
+      "allowedRoles": [
+        "anonymous"
+      ],
+      "headers": {
+        "Cache-Control": "no-store"
+      }
     },
     {
       "route": "/api/*",
-      "allowedRoles": ["anonymous"]
+      "allowedRoles": [
+        "anonymous"
+      ]
     }
   ],
   "globalHeaders": {

@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow" />
+<title>PMOFlow — concept</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<style>
+  :root{
+    --bg:#f6f7fb; --panel:#ffffff; --ink:#111827; --ink2:#4b5563; --ink3:#9ca3af; --line:#e5e7eb;
+    --accent:#4f46e5; --accent-soft:#eef2ff;
+    --done:#16a34a; --done-fill:#ecfdf3; --prog:#2563eb; --prog-fill:#eff6ff; --idle-fill:#f9fafb;
+    --soon:#f59e0b; --late:#dc2626; --late-soft:#fef2f2; --soon-soft:#fffbeb;
+    --live:#16a34a; --example:#d97706; --missing:#dc2626;
+    --r:12px; --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  button{font:inherit;cursor:pointer}
+  /* top bar */
+  .top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:10px 18px;background:#0f1020;color:#fff}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:700;letter-spacing:.2px}
+  .brand .mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#818cf8,#4f46e5);display:grid;place-items:center;font-size:12px}
+  .top nav{display:flex;gap:4px;margin-left:8px;flex-wrap:wrap}
+  .top nav a{padding:6px 10px;border-radius:8px;color:#c7c9e0;font-size:13px}
+  .top nav a.on,.top nav a:hover{background:#25264a;color:#fff}
+  .top .tag{margin-left:auto;font-size:11px;color:#a5a8d6;border:1px solid #33355e;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  main{max-width:1440px;margin:0 auto;padding:18px}
+  /* header block */
+  .hdr{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);display:grid;grid-template-columns:1fr auto;gap:12px}
+  .crumbs{font-size:12px;color:var(--ink3);margin-bottom:4px}
+  .crumbs a{color:var(--accent)}
+  .hdr h1{margin:0;font-size:20px}
+  .hdr p{margin:4px 0 0;color:var(--ink2);max-width:820px}
+  .hdr input.title{font-size:20px;font-weight:700;border:1px dashed var(--line);border-radius:8px;padding:4px 8px;width:100%;max-width:560px}
+  .hdr textarea{width:100%;max-width:820px;border:1px dashed var(--line);border-radius:8px;padding:6px 8px;font:inherit;color:var(--ink2);margin-top:6px;resize:vertical}
+  .res{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
+  .res .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3);margin-right:2px}
+  .person{display:inline-flex;align-items:center;gap:6px;padding:3px 9px 3px 3px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:12px}
+  .av{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:10px;font-weight:700;flex:none}
+  .person small{color:var(--ink3)}
+  .hdr-side{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fff}
+  .seg button{border:0;background:#fff;padding:6px 12px;font-size:12px;color:var(--ink2)}
+  .seg button.on{background:var(--accent);color:#fff}
+  .btn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 12px;font-size:13px}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .kpis{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:6px 10px;min-width:92px;background:#fff}
+  .kpi b{display:block;font-size:18px}
+  .kpi span{font-size:11px;color:var(--ink3)}
+  .bar{height:6px;border-radius:99px;background:#eef0f4;overflow:hidden;width:220px}
+  .bar i{display:block;height:100%;background:var(--done)}
+  /* layout */
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;margin-top:16px}
+  .canvas{background:var(--panel) radial-gradient(#e7e9f2 1px,transparent 1px) 0 0/18px 18px;border:1px solid var(--line);border-radius:var(--r);padding:22px 12px 40px;min-height:600px;overflow-x:auto}
+  .side{display:flex;flex-direction:column;gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:14px}
+  .card h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink2);display:flex;align-items:center;gap:6px}
+  .card h3 .n{margin-left:auto;background:#f3f4f6;color:var(--ink2);border-radius:99px;padding:1px 8px;font-size:11px}
+  .row{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid #f1f2f5}
+  .row:first-of-type{border-top:0;padding-top:0}
+  .row .t{font-weight:600;font-size:13px}
+  .row .s{font-size:12px;color:var(--ink2)}
+  .row .r{margin-left:auto;text-align:right;font-size:12px;white-space:nowrap}
+  .row.click{cursor:pointer}
+  .row.click:hover .t{color:var(--accent)}
+  /* flow */
+  .flow{display:flex;flex-direction:column;align-items:center;min-width:max-content;margin:0 auto}
+  .conn{width:2px;height:26px;background:#c7cbd6;position:relative}
+  .conn.add{height:34px}
+  .conn .plus{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:20px;height:20px;border-radius:50%;border:1px solid #c7cbd6;background:#fff;color:var(--ink3);font-size:14px;line-height:17px;text-align:center;opacity:0;transition:.15s}
+  .flow:hover .conn .plus{opacity:1}
+  .node{width:380px;max-width:calc(100vw - 70px);background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);cursor:pointer;position:relative;transition:transform .12s, box-shadow .12s}
+  .node:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(16,24,40,.10)}
+  .node .nh{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #f1f2f5}
+  .node .ic{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:13px;flex:none}
+  .node .ttl{font-weight:650;font-size:14px}
+  .node .num{font-size:11px;color:var(--ink3)}
+  .node .nb{padding:8px 12px 10px;display:flex;flex-direction:column;gap:7px}
+  .node .meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--ink2)}
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--ink2);white-space:nowrap}
+  .chip .dot{width:7px;height:7px;border-radius:50%}
+  .chip.touch{background:#f5f3ff;border-color:#e4defc;color:#5b21b6}
+  .chip.data{cursor:pointer}
+  .chip.data:hover{border-color:var(--accent)}
+  .chip.block{background:var(--late-soft);border-color:#fecaca;color:var(--late);font-weight:600}
+  .chip.diff-new{background:#ecfeff;border-color:#a5f3fc;color:#0e7490;font-weight:700;font-size:10px;letter-spacing:.5px}
+  .chip.diff-changed{background:#fdf4ff;border-color:#f5d0fe;color:#a21caf;font-weight:700;font-size:10px;letter-spacing:.5px}
+  .node.trigger .ic{background:#fff7ed;color:#c2410c}
+  .node.end{width:auto;padding:7px 16px;border-radius:999px;font-size:12px;color:var(--ink2);cursor:default}
+  /* project state encoding: fill = status, border = schedule */
+  .pm .node.s-done{background:var(--done-fill);border-color:#bbf7d0}
+  .pm .node.s-done .ic{background:#dcfce7;color:var(--done)}
+  .pm .node.s-prog{background:var(--prog-fill)}
+  .pm .node.s-prog .ic{background:#dbeafe;color:var(--prog)}
+  .pm .node.s-idle{background:var(--idle-fill)}
+  .pm .node.sch-soon{border:2px solid var(--soon)}
+  .pm .node.sch-late{border:2px solid var(--late)}
+  .pm .node.s-prog::before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:4px;border-radius:4px;background:var(--prog)}
+  .node.dim{opacity:.28}
+  .node.hl{outline:3px solid var(--accent);outline-offset:2px}
+  .badge{font-size:11px;padding:1px 7px;border-radius:99px;font-weight:600}
+  .b-done{background:#dcfce7;color:#15803d}.b-prog{background:#dbeafe;color:#1d4ed8}.b-idle{background:#f3f4f6;color:#4b5563}
+  .b-late{background:var(--late-soft);color:var(--late)}.b-soon{background:var(--soon-soft);color:#b45309}.b-ok{background:#f3f4f6;color:#4b5563}
+  /* decision */
+  .decision{display:flex;flex-direction:column;align-items:center}
+  .diamond{background:#fff;border:1px solid #fcd34d;color:#92400e;font-weight:650;font-size:13px;padding:8px 16px;border-radius:10px;box-shadow:var(--shadow);display:flex;gap:8px;align-items:center}
+  .branches{display:flex;gap:28px;position:relative;padding-top:26px;margin-top:0}
+  .branches::before{content:"";position:absolute;top:0;left:var(--bl,25%);right:var(--br,25%);height:2px;background:#c7cbd6}
+  .branch{display:flex;flex-direction:column;align-items:center;position:relative}
+  .branch::before{content:"";position:absolute;top:-26px;left:50%;width:2px;height:26px;background:#c7cbd6}
+  .blabel{font-size:11px;font-weight:700;color:#92400e;background:#fffbeb;border:1px solid #fde68a;padding:1px 8px;border-radius:99px;margin-bottom:8px;position:relative;z-index:1}
+  .passthru{font-size:12px;color:var(--ink3);border:1px dashed #d1d5db;border-radius:10px;padding:10px 16px;background:#fff;width:200px;text-align:center}
+  .merge{width:60%;height:2px;background:#c7cbd6;margin-top:0}
+  /* lanes */
+  .lanes{display:grid;gap:0;min-width:max-content}
+  .lane-h{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);padding:8px 10px;font-size:12px;font-weight:650;display:flex;gap:6px;align-items:center}
+  .lane-c{padding:8px 10px;border-right:1px dashed #e5e7eb;min-height:74px;display:flex;align-items:center;justify-content:center}
+  .lanes .node{width:230px}
+  .lanes .node .nb .chips{display:none}
+  /* legend */
+  .legend{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:12px;color:var(--ink2)}
+  .sw{display:inline-block;width:26px;height:16px;border-radius:5px;vertical-align:-3px;margin-right:6px;border:1px solid var(--line)}
+  /* drill */
+  .kgrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:16px}
+  .kc{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow)}
+  .kc span{font-size:11px;color:var(--ink3);text-transform:uppercase;letter-spacing:.6px}
+  .kc b{display:block;font-size:20px;margin-top:2px}
+  .kc small{color:var(--ink2)}
+  .two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:16px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+  td{padding:8px;border-bottom:1px solid #f1f2f5;vertical-align:top}
+  tr.click{cursor:pointer} tr.click:hover td{background:#fafaff}
+  .sub{display:flex;gap:10px;align-items:flex-start;padding:10px 0;position:relative}
+  .sub .dotc{width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:11px;font-weight:700;border:2px solid #d1d5db;background:#fff;color:var(--ink3);z-index:1}
+  .sub.done .dotc{background:var(--done);border-color:var(--done);color:#fff}
+  .sub.prog .dotc{border-color:var(--prog);color:var(--prog)}
+  .sub.blocked .dotc{border-color:var(--late);color:var(--late)}
+  .subs{position:relative}
+  .subs::before{content:"";position:absolute;left:10px;top:18px;bottom:18px;width:2px;background:#e5e7eb}
+  .home-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-top:12px}
+  .tile{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:16px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px;transition:.12s}
+  .tile:hover{border-color:#c7d2fe;transform:translateY(-1px)}
+  .tile h4{margin:0;font-size:15px}
+  .tile p{margin:0;color:var(--ink2);font-size:13px}
+  .sect{display:flex;align-items:center;gap:10px;margin-top:22px}
+  .sect h2{margin:0;font-size:15px}
+  .hint{font-size:12px;color:var(--ink3)}
+  .form{border:1px dashed #c7d2fe;background:#fafaff;border-radius:12px;padding:12px;width:380px;max-width:calc(100vw - 70px);display:flex;flex-direction:column;gap:8px}
+  .form input,.form select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;width:100%;background:#fff}
+  .form label{font-size:11px;color:var(--ink3);text-transform:uppercase;letter-spacing:.5px}
+  .pgroup{margin-bottom:8px}
+  .pgroup-h{display:flex;align-items:center;gap:8px;margin:6px auto 14px;width:max-content;max-width:100%;padding:6px 12px;border-radius:999px;background:#fff;border:1px solid var(--line);font-size:12px;font-weight:650;box-shadow:var(--shadow)}
+  .pgroup + .pgroup{margin-top:34px;padding-top:24px;border-top:2px dashed #dfe2ea}
+  .note{font-size:12px;color:var(--ink2);background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  @media (max-width:1060px){ .grid{grid-template-columns:1fr} .kgrid{grid-template-columns:repeat(2,minmax(0,1fr))} .two{grid-template-columns:1fr} }
+  @media (max-width:640px){ main{padding:12px} .hdr{grid-template-columns:1fr} .hdr-side{align-items:flex-start} .kpis{justify-content:flex-start} .top .tag{display:none} .canvas{padding:16px 10px 30px} .bar{width:160px}
+    .canvas > .flow, .pgroup > .flow{min-width:0;width:100%} .flow .flow{width:100%} .node,.form{width:100%;max-width:none}
+    .branches{flex-direction:column;gap:14px;padding-top:12px;width:100%} .branches::before,.branch::before{display:none} .branch{width:100%} .passthru{width:auto;align-self:stretch}}
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" id="brand" href="/concepts/pmoflow/" data-link><span class="mark">▾</span>PMOFlow</a>
+  <nav id="nav"></nav>
+  <span class="tag">Concept · demo data (Northwind)</span>
+</header>
+<main id="app"></main>
+
+<script>
+/* =====================================================================
+   PMOFlow concept — single-file SPA. All data is fictional (Northwind).
+   Routes (history API, base /concepts/pmoflow):
+     /                          workspace
+     /process/:pid              process design view (map | lanes)
+     /process/:pid/step/:sid    step drill-down
+     /project/:prj              project view (linked processes)
+     /data/:did                 data element impact
+     /new                       create new workflow (in-memory only)
+   ===================================================================== */
+const BASE = (() => {
+  const i = location.pathname.indexOf('/concepts/pmoflow');
+  return i >= 0 ? location.pathname.slice(0, i) + '/concepts/pmoflow' : '';
+})();
+const TODAY = new Date('2026-11-04T12:00:00');
+
+const PEOPLE = {
+  mc:{name:'Maya Chen',role:'Process Owner · BA',color:'#7c3aed'},
+  ta:{name:'Tom Alvarez',role:'Project Manager',color:'#0891b2'},
+  ps:{name:'Priya Shah',role:'Compliance SME',color:'#db2777'},
+  lp:{name:'Leo Park',role:'Treasury SME',color:'#ea580c'},
+  ar:{name:'Ana Ruiz',role:'AP Lead',color:'#16a34a'},
+  dk:{name:'Dev Kumar',role:'Integration Eng.',color:'#2563eb'},
+};
+const AVAIL = {
+  live:{label:'Live integration',short:'Live',color:'var(--live)'},
+  example:{label:'Examples only',short:'Examples',color:'var(--example)'},
+  missing:{label:'Missing',short:'Missing',color:'var(--missing)'},
+};
+const DATA = {
+  D1:{name:'Vendor legal name & Tax ID',owner:'mc',source:'W-9 upload (vendor portal)',avail:'example',note:'12 sample W-9s collected; no parser yet.'},
+  D2:{name:'Bank remittance details',owner:'lp',source:'Treasury portal',avail:'missing',note:'Arrives as emailed PDFs. No API or structured capture exists.'},
+  D3:{name:'Certificate of insurance',owner:'ps',source:'Vendor portal upload',avail:'example',note:'Sample COIs on file; expiry dates captured manually.'},
+  D4:{name:'Vendor master record',owner:'ar',source:'ERP vendor API',avail:'live',note:'Read/write API available in sandbox and production.'},
+  D5:{name:'Sanctions screening result',owner:'ps',source:'Screening service API',avail:'missing',note:'Screening vendor contract pending signature.'},
+  D6:{name:'Contract terms',owner:'mc',source:'Contract repository',avail:'live',note:'Metadata API live; terms extracted on upload.'},
+  D7:{name:'Approver matrix',owner:'dk',source:'HR directory',avail:'live',note:'Synced nightly from the directory.'},
+  D8:{name:'Vendor risk tier',owner:'ps',source:'Derived (screening + spend)',avail:'example',note:'Scoring rules drafted; sample outputs only.'},
+};
+
+/* Steps: status = done|prog|idle ; diff = new|changed|null (to-be vs as-is) */
+const PROCESSES = {
+  'vendor-onboarding':{
+    name:'Vendor Onboarding', desc:'From a vendor request to an active, payable vendor with a signed contract. To-be design: screening and banking move from email to system-captured data.',
+    owner:'mc', resources:['mc','ps','lp','ar','dk'],
+    nodes:[
+      {id:'k',type:'trigger',title:'Vendor request submitted',owner:'mc',touches:['Procurement','Request portal'],data:[],status:'done'},
+      {id:'s1',title:'Collect vendor information',owner:'mc',data:['D1','D3'],touches:['Procurement','Vendor portal'],status:'done',due:'2026-10-20',diff:null,
+        subs:[['Send vendor portal invite','done'],['Receive W-9 and COI','done'],['Validate completeness','done']]},
+      {id:'s2',title:'Sanctions & risk screening',owner:'ps',data:['D1','D5','D8'],touches:['Compliance','Screening service'],status:'prog',due:'2026-11-06',diff:'changed',
+        subs:[['Pull vendor identity from W-9','done'],['Call screening API','blocked','D5'],['Score risk tier','idle','D8'],['Record result on vendor file','idle']]},
+      {id:'d1',type:'decision',title:'Risk tier?',branches:[
+        {label:'High',nodes:[{id:'s2a',title:'Enhanced due diligence',owner:'ps',data:['D3','D8'],touches:['Compliance','Risk'],status:'idle',due:'2026-11-12',diff:'new',
+          subs:[['Request financial statements','idle'],['Reference checks','idle'],['Compliance sign-off','idle']]}]},
+        {label:'Standard',nodes:[]},
+      ]},
+      {id:'s3',title:'Capture banking details',owner:'lp',data:['D2'],touches:['Treasury','Treasury portal'],status:'idle',due:'2026-11-03',diff:'new',
+        subs:[['Design structured bank form','idle'],['Verify account (micro-deposit)','idle','D2'],['Dual approval','idle']]},
+      {id:'s4',title:'Create vendor master record',owner:'ar',data:['D1','D2','D4'],touches:['Accounts Payable','ERP'],status:'idle',due:'2026-11-14',diff:'changed',
+        subs:[['Map fields to ERP vendor API','prog','D4'],['Write record via API','idle'],['Attach W-9 & COI','idle']]},
+      {id:'s5',title:'Activate contract',owner:'mc',data:['D6','D4'],touches:['Procurement','Contract repository'],status:'idle',due:'2026-11-18',diff:null,
+        subs:[['Link contract to vendor ID','idle'],['Set renewal reminder','idle']]},
+      {id:'s6',title:'Notify requester & approvers',owner:'dk',data:['D7'],touches:['IT','Email / Teams'],status:'done',due:'2026-10-30',diff:'changed',
+        subs:[['Resolve approvers from matrix','done'],['Send notification','done']]},
+      {id:'e',type:'end',title:'Vendor active & payable'},
+    ]},
+  'invoice-approval':{
+    name:'Invoice Approval', desc:'Received invoice to scheduled payment. Linked because it depends on the vendor master and bank details that onboarding produces.',
+    owner:'ar', resources:['ar','lp','dk'],
+    nodes:[
+      {id:'k',type:'trigger',title:'Invoice received',owner:'ar',touches:['Accounts Payable','AP inbox'],data:[],status:'done'},
+      {id:'i1',title:'Match to PO & vendor master',owner:'ar',data:['D4','D2'],touches:['Accounts Payable','ERP'],status:'prog',due:'2026-11-10',diff:'changed',
+        subs:[['Read vendor master','done','D4'],['3-way match','prog'],['Confirm remit-to account','blocked','D2']]},
+      {id:'i2',title:'Route for approval',owner:'dk',data:['D7'],touches:['IT','Approvals'],status:'idle',due:'2026-11-20',diff:'new',
+        subs:[['Resolve approver by amount','idle','D7'],['Escalate after 48h','idle']]},
+      {id:'i3',title:'Schedule payment',owner:'lp',data:['D2','D4'],touches:['Treasury','Bank'],status:'idle',due:'2026-11-25',diff:null,
+        subs:[['Batch by pay date','idle'],['Release payment file','idle','D2']]},
+      {id:'e',type:'end',title:'Payment scheduled'},
+    ]},
+};
+const PROJECTS = {
+  'vendor-modernization':{
+    name:'Vendor Onboarding Modernization', desc:'Move vendor onboarding from email and PDFs to captured data, and unblock downstream invoice approval.',
+    owner:'ta', resources:['ta','mc','ps','lp','ar','dk'], target:'2026-12-15',
+    processes:['vendor-onboarding','invoice-approval'],
+  }
+};
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const link = p => BASE + p;
+const fmt = d => new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'});
+const days = d => Math.round((new Date(d+'T12:00:00') - TODAY)/86400000);
+function flatSteps(nodes){ const out=[]; nodes.forEach(n=>{ if(n.type==='decision') n.branches.forEach(b=>out.push(...flatSteps(b.nodes))); else if(n.type!=='end' && n.type!=='trigger') out.push(n); }); return out; }
+function allSteps(){ const out=[]; for(const [pid,p] of Object.entries(PROCESSES)) flatSteps(p.nodes).forEach(s=>out.push({pid,p,s})); return out; }
+function findStep(pid,sid){ return flatSteps(PROCESSES[pid].nodes).find(s=>s.id===sid); }
+function blockers(s){ return (s.data||[]).filter(d=>DATA[d] && DATA[d].avail==='missing'); }
+function schedule(s){ if(!s.due||s.status==='done') return 'ok'; const n=days(s.due); return n<0?'late':(n<=5?'soon':'ok'); }
+function readiness(s){ const d=s.data||[]; if(!d.length) return {live:0,total:0}; return {live:d.filter(x=>DATA[x].avail==='live').length,total:d.length}; }
+const statusLbl = {done:'Done',prog:'In progress',idle:'Not started'};
+function av(id,size){ const p=PEOPLE[id]; if(!p) return ''; const ini=p.name.split(' ').map(x=>x[0]).join(''); return `<span class="av" style="background:${p.color};${size?`width:${size}px;height:${size}px`:''}">${ini}</span>`; }
+function person(id){ const p=PEOPLE[id]; return `<span class="person">${av(id)}${esc(p.name)} <small>${esc(p.role)}</small></span>`; }
+function dataChip(d){ const x=DATA[d]; return `<span class="chip data" data-hl="${d}" title="${esc(AVAIL[x.avail].label)} · owner ${esc(PEOPLE[x.owner].name)}"><span class="dot" style="background:${AVAIL[x.avail].color}"></span>${esc(x.name)}</span>`; }
+function schedBadge(s){ const sc=schedule(s); if(s.status==='done') return `<span class="badge b-done">Done ${s.due?fmt(s.due):''}</span>`; if(!s.due) return ''; const n=days(s.due); const txt= sc==='late'?`${-n}d late · ${fmt(s.due)}`: sc==='soon'?`Due in ${n}d · ${fmt(s.due)}`:`Due ${fmt(s.due)}`; return `<span class="badge b-${sc}">${txt}</span>`; }
+const ICON = {trigger:'⚡',step:'▣',lock:'<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'};
+
+/* ---------- node renderers ---------- */
+function nodeHTML(n,pid,idx,mode){
+  if(n.type==='end') return `<div class="node end">● ${esc(n.title)}</div>`;
+  const isPM = mode==='project';
+  const bl = blockers(n), rd = readiness(n);
+  const cls = ['node', n.type==='trigger'?'trigger':'', 's-'+(n.status||'idle'), isPM?'sch-'+schedule(n):''].join(' ');
+  const href = n.type==='trigger' ? '' : `data-go="/process/${pid}/step/${n.id}"`;
+  const diff = isPM && n.diff ? `<span class="chip diff-${n.diff}">${n.diff==='new'?'NEW':'CHANGED'}</span>` : '';
+  return `<div class="${cls}" data-step="${n.id}" data-data="${(n.data||[]).join(',')}" ${href}>
+    <div class="nh"><span class="ic">${n.type==='trigger'?ICON.trigger:idx}</span>
+      <div style="min-width:0"><div class="ttl">${esc(n.title)}</div><div class="num">${n.type==='trigger'?'Kickoff / trigger':esc(PEOPLE[n.owner]?.name||'')}</div></div>
+      <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diff}${n.type!=='trigger'?av(n.owner):''}</div></div>
+    <div class="nb">
+      ${isPM && n.type!=='trigger' ? `<div class="meta"><span class="badge b-${n.status}">${statusLbl[n.status]}</span>${n.status!=='done'?schedBadge(n):''}</div>`:''}
+      ${n.data && n.data.length ? `<div class="chips">${n.data.map(dataChip).join('')}</div>`:''}
+      ${n.touches ? `<div class="chips">${n.touches.map(t=>`<span class="chip touch"># ${esc(t)}</span>`).join('')}</div>`:''}
+      ${bl.length && n.status!=='done' ? `<div class="chips">${bl.map(d=>`<span class="chip block">${ICON.lock} Blocked by ${esc(DATA[d].name)}</span>`).join('')}</div>`:''}
+      ${!isPM && rd.total ? `<div class="meta">Data ready ${rd.live}/${rd.total}</div>`:''}
+    </div></div>`;
+}
+function flowHTML(nodes,pid,mode,counter){
+  counter = counter || {n:0};
+  let h='';
+  nodes.forEach((n,i)=>{
+    if(i>0) h+=`<div class="conn add"><span class="plus" title="Insert step">+</span></div>`;
+    if(n.type==='decision'){
+      h+=`<div class="decision"><div class="diamond">◆ ${esc(n.title)}</div><div class="conn"></div>
+        <div class="branches" style="--bl:${100/(n.branches.length*2)}%;--br:${100/(n.branches.length*2)}%">${n.branches.map(b=>`<div class="branch"><span class="blabel">${esc(b.label)}</span>
+          ${b.nodes.length? `<div class="flow">${flowHTML(b.nodes,pid,mode,counter)}</div>` : `<div class="passthru">Continue → next step</div>`}</div>`).join('')}</div></div>`;
+    } else {
+      const idx = (n.type==='trigger'||n.type==='end')?'':(++counter.n);
+      h+=nodeHTML(n,pid,idx,mode);
+    }
+  });
+  return h;
+}
+function lanesHTML(pid){
+  const p = PROCESSES[pid];
+  const steps = flatSteps(p.nodes);
+  const owners = [...new Set(steps.map(s=>s.owner))];
+  let h = `<div class="lanes" style="grid-template-columns:repeat(${owners.length},250px)">`;
+  owners.forEach(o=>h+=`<div class="lane-h">${av(o)}${esc(PEOPLE[o].name)}</div>`);
+  steps.forEach((s,i)=>{ owners.forEach(o=>{ h+=`<div class="lane-c">${o===s.owner?nodeHTML(s,pid,i+1,'process'):''}</div>`; }); });
+  return h+'</div>';
+}
+
+/* ---------- pages ---------- */
+function headerHTML({crumbs,title,desc,resources,side}){
+  return `<section class="hdr"><div>
+    <div class="crumbs">${crumbs}</div><h1>${esc(title)}</h1>${desc?`<p>${esc(desc)}</p>`:''}
+    <div class="res"><span class="lbl">Resources</span>${resources.map(person).join('')}</div></div>
+    <div class="hdr-side">${side||''}</div></section>`;
+}
+function pageHome(){
+  const procTiles = Object.entries(PROCESSES).map(([id,p])=>{ const st=flatSteps(p.nodes); const dl=new Set(st.flatMap(s=>s.data)); const miss=[...dl].filter(d=>DATA[d].avail==='missing').length;
+    return `<a class="tile" href="${link('/process/'+id)}" data-link><h4>${esc(p.name)}</h4><p>${esc(p.desc)}</p>
+      <div class="chips"><span class="chip">${st.length} steps</span><span class="chip">${dl.size} data elements</span>${miss?`<span class="chip block">${ICON.lock} ${miss} missing</span>`:''}</div></a>`; }).join('');
+  const prjTiles = Object.entries(PROJECTS).map(([id,j])=>{ const st=j.processes.flatMap(pid=>flatSteps(PROCESSES[pid].nodes)); const done=st.filter(s=>s.status==='done').length; const late=st.filter(s=>schedule(s)==='late').length;
+    return `<a class="tile" href="${link('/project/'+id)}" data-link><h4>${esc(j.name)}</h4><p>${esc(j.desc)}</p>
+      <div class="bar"><i style="width:${Math.round(done/st.length*100)}%"></i></div>
+      <div class="chips"><span class="chip">${j.processes.length} linked processes</span><span class="chip">${done}/${st.length} steps done</span>${late?`<span class="chip block">${late} late</span>`:''}<span class="chip">Target ${fmt(j.target)}</span></div></a>`; }).join('');
+  return `<section class="hdr"><div><div class="crumbs">Northwind Traders · Workspace</div><h1>Process-first planning</h1>
+    <p>Analysts design the process. The project is the gap between how it runs today and the designed version. Same map, no handoff.</p></div>
+    <div class="hdr-side"><a class="btn primary" href="${link('/new')}" data-link>+ Create new workflow</a></div></section>
+    <div class="sect"><h2>Processes</h2><span class="hint">Design view: steps, data requirements, owners, what each step touches</span></div><div class="home-grid">${procTiles}</div>
+    <div class="sect"><h2>Projects</h2><span class="hint">Processes linked into a plan, with dates, status and blockers</span></div><div class="home-grid">${prjTiles}</div>`;
+}
+
+let processMode = 'map';
+function pageProcess(pid){
+  const p = PROCESSES[pid]; if(!p) return notFound();
+  const steps = flatSteps(p.nodes);
+  const dl = [...new Set(steps.flatMap(s=>s.data))];
+  const live = dl.filter(d=>DATA[d].avail==='live').length;
+  const blocked = steps.filter(s=>blockers(s).length);
+  const touches = {}; steps.forEach(s=>(s.touches||[]).forEach(t=>touches[t]=(touches[t]||0)+1));
+  const linkedProjects = Object.entries(PROJECTS).filter(([,j])=>j.processes.includes(pid));
+  const side = `<div class="seg" id="modeSeg"><button data-mode="map" class="${processMode==='map'?'on':''}">Map</button><button data-mode="lanes" class="${processMode==='lanes'?'on':''}">Swimlanes</button></div>
+    <div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Steps</span></div><div class="kpi"><b>${live}/${dl.length}</b><span>Data live</span></div><div class="kpi"><b style="color:${blocked.length?'var(--late)':'inherit'}">${blocked.length}</b><span>Blocked steps</span></div></div>`;
+  const dataRows = dl.sort((a,b)=>['missing','example','live'].indexOf(DATA[a].avail)-['missing','example','live'].indexOf(DATA[b].avail)).map(d=>{const x=DATA[d]; const used=steps.filter(s=>s.data.includes(d)).length;
+    return `<div class="row click" data-hl="${d}"><span class="dot" style="width:9px;height:9px;border-radius:50%;margin-top:5px;background:${AVAIL[x.avail].color};flex:none"></span>
+      <div><div class="t">${esc(x.name)}</div><div class="s">${esc(x.source)} · ${esc(PEOPLE[x.owner].name)}</div></div>
+      <div class="r"><a href="${link('/data/'+d)}" data-link style="color:var(--accent)">${AVAIL[x.avail].short}</a><div class="s">${used} step${used>1?'s':''}</div></div></div>`;}).join('');
+  return headerHTML({crumbs:`<a href="${link('/')}" data-link>Workspace</a> › Process`,title:p.name,desc:p.desc,resources:p.resources,side})+
+  `<div class="grid"><section class="canvas" id="canvas">${processMode==='map'?`<div class="flow">${flowHTML(p.nodes,pid,'process')}</div>`:lanesHTML(pid)}</section>
+   <aside class="side">
+    <div class="card"><h3>${ICON.lock} Design blockers <span class="n">${blocked.length}</span></h3>${blocked.length?blocked.map(s=>`<div class="row click" data-go="/process/${pid}/step/${s.id}"><div><div class="t">${esc(s.title)}</div><div class="s">Needs ${blockers(s).map(d=>esc(DATA[d].name)).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join(''):'<div class="s">No missing data.</div>'}</div>
+    <div class="card"><h3>Data requirements <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">Tap one to highlight every step that uses it</div>${dataRows}</div>
+    <div class="card"><h3>Touches across operations</h3><div class="chips">${Object.entries(touches).sort((a,b)=>b[1]-a[1]).map(([t,c])=>`<span class="chip touch"># ${esc(t)} · ${c}</span>`).join('')}</div></div>
+    <div class="card"><h3>Used in projects</h3>${linkedProjects.map(([id,j])=>`<div class="row click" data-go="/project/${id}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${fmt(j.target)}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('')||'<div class="s">Not linked to a project yet.</div>'}</div>
+   </aside></div>`;
+}
+
+function pageProject(prj){
+  const j = PROJECTS[prj]; if(!j) return notFound();
+  const items = j.processes.flatMap(pid=>flatSteps(PROCESSES[pid].nodes).map(s=>({pid,s})));
+  const done = items.filter(x=>x.s.status==='done').length;
+  const late = items.filter(x=>schedule(x.s)==='late');
+  const blocked = items.filter(x=>x.s.status!=='done' && blockers(x.s).length);
+  // "Up next": open items ordered by due date; flag the ones that unblock the most other steps (shared data dependencies)
+  const open = items.filter(x=>x.s.status!=='done').sort((a,b)=>a.s.due.localeCompare(b.s.due));
+  const missingData = [...new Set(blocked.flatMap(x=>blockers(x.s)))].map(d=>({d,n:items.filter(x=>x.s.status!=='done' && x.s.data.includes(d)).length})).sort((a,b)=>b.n-a.n);
+  const pct = Math.round(done/items.length*100);
+  const side = `<div class="kpis"><div class="kpi"><b>${pct}%</b><span>${done}/${items.length} done</span></div><div class="kpi"><b style="color:var(--late)">${late.length}</b><span>Late</span></div><div class="kpi"><b style="color:var(--late)">${blocked.length}</b><span>Blocked</span></div><div class="kpi"><b>${fmt(j.target)}</b><span>Target</span></div></div>
+    <div class="bar" style="width:100%"><i style="width:${pct}%"></i></div>`;
+  return headerHTML({crumbs:`<a href="${link('/')}" data-link>Workspace</a> › Project`,title:j.name,desc:j.desc,resources:j.resources,side})+
+  `<div class="grid"><section class="canvas pm" id="canvas">
+     ${j.processes.map(pid=>`<div class="pgroup"><a class="pgroup-h" href="${link('/process/'+pid)}" data-link>▤ ${esc(PROCESSES[pid].name)} <span style="color:var(--accent);font-weight:500">open design ›</span></a><div class="flow">${flowHTML(PROCESSES[pid].nodes,pid,'project')}</div></div>`).join('')}
+     <div style="text-align:center;margin-top:28px"><button class="btn" onclick="alert('Concept: pick an existing process to link into this project.')">+ Link another process</button></div>
+   </section>
+   <aside class="side">
+    <div class="card"><h3>Biggest blockers <span class="n">${missingData.length}</span></h3>${missingData.map(({d,n})=>`<div class="row click" data-go="/data/${d}"><span style="color:var(--late);margin-top:2px">${ICON.lock}</span><div><div class="t">${esc(DATA[d].name)}</div><div class="s">${esc(DATA[d].note)}</div></div><div class="r"><b style="color:var(--late)">${n}</b><div class="s">steps held</div></div></div>`).join('')}</div>
+    <div class="card"><h3>Up next <span class="n">${open.length}</span></h3>${open.slice(0,5).map(({pid,s})=>`<div class="row click" data-go="/process/${pid}/step/${s.id}">${av(s.owner)}<div><div class="t">${esc(s.title)}</div><div class="s">${esc(PROCESSES[pid].name)}${blockers(s).length?' · <span style="color:var(--late)">blocked</span>':''}</div></div><div class="r">${schedBadge(s)}</div></div>`).join('')}</div>
+    <div class="card"><h3>Due dates</h3>${open.map(({pid,s})=>{const n=days(s.due);return `<div class="row click" data-go="/process/${pid}/step/${s.id}"><div style="width:44px;text-align:center"><b>${fmt(s.due).split(' ')[1]}</b><div class="s">${fmt(s.due).split(' ')[0]}</div></div><div><div class="t">${esc(s.title)}</div><div class="s">${esc(PEOPLE[s.owner].name)}</div></div><div class="r"><span class="badge b-${schedule(s)}">${n<0?(-n)+'d late':n===0?'today':'in '+n+'d'}</span></div></div>`}).join('')}</div>
+    <div class="card"><h3>How to read the map</h3><div class="legend">
+      <div><span class="sw" style="background:var(--done-fill);border-color:#bbf7d0"></span>Done</div>
+      <div><span class="sw" style="background:var(--prog-fill);border-left:4px solid var(--prog)"></span>In progress</div>
+      <div><span class="sw" style="background:var(--idle-fill)"></span>Not started</div>
+      <div><span class="sw" style="border:2px solid var(--soon)"></span>Due within 5 days</div>
+      <div><span class="sw" style="border:2px solid var(--late)"></span>Past due</div>
+      <div><span class="chip block" style="padding:1px 6px">${ICON.lock}</span> Missing data</div>
+      <div><span class="chip diff-new">NEW</span> Not in as-is</div>
+      <div><span class="chip diff-changed">CHANGED</span> Differs from as-is</div></div>
+      <div class="hint" style="margin-top:8px">Fill shows status, border shows schedule, so "done late" and "in progress, on time" never share a color.</div></div>
+   </aside></div>`;
+}
+
+function pageStep(pid,sid){
+  const p = PROCESSES[pid]; const s = p && findStep(pid,sid); if(!s) return notFound();
+  const bl = blockers(s), rd = readiness(s);
+  const subsDone = s.subs.filter(x=>x[1]==='done').length;
+  const shared = allSteps().filter(x=>!(x.pid===pid && x.s.id===sid) && x.s.data.some(d=>s.data.includes(d)));
+  const pending = s.subs.filter(x=>x[1]!=='done');
+  const steps = flatSteps(p.nodes); const i = steps.indexOf(s);
+  const prev = steps[i-1], next = steps[i+1];
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › <a href="${link('/process/'+pid)}" data-link>${esc(p.name)}</a> › Step ${i+1}</div>
+      <h1>${esc(s.title)}</h1><div class="res">${person(s.owner)}${(s.touches||[]).map(t=>`<span class="chip touch"># ${esc(t)}</span>`).join('')}${s.diff?`<span class="chip diff-${s.diff}">${s.diff==='new'?'NEW IN TO-BE':'CHANGED FROM AS-IS'}</span>`:''}</div></div>
+    <div class="hdr-side"><div style="display:flex;gap:6px">${prev?`<a class="btn" href="${link('/process/'+pid+'/step/'+prev.id)}" data-link>‹ ${esc(prev.title)}</a>`:''}${next?`<a class="btn" href="${link('/process/'+pid+'/step/'+next.id)}" data-link>${esc(next.title)} ›</a>`:''}</div></div></section>
+  <div class="kgrid">
+    <div class="kc"><span>Status</span><b>${statusLbl[s.status]}</b><small>${subsDone}/${s.subs.length} sub-steps</small></div>
+    <div class="kc"><span>Due</span><b style="color:${schedule(s)==='late'?'var(--late)':schedule(s)==='soon'?'#b45309':'inherit'}">${s.due?fmt(s.due):'—'}</b><small>${s.status==='done'?'Complete':schedule(s)==='late'?(-days(s.due))+' days late':days(s.due)+' days left'}</small></div>
+    <div class="kc"><span>Data ready</span><b>${rd.live}/${rd.total}</b><small>live integrations</small></div>
+    <div class="kc"><span>Blockers</span><b style="color:${bl.length?'var(--late)':'inherit'}">${bl.length}</b><small>${bl.length?'missing data':'none'}</small></div>
+    <div class="kc"><span>Shared with</span><b>${shared.length}</b><small>other steps use this data</small></div>
+  </div>
+  <div class="two">
+    <div class="card"><h3>Sub-steps</h3><div class="subs">${s.subs.map((x,k)=>{const st=x[1]; return `<div class="sub ${st}"><span class="dotc">${st==='done'?'✓':st==='blocked'?'!':k+1}</span><div><div class="t" style="font-weight:600">${esc(x[0])}</div><div class="s">${st==='blocked'?`<span style="color:var(--late)">Blocked: ${esc(DATA[x[2]].name)} is missing</span>`:statusLbl[st]||st}${x[2]&&st!=='blocked'?' · needs '+esc(DATA[x[2]].name):''}</div></div></div>`}).join('')}</div></div>
+    <div class="card"><h3>Pending <span class="n">${pending.length}</span></h3>${pending.length?pending.map(x=>`<div class="row"><div><div class="t">${esc(x[0])}</div><div class="s">${x[1]==='blocked'?'<span style="color:var(--late)">Waiting on '+esc(DATA[x[2]].name)+' · owner '+esc(PEOPLE[DATA[x[2]].owner].name)+'</span>':statusLbl[x[1]]}</div></div></div>`).join(''):'<div class="s">Nothing pending.</div>'}</div>
+  </div>
+  <div class="two">
+    <div class="card"><h3>Data this step needs</h3><table><tr><th>Element</th><th>Owner</th><th>Availability</th></tr>${s.data.map(d=>{const x=DATA[d];return `<tr class="click" data-go="/data/${d}"><td><b>${esc(x.name)}</b><div class="s" style="color:var(--ink2);font-size:12px">${esc(x.source)}</div></td><td>${esc(PEOPLE[x.owner].name)}</td><td><span class="chip"><span class="dot" style="background:${AVAIL[x.avail].color}"></span>${AVAIL[x.avail].short}</span></td></tr>`}).join('')}</table></div>
+    <div class="card"><h3>Also touched by this change</h3>${shared.length?shared.map(x=>`<div class="row click" data-go="/process/${x.pid}/step/${x.s.id}"><div><div class="t">${esc(x.s.title)}</div><div class="s">${esc(x.p.name)} · shares ${x.s.data.filter(d=>s.data.includes(d)).map(d=>esc(DATA[d].name)).join(', ')}</div></div><div class="r">${av(x.s.owner)}</div></div>`).join(''):'<div class="s">No other steps share this data.</div>'}</div>
+  </div>`;
+}
+
+function pageData(did){
+  const x = DATA[did]; if(!x) return notFound();
+  const users = allSteps().filter(y=>y.s.data.includes(did));
+  const held = users.filter(y=>y.s.status!=='done');
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Data element</div><h1>${esc(x.name)}</h1><p>${esc(x.note)}</p>
+    <div class="res"><span class="lbl">Owner</span>${person(x.owner)}<span class="chip">${esc(x.source)}</span><span class="chip"><span class="dot" style="background:${AVAIL[x.avail].color}"></span>${AVAIL[x.avail].label}</span></div></div>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${users.length}</b><span>Steps use it</span></div><div class="kpi"><b>${new Set(users.map(u=>u.pid)).size}</b><span>Processes</span></div><div class="kpi"><b style="color:${x.avail==='missing'?'var(--late)':'inherit'}">${x.avail==='missing'?held.length:0}</b><span>Steps blocked</span></div></div></div></section>
+  <div class="card" style="margin-top:16px"><h3>Impact: every step that depends on this</h3><table><tr><th>Step</th><th>Process</th><th>Owner</th><th>Status</th><th>Due</th></tr>
+    ${users.map(u=>`<tr class="click" data-go="/process/${u.pid}/step/${u.s.id}"><td><b>${esc(u.s.title)}</b></td><td>${esc(u.p.name)}</td><td>${esc(PEOPLE[u.s.owner].name)}</td><td><span class="badge b-${u.s.status}">${statusLbl[u.s.status]}</span></td><td>${schedBadge(u.s)}</td></tr>`).join('')}</table></div>
+  ${x.avail!=='live'?`<div class="note" style="margin-top:12px"><b>What would change it:</b> ${x.avail==='missing'?'Once this element has a source, the blocked steps above become workable and the project map updates on its own.':'Turning the examples into a live integration moves these steps from "designed" to "buildable."'}</div>`:''}`;
+}
+
+/* ---------- create new workflow (in-memory only; nothing is saved) ---------- */
+const draft = {name:'Untitled workflow',desc:'',resources:['mc'],nodes:[{id:'k',type:'trigger',title:'Kickoff — what starts this process?',owner:'mc',touches:[],data:[]}],adding:false};
+function pageNew(){
+  const steps = draft.nodes.filter(n=>n.type!=='trigger');
+  const dl=[...new Set(steps.flatMap(s=>s.data))];
+  let flow=''; draft.nodes.forEach((n,i)=>{ if(i>0) flow+='<div class="conn"></div>'; flow+=nodeHTML(n,'__draft',n.type==='trigger'?'':i,'process').replace(/data-go="[^"]*"/,''); });
+  flow += '<div class="conn"></div>' + (draft.adding ? `<div class="form" id="addForm">
+      <label>Step name</label><input id="fTitle" placeholder="e.g. Verify vendor identity" />
+      <label>Owner</label><select id="fOwner">${Object.entries(PEOPLE).map(([k,p])=>`<option value="${k}">${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select>
+      <label>Data it needs (tap to tag)</label><div class="chips" id="fData">${Object.entries(DATA).map(([k,d])=>`<span class="chip data" data-pick="${k}"><span class="dot" style="background:${AVAIL[d.avail].color}"></span>${esc(d.name)}</span>`).join('')}</div>
+      <label>Touches (comma separated)</label><input id="fTouch" placeholder="e.g. Compliance, ERP" />
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" id="fCancel">Cancel</button><button class="btn primary" id="fSave">Add step</button></div></div>`
+    : `<button class="btn primary" id="addStep">+ Add step</button>`);
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › New workflow</div>
+      <input class="title" id="wfName" value="${esc(draft.name)}" />
+      <textarea id="wfDesc" rows="2" placeholder="Description — what this process does and where it ends">${esc(draft.desc)}</textarea>
+      <div class="res"><span class="lbl">Resources</span><span id="resList">${draft.resources.map(person).join('')}</span>
+        <select id="addRes" class="btn" style="padding:4px 8px"><option value="">+ Assign</option>${Object.entries(PEOPLE).filter(([k])=>!draft.resources.includes(k)).map(([k,p])=>`<option value="${k}">${esc(p.name)}</option>`).join('')}</select></div></div>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Steps</span></div><div class="kpi"><b>${dl.length}</b><span>Data tagged</span></div></div><span class="hint">Concept only: nothing is saved</span></div></section>
+  <div class="grid"><section class="canvas"><div class="flow">${flow}<div class="conn"></div><div class="node end">● End</div></div></section>
+  <aside class="side"><div class="card"><h3>Data requirements <span class="n">${dl.length}</span></h3>${dl.length?dl.map(d=>`<div class="row"><span class="dot" style="width:9px;height:9px;border-radius:50%;margin-top:5px;background:${AVAIL[DATA[d].avail].color};flex:none"></span><div><div class="t">${esc(DATA[d].name)}</div><div class="s">${AVAIL[DATA[d].avail].label} · ${esc(PEOPLE[DATA[d].owner].name)}</div></div></div>`).join(''):'<div class="s">Tag data on each step and the registry builds itself here.</div>'}</div>
+  <div class="card"><h3>Blockers</h3>${steps.filter(s=>blockers(s).length).map(s=>`<div class="row"><div><div class="t">${esc(s.title)}</div><div class="s" style="color:var(--late)">Needs ${blockers(s).map(d=>esc(DATA[d].name)).join(', ')}</div></div></div>`).join('')||'<div class="s">None yet.</div>'}</div></aside></div>`;
+}
+function bindNew(){
+  $('#wfName').oninput=e=>draft.name=e.target.value;
+  $('#wfDesc').oninput=e=>draft.desc=e.target.value;
+  $('#addRes').onchange=e=>{ if(e.target.value){ draft.resources.push(e.target.value); render(); } };
+  const add=$('#addStep'); if(add) add.onclick=()=>{draft.adding=true; render(); $('#fTitle').focus();};
+  const form=$('#addForm'); if(!form) return;
+  const picked=new Set();
+  form.querySelectorAll('[data-pick]').forEach(c=>c.onclick=()=>{ const k=c.dataset.pick; picked.has(k)?picked.delete(k):picked.add(k); c.style.borderColor=picked.has(k)?'var(--accent)':''; c.style.background=picked.has(k)?'var(--accent-soft)':''; });
+  $('#fCancel').onclick=()=>{draft.adding=false; render();};
+  $('#fSave').onclick=()=>{ const t=$('#fTitle').value.trim()||'Untitled step';
+    draft.nodes.push({id:'n'+draft.nodes.length,title:t,owner:$('#fOwner').value,data:[...picked],touches:$('#fTouch').value.split(',').map(x=>x.trim()).filter(Boolean),status:'idle',subs:[]});
+    draft.adding=false; render(); };
+}
+
+function notFound(){ return `<div class="card"><h3>Not found</h3><a href="${link('/')}" data-link style="color:var(--accent)">Back to workspace</a></div>`; }
+
+/* ---------- router ---------- */
+function route(){
+  const path = location.pathname.slice(BASE.length).replace(/\/+$/,'') || '/';
+  const m = s => path.match(s);
+  let r;
+  if(path==='/' ) r={nav:'home',html:pageHome()};
+  else if(r=m(/^\/process\/([\w-]+)\/step\/([\w-]+)$/)) r={nav:'process',html:pageStep(r[1],r[2])};
+  else if(r=m(/^\/process\/([\w-]+)$/)) r={nav:'process',html:pageProcess(r[1])};
+  else if(r=m(/^\/project\/([\w-]+)$/)) r={nav:'project',html:pageProject(r[1])};
+  else if(r=m(/^\/data\/(\w+)$/)) r={nav:'data',html:pageData(r[1])};
+  else if(path==='/new') r={nav:'new',html:pageNew(),after:bindNew};
+  else r={nav:'',html:notFound()};
+  return r;
+}
+function render(){
+  const r = route();
+  $('#nav').innerHTML = [['home','/','Workspace'],['process','/process/vendor-onboarding','Process view'],['project','/project/vendor-modernization','Project view'],['new','/new','+ New workflow']]
+    .map(([k,p,l])=>`<a href="${link(p)}" data-link class="${r.nav===k?'on':''}">${l}</a>`).join('');
+  $('#brand').setAttribute('href', link('/'));
+  $('#app').innerHTML = r.html;
+  if(r.after) r.after();
+  const seg=$('#modeSeg'); if(seg) seg.onclick=e=>{const b=e.target.closest('button'); if(b){processMode=b.dataset.mode; render();}};
+}
+function go(p){ history.pushState({},'',link(p)); render(); window.scrollTo(0,0); }
+document.addEventListener('click',e=>{
+  const hl = e.target.closest('[data-hl]');
+  if(hl && !e.target.closest('a')){            // highlight every step using this data element
+    e.stopPropagation();
+    const d = hl.dataset.hl, nodes=document.querySelectorAll('.node[data-step]');
+    const already = hl.classList.contains('hl-on');
+    document.querySelectorAll('.hl-on').forEach(x=>x.classList.remove('hl-on'));
+    nodes.forEach(n=>{ n.classList.remove('dim','hl'); if(!already){ const has=(n.dataset.data||'').split(',').includes(d); n.classList.add(has?'hl':'dim'); }});
+    if(!already) hl.classList.add('hl-on');
+    return;
+  }
+  const a = e.target.closest('a[data-link]');
+  if(a){ e.preventDefault(); history.pushState({},'',a.getAttribute('href')); render(); window.scrollTo(0,0); return; }
+  const g = e.target.closest('[data-go]');
+  if(g){ go(g.dataset.go); }
+});
+window.addEventListener('popstate',render);
+render();
+</script>
+</body>
+</html>
