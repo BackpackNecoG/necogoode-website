@@ -1,13 +1,19 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, av, personChip, pname, dataDot, AVAIL, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox } from './process.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, opsLine } from './process.js';
 
 const TYPES = ['text', 'digits', 'number', 'date', 'currency', 'list'];
 const clone = o => JSON.parse(JSON.stringify(o));
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
 const availOpts = sel => Object.entries(AVAIL).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
 
+export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: { label: 'Internal', cls: 'd-s-internal' }, confidential: { label: 'Confidential', cls: 'd-s-conf' }, pii: { label: 'PII', cls: 'd-s-pii' } };
+export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="Sensitivity: ${esc(v.label)}">${esc(v.label)}</span>` : '<span class="badge b-none" title="Sensitivity not classified">Unclassified</span>'; };
+const canEdit = x => !!x && store.state.me === x.owner;
+const onlyMsg = x => `Only ${pname(x.owner)} can change this`;
+/* disabled-state attributes for owner-only controls */
+const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(onlyMsg(x))}"`;
 function ruleText(f) {
   const r = [];
   if (f.required) r.push('Required');
@@ -16,8 +22,10 @@ function ruleText(f) {
   if (f.max != null && f.max !== '') r.push('max ' + f.max);
   if (f.pattern) r.push('pattern ' + f.pattern);
   if ((f.values || []).length) r.push('one of ' + f.values.join(' / '));
-  if (f.rule) r.push(f.rule);
-  return r.join(' · ') || '—';
+  if (f.rule) String(f.rule).split(/\s*[·;]\s*/).forEach(x => x && r.push(x));
+  /* de-duplicate case-insensitively: a rule of "Required" plus required:true reads once */
+  const seen = new Set();
+  return r.filter(x => { const k = String(x).trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).join(' · ') || '—';
 }
 
 export function render(params) {
@@ -43,8 +51,8 @@ export function render(params) {
 
   const spec = `<div class="card"><h3>Specification <span class="n">${fields.length} field${fields.length === 1 ? '' : 's'}</span></h3>
     ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Field</th><th>Type</th><th>Format</th><th>Rules</th><th><span class="d-sr">Actions</span></th></tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td>${esc(f.type || 'text')}</td><td>${esc(f.format || '—')}</td><td class="d-rule">${esc(ruleText(f))}</td>
-      <td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit field ${esc(f.name)}">Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete field ${esc(f.name)}">Delete</button></td></tr>`).join('')}</table></div>` : '<div class="s">No fields specified yet. Describe each field so test cases can be generated.</div>'}
-    <div style="margin-top:10px"><button class="btn sm" data-fadd>+ Add field</button></div></div>`;
+      <td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit field ${esc(f.name)}" ${gate(x)}>Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete field ${esc(f.name)}" ${gate(x)}>Delete</button></td></tr>`).join('')}</table></div>` : '<div class="s">No fields specified yet. Describe each field so test cases can be generated.</div>'}
+    <div class="d-ownerrow"><button class="btn sm" data-fadd ${gate(x)}>+ Add field</button>${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}</div></div>`;
 
   const examples = `<div class="card"><h3>Examples on file <span class="n">${(x.samples || []).length}</span></h3>${(x.samples || []).length ? x.samples.map(f => `<div class="row"><span>📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample artifact (concept, not downloadable)</div></div></div>`).join('') : '<div class="s">None. Nobody has produced a real example of this data yet.</div>'}
     ${x.sampleCsv ? '<div class="hint" style="margin-top:8px">A synthetic sample extract is on file for profiling.</div>' : ''}</div>`;
@@ -60,11 +68,14 @@ export function render(params) {
     : '<div class="s">No profile yet. Profiling computes column statistics from a sample extract and compares them with the specification.</div>'}
     ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id)}" data-link>Run profiling in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Link a process that uses this data to a project to run profiling.</div>'}</div>`;
 
-  const disc = `<div class="card"><h3>Discovered requirements <span class="n">${(x.discovered || []).length}</span></h3>${(x.discovered || []).length ? x.discovered.map(d => `<div class="row"><span aria-hidden="true">🔎</span><div><div class="t">${esc(d.text)}</div><div class="s">${d.fromRun ? 'Found in test run ' + esc(d.fromRun) + ' · ' : ''}${esc(fmtTime(d.at))}</div></div></div>`).join('') : '<div class="s">Nothing discovered yet. Requirements found during testing land here.</div>'}</div>`;
+  const dlist = x.discovered || [], open = dlist.filter(d => !d.resolved).length;
+  const disc = `<div class="card"><h3>Discovered requirements <span class="n">${open} open · ${dlist.length - open} resolved</span></h3>${dlist.length ? dlist.map((d, i) => `<div class="row d-disc ${d.resolved ? 'd-resolved' : ''}"><span aria-hidden="true">${d.resolved ? '✓' : '🔎'}</span><div style="flex:1;min-width:0"><div class="t">${esc(d.text)}</div><div class="s">${d.fromRun ? 'Found in test run ' + esc(d.fromRun) + ' · ' : ''}${esc(fmtTime(d.at))}</div>
+      ${d.resolved ? `<div class="d-resnote"><b>Resolved</b> by ${esc(pname(d.resolved.by))} · ${esc(fmtTime(d.resolved.at))}${d.resolved.note ? ': ' + esc(d.resolved.note) : ''}</div>` : ''}</div>
+      ${d.resolved ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}" ${gate(x)}>Resolve</button></div>`}</div>`).join('') + (open && !canEdit(x) ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing discovered yet. Requirements found during testing land here.</div>'}</div>`;
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Data element</div><h1>${esc(x.name)}</h1>${x.note ? `<p>${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip">${esc(x.source || 'Source not set')}</span><span class="chip">${dataDot(did)}${esc(a.label)}</span></div></div>
-    <div class="hdr-side"><button class="btn" data-dedit>Edit</button><div class="kpis"><div class="kpi"><b>${users.length}</b><span>Steps use it</span></div><div class="kpi"><b>${new Set(users.map(u => u.pid)).size}</b><span>Processes</span></div><div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work items waiting</span></div></div></div></section>
+    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip">${esc(x.source || 'Source not set')}</span><span class="chip">${dataDot(did)}${esc(a.label)}</span>${sensBadge(x.sensitivity)}</div></div>
+    <div class="hdr-side"><div class="d-ownerrow d-right">${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}<button class="btn" data-dedit ${gate(x)}>Edit</button></div><div class="kpis"><div class="kpi"><b>${users.length}</b><span>Steps use it</span></div><div class="kpi"><b>${new Set(users.map(u => u.pid)).size}</b><span>Processes</span></div><div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work items waiting</span></div></div></div></section>
   ${resolution}
   <div class="two">${spec}${examples}</div>
   ${impact}
@@ -107,27 +118,52 @@ export function bind(root, params) {
   const save = async (d, summary) => { try { await store.save('dataElement', did, d, summary); toast(summary); } catch (e) { toast('Could not save: ' + e.message); } };
   const de = root.querySelector('[data-dedit]');
   if (de) de.onclick = async () => {
-    const x = cur();
+    const x = cur(); if (!canEdit(x)) { toast(onlyMsg(x)); return; }
+    let err = '', vals = x;
+    for (;;) {
     const r = await modal({
       title: 'Edit data element',
-      body: `<div class="field"><label>Name</label><input name="name" value="${esc(x.name)}" /></div>
-        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(x.owner)}</select></div><div class="field"><label>Availability</label><select name="avail">${availOpts(x.avail)}</select></div></div>
-        <div class="field"><label>Source</label><input name="source" value="${esc(x.source || '')}" /></div>
-        <div class="field"><label>Note</label><textarea name="note">${esc(x.note || '')}</textarea></div>`,
+      body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(vals.name)}" /></div>
+        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(vals.owner)}</select></div><div class="field"><label>Availability</label><select name="avail">${availOpts(vals.avail)}</select></div></div>
+        <div class="frow"><div class="field"><label>Sensitivity</label><select name="sensitivity"><option value="">Not classified</option>${Object.entries(SENS).map(([k, v]) => `<option value="${k}" ${k === vals.sensitivity ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Source</label><input name="source" value="${esc(vals.source || '')}" /></div></div>
+        <div class="field"><label>Note</label><textarea name="note">${esc(vals.note || '')}</textarea></div>
+        ${''}<span class="hint">Handing ownership to someone else means only they can edit this element afterwards.</span>`,
       actions: [{ id: 'save', label: 'Save', primary: true }],
     });
     if (r.action !== 'save') return;
-    const d = clone(cur()); const before = d.avail;
-    Object.assign(d, { name: (r.form.name || '').trim() || d.name, owner: r.form.owner, avail: r.form.avail, source: r.form.source.trim(), note: r.form.note.trim() });
-    await save(d, before !== d.avail ? `Edited '${d.name}': availability ${AVAIL[before] ? AVAIL[before].short : before} → ${AVAIL[d.avail].short}` : `Edited data element '${d.name}'`);
+    const name = (r.form.name || '').trim() || x.name;
+    const dup = dupDataName(name, did);
+    if (dup) { err = `A data element called '${dup.name}' already exists. Choose a different name.`; vals = Object.assign({}, x, r.form); continue; }
+    const d = clone(cur()); const before = d.avail, sBefore = d.sensitivity || '';
+    Object.assign(d, { name, owner: r.form.owner, avail: r.form.avail, source: r.form.source.trim(), note: r.form.note.trim() });
+    if (r.form.sensitivity) d.sensitivity = r.form.sensitivity; else delete d.sensitivity;
+    const parts = [];
+    if (before !== d.avail) parts.push(`availability ${AVAIL[before] ? AVAIL[before].short : before} → ${AVAIL[d.avail].short}`);
+    if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'unclassified'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'unclassified'}`);
+    if (x.owner !== d.owner) parts.push(`owner → ${pname(d.owner)}`);
+    await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited data element '${d.name}'`);
+    return;
+    }
   };
+  root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {
+    const x = cur(); if (!canEdit(x)) { toast(onlyMsg(x)); return; }
+    const i = +b.dataset.resolve; const item = (x.discovered || [])[i]; if (!item) return;
+    const r = await modal({ title: 'Resolve discovered requirement', body: `<div class="note">${esc(item.text)}</div><div class="field"><label>Resolution note</label><textarea name="note" placeholder="e.g. Added a max-length rule to the specification"></textarea></div>`, actions: [{ id: 'save', label: 'Resolve', primary: true }] });
+    if (r.action !== 'save') return;
+    const note = (r.form.note || '').trim(); if (!note) { toast('Add a note that says how it was resolved'); return; }
+    const d = clone(cur()); if (!d.discovered || !d.discovered[i]) return;
+    d.discovered[i].resolved = { by: store.state.me, at: new Date().toISOString(), note };
+    await save(d, `Resolved discovered requirement on '${d.name}': ${note.slice(0, 60)}`);
+  });
   const add = root.querySelector('[data-fadd]');
-  if (add) add.onclick = async () => { const f = await fieldModal(); if (!f) return; const d = clone(cur()); d.fields = [...(d.fields || []), f]; await save(d, `Added field '${f.name}' to the specification`); };
-  root.querySelectorAll('[data-fedit]').forEach(b => b.onclick = async () => {
+  const owner = () => { const x = cur(); if (canEdit(x)) return true; toast(onlyMsg(x)); return false; };
+  if (add) add.onclick = async () => { if (!owner()) return; const f = await fieldModal(); if (!f) return; const d = clone(cur()); d.fields = [...(d.fields || []), f]; await save(d, `Added field '${f.name}' to the specification`); };
+  root.querySelectorAll('[data-fedit]').forEach(b => b.onclick = async () => { if (!owner()) return;
     const i = +b.dataset.fedit; const f = await fieldModal((cur().fields || [])[i]); if (!f) return;
     const d = clone(cur()); if (!d.fields || !d.fields[i]) return; d.fields[i] = f; await save(d, `Edited field '${f.name}' in the specification`);
   });
-  root.querySelectorAll('[data-fdel]').forEach(b => b.onclick = async () => {
+  root.querySelectorAll('[data-fdel]').forEach(b => b.onclick = async () => { if (!owner()) return;
     const i = +b.dataset.fdel; const f = (cur().fields || [])[i]; if (!f) return;
     if (!await confirmBox('Delete field?', `Delete '${f.name}' from the specification? Generated test cases for it will no longer be produced.`, 'Delete')) return;
     const d = clone(cur()); d.fields.splice(i, 1); await save(d, `Deleted field '${f.name}' from the specification`);

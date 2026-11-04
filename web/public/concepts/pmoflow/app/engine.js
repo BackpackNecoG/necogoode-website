@@ -48,17 +48,35 @@
   /* ------------------------------------------------------------------ */
   /* Process helpers                                                     */
   /* ------------------------------------------------------------------ */
-  function isStep(n) { return n && n.type !== 'decision' && n.type !== 'trigger' && n.type !== 'end'; }
+  // A gateway is any node with `branches` (decision or parallel); both are traversed the same way.
+  function isGateway(n) { return !!n && (Array.isArray(n.branches) || n.type === 'decision' || n.type === 'parallel'); }
+  function isStep(n) { return !!n && !isGateway(n) && n.type !== 'trigger' && n.type !== 'end'; }
 
-  // Steps only (no trigger/end/decision), branch steps included, in map order.
+  // Steps only (no trigger/end/gateway), branch steps included, in map order.
   function flatSteps(nodes) {
     const out = [];
     (nodes || []).forEach(n => {
       if (!n) return;
-      if (n.type === 'decision') (n.branches || []).forEach(b => out.push(...flatSteps(b && b.nodes)));
+      if (isGateway(n)) (n.branches || []).forEach(b => out.push(...flatSteps(b && b.nodes)));
       else if (isStep(n)) out.push(n);
     });
     return out;
+  }
+  // Gateways, nested ones included, in map order.
+  function flatGateways(nodes) {
+    const out = [];
+    (nodes || []).forEach(n => {
+      if (!isGateway(n)) return;
+      out.push(n);
+      (n.branches || []).forEach(b => out.push(...flatGateways(b && b.nodes)));
+    });
+    return out;
+  }
+  // Every node id (any type, any depth).
+  function allNodeIds(nodes, set) {
+    set = set || new Set();
+    (nodes || []).forEach(n => { if (!n) return; if (n.id != null) set.add(n.id); (n.branches || []).forEach(b => allNodeIds(b && b.nodes, set)); });
+    return set;
   }
   function stepData(s) {
     const set = new Set(s.data || []);
@@ -77,27 +95,68 @@
   /* ------------------------------------------------------------------ */
   /* Diff                                                                */
   /* ------------------------------------------------------------------ */
+  function textChange(label, a, b) {
+    a = a == null ? '' : String(a); b = b == null ? '' : String(b);
+    if (a === b) return null;
+    if (!a) return label + ' added: ' + b;
+    if (!b) return label + ' removed: ' + a;
+    return label + ' "' + a + '" → "' + b + '"';
+  }
+  function setDiff(label, a, b) {
+    const A = new Set(a || []), B = new Set(b || []);
+    const out = [];
+    const add = [...B].filter(x => !A.has(x)), rem = [...A].filter(x => !B.has(x));
+    if (add.length) out.push(label + ' added: ' + add.join(', '));
+    if (rem.length) out.push(label + ' removed: ' + rem.join(', '));
+    return out;
+  }
+  function stepChanges(a, n) {
+    const ch = [];
+    const t = textChange('Title', a.title, n.title); if (t) ch.push(t);
+    if ((a.owner || '') !== (n.owner || '')) ch.push('Owner ' + (a.owner || '(none)') + ' → ' + (n.owner || '(none)'));
+    setDiff('Data', a.data, n.data).forEach(x => ch.push(x));
+    const s = textChange('SLA', a.sla, n.sla); if (s) ch.push(s);
+    const y = textChange('System', a.system, n.system); if (y) ch.push(y);
+    // Sub-steps are compared only when the as-is step documents them (undefined = not decomposed).
+    if (Array.isArray(a.subs)) {
+      const at = a.subs.map(x => x && x.title || ''), nt = (n.subs || []).map(x => x && x.title || '');
+      setDiff('Sub-steps', at, nt).forEach(x => ch.push(x));
+      const am = {}; a.subs.forEach(x => { if (x) am[x.title || ''] = x; });
+      (n.subs || []).forEach(x => {
+        const o = x && am[x.title || ''];
+        if (o) setDiff('Sub-step "' + x.title + '" data', o.data, x.data).forEach(c => ch.push(c));
+      });
+      if (!ch.some(c => c.startsWith('Sub-step')) && at.join('\u0000') !== nt.join('\u0000')) ch.push('Sub-steps reordered');
+    }
+    return ch;
+  }
+  function gatewayChanges(a, n) {
+    const ch = [];
+    if ((a.type || '') !== (n.type || '')) ch.push('Gateway type ' + (a.type || '(none)') + ' → ' + (n.type || '(none)'));
+    const t = textChange('Title', a.title, n.title); if (t) ch.push(t);
+    const lab = g => (g.branches || []).map(b => b && b.label || '');
+    setDiff('Branches', lab(a), lab(n)).forEach(x => ch.push(x));
+    const gt = g => (g.branches || []).filter(b => b && b.goto).map(b => (b.label || '') + ' ↺ ' + b.goto);
+    setDiff('Loop-backs', gt(a), gt(n)).forEach(x => ch.push(x));
+    return ch;
+  }
+
+  // Classifies to-be steps AND gateways (trigger/end ignored). Gateways match as-is gateways via `from`.
   function diffProcess(process) {
-    const asisSteps = flatSteps(process && process.asis);
-    const asis = byId(asisSteps);
-    const tobe = flatSteps(process && process.tobe);
+    const asisSteps = flatSteps(process && process.asis), asisGw = flatGateways(process && process.asis);
+    const asis = byId(asisSteps), asisG = byId(asisGw);
     const nodes = {}, changes = {}, used = new Set();
-    for (const n of tobe) {
-      if (!n.from) { nodes[n.id] = 'new'; changes[n.id] = ['New step']; continue; }
-      const a = asis[n.from];
-      if (!a) { nodes[n.id] = 'new'; changes[n.id] = ['New step (as-is step ' + n.from + ' not found)']; continue; }
+    const classify = (n, a, kindLabel, fn) => {
+      if (!n.from) { nodes[n.id] = 'new'; changes[n.id] = ['New ' + kindLabel]; return; }
+      if (!a) { nodes[n.id] = 'new'; changes[n.id] = ['New ' + kindLabel + ' (as-is ' + kindLabel + ' ' + n.from + ' not found)']; return; }
       used.add(n.from);
-      const ch = [];
-      if ((a.title || '') !== (n.title || '')) ch.push('Title "' + (a.title || '') + '" → "' + (n.title || '') + '"');
-      if ((a.owner || '') !== (n.owner || '')) ch.push('Owner ' + (a.owner || '(none)') + ' → ' + (n.owner || '(none)'));
-      const ad = new Set(a.data || []), nd = new Set(n.data || []);
-      const added = [...nd].filter(d => !ad.has(d)), removed = [...ad].filter(d => !nd.has(d));
-      if (added.length) ch.push('Data added: ' + added.join(', '));
-      if (removed.length) ch.push('Data removed: ' + removed.join(', '));
+      const ch = fn(a, n);
       nodes[n.id] = ch.length ? 'changed' : 'same';
       changes[n.id] = ch;
-    }
-    const removed = asisSteps.filter(a => !used.has(a.id));
+    };
+    flatSteps(process && process.tobe).forEach(n => classify(n, n.from && asis[n.from], 'step', stepChanges));
+    flatGateways(process && process.tobe).forEach(n => classify(n, n.from && asisG[n.from], 'gateway', gatewayChanges));
+    const removed = asisSteps.concat(asisGw).filter(a => !used.has(a.id));
     return { nodes, removed, changes };
   }
 
@@ -109,7 +168,7 @@
     return Math.max(1, diffDays(w.due, w.start));
   }
 
-  // Rules: a not-done item cannot finish before (a) its due date, (b) each open dep's
+  // Done items forecast at doneAt || due. Rules: a not-done item cannot finish before (a) its due date, (b) each open dep's
   // forecast + its own duration, (c) today + duration when idle and the start has passed,
   // (d) today. Cycles: a dep already on the evaluation stack is treated as no dep.
   function forecastAll(docs, today) {
@@ -122,7 +181,8 @@
       visiting[id] = true;
       let res;
       if (w.status === 'done') {
-        res = { forecast: isDate(w.due) ? w.due : null, sched: 'done', slipDays: 0 };
+        const fin = isDate(w.doneAt) ? w.doneAt : isDate(w.due) ? w.due : null;
+        res = { forecast: fin, sched: 'done', slipDays: fin && isDate(w.due) ? Math.max(0, diffDays(fin, w.due)) : 0 };
       } else {
         const dur = duration(w);
         let best = isDate(w.due) ? w.due : null, bestCause = null;
@@ -218,9 +278,11 @@
     const items = work.filter(w => w.projectId === projectId);
     const fc = forecastAll(docs, today);
     const done = items.filter(w => w.status === 'done').length;
-    const finish = maxDate(items.map(w => fc[w.id].forecast));
+    const allDone = items.length > 0 && done === items.length;
+    // All done: finish is the actual finish (max doneAt, falling back to due). Otherwise: max forecast of open items.
+    const finish = allDone ? maxDate(items.map(w => w.doneAt || w.due)) : maxDate(items.filter(w => w.status !== 'done').map(w => fc[w.id].forecast));
     const target = project && project.target || null;
-    return {
+    const out = {
       total: items.length, done,
       pct: items.length ? Math.round(done / items.length * 100) : 0,
       late: items.filter(w => fc[w.id].sched === 'late').length,
@@ -229,6 +291,8 @@
       finish, target,
       onTrack: !target || !finish || finish <= target,
     };
+    if (allDone) out.actualFinish = finish;
+    return out;
   }
 
   /* ------------------------------------------------------------------ */
@@ -244,8 +308,13 @@
     const steps = [];
     procs.forEach(p => flatSteps(p.tobe).forEach(s => steps.push({ pid: p.id, s })));
     const usedData = [...new Set(steps.flatMap(x => stepData(x.s)))];
+    const dataIdx = byId(list(docs, 'dataElement'));
     const work = list(docs, 'workItem').filter(w => w.projectId === projectId);
     const checks = [];
+    const buOf = pid => people[pid] && people[pid].bu || null;
+    const stepOwner = {};
+    steps.forEach(x => { stepOwner[x.pid + '/' + x.s.id] = x.s.owner; });
+    const workBu = w => buOf(stepOwner[w.pid + '/' + w.step] || w.owner);
 
     // work-done
     const open = work.filter(w => w.status !== 'done').map(w => w.id);
@@ -257,28 +326,56 @@
     checks.push({ id: 'data-live', label: 'Required data is live', pass: notReady.length === 0,
       detail: notReady.length ? notReady.length + ' data element(s) used by the to-be steps are not live and have no completed resolver.' : 'All ' + usedData.length + ' data elements are live or resolved.', items: notReady });
 
-    // tests-passed: only cases for data used by linked to-be steps
+    // discovered-resolved: every discovered requirement on project data has `resolved`. Items are "<dataId>#<index>".
+    const unresolved = [];
+    usedData.forEach(d => ((dataIdx[d] && dataIdx[d].discovered) || []).forEach((x, i) => { if (x && !x.resolved) unresolved.push(d + '#' + i); }));
+    checks.push({ id: 'discovered-resolved', label: 'Discovered requirements resolved', pass: unresolved.length === 0,
+      detail: unresolved.length ? unresolved.length + ' discovered requirement(s) on project data are not resolved.' : 'No open discovered requirements.', items: unresolved });
+
+    // process-valid: owners on every to-be step, no gateway with all branches empty, every goto target exists.
+    const problems = [];
+    procs.forEach(p => {
+      const ids = allNodeIds(p.tobe);
+      flatSteps(p.tobe).forEach(s => { if (!s.owner) problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || s.id) + '" has no owner' }); });
+      flatGateways(p.tobe).forEach(g => {
+        const br = g.branches || [];
+        if (!br.some(b => b && ((b.nodes || []).length || b.goto))) problems.push({ pid: p.id, node: g.id, problem: 'Gateway "' + (g.title || g.id) + '" has no non-empty branch' });
+        br.forEach(b => { if (b && b.goto && !ids.has(b.goto)) problems.push({ pid: p.id, node: g.id, problem: 'Branch "' + (b.label || '') + '" loops back to missing node ' + b.goto }); });
+      });
+    });
+    checks.push({ id: 'process-valid', label: 'Process design is valid', pass: problems.length === 0,
+      detail: problems.length ? problems.map(x => x.problem).join('; ') + '.' : 'Every step has an owner and every gateway is well formed.',
+      items: problems.map(x => x.pid + ':' + x.node), problems });
+
+    // tests-passed
     const usedSet = new Set(usedData);
     const cases = list(docs, 'testCase').filter(c => usedSet.has(c.dataId));
-    const caseIds = new Set(cases.map(c => c.id));
+    const scripts = Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, projectId);
     const runs = list(docs, 'testRun').filter(r => r.projectId === projectId);
     const lastDev = latestBy(runs.filter(r => r.env === 'dev'), 'at');
     const lastUat = latestBy(runs.filter(r => r.env === 'uat'), 'at');
-    const failing = new Set();
-    [lastDev, lastUat].forEach(r => r && (r.results || []).forEach(x => { if (caseIds.has(x.caseId) && x.outcome === 'fail') failing.add(x.caseId); }));
-    const ranInUat = new Set();
-    runs.filter(r => r.env === 'uat').forEach(r => (r.results || []).forEach(x => { if (x.outcome === 'pass' || x.outcome === 'fail') ranInUat.add(x.caseId); }));
-    const unrun = cases.map(c => c.id).filter(id => !ranInUat.has(id));
-    const missingRuns = cases.length ? [lastDev ? null : 'dev', lastUat ? null : 'uat'].filter(Boolean) : [];
-    const tp = failing.size === 0 && unrun.length === 0 && missingRuns.length === 0;
+    const rid = x => x.caseId || x.scriptId;
+    const failing = new Set(), blocked = new Set();
+    if (lastDev) (lastDev.results || []).forEach(x => { if (x.outcome === 'fail') failing.add(rid(x)); });
+    const coveredUat = new Set();
+    if (lastUat) (lastUat.results || []).forEach(x => {
+      coveredUat.add(rid(x));
+      if (x.outcome === 'fail') failing.add(rid(x));
+      else if (x.outcome === 'blocked') blocked.add(rid(x));
+    });
+    const unrun = cases.map(c => c.id).concat(scripts.map(x => x.id)).filter(id => !coveredUat.has(id));
+    const defects = work.filter(w => w.kind === 'defect' && w.status !== 'done').map(w => w.id);
+    const missingRuns = [cases.length && !lastDev ? 'dev' : null, (cases.length || scripts.length) && !lastUat ? 'uat' : null].filter(Boolean);
+    const tp = failing.size === 0 && blocked.size === 0 && unrun.length === 0 && defects.length === 0 && missingRuns.length === 0;
     const tDetail = [];
-    if (!cases.length) tDetail.push('No test cases for the data used by this project.');
     if (missingRuns.length) tDetail.push('No ' + missingRuns.join(' or ').toUpperCase() + ' run recorded.');
-    if (failing.size) tDetail.push(failing.size + ' case(s) failing in the latest dev/UAT run.');
-    if (unrun.length) tDetail.push(unrun.length + ' case(s) never run in UAT.');
-    if (tp && cases.length) tDetail.push('All ' + cases.length + ' cases pass and have run in UAT.');
+    if (failing.size) tDetail.push(failing.size + ' failing in the latest dev/UAT run.');
+    if (blocked.size) tDetail.push(blocked.size + ' blocked in the latest UAT run.');
+    if (unrun.length) tDetail.push(unrun.length + ' case(s)/script(s) not covered by the latest UAT run.');
+    if (defects.length) tDetail.push(defects.length + ' open defect(s).');
+    if (tp) tDetail.push(cases.length + ' data case(s) and ' + scripts.length + ' UAT script(s) pass; no open defects.');
     checks.push({ id: 'tests-passed', label: 'Tests passed in dev and UAT', pass: tp, detail: tDetail.join(' '),
-      items: [...new Set([...failing, ...unrun])], failing: [...failing], unrun });
+      items: [...new Set([...failing, ...blocked, ...unrun, ...defects])], failing: [...failing], blocked: [...blocked], unrun, defects, scripts: scripts.map(x => x.id) });
 
     // grants-closed: requested/approved block; active ones are expired automatically at go-live.
     const grants = list(docs, 'grant').filter(g => g.projectId === projectId);
@@ -289,36 +386,101 @@
         'Active grants expire automatically at go-live' + (expiring.length ? ' (' + expiring.length + ' will be expired).' : '.'),
       items: blocking.concat(expiring), blocking, expiring });
 
-    // bu-signoff: each BU owning at least one to-be step needs its latest approval approved with stepUp.
+    // bu-signoff: each BU owning a to-be step needs its latest approval approved with stepUp and not stale.
+    // Stale: a work item or linked process in that BU's section has updatedAt > approval time (snapshotAt || at).
     const approvals = list(docs, 'approval').filter(a => a.projectId === projectId);
-    const bus = [...new Set(steps.map(x => people[x.s.owner] && people[x.s.owner].bu).filter(Boolean))].sort();
+    const bus = [...new Set(steps.map(x => buOf(x.s.owner)).filter(Boolean))].sort();
     const validFor = bu => {
       const latest = latestBy(approvals.filter(a => a.bu === bu), 'at');
       return latest && latest.decision === 'approved' && latest.stepUp === true ? latest : null;
     };
+    const apprAt = a => String(a.snapshotAt || a.at || '');
+    const changedSince = bu => {
+      const a = validFor(bu); if (!a) return [];
+      const t = apprAt(a), out = [];
+      work.forEach(w => { if (w.updatedAt && String(w.updatedAt) > t && workBu(w) === bu) out.push({ ref: 'workItem:' + w.id, label: w.title || w.id }); });
+      procs.forEach(p => { if (p.updatedAt && String(p.updatedAt) > t && flatSteps(p.tobe).some(s => buOf(s.owner) === bu)) out.push({ ref: 'process:' + p.id, label: p.name || p.id }); });
+      return out;
+    };
     const unsigned = bus.filter(bu => !validFor(bu));
-    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0,
-      detail: !bus.length ? 'No business units own steps in the linked processes.' : unsigned.length ? 'Awaiting sign-off: ' + unsigned.join(', ') + '.' : 'All ' + bus.length + ' business units approved with step-up.', items: unsigned });
+    const stale = bus.filter(bu => validFor(bu)).map(bu => ({ bu, changed: changedSince(bu) })).filter(x => x.changed.length);
+    const buDetail = [];
+    if (!bus.length) buDetail.push('No business units own steps in the linked processes.');
+    if (unsigned.length) buDetail.push('Awaiting sign-off: ' + unsigned.join(', ') + '.');
+    stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + x.changed.map(c => c.label).join(', ') + '.'));
+    if (bus.length && !unsigned.length && !stale.length) buDetail.push('All ' + bus.length + ' business units approved with step-up.');
+    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0 && stale.length === 0,
+      detail: buDetail.join(' '), items: unsigned.concat(stale.map(x => x.bu)), unsigned,
+      stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + x.changed.map(c => c.label).join(', ') })) });
 
     // two-person
     const approvers = [...new Set(bus.map(validFor).filter(Boolean).map(a => a.approver))];
     checks.push({ id: 'two-person', label: 'Two-person rule', pass: approvers.length >= 2,
       detail: approvers.length + ' distinct approver(s); at least 2 required.', items: approvers });
 
-    // exceptions (warning only): work items whose updatedAt is after their BU's approval.
-    const stepOwner = {};
-    steps.forEach(x => { stepOwner[x.pid + '/' + x.s.id] = x.s.owner; });
+    // cutover-plan
+    const co = project.cutover || {};
+    const missingCo = ['rollbackOwner', 'rollbackPlan', 'hypercareOwner'].filter(k => !(co[k] && String(co[k]).trim()));
+    checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: missingCo.length === 0,
+      detail: missingCo.length ? 'Cutover plan is missing: ' + missingCo.join(', ') + '.' : 'Rollback owner, rollback plan and hypercare owner are set.', items: missingCo });
+
+    // exceptions (warning only): work items whose updatedAt is after their BU's approval. Stale ones block via bu-signoff.
     const exc = work.filter(w => {
       if (!w.updatedAt) return false;
-      const owner = stepOwner[w.pid + '/' + w.step] || w.owner;
-      const bu = people[owner] && people[owner].bu;
+      const bu = workBu(w);
       const appr = bu && validFor(bu);
-      return appr && String(w.updatedAt) > String(appr.at);
+      return appr && String(w.updatedAt) > apprAt(appr);
     }).map(w => w.id);
     checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: exc.length === 0, warning: true,
-      detail: exc.length ? exc.length + ' work item(s) changed after their business unit approved. Warning only.' : 'No work changed after sign-off.', items: exc });
+      detail: exc.length ? exc.length + ' work item(s) changed after their business unit approved; those sections need re-approval.' : 'No work changed after sign-off.', items: exc });
 
     return { pass: checks.filter(c => !c.warning).every(c => c.pass), checks };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* UAT scripts                                                         */
+  /* ------------------------------------------------------------------ */
+  function slug(s) { return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '') || 'branch'; }
+  // One script per new/changed to-be step plus one per gateway branch. Deterministic ids:
+  // uat-<pid>-<step> and uat-<pid>-<gatewayId>-<branch-label-slug>.
+  function generateUatScripts(docs, projectId) {
+    const project = get(docs, 'project', projectId);
+    if (!project) return [];
+    const people = personMap(docs);
+    const data = byId(list(docs, 'dataElement'));
+    const pname = id => (people[id] && people[id].name) || id || 'The step owner';
+    const dname = d => (data[d] && data[d].name) || d;
+    const out = [], ids = new Set();
+    const push = sc => { let id = sc.id, k = 2; while (ids.has(id)) id = sc.id + '-' + k++; ids.add(id); out.push(Object.assign(sc, { id })); };
+    linkedProcesses(docs, project).forEach(p => {
+      const diff = diffProcess(p);
+      const titles = {};
+      const walk = nodes => (nodes || []).forEach(n => { if (!n) return; titles[n.id] = n.title || n.id; (n.branches || []).forEach(b => walk(b && b.nodes)); });
+      walk(p.tobe);
+      flatSteps(p.tobe).forEach(s => {
+        const st = diff.nodes[s.id];
+        if (st !== 'new' && st !== 'changed') return;
+        const sd = stepData(s);
+        push({ id: 'uat-' + p.id + '-' + s.id, pid: p.id, step: s.id, title: s.title || s.id,
+          given: sd.length ? sd.map(dname).join(', ') + (sd.length > 1 ? ' are' : ' is') + ' available in UAT' : 'The process has reached "' + (s.title || s.id) + '"',
+          when: pname(s.owner) + ' performs "' + (s.title || s.id) + '"' + ((s.subs || []).length ? ' (' + s.subs.map(x => x && x.title).filter(Boolean).join('; ') + ')' : ''),
+          then: 'The step completes' + (s.system ? ' in ' + s.system : '') + (s.sla ? ' within ' + s.sla : '') + ' and its output is recorded' +
+            (st === 'changed' && (diff.changes[s.id] || []).length ? '; verify: ' + diff.changes[s.id].join('; ') : ''),
+          data: sd });
+      });
+      flatGateways(p.tobe).forEach(g => (g.branches || []).forEach((b, i) => {
+        if (!b) return;
+        const first = flatSteps(b.nodes)[0];
+        const bd = [...new Set(flatSteps(b.nodes).flatMap(stepData))];
+        push({ id: 'uat-' + p.id + '-' + g.id + '-' + slug(b.label || String(i + 1)), pid: p.id, step: g.id,
+          title: (g.title || g.id) + ' → ' + (b.label || 'branch ' + (i + 1)),
+          given: 'The process reaches "' + (g.title || g.id) + '"',
+          when: g.type === 'parallel' ? 'Branch "' + (b.label || i + 1) + '" runs in parallel' : 'The outcome is "' + (b.label || i + 1) + '"',
+          then: b.goto ? 'The flow returns to "' + (titles[b.goto] || b.goto) + '"' : first ? 'The flow continues to "' + (first.title || first.id) + '"' : 'The flow continues to the next step',
+          data: bd });
+      }));
+    });
+    return out;
   }
 
   /* ------------------------------------------------------------------ */
@@ -435,7 +597,13 @@
   /* ------------------------------------------------------------------ */
   /* Field spec interpretation (shared by specDrift / generateTests)     */
   /* ------------------------------------------------------------------ */
-  function norm(s) { return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''); }
+  // Token normalisation for field↔column matching: split camelCase, drop parenthetical text,
+  // lower-case, split on punctuation/space/underscore. "Tax ID (EIN)" → "tax id" ↔ "tax_id".
+  function tokens(s) {
+    return String(s || '').replace(/\([^)]*\)/g, ' ').replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
+  }
+  function parenTokens(s) { const m = /\(([^)]*)\)/.exec(String(s || '')); return m ? tokens(m[1]) : ''; }
   function isMask(s) { return typeof s === 'string' && s.includes('#') && /^[#9\-\/.\s()+]+$/.test(s); }
 
   // Normalised view of a field: type, exact length, length bounds (text/digits), value bounds
@@ -500,7 +668,12 @@
   }
 
   function columnsOf(profile) { return Array.isArray(profile) ? profile : (profile && Array.isArray(profile.columns) ? profile.columns : []); }
-  function columnFor(f, cols) { const k = norm(f.column || f.name); return cols.find(c => norm(c.name) === k) || null; }
+  // Match order: explicit field.column (token-equal), then field name tokens, then the parenthetical alias ("EIN").
+  function columnFor(f, cols) {
+    const keys = f.column ? [tokens(f.column)] : [tokens(f.name), tokens(String(f.name || '').replace(/\s+/g, '')), parenTokens(f.name)];
+    for (const k of keys) { if (!k) continue; const c = cols.find(x => tokens(x.name) === k); if (c) return c; }
+    return null;
+  }
 
   /* ------------------------------------------------------------------ */
   /* Spec drift                                                          */
@@ -654,36 +827,66 @@
   /* ------------------------------------------------------------------ */
   /* Portfolio helpers                                                   */
   /* ------------------------------------------------------------------ */
-  // workload(docs, projectId?, today). projectId may be null/undefined; workload(docs, today) also works.
+  // workload(docs, today) or workload(docs, projectId|null|undefined, today).
+  // effortNext14 = effortDays (default 1) of open items falling in [today, today+13]: overdue items count in
+  // full; items spanning the window count pro rata by calendar-day overlap of [start, due].
+  // capacityNext14 = capacity (days/week, default 4) × 2. overloaded = effortNext14 > capacityNext14.
   function workload(docs, projectId, today) {
     if (today === undefined && /^\d{4}-\d{2}-\d{2}$/.test(String(projectId || ''))) { today = projectId; projectId = null; }
     const fc = forecastAll(docs, today);
+    const people = personMap(docs);
     const items = list(docs, 'workItem').filter(w => !projectId || w.projectId === projectId);
     const rows = {};
+    const winEnd = isDate(today) ? addDays(today, 13) : null;
     items.forEach(w => {
       if (!w.owner) return;
-      const r = rows[w.owner] || (rows[w.owner] = { person: w.owner, open: 0, late: 0, dueNext7: 0 });
+      const cap = people[w.owner] && people[w.owner].capacity != null && isFinite(+people[w.owner].capacity) ? +people[w.owner].capacity : 4;
+      const r = rows[w.owner] || (rows[w.owner] = { person: w.owner, open: 0, late: 0, dueNext7: 0, effortNext14: 0, capacityNext14: cap * 2, overloaded: false });
       if (w.status === 'done') return;
       r.open++;
       if (fc[w.id] && fc[w.id].sched === 'late') r.late++;
       if (isDate(w.due) && isDate(today)) { const d = diffDays(w.due, today); if (d >= 0 && d <= 7) r.dueNext7++; }
+      if (winEnd) {
+        const effort = w.effortDays != null && isFinite(+w.effortDays) ? Math.max(0, +w.effortDays) : 1;
+        const due = isDate(w.due) ? w.due : today;
+        const start = isDate(w.start) && w.start <= due ? w.start : due;
+        let share;
+        if (due < today) share = 1;
+        else {
+          const from = start > today ? start : today, to = due < winEnd ? due : winEnd;
+          share = from > to ? 0 : (diffDays(to, from) + 1) / (diffDays(due, start) + 1);
+        }
+        r.effortNext14 = Math.round((r.effortNext14 + effort * share) * 100) / 100;
+      }
     });
+    Object.values(rows).forEach(r => { r.overloaded = r.effortNext14 > r.capacityNext14; });
     return Object.values(rows).sort((a, b) => b.open - a.open || b.late - a.late || String(a.person).localeCompare(String(b.person)));
   }
 
+  // Rows: variance = (doneAt for done items, else forecast) − baseline due.
+  // Returns an array (rows) carrying `projectSlipDays` = project finish − max baseline due (the headline
+  // number; never sum row variances), plus `plannedFinish` and `finish`.
   function baselineVariance(docs, projectId, baselineId, today) {
     const project = get(docs, 'project', projectId);
     const bl = project && (project.baselines || []).find(b => b.id === baselineId);
-    if (!bl) return [];
+    const rows = [];
+    rows.projectSlipDays = null; rows.plannedFinish = null; rows.finish = null;
+    if (!bl) return rows;
     const fc = forecastAll(docs, today);
+    const work = byId(list(docs, 'workItem'));
     const planned = bl.items || {};
     const ids = Object.keys(planned);
-    list(docs, 'workItem').forEach(w => { if (w.projectId === projectId && !(w.id in planned)) ids.push(w.id); });
-    return ids.map(id => {
+    Object.values(work).forEach(w => { if (w.projectId === projectId && !(w.id in planned)) ids.push(w.id); });
+    ids.forEach(id => {
+      const w = work[id];
       const plannedDue = planned[id] ? planned[id].due || null : null;
-      const forecast = fc[id] ? fc[id].forecast : null;
-      return { workId: id, plannedDue, forecast, varianceDays: plannedDue && forecast ? diffDays(forecast, plannedDue) : null };
+      const forecast = !w ? null : w.status === 'done' ? (isDate(w.doneAt) ? w.doneAt : w.due || null) : (fc[id] ? fc[id].forecast : null);
+      rows.push({ workId: id, plannedDue, forecast, varianceDays: plannedDue && forecast ? diffDays(forecast, plannedDue) : null });
     });
+    rows.plannedFinish = maxDate(Object.keys(planned).map(k => planned[k] && planned[k].due));
+    rows.finish = projectStats(docs, projectId, today).finish;
+    rows.projectSlipDays = rows.plannedFinish && rows.finish ? diffDays(rows.finish, rows.plannedFinish) : null;
+    return rows;
   }
 
   function suggestWorkFromDiff(docs, projectId) {
@@ -715,6 +918,7 @@
     // contract section 4
     flatSteps, diffProcess, forecastAll, stepState, dataReady, dependents, impactOfData,
     projectStats, readiness, profileCsv, specDrift, generateTests, workload, baselineVariance, suggestWorkFromDiff,
+    generateUatScripts, flatGateways,
     // helpers (stable, safe to use from pages)
     parseCsv, maskValue, patternOf, expandPattern, fieldSpec, validate, addDays, diffDays,
   };

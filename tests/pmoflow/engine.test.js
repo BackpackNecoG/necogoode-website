@@ -127,9 +127,11 @@ function readyDocs() {
     { id: 'TX', dataId: 'DX-unused', field: 'x', kind: 'valid', input: 'a', expect: 'accept', origin: 'user' },
   ]);
   d.testRun = wrap([
-    { id: 'R1', projectId: PRJ, env: 'dev', at: '2026-11-01T09:00:00Z', by: 'dk', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }, { caseId: 'TX', outcome: 'fail' }] },
-    { id: 'R2', projectId: PRJ, env: 'uat', at: '2026-11-02T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }, { caseId: 'TX', outcome: 'fail' }] },
+    { id: 'R1', projectId: PRJ, env: 'dev', at: '2026-11-01T09:00:00Z', by: 'dk', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }, { caseId: 'TX', outcome: 'pass' }] },
+    { id: 'R2', projectId: PRJ, env: 'uat', at: '2026-11-02T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }] },
   ]);
+  E.generateUatScripts(d, PRJ).forEach(sc => d.testRun[1].data.results.push({ scriptId: sc.id, outcome: 'pass', evidence: 'screenshot' }));
+  d.project[0].data.cutover = { window: 'Sat 06:00-10:00', rollbackOwner: 'dk', rollbackPlan: 'Restore v1 as-is', hypercareDays: 10, hypercareOwner: 'ta', comms: 'Teams' };
   d.grant = wrap([{ id: 'G1', projectId: PRJ, dataId: 'D2', env: 'uat', access: 'read', reason: 'UAT', requestedBy: 'dk', status: 'active', expires: '2026-12-01', log: [] }]);
   return d;
 }
@@ -217,7 +219,8 @@ test('diffProcess classifies new / changed / same / removed', () => {
 test('readiness: scenario project fails work-done and data-live', () => {
   const r = E.readiness(deepFreeze(baseDocs()), PRJ, TODAY);
   assert.equal(r.pass, false);
-  assert.deepEqual(r.checks.map(c => c.id), ['work-done', 'data-live', 'tests-passed', 'grants-closed', 'bu-signoff', 'two-person', 'exceptions']);
+  assert.deepEqual(r.checks.map(c => c.id), ['work-done', 'data-live', 'discovered-resolved', 'process-valid', 'tests-passed', 'grants-closed', 'bu-signoff', 'two-person', 'cutover-plan', 'exceptions']);
+  assert.equal(check(r, 'cutover-plan').pass, false);
   r.checks.forEach(c => assert.ok('id' in c && 'label' in c && 'pass' in c && 'detail' in c && Array.isArray(c.items)));
   assert.equal(check(r, 'work-done').pass, false);
   assert.equal(check(r, 'data-live').pass, false);
@@ -233,7 +236,7 @@ test('readiness: ready project passes; active grant is listed as expiring', () =
   const g = check(r, 'grants-closed');
   assert.deepEqual(g.expiring, ['G1']);
   assert.match(g.detail, /expire automatically at go-live/);
-  assert.ok(!check(r, 'tests-passed').items.includes('TX'));   // unused data's cases ignored
+  assert.ok(!check(r, 'tests-passed').unrun.includes('TX'));   // unused data's cases need no UAT coverage
 });
 
 test('readiness: each check fails on its own condition', () => {
@@ -258,7 +261,7 @@ test('readiness: each check fails on its own condition', () => {
   r = E.readiness(d, PRJ, TODAY);
   assert.deepEqual(check(r, 'tests-passed').failing, ['T1']);
 
-  d = readyDocs(); d.testRun[1].data.results = [{ caseId: 'T1', outcome: 'pass' }];
+  d = readyDocs(); d.testRun[1].data.results = d.testRun[1].data.results.filter(x => x.caseId !== 'T2');
   r = E.readiness(d, PRJ, TODAY);
   assert.deepEqual(check(r, 'tests-passed').unrun, ['T2']);
 
@@ -268,11 +271,18 @@ test('readiness: each check fails on its own condition', () => {
   d = readyDocs(); d.dataElement.find(e => e.id === 'D9').data.avail = 'missing';
   assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'data-live').items, ['D9']);
 
+  // R2: an edit after sign-off is still listed by `exceptions` (warning), and now blocks through `bu-signoff`.
   d = readyDocs(); d.workItem[5].data.updatedAt = '2026-11-02T08:00:00Z';   // W6 (Treasury step) edited after approval
   r = E.readiness(d, PRJ, TODAY);
   const ex = check(r, 'exceptions');
   assert.equal(ex.warning, true); assert.equal(ex.pass, false); assert.deepEqual(ex.items, ['W6']);
-  assert.equal(r.pass, true);                                   // warning does not block
+  const bu = check(r, 'bu-signoff');
+  assert.equal(bu.pass, false); assert.deepEqual(bu.items, ['Treasury']);
+  assert.match(bu.detail, /Treasury: re-approval needed: Stand up structured bank capture/);
+  assert.deepEqual(bu.stale, [{ bu: 'Treasury', changed: ['workItem:W6'], reason: 're-approval needed: Stand up structured bank capture' }]);
+  assert.equal(r.pass, false);
+  d = readyDocs(); d.workItem[5].data.updatedAt = '2026-10-30T08:00:00Z';   // edited before approval: fine
+  assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
 });
 
 /* ---------------- profiler ---------------- */
@@ -406,4 +416,189 @@ test('engine files are byte-identical and the UMD exports the contract', () => {
     'profileCsv', 'specDrift', 'generateTests', 'workload', 'baselineVariance', 'suggestWorkFromDiff'].forEach(n => assert.equal(typeof E[n], 'function', n));
   const sandbox = {}; new Function('self', fs.readFileSync(WEB_ENGINE, 'utf8'))(sandbox);   // browser path: sets self.PMOEngine
   assert.equal(typeof sandbox.PMOEngine.forecastAll, 'function');
+});
+
+/* ================================ Round 2 ================================ */
+test('R2 Bug 1: done items forecast at doneAt; finish/actualFinish; variance uses doneAt', () => {
+  const d = baseDocs();
+  d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = '2026-11-08'; });
+  deepFreeze(d);
+  const fc = E.forecastAll(d, TODAY);
+  assert.equal(fc.W10.forecast, '2026-11-08');                // not the due date (Nov 20)
+  assert.equal(fc.W6.slipDays, 5);
+  const st = E.projectStats(d, PRJ, TODAY);
+  assert.equal(st.finish, '2026-11-08');
+  assert.equal(st.actualFinish, '2026-11-08');
+  const bv = E.baselineVariance(d, PRJ, 'b1', TODAY);
+  assert.equal(bv.find(r => r.workId === 'W6').varianceDays, 5);   // doneAt − baseline due (grader expected +5)
+  assert.equal(bv.find(r => r.workId === 'W10').varianceDays, -12);
+  assert.equal(bv.plannedFinish, '2026-11-20');
+  assert.equal(bv.projectSlipDays, -12);                       // finish − max baseline due, not a sum
+  // done without doneAt falls back to due
+  const d2 = baseDocs(); d2.workItem.forEach(e => { e.data.status = 'done'; });
+  assert.equal(E.projectStats(d2, PRJ, TODAY).finish, '2026-11-20');
+});
+
+test('R2: open-work finish ignores done items; projectSlipDays on the scenario', () => {
+  const d = baseDocs();
+  d.workItem.find(e => e.id === 'W9').data.doneAt = '2026-12-31';   // a late-recorded done item must not drive the open forecast
+  const st = E.projectStats(d, PRJ, TODAY);
+  assert.equal(st.finish, '2026-11-28');
+  assert.equal(st.actualFinish, undefined);
+  const bv = E.baselineVariance(deepFreeze(baseDocs()), PRJ, 'b1', TODAY);
+  const sum = bv.reduce((a, r) => a + Math.max(0, r.varianceDays || 0), 0);
+  assert.equal(bv.projectSlipDays, 8);                          // 11-28 − 11-20
+  assert.notEqual(bv.projectSlipDays, sum);
+  assert.ok(Array.isArray(bv) && bv.length === 11);
+});
+
+test('R2 readiness: stale via process updatedAt and snapshotAt', () => {
+  let d = readyDocs();
+  d.process[1].data.updatedAt = '2026-11-03T00:00:00Z';         // invoice-approval: owners ar, dk, lp, ps
+  let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.items.sort(), ['Accounts Payable', 'Compliance', 'IT', 'Treasury']);
+  assert.ok(bu.stale.every(x => x.changed.includes('process:invoice-approval')));
+  d = readyDocs();
+  d.approval.forEach(a => { a.data.snapshotAt = '2026-11-05T00:00:00Z'; });
+  d.process[1].data.updatedAt = '2026-11-03T00:00:00Z';
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'bu-signoff').pass, true);
+});
+
+test('R2 readiness: discovered-resolved, process-valid, cutover-plan', () => {
+  let d = readyDocs();
+  const d2 = d.dataElement.find(e => e.id === 'D2').data;
+  d2.discovered = [{ text: 'Routing can be 8 digits for legacy banks', fromRun: 'R2', at: '2026-11-02' }, { text: 'x', fromRun: 'R2', at: '2026-11-02', resolved: { by: 'lp', at: '2026-11-03', note: 'spec updated' } }];
+  let c = check(E.readiness(d, PRJ, TODAY), 'discovered-resolved');
+  assert.equal(c.pass, false); assert.deepEqual(c.items, ['D2#0']);
+  d2.discovered[0].resolved = { by: 'lp', at: '2026-11-03', note: 'ok' };
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'discovered-resolved').pass, true);
+
+  d = readyDocs();
+  const vo = d.process[0].data;
+  vo.tobe.find(n => n.id === 's5').owner = '';
+  vo.tobe.find(n => n.id === 'd1').branches[0].goto = 'nope';
+  vo.tobe.splice(1, 0, { id: 'g9', type: 'parallel', title: 'Empty fork', branches: [{ label: 'A', nodes: [] }, { label: 'B', nodes: [] }] });
+  c = check(E.readiness(d, PRJ, TODAY), 'process-valid');
+  assert.equal(c.pass, false);
+  assert.deepEqual(c.items.sort(), ['vendor-onboarding:d1', 'vendor-onboarding:g9', 'vendor-onboarding:s5']);
+  assert.match(c.detail, /missing node nope/);
+  d = readyDocs();
+  d.process[0].data.tobe.find(n => n.id === 'd1').branches[1].goto = 's1';    // valid loop-back
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'process-valid').pass, true);
+
+  d = readyDocs(); d.project[0].data.cutover.rollbackPlan = ' ';
+  c = check(E.readiness(d, PRJ, TODAY), 'cutover-plan');
+  assert.equal(c.pass, false); assert.deepEqual(c.items, ['rollbackPlan']);
+});
+
+test('R2 readiness: stricter tests-passed', () => {
+  let d = readyDocs(); d.testRun[0].data.results[2].outcome = 'fail';            // any dev fail blocks
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').failing, ['TX']);
+  d = readyDocs(); d.testRun[1].data.results[0].outcome = 'blocked';
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').blocked, ['T1']);
+  d = readyDocs(); const firstScript = d.testRun[1].data.results.find(x => x.scriptId).scriptId;
+  d.testRun[1].data.results = d.testRun[1].data.results.filter(x => x.scriptId !== firstScript);
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').unrun, [firstScript]);
+  d = readyDocs();                                                                 // an older complete UAT run doesn't count
+  d.testRun.push({ id: 'R3', data: { id: 'R3', projectId: PRJ, env: 'uat', at: '2026-11-03T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }] } });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, false);
+  d = readyDocs();
+  d.workItem.push({ id: 'W12', data: { id: 'W12', projectId: PRJ, pid: 'vendor-onboarding', step: 's3', title: 'Fix routing check', owner: 'dk', status: 'prog', start: TODAY, due: TODAY, kind: 'defect', testRef: { runId: 'R2', caseId: 'T2' } } });
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'tests-passed').defects, ['W12']);
+  d = readyDocs(); d.project[0].data.uatScripts = [{ id: 'custom-1', pid: 'vendor-onboarding', step: 's3', title: 'Bank capture', given: 'g', when: 'w', then: 't', data: ['D2'] }];
+  let c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.deepEqual(c.scripts, ['custom-1']); assert.deepEqual(c.unrun, ['custom-1']);
+  d.testRun[1].data.results.push({ scriptId: 'custom-1', outcome: 'pass' });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);
+});
+
+test('R2 gateways: parallel traversal, goto, diff of gateways and sla/system/sub-steps', () => {
+  const proc = {
+    asis: [
+      { id: 'k', type: 'trigger', title: 'Start' },
+      { id: 'a1', title: 'Review', owner: 'mc', data: [], sla: '3 days', system: 'Email', subs: [{ title: 'Read', data: [] }, { title: 'Decide', data: [] }] },
+      { id: 'g0', type: 'decision', title: 'Approved?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] },
+      { id: 'a2', title: 'File it', owner: 'mc', data: [] },
+      { id: 'e', type: 'end', title: 'End' },
+    ],
+    tobe: [
+      { id: 'k', type: 'trigger', title: 'Start' },
+      { id: 'r1', title: 'Review', owner: 'mc', data: [], from: 'a1', sla: '1 day', system: 'Portal', subs: [{ title: 'Read', data: ['D1'] }, { title: 'Score', data: [] }] },
+      { id: 'g1', type: 'decision', title: 'Approved?', from: 'g0', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [], goto: 'r1' }] },
+      { id: 'p1', type: 'parallel', title: 'Fan out', branches: [{ label: 'Notify', nodes: [{ id: 'n1', title: 'Notify', owner: 'dk', data: [] }] }, { label: 'Archive', nodes: [{ id: 'n2', title: 'Archive', owner: 'mc', data: [], from: 'a2' }] }] },
+      { id: 'e', type: 'end', title: 'End' },
+    ],
+  };
+  deepFreeze(proc);
+  assert.deepEqual(E.flatSteps(proc.tobe).map(s => s.id), ['r1', 'n1', 'n2']);
+  const df = E.diffProcess(proc);
+  assert.equal(df.nodes.p1, 'new');
+  assert.equal(df.nodes.g1, 'changed');
+  assert.ok(df.changes.g1.includes('Loop-backs added: No ↺ r1'));
+  assert.equal(df.nodes.r1, 'changed');
+  ['SLA "3 days" → "1 day"', 'System "Email" → "Portal"', 'Sub-steps added: Score', 'Sub-steps removed: Decide', 'Sub-step "Read" data added: D1']
+    .forEach(t => assert.ok(df.changes.r1.includes(t), t));
+  assert.equal(df.nodes.n2, 'changed');                       // title differs
+  assert.equal(df.nodes.n1, 'new');
+  assert.deepEqual(df.removed, []);
+  // a node released as-is (from = own id) diffs as same; undocumented as-is subs are not compared
+  const same = E.diffProcess({ asis: [{ id: 'x', title: 'X', owner: 'mc', data: [] }, { id: 'g', type: 'parallel', title: 'P', branches: [{ label: 'A', nodes: [] }] }],
+    tobe: [{ id: 'x', from: 'x', title: 'X', owner: 'mc', data: [], subs: [{ title: 'detail', data: [] }] }, { id: 'g', from: 'g', type: 'parallel', title: 'P', branches: [{ label: 'A', nodes: [] }] }] });
+  assert.deepEqual(same.nodes, { x: 'same', g: 'same' });
+});
+
+test('R2 generateUatScripts: deterministic ids, one per new/changed step and per gateway branch', () => {
+  const docs = deepFreeze(baseDocs());
+  const a = E.generateUatScripts(docs, PRJ), b = E.generateUatScripts(docs, PRJ);
+  assert.deepEqual(a, b);
+  const ids = a.map(x => x.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(ids.includes('uat-vendor-onboarding-s3'));
+  assert.ok(ids.includes('uat-vendor-onboarding-s2a'));
+  assert.ok(!ids.includes('uat-invoice-approval-i3'));        // unchanged step
+  assert.ok(ids.includes('uat-vendor-onboarding-d1-high') && ids.includes('uat-vendor-onboarding-d1-standard'));
+  const s3 = a.find(x => x.id === 'uat-vendor-onboarding-s3');
+  assert.deepEqual(s3.data, ['D2']);
+  assert.match(s3.given, /Bank remittance details is available/);
+  assert.match(s3.when, /Leo Park performs "Capture banking details"/);
+  a.forEach(x => ['id', 'pid', 'step', 'title', 'given', 'when', 'then'].forEach(k => assert.equal(typeof x[k], 'string')));
+  assert.match(a.find(x => x.id === 'uat-vendor-onboarding-d1-high').then, /Enhanced due diligence/);
+});
+
+test('R2 Bug 8: specDrift token-normalised matching', () => {
+  const prof = E.profileCsv('tax_id,routing_number,AccountHolder,ein_alias\n12-3456789,123456789,Ann,x\n', {});
+  const drift = E.specDrift({ fields: [
+    { name: 'Tax ID (EIN)', type: 'text', format: '##-#######' },
+    { name: 'Routing Number', type: 'digits', length: 9 },
+    { name: 'Account holder', type: 'text' },
+    { name: 'Alias', column: 'EIN alias', type: 'text' },
+  ] }, prof);
+  assert.deepEqual(drift, []);
+  // parenthetical alias as a fallback: "Tax ID (EIN)" ↔ column "ein"
+  assert.deepEqual(E.specDrift({ fields: [{ name: 'Tax ID (EIN)', type: 'text' }] }, E.profileCsv('EIN\n12-3456789\n', {})), []);
+  let seedMod = null; try { seedMod = require(path.join(ROOT, 'api', 'shared', 'pmoflow-seed.js')); } catch (e) { seedMod = null; }
+  if (seedMod && seedMod.seed) {
+    const d1 = seedMod.seed(TODAY).docs.dataElement.find(e => e.id === 'D1').data;
+    const sd = E.specDrift(d1, E.profileCsv(d1.sampleCsv, {}));
+    assert.ok(!sd.some(x => x.issue === 'missing-column' || x.issue === 'unspecified-column'), JSON.stringify(sd));
+    assert.ok(sd.some(x => x.field === 'Tax ID (EIN)' && x.issue === 'pattern-mismatch'));
+  }
+});
+
+test('R2 workload: capacity-aware', () => {
+  const d = baseDocs();
+  d.person.find(e => e.id === 'dk').data.capacity = 1;          // 2 days per fortnight
+  d.workItem.find(e => e.id === 'W7').data.effortDays = 3;
+  deepFreeze(d);
+  const wl = E.workload(d, TODAY);
+  const dk = wl.find(r => r.person === 'dk');
+  assert.equal(dk.capacityNext14, 2);
+  assert.equal(dk.overloaded, true);
+  assert.ok(dk.effortNext14 >= 3);
+  const lp = wl.find(r => r.person === 'lp');
+  assert.deepEqual([lp.effortNext14, lp.capacityNext14, lp.overloaded], [1, 8, false]);   // overdue W6 counts in full
+  // W3: 11-11..11-17 lies inside the 14-day window → full effort 1. W11 (11-10..11-20) overlaps 8 of 11 days.
+  const one = E.workload({ person: d.person, workItem: [d.workItem.find(e => e.id === 'W11')] }, TODAY)[0];
+  assert.equal(one.effortNext14, Math.round(8 / 11 * 100) / 100);
+  ['person', 'open', 'late', 'dueNext7', 'effortNext14', 'capacityNext14', 'overloaded'].forEach(k => assert.ok(k in dk, k));
 });

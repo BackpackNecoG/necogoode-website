@@ -33,9 +33,18 @@ export function render(params) {
   const W = id => store.get('workItem', id);
   const schedColor = st && (st.sched === 'late' || st.sched === 'slip') ? 'var(--late)' : st && st.sched === 'soon' ? '#b45309' : 'inherit';
   const stepLink = x => link(`/process/${pid}/step/${x.id}`);
+  /* UAT scripts: the project's edited set wins; otherwise the engine generates them from the design */
+  let uat = [], uatSrc = '';
+  if (prj && version === 'tobe') {
+    const own = (prj.uatScripts || []).filter(u => u.pid === pid && u.step === sid);
+    if ((prj.uatScripts || []).length) { uat = own; uatSrc = 'From the project’s UAT script set'; }
+    else { uat = eng('generateUatScripts', [docs(), prj.id], []).filter(u => u.pid === pid && u.step === sid); uatSrc = 'Generated from the to-be design (not yet saved to the project)'; }
+  }
+  const ops = [s.sla ? ['SLA', s.sla] : null, s.system ? ['System', s.system] : null, s.durationHrs ? ['Duration', s.durationHrs + ' h'] : null].filter(Boolean);
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › <a href="${link('/process/' + pid + (version === 'asis' ? '?mode=asis' : ''))}" data-link>${esc(p.name)}</a> › ${version === 'asis' ? 'As-is step' : 'Step'} ${i + 1} of ${steps.length}</div>
       <h1>${esc(s.title)}</h1><div class="res">${personChip(s.owner) || '<span class="hint">No owner</span>'}${(s.touches || []).map(t => `<span class="chip touch"># ${esc(t)}</span>`).join('')}${diff === 'new' ? '<span class="chip diff-new">NEW IN TO-BE</span>' : diff === 'changed' ? '<span class="chip diff-changed">CHANGED FROM AS-IS</span>' : ''}${version === 'asis' ? '<span class="chip">AS-IS (today)</span>' : ''}</div>
+      <div class="res d-opsrow">${ops.length ? ops.map(([k, v]) => `<span class="chip d-opschip"><b>${k}</b> ${esc(v)}</span>`).join('') : '<span class="hint">No SLA, system or duration set. Add them in the process editor.</span>'}</div>
       ${version === 'tobe' ? `<p style="margin-top:8px"><span class="was">${asis ? 'As-is: ' + esc(asis.title) : 'No as-is step: this is new in the to-be design'}</span></p>` : ''}</div>
     <div class="hdr-side"><div class="d-prevnext">${prev ? `<a class="btn" href="${stepLink(prev)}" data-link aria-label="Previous step: ${esc(prev.title)}">‹ ${esc(prev.title)}</a>` : ''}${next ? `<a class="btn" href="${stepLink(next)}" data-link aria-label="Next step: ${esc(next.title)}">${esc(next.title)} ›</a>` : ''}</div></div></section>
   <div class="kgrid">
@@ -55,6 +64,9 @@ export function render(params) {
     <div class="card"><h3>Data this step needs <span class="n">${data.length}</span></h3>${data.length ? `<div class="tbl-wrap"><table><tr><th>Element</th><th>Owner</th><th>Availability</th></tr>${data.map(d => { const x = dataEl(d) || {}; return `<tr class="click" data-go="/data/${esc(d)}"><td><a href="${link('/data/' + d)}" data-link><b>${esc(x.name || d)}</b></a><div style="color:var(--ink2);font-size:12px">${esc(x.source || 'Source not set')} · ${(x.fields || []).length} fields</div></td><td>${esc(pname(x.owner))}</td><td><span class="chip">${dataDot(d)}${esc((AVAIL[x.avail] || AVAIL.missing).short)}</span>${blockers.includes(d) ? `<div class="d-blk">${LOCK} blocks this step</div>` : ''}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No data tagged on this step.</div>'}</div>
     <div class="card"><h3>Also touched by this change <span class="n">${sharedList.length}</span></h3>${sharedList.length ? sharedList.map(x => `<div class="row click" data-go="/process/${esc(x.pid)}/step/${esc(x.stepId)}"><div><div class="t">${esc(x.s.title)}</div><div class="s">${esc(x.p.name)} · shares ${x.data.map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(x.s.owner)}</div></div>`).join('') : '<div class="s">No other steps share this data.</div>'}</div>
   </div>
+  ${version === 'tobe' ? `<div class="card" style="margin-top:16px"><h3>UAT scripts for this step <span class="n">${uat.length}</span></h3>${prj ? `<div class="hint" style="margin:-4px 0 8px">${esc(uatSrc)} · <a href="${link('/testing/' + prj.id)}" data-link style="color:var(--accent)">Open testing ›</a></div>` : ''}
+    ${uat.length ? `<div class="d-uat">${uat.map(u => `<div class="d-uatc" data-uat="${esc(u.id)}"><div class="t">${esc(u.title)}</div><dl><dt>Given</dt><dd>${esc(u.given)}</dd><dt>When</dt><dd>${esc(u.when)}</dd><dt>Then</dt><dd>${esc(u.then)}</dd></dl>${(u.data || []).length ? `<div class="s">${u.data.map(d => `${dataDot(d)} ${esc(dataName(d))}`).join(' &nbsp; ')}</div>` : ''}</div>`).join('')}</div>`
+      : `<div class="s">${prj ? 'No UAT scripts for this step. Unchanged steps do not need one.' : 'Link this process to a project to plan UAT.'}</div>`}</div>` : ''}
   <div class="two"><div class="card"><h3>Comments</h3>${commentsPanel('step:' + pid + '/' + sid)}</div>
     <div class="card"><h3>History <span class="n">process</span></h3><div class="hint" style="margin:-4px 0 8px">Changes to ${esc(p.name)}, which holds this step</div>${historyPanel('process:' + pid)}</div></div>`;
 }

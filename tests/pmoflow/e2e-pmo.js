@@ -66,6 +66,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('map has open-design pills', await page.locator('.pgroup-h').count() >= 1);
   check('side panel: biggest blockers', await page.locator('.side .card h3', { hasText: 'Biggest blockers' }).count() === 1);
   check('side panel: up next', await page.locator('.side .card h3', { hasText: 'Up next' }).count() === 1);
+  const dl = await page.locator('.side .pmo-dl').allInnerTexts();
+  check('one schedule format: "Due X · forecast Y (+Nd)"', dl.length > 0 && dl.every(t => /^Due [A-Z][a-z]{2} \d{1,2} · (forecast|done) [A-Z][a-z]{2} \d{1,2}( \(\+\d+d\))?$/.test(t.trim())), dl.slice(0, 3));
   const collapsedBefore = await page.locator('.collapsed').count();
   await page.click('button[data-expand="1"]');
   await page.waitForSelector('button[data-expand="0"]');
@@ -80,6 +82,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.waitForSelector('.tl .tbar');
   check('timeline bars render', await page.locator('.tl .tbar').count() > 3);
   check('timeline has slip hatching', await page.locator('.tl .tslip').count() > 0);
+  check('timeline bars show dates, not "unblocks"', (await page.locator('.tl .tbar').allInnerTexts()).every(t => !t.includes('unblocks')));
+  check('timeline label subtitle carries "unblocks"', (await page.locator('.tl .lab .s').allInnerTexts()).some(t => t.includes('unblocks')));
   check('timeline has today + target lines', await page.locator('.tl .tday').count() > 0 && await page.locator('.tl .tgt').count() > 0);
   check('project no overflow @1440 (timeline)', await noOverflow());
   await shot('03-project-timeline-1440');
@@ -88,6 +92,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('work items');
   await page.click('.pmo-tabs a:has-text("Work")');
   await page.waitForSelector('table.pmo-work');
+  const roRow = page.locator('tr[data-wid].pmo-ro').first();
+  check('non-owner: status select disabled', await roRow.count() === 1 && await roRow.locator('select[data-status]').isDisabled());
+  check('non-owner: lock title explains who can act', /^Only .+ or .+ can update this$/.test(await roRow.locator('select[data-status]').getAttribute('title') || ''));
+  check('non-owner: edit disabled', await roRow.locator('[data-edit-work]').isDisabled());
+  const pmId = await page.$eval('#persona', s => [...s.options].find(o => /Project Manager/.test(o.text)).value);
+  await page.selectOption('#persona', pmId); await settle();
+  await page.waitForSelector('table.pmo-work');
+  check('PM: every status select enabled', await page.locator('tr[data-wid] select[data-status]:disabled').count() === 0);
   const rowsBefore = await page.locator('tr[data-wid]').count();
   check('work table lists items', rowsBefore > 3, rowsBefore);
   const T1 = 'E2E reconcile remit-to letters';
@@ -95,10 +107,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.fill('.overlay input[name="title"]', T1);
   await page.fill('.overlay input[name="start"]', '2026-11-20');
   await page.fill('.overlay input[name="due"]', '2026-11-27');
+  await page.fill('.overlay input[name="effortDays"]', '3');
   const depLabel = (await page.locator('.overlay .pmo-checks label span').first().innerText()).trim();
   await page.locator('.overlay .pmo-checks input[name="deps"]').first().check();
   await act('save'); await settle();
   check('work item created', await workRow(T1).count() === 1);
+  check('effort shown in work table', (await workRow(T1).locator('.pmo-eff').innerText()).trim() === '3d');
   check('new item shows its dependency', (await workRow(T1).locator('.pmo-deps').innerText()).includes(depLabel), depLabel);
   await shot('04-work-created-1440');
 
@@ -116,6 +130,29 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await workRow(T2).locator('select[data-status]').selectOption('done'); await settle();
   const pctAfter = await kpiPct();
   check('status change updates progress KPI', pctAfter > pctBefore, { pctBefore, pctAfter });
+  check('done item shows "done <date>"', /done [A-Z][a-z]{2} \d{1,2}/.test(await workRow(T2).locator('.pmo-dl').innerText()));
+
+  /* defect work item */
+  const TD = 'E2E defect: routing number rejects leading zero';
+  await page.click('[data-add-work]'); await modalOpen();
+  await page.fill('.overlay input[name="title"]', TD);
+  await page.selectOption('.overlay select[name="kind"]', 'defect');
+  await act('save'); await settle();
+  check('defect row has bug icon', await workRow(TD).locator('.pmo-bug').count() > 0);
+  check('defect row links to testing', await workRow(TD).locator('a.pmo-runlink').count() === 1);
+
+  /* hierarchy: group by process > step */
+  await page.click('[data-wgroup="step"]'); await page.waitForSelector('tr.pmo-gh.p');
+  check('grouped: process headers with roll-up', await page.locator('tr.pmo-gh.p .pmo-roll').count() >= 1);
+  check('grouped: step headers', await page.locator('tr.pmo-gh.s').count() >= 2);
+  const visBefore = await page.locator('tr[data-wid]').count();
+  await page.locator('tr.pmo-gh.p').first().click(); await sleep(200);
+  const visCollapsed = await page.locator('tr[data-wid]').count();
+  check('grouped: collapsing a process hides its items', visCollapsed < visBefore, { visBefore, visCollapsed });
+  await page.locator('tr.pmo-gh.p').first().click(); await sleep(200);
+  check('grouped: expanding restores', await page.locator('tr[data-wid]').count() === visBefore);
+  await shot('04b-work-grouped-1440');
+  await page.click('[data-wgroup="flat"]'); await page.waitForSelector('table.pmo-work:not(.grouped)');
 
   /* push an open item's due out by editing it, so baseline variance has something to show (after baseline below) */
   /* ---------------- baseline ---------------- */
@@ -133,6 +170,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('.pmo-tabs a:has-text("Timeline")');
   await page.waitForSelector('.tl .tbar');
   check('timeline baseline overlay markers', await page.locator('.tl .pmo-blmark').count() > 0);
+  check('timeline actual-finish marker for done item', await page.locator('.tl .pmo-actual').count() > 0);
   await shot('05-timeline-baseline-1440');
   await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
 
@@ -198,7 +236,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('workload bars', await page.locator('.pmo-wl-row').count() > 0);
   check('variance table appears for baseline', await page.locator('.pmo-vtable tbody tr').count() > 0);
   check('variance shows slip for pushed item', await page.locator('.pmo-vtable tr', { hasText: openTitle }).locator('.pmo-var.up').count() === 1, openTitle);
-  check('total slip shown', /\+\d+d/.test(await page.locator('.pmo-var-kpis').innerText()));
+  check('project slip headline (not a sum)', (await page.locator('[data-proj-slip]').innerText()).includes('Project slip'));
+  check('workload shows effort vs capacity', await page.locator('.pmo-wl-row .pmo-cap').count() > 0);
+  const capPid = await page.locator('[data-cap]').first().getAttribute('data-cap');
+  await page.locator('[data-cap]').first().click(); await modalOpen();
+  await page.fill('.overlay input[name="capacity"]', '1');
+  await act('save'); await settle();
+  check('capacity edit applies (2d per 14 days)', (await page.locator(`[data-wl="${capPid}"] .pmo-wl-n`).innerText()).includes('/ 2d'));
   check('risk matrix', await page.locator('.pmo-mx-c').count() === 9);
 
   const R1 = 'E2E sanctions list feed delayed';
@@ -207,8 +251,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.selectOption('.overlay select[name="impact"]', 'high');
   await page.selectOption('.overlay select[name="likelihood"]', 'high');
   await page.fill('.overlay textarea[name="mitigation"]', 'Fall back to manual weekly screening');
+  const linkTitle = (await page.locator('.overlay [data-risk-work] label:not([hidden]) span').first().innerText()).trim();
+  await page.locator('.overlay [data-risk-work] label:not([hidden]) input').first().check();
   await act('save'); await settle();
   check('risk created', await page.locator('.pmo-rtable tr', { hasText: R1 }).count() === 1);
+  check('risk shows linked work item', (await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('.pmo-rlinks').innerText()).includes(linkTitle));
   check('risk score 9', (await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('.pmo-sev').innerText()).trim() === '9');
   await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('[data-edit-risk]').click(); await modalOpen();
   await page.selectOption('.overlay select[name="likelihood"]', 'low');
@@ -228,16 +275,42 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   await sleep(800);
   await page.reload(); await page.waitForSelector('.pmo-rtable');
+  check('reload: capacity persisted', (await page.locator(`[data-wl="${capPid}"] .pmo-wl-n`).innerText()).includes('/ 2d'));
   check('reload: risk persisted with edit', (await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('.pmo-sev').innerText()).trim() === '3');
   await page.waitForSelector('[data-feed="risk"] .ev', { timeout: 10000 }).catch(() => {});
   const rfeed = await page.locator('[data-feed="risk"]').innerText();
   check('risk history shows create + edit', rfeed.includes('Logged risk') && rfeed.includes('Edited risk'), rfeed.slice(0, 200));
+  /* linked work row shows a risk badge on the project Work tab */
+  await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=work'); await page.waitForSelector('table.pmo-work');
+  check('linked work row shows risk badge', await workRow(linkTitle).first().locator('.pmo-riskb').count() === 1, linkTitle);
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-rtable');
   await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('[data-del-risk]').click(); await modalOpen();
   await act('delete'); await settle();
   check('risk deleted', await page.locator('.pmo-rtable tr', { hasText: R1 }).count() === 0);
   await sleep(800);
   await page.reload(); await page.waitForSelector('.pmo-ptable');
   check('reload: risk stays deleted', await page.locator('.pmo-rtable tr', { hasText: R1 }).count() === 0);
+
+  /* ---------------- actuals: finish every item on a project -> "Finished <date>" ---------------- */
+  console.log('actuals');
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  const prjLinks = await page.locator('.home-grid a[href*="/project/"]').evaluateAll(as => as.map(a => a.getAttribute('href')));
+  const other = prjLinks.find(h => h !== prjPath);
+  if (other) {
+    await page.goto(ROOT + other.replace(/^\/concepts\/pmoflow/, '') + '?mode=work'); await page.waitForSelector('table.pmo-work');
+    for (let i = 0; i < 30; i++) {
+      const open = page.locator('tr[data-wid] select[data-status]').filter({ hasNot: page.locator('option[value="done"]:checked') });
+      if (!await open.count()) break;
+      await open.first().selectOption('done'); await settle();
+    }
+    const fin = await page.locator('[data-kpi-finish]').innerText();
+    check('all done -> KPI shows "Finished <date>"', /Finished [A-Z][a-z]{2} \d{1,2}/.test(fin) && fin.includes('Actual finish'), fin);
+    await sleep(800); await page.reload(); await page.waitForSelector('[data-kpi-finish]');
+    check('reload: Finished persists', (await page.locator('[data-kpi-finish]').innerText()).includes('Finished'));
+    await page.click('.pmo-tabs a:has-text("Timeline")'); await page.waitForSelector('.tl .tbar');
+    check('timeline shows actual finish markers', await page.locator('.tl .pmo-actual').count() > 0);
+    await shot('15-finished-project-1440');
+  } else check('second project exists for Finished check', false);
 
   /* ---------------- phone width ---------------- */
   console.log('phone 390');

@@ -1,20 +1,30 @@
 /* PMOFlow — workspace home (stream P). Route: / */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, av, pname, LOCK } from '../ui.js';
-import { eng, docs, forecasts, flatSteps, projectStats, rag, ragBadge, dataName, stepTitle, rerender } from './project.js';
+import { eng, forecasts, flatSteps, projectStats, rag, ragBadge, dataName, rerender, finishInfo, dueLine } from './project.js';
 
 let scope = 'mine'; /* 'mine' | 'all' */
 
-/* BUs that own steps in a project's linked processes but have no approved sign-off yet. */
+/* BUs that own steps in a project's linked processes and still need a (re-)approval.
+   An approval is stale when work or a process in that BU's section changed after it (R2). Returns [{bu, stale}]. */
 export function pendingApprovals(project) {
   if (!project || project.status === 'live') return [];
-  const bus = new Set();
+  const section = {}; /* bu -> {steps:Set('pid/sid'), procs:Set(pid)} */
   (project.processes || []).forEach(pid => {
     const p = store.get('process', pid); if (!p) return;
-    flatSteps(p.tobe).forEach(s => { const o = store.person(s.owner); if (o && o.bu) bus.add(o.bu); });
+    flatSteps(p.tobe).forEach(s => { const o = store.person(s.owner); if (!o || !o.bu) return; const x = section[o.bu] = section[o.bu] || { steps: new Set(), procs: new Set() }; x.steps.add(pid + '/' + s.id); x.procs.add(pid); });
   });
-  const approved = new Set(store.list('approval', a => a.projectId === project.id && a.decision === 'approved').map(a => a.bu));
-  return [...bus].filter(b => !approved.has(b)).sort();
+  const out = [];
+  Object.keys(section).sort().forEach(bu => {
+    const ap = store.list('approval', a => a.projectId === project.id && a.bu === bu).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    if (!ap || ap.decision !== 'approved') { out.push({ bu, stale: false }); return; }
+    const at = String(ap.at || '');
+    const x = section[bu];
+    const changed = store.list('workItem', w => w.projectId === project.id && x.steps.has(w.pid + '/' + w.step) && String(w.updatedAt || '') > at).length
+      + [...x.procs].filter(pid => String((store.get('process', pid) || {}).updatedAt || '') > at).length;
+    if (changed) out.push({ bu, stale: true });
+  });
+  return out;
 }
 
 function attention() {
@@ -24,7 +34,7 @@ function attention() {
   const pName = id => (store.get('project', id) || {}).name || 'Project';
   const work = store.list('workItem', w => w.status !== 'done' && fc[w.id] && (fc[w.id].sched === 'late' || fc[w.id].sched === 'slip'))
     .map(w => ({ w, f: fc[w.id] })).sort((a, b) => (b.f.slipDays || 0) - (a.f.slipDays || 0));
-  const approvals = projects.flatMap(p => pendingApprovals(p).map(bu => ({ p, bu })));
+  const approvals = projects.flatMap(p => pendingApprovals(p).map(x => ({ p, bu: x.bu, stale: x.stale })));
   const grants = store.list('grant', g => g.status === 'requested').map(g => ({ g, d: store.get('dataElement', g.dataId) }));
   const notes = store.list('notification', n => !n.read).sort((a, b) => String(b.at).localeCompare(String(a.at)));
   const mine = {
@@ -44,8 +54,8 @@ function attnHTML() {
   const box = (key, title, sub, arr, rows, emptyText) => `<div class="pmo-attn-col ${arr.length ? 'has' : ''}" data-attn="${key}">
       <div class="pmo-attn-h"><b class="pmo-attn-n">${arr.length}</b><div><div class="t">${title}</div><div class="hint">${sub}</div></div></div>
       ${arr.length ? rows + more(arr, 3) : `<div class="pmo-attn-empty">${emptyText}</div>`}</div>`;
-  const workRows = set.work.slice(0, 3).map(({ w, f }) => `<a class="pmo-attn-row" href="${link('/project/' + encodeURIComponent(w.projectId) + '?mode=work')}" data-link>${av(w.owner)}<span><span class="t">${esc(w.title)}</span><span class="s">${f.sched === 'late' ? `<b class="fail">Late</b> · due ${esc(fmt(w.due))}` : `<b class="warn">Slipping ${f.slipDays ? f.slipDays + 'd' : ''}</b> → ${esc(fmt(f.forecast))}`}${f.cause ? ' · waits on ' + esc(dataName(f.cause) !== f.cause ? dataName(f.cause) : ((store.get('workItem', f.cause) || {}).title || f.cause)) : ''}</span></span></a>`).join('');
-  const apprRows = set.approvals.slice(0, 3).map(({ p, bu }) => `<a class="pmo-attn-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link><span class="pmo-attn-ic">✓</span><span><span class="t">${esc(bu)} sign-off</span><span class="s">${esc(p.name)}</span></span></a>`).join('');
+  const workRows = set.work.slice(0, 3).map(({ w, f }) => `<a class="pmo-attn-row" href="${link('/project/' + encodeURIComponent(w.projectId) + '?mode=work')}" data-link>${av(w.owner)}<span><span class="t">${esc(w.title)}</span><span class="s">${f.sched === 'late' ? '<b class="fail">Late</b>' : '<b class="warn">Slipping</b>'} · ${esc(dueLine(w, f))}${f.cause ? ' · waits on ' + esc(dataName(f.cause) !== f.cause ? dataName(f.cause) : ((store.get('workItem', f.cause) || {}).title || f.cause)) : ''}</span></span></a>`).join('');
+  const apprRows = set.approvals.slice(0, 3).map(({ p, bu, stale }) => `<a class="pmo-attn-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link><span class="pmo-attn-ic">✓</span><span><span class="t">${esc(bu)} ${stale ? 're-approval (changed since sign-off)' : 'sign-off'}</span><span class="s">${esc(p.name)}</span></span></a>`).join('');
   const grantRows = set.grants.slice(0, 3).map(({ g, d }) => `<a class="pmo-attn-row" href="${link('/release/' + encodeURIComponent(g.projectId))}" data-link><span class="pmo-attn-ic">${LOCK}</span><span><span class="t">${esc(d ? d.name : g.dataId)}</span><span class="s">${esc(String(g.env || '').toUpperCase())} ${esc(g.access || '')} · requested by ${esc(pname(g.requestedBy))}</span></span></a>`).join('');
   const noteRows = set.notes.slice(0, 3).map(n => `<button class="pmo-attn-row" data-open-bell><span class="pmo-attn-ic">●</span><span><span class="t">${esc(n.text)}</span><span class="s">${scope === 'all' ? 'To ' + esc(pname(n.to)) + ' · ' : ''}${esc(fmtTime(n.at))}</span></span></button>`).join('');
   const total = set.work.length + set.approvals.length + set.grants.length + set.notes.length;
@@ -74,13 +84,13 @@ function processTile(p) {
     <div class="pmo-tile-f">${av(p.owner)}<span class="hint">${esc(pname(p.owner))}</span></div></a>`;
 }
 function projectTile(j) {
-  const s = projectStats(j.id), r = rag(j, s);
-  const over = s.finish && j.target && s.finish > j.target;
+  const s = projectStats(j.id), r = rag(j, s), fi = finishInfo(j, s);
+  const over = fi.over;
   return `<a class="tile" href="${link('/project/' + encodeURIComponent(j.id))}" data-link><div class="pmo-tile-h"><h4>${esc(j.name)}</h4>${ragBadge(r)}</div>
     ${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
     <div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div>
     <div class="chips"><span class="chip">${s.done}/${s.total} work done</span>${s.late + s.slip ? `<span class="chip block">${s.late} late · ${s.slip} slipping</span>` : ''}
-      <span class="chip ${over ? 'block' : ''}">Forecast ${esc(fmt(s.finish))} · target ${esc(fmt(j.target))}</span><span class="chip">${(j.processes || []).length} linked process${(j.processes || []).length === 1 ? '' : 'es'}</span></div>
+      <span class="chip ${over ? 'block' : ''}">${fi.label} ${esc(fmt(fi.date))} · target ${esc(fmt(j.target))}</span><span class="chip">${(j.processes || []).length} linked process${(j.processes || []).length === 1 ? '' : 'es'}</span></div>
     <div class="pmo-tile-f">${av(j.owner)}<span class="hint">${esc(pname(j.owner))}</span></div></a>`;
 }
 

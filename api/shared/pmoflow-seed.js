@@ -183,9 +183,12 @@ function processes() {
         { id: 'k', type: 'trigger', title: 'Invoice received', owner: 'ar', data: [], touches: ['Accounts Payable', 'AP inbox'], from: 'k' },
         { id: 'i1', type: 'step', title: 'Match to PO & vendor master', owner: 'ar', data: ['D4', 'D2'], touches: ['Accounts Payable', 'ERP'], from: 'b1',
           subs: [sub('Read vendor master', ['D4']), sub('3-way match', ['D4']), sub('Confirm remit-to account', ['D2'])] },
-        { id: 'i2', type: 'step', title: 'Route for approval', owner: 'dk', data: ['D7'], touches: ['IT', 'Approvals'], from: 'b2',
-          subs: [sub('Resolve approver by amount', ['D7']), sub('Escalate after 48h', [])] },
-        { id: 'i3', type: 'step', title: 'Schedule payment', owner: 'lp', data: ['D2', 'D4'], touches: ['Treasury', 'Bank'], from: 'b3',
+        { id: 'p1', type: 'parallel', title: 'Approve and prepare payment in parallel', branches: [
+          { label: 'Approval', nodes: [{ id: 'i2', type: 'step', title: 'Route for approval', owner: 'dk', data: ['D7'], touches: ['IT', 'Approvals'], from: 'b2',
+            subs: [sub('Resolve approver by amount', ['D7']), sub('Escalate after 48h', [])] }] },
+          { label: 'Payment prep', nodes: [{ id: 'i2p', type: 'step', title: 'Schedule payment prep', owner: 'lp', data: ['D2', 'D4'], touches: ['Treasury', 'Bank'],
+            subs: [sub('Validate remit-to against verified bank', ['D2']), sub('Stage payment in next batch', ['D4'])] }] }] },
+        { id: 'i3', type: 'step', title: 'Release scheduled payment', owner: 'lp', data: ['D2', 'D4'], touches: ['Treasury', 'Bank'], from: 'b3',
           subs: [sub('Batch by pay date', ['D4']), sub('Release payment file', ['D2'])] },
         { id: 'e', type: 'end', title: 'Payment scheduled', from: 'e' },
       ] },
@@ -281,8 +284,6 @@ function seed(createdAtISODate) {
     at: at(-2, 16), stepUp: true, note: 'Procurement steps (intake, contract activation) reviewed and approved.' });
   add('approval', { id: 'AP2', projectId: 'access-review-automation', bu: 'IT', approver: 'dk', decision: 'approved',
     at: at(-1, 14), stepUp: true, note: 'Entitlement pull and auto-removal steps approved.' });
-  add('approval', { id: 'AP3', projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved',
-    at: at(-1, 16), stepUp: true, note: 'Manager certification step approved.' });
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract slips past legal review', impact: 'high', likelihood: 'med', owner: 'ps',
     mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'open' });
@@ -312,7 +313,7 @@ function seed(createdAtISODate) {
     text: 'Risk-tier thresholds are drafted. I need sign-off on them before the EDD checklist (W5) can start.' });
 
   add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on W6: Stand up structured bank capture', ref: 'workItem:W6', at: at(-1, 20), read: false });
-  add('notification', { id: 'N2', to: 'ta', text: 'Dev Kumar requested UAT read access to Bank remittance details (D2)', ref: 'grant:G2', at: at(-1, 21), read: false });
+  add('notification', { id: 'N2', to: 'lp', text: 'Dev Kumar requested UAT read access to Bank remittance details (D2)', ref: 'grant:G2', at: at(-1, 21), read: false });
 
   const ev = (n, hh, actor, action, ref, summary) => ({ at: at(n, hh), actor, action, ref, summary, seeded: true });
   const events = [
@@ -332,7 +333,67 @@ function seed(createdAtISODate) {
     ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to D2'),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
-  return { people: clone(PEOPLE), docs, events };
+  enrichR2(docs, day, at);
+  return { people: docs.person.map(d => clone(d.data)), docs, events };
+}
+
+/* ---------- Round 2 fields (contract R2) ---------- */
+const CAPACITY = { mc: 3, ta: 2, ps: 4, lp: 3, ar: 4, dk: 4 };           /* days per week */
+const EFFORT = { W1: 6, W2: 3, W3: 4, W4: 3, W5: 3, W6: 5, W7: 4, W8: 7, W9: 4, W10: 3, W11: 5, A1: 5, A2: 6, A3: 3, A4: 2 };
+const DONE_AT = { W1: -16, W9: -5, A1: -14, A2: -3, A3: -1 };            /* actual finish offsets */
+const SENSITIVITY = { D1: 'confidential', D2: 'pii', D3: 'internal', D4: 'confidential', D5: 'confidential', D6: 'internal', D7: 'internal', D8: 'internal' };
+const STEP_META = {                                                       /* pid/step -> {sla, system, durationHrs} */
+  'vendor-onboarding/s1': { sla: '5 business days', system: 'Vendor portal', durationHrs: 1 },
+  'vendor-onboarding/s2': { sla: '1 business day', system: 'Screening service', durationHrs: 0.5 },
+  'vendor-onboarding/s2a': { sla: '5 business days', durationHrs: 6 },
+  'vendor-onboarding/s3': { sla: '2 business days', system: 'Treasury portal', durationHrs: 0.5 },
+  'vendor-onboarding/s4': { system: 'ERP', durationHrs: 0.25 },
+  'invoice-approval/i1': { sla: '1 business day', system: 'ERP' },
+  'invoice-approval/i2': { sla: '2 business days', system: 'Approvals' },
+  'access-review/r1': { system: 'Identity platform', durationHrs: 0.5 },
+  'access-review/r2': { sla: '10 business days', system: 'Review portal' },
+  'access-review/r3': { sla: '1 business day', system: 'Identity platform' },
+};
+const RISK_WORK = { R1: ['W2', 'W3'], R2: ['W6', 'W7', 'W8'], R3: ['W10', 'W11'], R4: ['A4'] };
+
+function enrichR2(docs, day, at) {
+  const byId = type => Object.fromEntries(docs[type].map(d => [d.id, d.data]));
+  docs.person.forEach(d => { d.data.capacity = CAPACITY[d.id] || 4; });
+  docs.workItem.forEach(d => {
+    const w = d.data;
+    w.effortDays = EFFORT[w.id] || 1;
+    if (w.status === 'done' && DONE_AT[w.id] != null) w.doneAt = addDays(day, DONE_AT[w.id]);
+  });
+  /* W1 was edited after Procurement signed off, so the gate shows a re-approval exception */
+  byId('workItem').W1.updatedAt = at(-1, 11);
+  docs.dataElement.forEach(d => { d.data.sensitivity = SENSITIVITY[d.id] || 'internal'; });
+  byId('dataElement').D2.discovered = [{ text: 'Account holder must be required: the capture form accepted a blank value (dev run, case "Account holder blank").',
+    fromRun: 'TR1', at: at(-1, 18) }];
+  const walk = (pid, nodes) => (nodes || []).forEach(n => {
+    Object.assign(n, STEP_META[pid + '/' + n.id] || {});
+    (n.branches || []).forEach(b => walk(pid, b.nodes));
+  });
+  docs.process.forEach(d => walk(d.id, d.data.tobe));
+  docs.risk.forEach(d => { d.data.workItems = RISK_WORK[d.id] || []; });
+  docs.approval.forEach(d => { d.data.snapshotAt = d.data.at; });
+
+  const ar = byId('project')['access-review-automation'];
+  ar.cutover = { window: addDays(day, 10) + ' 08:00–10:00 (after quarter close)', rollbackOwner: 'dk',
+    rollbackPlan: 'Disable the auto-removal job and fall back to the spreadsheet campaign for this quarter.',
+    hypercareDays: 10, hypercareOwner: 'ps', comms: 'Manager email and Teams post two days before; reminder on day 5.' };
+  ar.uatScripts = [
+    { id: 'uat-access-review-r1', pid: 'access-review', step: 'r1', title: 'Pull entitlements automatically',
+      given: 'A quarter end with three finance apps connected', when: 'The scheduled pull runs', then: 'Every active account appears with its manager', data: ['D7'] },
+    { id: 'uat-access-review-r2', pid: 'access-review', step: 'r2', title: 'Managers certify in review portal',
+      given: 'A manager with five direct reports', when: 'They certify four and reject one', then: 'Decisions are recorded with timestamps', data: ['D7'] },
+    { id: 'uat-access-review-r3', pid: 'access-review', step: 'r3', title: 'Auto-remove uncertified access',
+      given: 'One rejected account', when: 'The removal job runs', then: 'Access is removed and the evidence pack lists it', data: [] },
+  ];
+  /* vendor-modernization intentionally has no cutover plan: it shows as an open gate item */
+  docs.testRun.push({ id: 'TR2', data: { id: 'TR2', projectId: 'access-review-automation', env: 'dev', at: at(-4, 15), by: 'dk',
+    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '' })) } });
+  docs.testRun.push({ id: 'TR3', data: { id: 'TR3', projectId: 'access-review-automation', env: 'uat', at: at(-2, 15), by: 'ps',
+    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '', evidence: 'Screenshot pack in UAT folder' })) } });
 }
 
 module.exports = { seed, DOC_TYPES, addDays, dayOf };

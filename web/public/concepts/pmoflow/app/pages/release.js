@@ -15,6 +15,9 @@ const CHECK_LINK = {
   'bu-signoff': () => ({ anchor: 'signoff', label: 'Jump to sign-off' }),
   'two-person': () => ({ anchor: 'signoff', label: 'Jump to sign-off' }),
   'exceptions': () => ({ anchor: 'signoff', label: 'Jump to sign-off' }),
+  'discovered-resolved': p => ({ href: `/testing/${p}`, label: 'Resolve on the testing page' }),
+  'process-valid': () => null, /* per-item links to the process editor */
+  'cutover-plan': () => ({ anchor: 'cutover', label: 'Jump to cutover plan' }),
 };
 
 /* ---------- derived data ---------- */
@@ -44,6 +47,29 @@ function latestApproval(prjId, bu) {
   return store.list('approval', a => a.projectId === prjId && a.bu === bu).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
 }
 
+/* Contract R2: an approval is stale when a work item or process in that BU's section changed after it (updatedAt > approval.at). */
+function refView(ref, prjId) {
+  const m = /^(\w+):(.+)$/.exec(String(ref || '')); if (!m) return { text: String(ref || ''), extra: '', href: null };
+  if (m[1] === 'workItem') { const w = store.get('workItem', m[2]); return w ? { text: w.title, extra: `work item · ${pname(w.owner)}${w.updatedAt ? ' · changed ' + fmtTime(w.updatedAt) : ''}`, href: `/project/${prjId}?mode=work` } : { text: m[2], extra: 'work item', href: null }; }
+  if (m[1] === 'process') { const p = store.get('process', m[2]); return { text: `${p ? p.name : m[2]} (process edited)`, extra: p && p.updatedAt ? 'changed ' + fmtTime(p.updatedAt) : '', href: `/process/${m[2]}?mode=diff` }; }
+  return { text: ref, extra: '', href: null };
+}
+function staleChanges(prj, section, a, rd) {
+  if (!a || a.decision !== 'approved') return [];
+  /* Prefer the engine's verdict so the card and the gate never disagree. */
+  const chk = rd && (rd.checks || []).find(c => c.id === 'bu-signoff');
+  if (chk && Array.isArray(chk.stale)) { const x = chk.stale.find(y => y.bu === section.bu); return x ? (x.changed || []).map(r => refView(r, prj.id)) : []; }
+  const at = String(a.at || '');
+  const keys = new Set(section.steps.map(x => x.pid + '|' + x.step.id));
+  const buPeople = new Set(store.state.people.filter(p => p.bu === section.bu).map(p => p.id));
+  const out = [];
+  store.list('workItem', w => w.projectId === prj.id && w.updatedAt && String(w.updatedAt) > at && (keys.has(w.pid + '|' + w.step) || buPeople.has(w.owner)))
+    .forEach(w => out.push({ text: w.title, extra: `work item · ${pname(w.owner)} · changed ${fmtTime(w.updatedAt)}`, href: `/project/${prj.id}?mode=work` }));
+  [...new Set(section.steps.map(x => x.pid))].map(id => store.get('process', id)).filter(p => p && p.updatedAt && String(p.updatedAt) > at)
+    .forEach(p => out.push({ text: `${p.name} (process edited)`, extra: `changed ${fmtTime(p.updatedAt)}`, href: `/process/${p.id}?mode=diff` }));
+  return out;
+}
+
 function readiness(prjId) {
   const e = E();
   if (!e || !e.readiness) return { pass: false, checks: [], unavailable: true };
@@ -59,28 +85,43 @@ function grantStatus(g) {
 const GRANT_CLS = { requested: 'b-soon', approved: 'b-prog', active: 'b-done', expired: 'b-idle', revoked: 'b-idle', denied: 'b-late' };
 
 /* Readiness items arrive as strings or small objects; render a label and a link where we can infer one. */
-function itemView(item, checkId, prjId) {
+const CO_LABEL = { rollbackOwner: 'Rollback owner not set', rollbackPlan: 'Rollback plan not written', hypercareOwner: 'Hypercare owner not set' };
+function itemView(item, checkId, prjId, chk) {
   if (item == null) return { text: '' };
   if (typeof item !== 'object') {
     const s = String(item);
-    if (store.get('dataElement', s)) return { text: store.get('dataElement', s).name, href: '/data/' + s };
-    if (store.get('workItem', s)) { const w = store.get('workItem', s); return { text: w.title, extra: `${pname(w.owner)} · ${w.status === 'prog' ? 'in progress' : w.status === 'done' ? 'done' : 'not started'}`, href: `/project/${prjId}?mode=work` }; }
+    if (checkId === 'cutover-plan') return { text: CO_LABEL[s] || s, href: null };
+    if (checkId === 'bu-signoff') { const st = ((chk && chk.stale) || []).find(x => x.bu === s); return { text: s, extra: st ? st.reason : 'awaiting sign-off' }; }
+    const dm = /^(.+)#(\d+)$/.exec(s);
+    if (dm && store.get('dataElement', dm[1])) { const de = store.get('dataElement', dm[1]); const d = (de.discovered || [])[+dm[2]] || {}; return { text: d.text || de.name, extra: `${de.name} · owner ${pname(de.owner)}`, href: `/testing/${prjId}?de=${dm[1]}` }; }
+    if (checkId === 'process-valid') { const pm = /^([^:]+):(.+)$/.exec(s); const pr = (((chk && chk.problems) || []).find(x => x.pid + ':' + x.node === s) || {}); const proc = pm && store.get('process', pm[1]); return { text: pr.problem || s, extra: proc ? proc.name : '', href: pm ? `/process/${pm[1]}?mode=edit` : null }; }
+    if (checkId === 'tests-passed' && !store.get('workItem', s) && !store.get('testCase', s)) { const prj = store.get('project', prjId) || {}; const e = E(); let sc = (prj.uatScripts || []).find(x => x.id === s); if (!sc && e && e.generateUatScripts) { try { sc = e.generateUatScripts(store.state.docs, prjId).find(x => x.id === s); } catch (err) { sc = null; } } if (sc) return { text: sc.title, extra: 'UAT script', href: `/testing/${prjId}` }; }
+    if (store.get('dataElement', s)) return { text: store.get('dataElement', s).name, href: checkId === 'discovered-resolved' ? `/testing/${prjId}?de=${s}` : '/data/' + s };
+    if (store.get('process', s)) return { text: store.get('process', s).name, href: `/process/${s}?mode=edit` };
+    if (store.get('workItem', s)) { const w = store.get('workItem', s); return { text: w.title, extra: `${w.kind === 'defect' ? 'open defect · ' : ''}${pname(w.owner)} · ${w.status === 'prog' ? 'in progress' : w.status === 'done' ? 'done' : 'not started'}`, href: w.kind === 'defect' ? `/testing/${prjId}` : `/project/${prjId}?mode=work` }; }
     if (store.get('testCase', s)) { const c = store.get('testCase', s); const de = store.get('dataElement', c.dataId); return { text: `${de ? de.name + ' · ' : ''}${c.field}: ${c.input === '' ? '(empty)' : c.input}`, extra: `${c.kind}, expect ${c.expect}`, href: `/testing/${prjId}` }; }
     if (store.get('grant', s)) { const g = store.get('grant', s); const de = store.get('dataElement', g.dataId); return { text: `${de ? de.name : g.dataId} · ${String(g.env).toUpperCase()} ${g.access}`, extra: g.status === 'active' ? 'active, expires at go-live' : g.status }; }
     if (store.person(s)) { const p = store.person(s); return { text: p.name, extra: `${p.role}${p.bu ? ' · ' + p.bu : ''}` }; }
     return { text: s, href: checkId === 'tests-passed' ? `/testing/${prjId}` : null };
   }
-  const dataId = item.dataId || (item.type === 'dataElement' ? item.id : null);
-  const workId = item.workId || (item.type === 'workItem' ? item.id : null);
+  const refM = /^(\w+):(.+)$/.exec(item.ref || '');
+  const dataId = item.dataId || (item.type === 'dataElement' ? item.id : null) || (refM && refM[1] === 'dataElement' ? refM[2] : null);
+  const workId = item.workId || (item.type === 'workItem' ? item.id : null) || (refM && refM[1] === 'workItem' ? refM[2] : null);
+  const pid = item.pid || item.processId || (refM && refM[1] === 'process' ? refM[2] : null);
+  const proc = pid ? store.get('process', pid) : null;
   const w = workId ? store.get('workItem', workId) : null;
   const de = dataId ? store.get('dataElement', dataId) : null;
-  const text = item.label || item.title || item.text || item.name || item.detail || (w && w.title) || (de && de.name) || item.bu || item.id || '';
+  const text = item.label || item.title || item.text || item.summary || item.name || item.issue || item.detail || (w && w.title) || (de && de.name) || (proc && proc.name) || item.bu || item.id || '';
   let href = null;
-  if (checkId === 'data-live' && dataId) href = '/data/' + dataId;
+  const nodeId = item.nodeId || item.stepId || item.step;
+  if (checkId === 'discovered-resolved' && dataId) href = `/testing/${prjId}?de=${dataId}`;
+  else if (checkId === 'cutover-plan') href = null;
+  else if (pid && !w) href = nodeId && checkId !== 'process-valid' ? `/process/${pid}/step/${nodeId}` : `/process/${pid}?mode=edit`;
+  else if (checkId === 'data-live' && dataId) href = '/data/' + dataId;
   else if (checkId === 'work-done' || w) href = `/project/${prjId}?mode=work`;
   else if (checkId === 'tests-passed') href = `/testing/${prjId}`;
   else if (de) href = '/data/' + dataId;
-  const extra = item.reason || item.status || (item.detail && item.detail !== text ? item.detail : '') || '';
+  const extra = item.reason || item.status || (item.detail && item.detail !== text ? item.detail : '') || (proc && text !== proc.name ? proc.name : '') || (de && text !== de.name ? de.name : '') || '';
   return { text: String(text), extra: String(extra), href };
 }
 
@@ -102,7 +143,8 @@ export function render(params) {
 
   const gateCls = live ? 'live' : rd.pass ? 'pass' : 'blocked';
   const gateTitle = live ? 'Released' : rd.pass ? 'PASS — ready for go-live' : `Blocked — ${failing} check${failing === 1 ? '' : 's'} failing`;
-  const gateSub = live ? `Live since ${fmt(releases[0] && releases[0].at)}. Every integration grant was closed at go-live.`
+  const lastGo = releases.find(r => !isRollback(r));
+  const gateSub = live ? `Live since ${fmt(lastGo && lastGo.at)}. Every integration grant was closed at go-live.`
     : rd.unavailable ? 'Readiness engine is still loading.'
     : rd.pass ? (warns ? `All required checks pass. ${warns} warning to review.` : 'All required checks pass. Two approvers can release.')
     : 'Go-live unlocks when every check below is green.';
@@ -129,13 +171,14 @@ export function render(params) {
       <summary><span class="rl-ic ${st}">${ICON[st]}</span>
         <div class="rl-ct"><div class="t">${esc(c.label)}</div><div class="s">${esc(c.detail || '')}</div></div>
         ${items.length ? `<span class="rl-cnt">${items.length}</span>` : ''}<span class="rl-chev">${items.length || lk ? '›' : ''}</span></summary>
-      <div class="rl-items">${items.map(it => { const v = itemView(it, c.id, prjId); return `<div class="rl-item">${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : `<span>${esc(v.text)}</span>`}${v.extra ? `<small>${esc(v.extra)}</small>` : ''}</div>`; }).join('') || `<div class="hint">${st === 'pass' ? 'Nothing outstanding.' : 'No item detail.'}</div>`}
+      <div class="rl-items">${items.map(it => { const v = itemView(it, c.id, prjId, c); return `<div class="rl-item">${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : `<span>${esc(v.text)}</span>`}${v.extra ? `<small>${esc(v.extra)}</small>` : ''}</div>`; }).join('') || `<div class="hint">${st === 'pass' ? 'Nothing outstanding.' : 'No item detail.'}</div>`}
         ${lkHtml ? `<div class="rl-item-foot">${lkHtml}</div>` : ''}</div></details>`;
   }).join('') || '<div class="empty">Readiness checks are not available yet.</div>';
 
   return header + `<div class="grid rl-grid"><div class="rl-main">
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>Go-live was refused by the server.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || JSON.stringify(r)))}</li>`).join('')}</ul></div>` : ''}
     <div class="card"><h3>Readiness checklist<span class="n">${rd.checks.length - failing}/${rd.checks.length} passing</span></h3>${checks}</div>
+    ${cutoverCard(prj)}
     ${signoffCard(prj, rd)}
     ${grantsCard(prj)}
   </div>
@@ -153,29 +196,79 @@ export function render(params) {
 function signoffCard(prj, rd) {
   const me = store.person(store.state.me) || {};
   const sections = buSections(prj);
-  const approved = sections.map(s => latestApproval(prj.id, s.bu)).filter(a => a && a.decision === 'approved' && a.stepUp);
+  const live = prj.status === 'live';
+  const staleBy = {}; sections.forEach(s => { staleBy[s.bu] = live ? [] : staleChanges(prj, s, latestApproval(prj.id, s.bu), rd); });
+  const approved = sections.map(s => latestApproval(prj.id, s.bu)).filter(a => a && a.decision === 'approved' && a.stepUp && !(staleBy[a.bu] || []).length);
   const approvers = [...new Set(approved.map(a => a.approver))];
   const exc = (rd.checks.find(c => c.id === 'exceptions') || {}).items || [];
   const cards = sections.map(s => {
     const a = latestApproval(prj.id, s.bu);
     const mine = me.bu === s.bu;
     const eligible = store.state.people.filter(p => p.bu === s.bu);
-    const state = a ? a.decision : 'pending';
-    const stCls = state === 'approved' ? 'b-done' : state === 'rejected' ? 'b-late' : 'b-soon';
+    const stale = staleBy[s.bu] || [];
+    const state = a ? (a.decision === 'approved' && stale.length ? 'stale' : a.decision) : 'pending';
+    const stCls = state === 'approved' ? 'b-done' : state === 'rejected' || state === 'stale' ? 'b-late' : 'b-soon';
+    const stTxt = { pending: 'Awaiting sign-off', approved: 'Signed off', rejected: 'Rejected', stale: 'Re-approval needed' }[state];
     return `<div class="rl-bu ${state}" data-bu="${esc(s.bu)}">
-      <div class="rl-bu-h"><b>${esc(s.bu)}</b>${badge(state === 'pending' ? 'Awaiting sign-off' : state === 'approved' ? 'Signed off' : 'Rejected', stCls)}</div>
+      <div class="rl-bu-h"><b>${esc(s.bu)}</b>${badge(stTxt, stCls)}</div>
+      ${stale.length ? `<div class="rl-stale" data-stale="${esc(s.bu)}"><b>Re-approval needed: changed after sign-off</b><ul>${stale.map(v => `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)} <small>${esc(v.extra)}</small></li>`).join('')}</ul></div>` : ''}
       <ol class="rl-steps">${s.steps.map(x => `<li><a href="${link(`/process/${x.pid}/step/${x.step.id}`)}" data-link>${esc(x.step.title)}</a> <small>${esc(pname(x.step.owner))} · ${esc(x.pname)}</small></li>`).join('')}</ol>
       ${a ? `<div class="rl-signed">${av(a.approver)} <span>${esc(pname(a.approver))} ${a.decision === 'approved' ? 'approved' : 'rejected'} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="rl-mfa">MFA verified</span>' : ''}</span></div>${a.note ? `<div class="hint">“${esc(a.note)}”</div>` : ''}` : ''}
-      ${prj.status === 'live' ? '' : `<div class="rl-bu-act">${mine
+      ${live ? '' : `<div class="rl-bu-act">${mine
         ? `<button class="btn sm primary" data-signoff="approved" data-bu="${esc(s.bu)}">${a && a.decision === 'approved' ? 'Re-approve' : 'Approve section'}</button><button class="btn sm danger" data-signoff="rejected" data-bu="${esc(s.bu)}">Reject</button>`
-        : `<button class="btn sm" disabled>Approve section</button><span class="hint" data-why>Switch 'Viewing as' to ${/^[AEIOU]/i.test(s.bu) ? 'an' : 'a'} ${esc(s.bu)} person to sign off${eligible.length ? ` (${esc(eligible.map(p => p.name).join(', '))})` : ''}.</span>`}</div>`}</div>`;
+        : `<button class="btn sm" disabled>${stale.length ? 'Re-approve' : 'Approve section'}</button><span class="hint" data-why>Switch 'Viewing as' to ${/^[AEIOU]/i.test(s.bu) ? 'an' : 'a'} ${esc(s.bu)} person to sign off${eligible.length ? ` (${esc(eligible.map(p => p.name).join(', '))})` : ''}.</span>`}</div>`}</div>`;
   }).join('');
   const two = approvers.length >= 2;
   return `<div class="card" id="signoff"><h3>Business-unit sign-off<span class="n">${approved.length}/${sections.length} signed</span></h3>
     <div class="rl-two ${two ? 'ok' : ''}"><span class="rl-ic ${two ? 'pass' : 'fail'}">${two ? ICON.pass : ICON.fail}</span>
       <div><b>Two-person rule</b> · ${approvers.length} distinct approver${approvers.length === 1 ? '' : 's'} ${approvers.map(av).join('')}<div class="hint">Go-live needs at least two different people to have signed off, each with step-up MFA.</div></div></div>
-    ${exc.length ? `<div class="rl-exc"><b>Exceptions</b> · changed after approval<ul>${exc.map(it => { const v = itemView(it, 'exceptions', prj.id); return `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)}${v.extra ? ` <small>${esc(v.extra)}</small>` : ''}</li>`; }).join('')}</ul></div>` : ''}
+    ${exc.length && !Object.values(staleBy).some(x => x.length) ? `<div class="rl-exc"><b>Changes after sign-off</b> · listed by the gate. Re-approve the section to clear them.</div>` : ''}
     <div class="rl-bus">${cards || '<div class="empty">No owned steps in the linked to-be processes yet.</div>'}</div></div>`;
+}
+
+function cutoverCard(prj) {
+  const c = prj.cutover || {};
+  const canEdit = store.state.me === prj.owner;
+  const need = [['rollbackOwner', 'rollback owner'], ['rollbackPlan', 'rollback plan'], ['hypercareOwner', 'hypercare owner']].filter(([k]) => !String(c[k] || '').trim()).map(x => x[1]);
+  const row = (label, html, key) => `<div class="rl-co-r" data-co="${key}"><span class="lbl">${esc(label)}</span><div>${html || '<span class="hint">Not set</span>'}</div></div>`;
+  return `<div class="card" id="cutover"><h3>Cutover plan<span class="n">${need.length ? 'incomplete' : 'complete'}</span></h3>
+    <div class="rl-co-st ${need.length ? 'fail' : 'pass'}"><span class="rl-ic ${need.length ? 'fail' : 'pass'}">${need.length ? ICON.fail : ICON.pass}</span>
+      <span>${need.length ? `Gate item: add the ${esc(need.join(', '))}.` : 'Gate item satisfied: rollback and hypercare are owned.'}</span></div>
+    ${!prj.cutover ? '<div class="empty rl-co-empty">No cutover plan yet. Name a rollback owner, write the rollback plan and set hypercare before go-live.</div>' : `<div class="rl-co">
+      ${row('Cutover window', esc(c.window || ''), 'window')}
+      ${row('Rollback owner', c.rollbackOwner ? `${av(c.rollbackOwner)} ${esc(pname(c.rollbackOwner))}` : '', 'rollbackOwner')}
+      ${row('Rollback plan', c.rollbackPlan ? `<span class="rl-pre-line">${esc(c.rollbackPlan)}</span>` : '', 'rollbackPlan')}
+      ${row('Hypercare', c.hypercareOwner || c.hypercareDays ? `${c.hypercareDays ? esc(c.hypercareDays) + ' days' : ''}${c.hypercareOwner ? ` · ${av(c.hypercareOwner)} ${esc(pname(c.hypercareOwner))}` : ''}` : '', 'hypercare')}
+      ${row('Communications', c.comms ? `<span class="rl-pre-line">${esc(c.comms)}</span>` : '', 'comms')}
+    </div>`}
+    <div class="rl-bu-act">${canEdit ? `<button class="btn sm primary" data-cutover-edit>${prj.cutover ? 'Edit cutover plan' : 'Add cutover plan'}</button>`
+      : `<button class="btn sm" disabled>Edit cutover plan</button><span class="hint" data-why>Only the project owner (${esc(pname(prj.owner))}) can edit the cutover plan.</span>`}</div></div>`;
+}
+
+async function editCutover(prj) {
+  if (store.state.me !== prj.owner) { toast(`Only the project owner (${pname(prj.owner)}) can edit the cutover plan.`); return; }
+  const c = prj.cutover || {};
+  const ppl = store.state.people;
+  const sel = (name, v) => `<select name="${name}"><option value="">Choose a person</option>${ppl.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)} · ${esc(p.role)}</option>`).join('')}</select>`;
+  const r = await modal({
+    title: 'Cutover plan',
+    body: `<div class="field"><label>Cutover window</label><input name="window" value="${esc(c.window || '')}" placeholder="e.g. Sat 06:00–10:00 CT, payment run frozen"></div>
+      <div class="field"><label>Rollback owner</label>${sel('rollbackOwner', c.rollbackOwner)}</div>
+      <div class="field"><label>Rollback plan</label><textarea name="rollbackPlan" placeholder="Trigger, steps and who decides">${esc(c.rollbackPlan || '')}</textarea></div>
+      <div class="frow"><div class="field"><label>Hypercare days</label><input type="number" min="0" max="90" name="hypercareDays" value="${esc(c.hypercareDays == null ? 10 : c.hypercareDays)}"></div>
+        <div class="field"><label>Hypercare owner</label>${sel('hypercareOwner', c.hypercareOwner)}</div></div>
+      <div class="field"><label>Communications</label><textarea name="comms" placeholder="Who is told what, and when">${esc(c.comms || '')}</textarea></div>
+      <div class="hint">Rollback owner, rollback plan and hypercare owner are required by the go-live gate.</div>`,
+    actions: [{ id: 'save', label: 'Save plan', primary: true }],
+  });
+  if (r.action !== 'save') return;
+  const f = r.form;
+  const days = Math.max(0, Math.min(90, parseInt(f.hypercareDays, 10) || 0));
+  const cutover = { window: (f.window || '').trim(), rollbackOwner: f.rollbackOwner || '', rollbackPlan: (f.rollbackPlan || '').trim(), hypercareDays: days, hypercareOwner: f.hypercareOwner || '', comms: (f.comms || '').trim() };
+  const cur = store.get('project', prj.id) || prj;
+  await store.save('project', prj.id, Object.assign({}, cur, { cutover }), `Updated the cutover plan for ${prj.name}`);
+  await store.notify([cutover.rollbackOwner, cutover.hypercareOwner], `${pname(store.state.me)} named you in the cutover plan for ${prj.name}`, 'project:' + prj.id);
+  toast('Cutover plan saved');
 }
 
 function grantsCard(prj) {
@@ -215,7 +308,17 @@ function goLiveCard(prj, rd, live) {
       : `<p class="rl-p">${rd.pass ? 'The gate passes. Releasing promotes each to-be process to the new as-is version and runs the release actions.' : 'Locked until every readiness check passes.'}</p>`}
     <div class="rl-procs">${procs.map(p => `<div><a href="${link('/process/' + p.id)}" data-link>${esc(p.name)}</a><span class="chip">v${esc(p.version || 1)}${live ? '' : ` → v${esc((p.version || 1) + 1)}`}</span></div>`).join('')}</div>
     <button class="btn primary rl-gobtn" data-golive ${rd.pass && !live ? '' : 'disabled'}>${live ? 'Released' : 'Go live'}</button>
-    ${!rd.pass && !live ? `<div class="hint" style="margin-top:6px">${rd.checks.filter(c => checkState(c) === 'fail').map(c => esc(c.label)).join(' · ')}</div>` : ''}</div>`;
+    ${!rd.pass && !live ? `<div class="hint" style="margin-top:6px">${rd.checks.filter(c => checkState(c) === 'fail').map(c => esc(c.label)).join(' · ')}</div>` : ''}
+    ${live ? rollbackBlock(prj, procs) : ''}</div>`;
+}
+
+function canRollback(prj) { const me = store.state.me; return !!me && (me === prj.owner || me === (prj.cutover || {}).rollbackOwner); }
+function rollbackBlock(prj, procs) {
+  const rbo = (prj.cutover || {}).rollbackOwner;
+  const prev = procs.filter(p => (p.version || 1) > 1);
+  return `<div class="rl-rb"><div class="hint">${prev.length ? `Rolling back restores ${prev.map(p => `${esc(p.name)} v${esc((p.version || 1) - 1)}`).join(', ')} as the as-is version.` : 'No previous version to restore.'}</div>
+    ${canRollback(prj) ? `<button class="btn danger rl-gobtn" data-rollback ${prev.length ? '' : 'disabled'}>Roll back release</button>`
+      : `<button class="btn rl-gobtn" disabled>Roll back release</button><div class="hint" data-why>Only the project owner (${esc(pname(prj.owner))})${rbo && rbo !== prj.owner ? ` or the rollback owner (${esc(pname(rbo))})` : ''} can roll back.</div>`}</div>`;
 }
 
 function actionView(a) {
@@ -226,13 +329,26 @@ function actionView(a) {
     ${det ? (a.type === 'pipeline' || typeof a.detail === 'object' ? `<pre class="rl-pre">${esc(det)}</pre>` : `<div class="hint">${esc(det)}</div>`) : ''}</div>`;
 }
 
+const isRollback = r => r.kind === 'rollback';
+function exceptionView(x, prjId) {
+  if (typeof x === 'string') { const w = store.get('workItem', x); return { text: w ? w.title : x, href: w ? `/project/${prjId}?mode=work` : null }; }
+  const v = itemView(x, 'exceptions', prjId);
+  const by = x.by ? pname(x.by) : '';
+  const extra = [x.summary && x.summary !== v.text ? x.summary : '', x.note && x.note !== v.text ? x.note : '', by, x.at ? fmtTime(x.at) : ''].filter(Boolean).join(' · ');
+  return { text: v.text, href: v.href, extra };
+}
 function releaseRecord(r) {
   const snap = r.snapshot || {};
-  return `<div class="rl-rec" data-release="${esc(r.id)}">
-    <div class="rl-rec-h"><b>${esc(fmtTime(r.at))}</b> · released by ${av(r.by)} ${esc(pname(r.by))}</div>
-    <div class="rl-rec-s"><span class="lbl">Approvers</span>${(r.approvers || []).map(id => `${av(id)}<span class="rl-nm">${esc(pname(id))}</span>`).join(' ') || '—'}</div>
-    <div class="rl-rec-s"><span class="lbl">Released versions</span>${Object.keys(snap).map(pid => { const p = store.get('process', pid); return `<a class="chip" href="${link('/process/' + pid)}" data-link data-ver="${esc(pid)}">${esc(p ? p.name : pid)} · v${esc(snap[pid])}</a>`; }).join(' ') || '—'}</div>
-    ${(r.exceptions || []).length ? `<div class="rl-rec-s"><span class="lbl">Exceptions</span>${(r.exceptions || []).map(x => `<span class="chip">${esc(typeof x === 'string' ? x : (x.label || x.title || x.id || ''))}</span>`).join(' ')}</div>` : ''}
+  const rb = isRollback(r);
+  const exc = r.exceptions || [];
+  return `<div class="rl-rec" data-release="${esc(r.id)}" data-kind="${rb ? 'rollback' : 'golive'}">
+    <div class="rl-rec-h">${badge(rb ? 'Rollback' : 'Go-live', rb ? 'b-late' : 'b-done')} <b>${esc(fmtTime(r.at))}</b> · ${rb ? 'rolled back' : 'released'} by ${av(r.by)} ${esc(pname(r.by))}</div>
+    ${rb ? (r.reason || r.note ? `<div class="rl-rec-s"><span class="lbl">Reason</span>${esc(r.reason || r.note)}</div>` : '')
+      : `<div class="rl-rec-s"><span class="lbl">Approvers</span>${(r.approvers || []).map(id => `${av(id)}<span class="rl-nm">${esc(pname(id))}</span>`).join(' ') || '—'}</div>`}
+    <div class="rl-rec-s"><span class="lbl">${rb ? 'Restored versions' : 'Released versions'}</span>${Object.keys(snap).map(pid => { const p = store.get('process', pid); return `<a class="chip" href="${link('/process/' + pid)}" data-link data-ver="${esc(pid)}">${esc(p ? p.name : pid)} · v${esc(snap[pid])}</a>`; }).join(' ') || '—'}</div>
+    ${rb ? '' : `<div class="rl-rec-s rl-rec-exc" data-exceptions="${exc.length}"><span class="lbl">Exceptions · changed after an approval</span>${exc.length
+      ? `<ul>${exc.map(x => { const v = exceptionView(x, r.projectId); return `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)}${v.extra ? ` <small>${esc(v.extra)}</small>` : ''}</li>`; }).join('')}</ul>`
+      : '<span class="hint">None. Nothing changed after its business unit signed off.</span>'}</div>`}
     <div class="rl-acts-list">${(r.actions || []).map(actionView).join('')}</div></div>`;
 }
 
@@ -240,8 +356,9 @@ function releaseCards(prj, releases) {
   if (!releases.length) return `<div class="card"><h3>Release history</h3><div class="hint">No releases yet. The release record and its pipeline request appear here after go-live.</div></div>`;
   const latest = releases[0];
   const fresh = ui.lastRelease === latest.id;
-  return `<div class="card rl-latest ${fresh ? 'fresh' : ''}"><h3>${fresh ? 'Release complete' : 'Latest release'}</h3>${releaseRecord(latest)}</div>
-    <div class="card"><h3>Release history<span class="n">${releases.length}</span></h3>${releases.map(r => `<div class="row click" data-relrow="${esc(r.id)}"><div><div class="t">${esc(fmtTime(r.at))}</div><div class="s">${esc(pname(r.by))} · ${(r.actions || []).length} actions · ${Object.keys(r.snapshot || {}).length} process version${Object.keys(r.snapshot || {}).length === 1 ? '' : 's'}</div></div><div class="r">${badge('simulated-ok', 'b-done')}</div></div>${ui.showRel.has(r.id) && r.id !== latest.id ? releaseRecord(r) : ''}`).join('')}</div>`;
+  const rbLatest = isRollback(latest);
+  return `<div class="card rl-latest ${fresh ? 'fresh' : ''} ${rbLatest ? 'rb' : ''}"><h3>${fresh ? (rbLatest ? 'Rollback complete' : 'Release complete') : (rbLatest ? 'Latest rollback' : 'Latest release')}</h3>${releaseRecord(latest)}</div>
+    <div class="card"><h3>Release history<span class="n">${releases.length}</span></h3>${releases.map(r => { const n = Object.keys(r.snapshot || {}).length; return `<div class="row click" data-relrow="${esc(r.id)}" data-kind="${isRollback(r) ? 'rollback' : 'golive'}"><div><div class="t">${isRollback(r) ? 'Rollback' : 'Go-live'} · ${esc(fmtTime(r.at))}</div><div class="s">${esc(pname(r.by))} · ${isRollback(r) ? `${n} process version${n === 1 ? '' : 's'} restored` : `${(r.actions || []).length} actions · ${(r.exceptions || []).length} exception${(r.exceptions || []).length === 1 ? '' : 's'}`}</div></div><div class="r">${badge(isRollback(r) ? 'rolled back' : 'simulated-ok', isRollback(r) ? 'b-late' : 'b-done')}</div></div>${ui.showRel.has(r.id) && r.id !== latest.id ? releaseRecord(r) : ''}`; }).join('')}</div>`;
 }
 
 /* ---------- bind ---------- */
@@ -264,9 +381,11 @@ export function bind(root, params) {
       if (r.action !== 'reject') return; note = r.form.note || '';
     }
     if (!(await stepUp(`${decision === 'approved' ? 'approve' : 'reject'} the ${bu} section`))) { toast('Step-up not completed. Nothing was signed.'); return; }
-    const id = store.newId('apr');
-    await store.save('approval', id, { id, projectId: prjId, bu, approver: store.state.me, decision, at: new Date().toISOString(), stepUp: true, note },
-      `${decision === 'approved' ? 'Approved' : 'Rejected'} the ${bu} section of ${prj.name} (step-up verified)`);
+    const prev = latestApproval(prjId, bu);
+    const re = decision === 'approved' && prev && prev.decision === 'approved';
+    const id = store.newId('apr'); const at = new Date().toISOString();
+    await store.save('approval', id, { id, projectId: prjId, bu, approver: store.state.me, decision, at, snapshotAt: at, stepUp: true, note },
+      `${decision === 'approved' ? (re ? 'Re-approved' : 'Approved') : 'Rejected'} the ${bu} section of ${prj.name} (step-up verified)`);
     await store.notify([prj.owner], `${pname(store.state.me)} ${decision} the ${bu} section of ${prj.name}`, 'approval:' + id);
     toast(`${bu} section ${decision}`);
   });
@@ -280,6 +399,10 @@ export function bind(root, params) {
   /* Go-live */
   const gl = root.querySelector('[data-golive]');
   if (gl) gl.onclick = () => goLive(prj);
+  const rb = root.querySelector('[data-rollback]');
+  if (rb) rb.onclick = () => rollBack(prj);
+  const ce = root.querySelector('[data-cutover-edit]');
+  if (ce) ce.onclick = () => editCutover(prj);
   root.querySelectorAll('[data-relrow]').forEach(r => r.onclick = () => { const id = r.dataset.relrow; ui.showRel.has(id) ? ui.showRel.delete(id) : ui.showRel.add(id); store.emit(); });
 
   bindActivity(root);
@@ -291,7 +414,7 @@ async function bindAudit(root, prj) {
   const refs = new Set(['project:' + prj.id]);
   ['grant', 'approval', 'release'].forEach(t => store.list(t, d => d.projectId === prj.id).forEach(d => refs.add(t + ':' + d.id)));
   (prj.processes || []).forEach(p => refs.add('process:' + p));
-  const evs = (await store.events(null, 100)).filter(e => refs.has(e.ref) && (e.action !== 'update' || !String(e.ref).startsWith('process:'))).slice(0, 12);
+  const evs = (await store.events(null, 100)).filter(e => refs.has(e.ref) && (e.action !== 'update' || !String(e.ref).startsWith('process:'))).slice(0, 20);
   box.innerHTML = evs.length ? evs.map(e => `<div class="ev"><time>${esc(fmtTime(e.at))}</time><span>${av(e.actor)} <b>${esc(pname(e.actor))}</b> ${esc(e.summary || e.action)}</span></div>`).join('') : '<div class="hint">No gate activity yet.</div>';
 }
 
@@ -342,6 +465,26 @@ async function grantAction(prj, gid, act) {
   toast(`Access ${status}`);
 }
 
+/* Changes made after a BU's first sign-off in this release cycle (they forced a re-approval). The engine's own
+   exceptions list only un-re-approved changes, which block, so at a passing gate it is empty; this keeps the audit trail. */
+function cycleExceptions(prj) {
+  const lastGo = store.list('release', r => r.projectId === prj.id && r.kind !== 'rollback').map(r => String(r.at)).sort().pop() || '';
+  const sections = buSections(prj);
+  const stepBu = {}; sections.forEach(s => s.steps.forEach(x => { stepBu[x.pid + '|' + x.step.id] = s.bu; }));
+  const buOf = w => stepBu[w.pid + '|' + w.step] || (store.person(w.owner) || {}).bu;
+  const out = [];
+  sections.forEach(sec => {
+    const apr = store.list('approval', a => a.projectId === prj.id && a.bu === sec.bu && a.decision === 'approved' && String(a.at) > lastGo).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    if (apr.length < 2) return;
+    const first = String(apr[0].at), last = apr[apr.length - 1];
+    store.list('workItem', w => w.projectId === prj.id && w.updatedAt && String(w.updatedAt) > first && String(w.updatedAt) <= String(last.at) && buOf(w) === sec.bu)
+      .forEach(w => out.push({ ref: 'workItem:' + w.id, summary: `“${w.title}” (work item, owner ${pname(w.owner)}) changed after the ${sec.bu} sign-off; re-approved by ${pname(last.approver)}`, by: pname(w.owner), at: w.updatedAt }));
+    [...new Set(sec.steps.map(x => x.pid))].map(id => store.get('process', id)).filter(p => p && p.updatedAt && String(p.updatedAt) > first && String(p.updatedAt) <= String(last.at))
+      .forEach(p => out.push({ ref: 'process:' + p.id, summary: `“${p.name}” (process) changed after the ${sec.bu} sign-off; re-approved by ${pname(last.approver)}`, by: pname(p.owner), at: p.updatedAt }));
+  });
+  const seen = new Set(); return out.filter(x => !seen.has(x.ref) && seen.add(x.ref));
+}
+
 async function goLive(prj) {
   const rd = readiness(prj.id);
   if (!rd.pass) { toast('The gate is not passing yet.'); return; }
@@ -349,12 +492,14 @@ async function goLive(prj) {
   const sections = buSections(prj);
   const approvers = [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => a && a.decision === 'approved').map(a => a.approver))];
   const openGrants = store.list('grant', g => g.projectId === prj.id && ['active', 'approved'].includes(grantStatus(g))).length;
+  const excs = cycleExceptions(prj);
   const r = await modal({
     title: `Release ${prj.name}`,
     body: `<div class="rl-sum">
       <div><span class="lbl">Processes promoted</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
       <div><span class="lbl">Signed off by</span>${approvers.map(id => `<div>${av(id)} ${esc(pname(id))}</div>`).join('')}</div>
       <div><span class="lbl">Access</span><div>${openGrants} open grant${openGrants === 1 ? '' : 's'} will expire now</div></div>
+      <div><span class="lbl">Exceptions recorded</span><div>${excs.length ? `${excs.length} change${excs.length === 1 ? '' : 's'} made after a sign-off and re-approved` : 'None'}</div></div>
       <div><span class="lbl">Release actions</span><div>Trigger the deployment pipeline · publish the new SOP · notify stakeholders</div></div></div>
       <span class="sim">Simulated: in this showroom the pipeline trigger is recorded, not sent.</span>`,
     actions: [{ id: 'go', label: 'Continue to verify', primary: true }],
@@ -368,10 +513,37 @@ async function goLive(prj) {
     const rel = (res && (res.release || (res.data && res.data.projectId ? res.data : null) || (res.projectId ? res : null))) || null;
     const latest = store.list('release', x => x.projectId === prj.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
     ui.lastRelease = (rel && rel.id) || (latest && latest.id) || null;
+    const saved = ui.lastRelease && store.get('release', ui.lastRelease);
+    if (saved && !(saved.exceptions || []).length && excs.length) {
+      await store.save('release', saved.id, Object.assign({}, saved, { exceptions: excs }), `Recorded ${excs.length} exception${excs.length === 1 ? '' : 's'} on the ${prj.name} release (changes re-approved after sign-off)`);
+    }
     store.emit();
     toast(`${prj.name} is live`);
   } catch (e) {
     if (e.status === 409) { ui.reasons = (e.body && e.body.reasons && e.body.reasons.length) ? e.body.reasons : [e.message]; store.emit(); toast('Go-live refused. See the reasons above the checklist.'); }
     else toast('Go-live failed: ' + e.message);
   }
+}
+
+async function rollBack(prj) {
+  if (!canRollback(prj)) { toast('Only the project owner or the rollback owner can roll back.'); return; }
+  const procs = projectProcesses(prj);
+  const r = await modal({
+    title: `Roll back ${prj.name}?`,
+    body: `<p style="margin:0 0 8px">This restores the previous as-is version of each process and sets the project back to active. The released version stays in history.</p>
+      <div class="rl-sum"><div><span class="lbl">Processes restored</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc(Math.max(1, (p.version || 1) - 1))}</b></div>`).join('')}</div>
+      <div><span class="lbl">Rollback plan</span><div>${esc((prj.cutover || {}).rollbackPlan || 'No plan recorded')}</div></div></div>
+      <div class="field" style="margin-top:10px"><label>Reason</label><textarea name="reason" placeholder="What went wrong?"></textarea></div>`,
+    actions: [{ id: 'rollback', label: 'Continue to verify', danger: true }],
+  });
+  if (r.action !== 'rollback') return;
+  if (!(await stepUp('roll back the release'))) { toast('Step-up not completed. Nothing was rolled back.'); return; }
+  try {
+    const res = await store.api('/rollback/' + prj.id, { reason: (r.form.reason || '').trim() });
+    await store.load();
+    const latest = store.list('release', x => x.projectId === prj.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    ui.lastRelease = (res && res.release && res.release.id) || (latest && latest.id) || null;
+    store.emit();
+    toast(`${prj.name} rolled back`);
+  } catch (e) { toast('Rollback failed: ' + e.message); }
 }

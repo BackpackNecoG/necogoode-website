@@ -59,15 +59,18 @@ export function modal({ title, body, actions }) {
 }
 
 /* Simulated step-up. In production this is a Microsoft Entra Conditional Access authentication-context challenge. */
-export async function stepUp(actionLabel) {
+export async function stepUp(actionLabel, attempt) {
+  attempt = attempt || 1;
   const r = await modal({
     title: 'Verify it’s you',
-    body: `<p style="margin:0">To <b>${esc(actionLabel)}</b>, confirm with multi-factor authentication.</p>
+    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, confirm with multi-factor authentication.</p>
       <div class="field"><label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits" maxlength="6" /></div>
       <span class="sim">Simulated step-up: in production this is Microsoft Entra MFA on a compliant device, checked by the in-tenant API.</span>`,
     actions: [{ id: 'verify', label: 'Verify', primary: true }],
   });
-  return r.action === 'verify' && /^\d{6}$/.test(r.form.code || '');
+  if (r.action !== 'verify') return false;
+  if (/^\d{6}$/.test(r.form.code || '')) return true;
+  return attempt < 3 ? stepUp(actionLabel, attempt + 1) : false; /* re-prompt inline, max 3 tries */
 }
 
 export function drawer(title, html, bind) {

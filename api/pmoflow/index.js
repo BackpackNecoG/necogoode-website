@@ -13,6 +13,7 @@ const MAX_DOC = 48 * 1024;
 const MAX_CSV = 2 * 1024 * 1024;
 const MAX_ROWS = 50000;
 const WRITES_PER_MIN = 120;
+const STAMPED = ['workItem', 'process'];
 const SALT = process.env.PMOFLOW_SALT || 'pmoflow-showroom-v3-salt';
 
 function engine() { try { return require('../shared/pmoflow-engine.js'); } catch (e) { return null; } }
@@ -73,6 +74,139 @@ function cloneNodes(nodes, asFrom) {
     if (Array.isArray(c.branches)) c.branches = c.branches.map(b => Object.assign({}, b, { nodes: cloneNodes(b.nodes, asFrom) }));
     return c;
   });
+}
+
+const names = docs => {
+  const m = {};
+  ['person', 'dataElement', 'process', 'project', 'workItem'].forEach(t => (docs[t] || []).forEach(d => { m[t + ':' + d.id] = d.data.name || d.data.title || d.id; }));
+  return m;
+};
+
+/* release.exceptions from the engine's exceptions check: [{ref, summary, by, at}], summaries use names, never ids */
+function releaseExceptions(docs, check) {
+  const n = names(docs);
+  return ((check && check.items) || []).map(it => {
+    const ref = typeof it === 'string' ? (it.includes(':') ? it : 'workItem:' + it) : String(it.ref || '');
+    const [type, id] = ref.split(':');
+    const doc = ((docs[type] || []).find(d => d.id === id) || {}).data || {};
+    const label = n[ref] || (typeof it === 'object' && it.title) || 'An item';
+    const owner = n['person:' + (doc.owner || (typeof it === 'object' && it.by))] || 'its owner';
+    return { ref, summary: `"${label}" (${type === 'process' ? 'process' : 'work item'}, owner ${owner}) changed after its business unit signed off`,
+      by: owner, at: doc.updatedAt || (typeof it === 'object' && it.at) || null };
+  });
+}
+
+function pipelineAction(kind, projectId, relId, snapshot) {
+  const dispatch = { ref: 'main', inputs: { project: projectId, release: relId, mode: kind, processes: JSON.stringify(snapshot) } };
+  return { type: 'pipeline', target: 'github: northwind-traders/process-automation · release.yml', status: 'simulated-ok',
+    detail: 'POST https://api.github.com/repos/northwind-traders/process-automation/actions/workflows/release.yml/dispatches\n' +
+      'Accept: application/vnd.github+json\nAuthorization: Bearer <token from Key Vault>\n\n' + JSON.stringify(dispatch, null, 2) };
+}
+
+async function goLive(wsId, docs, project, actor, today) {
+  const eng = engine();
+  if (!eng || typeof eng.readiness !== 'function') return { status: 503, body: { error: 'engine unavailable' } };
+  const projectId = project.id;
+  if (project.status === 'live') return { status: 409, body: { error: 'project is already live', reasons: ['Project status is live.'] } };
+  const gate = eng.readiness(docs, projectId, today);
+  if (!gate.pass) return { status: 409, body: { error: 'readiness gate failed',
+    reasons: gate.checks.filter(c => !c.pass && !c.warning).map(c => `${c.label}: ${c.detail}`) } };
+  const at = new Date().toISOString();
+  const events = [], snapshot = {};
+  const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
+  for (const pd of procDocs) {
+    const p = JSON.parse(JSON.stringify(pd.data));
+    const prevVersion = Number(p.version) || 1;
+    const version = prevVersion + 1;
+    /* keep the pre-release version viewable (and restorable): as-is plus the to-be that replaced it */
+    p.released = (p.released || []).concat([{ version: prevVersion, at, by: actor, asis: cloneNodes(p.asis, false), tobe: JSON.parse(JSON.stringify(p.tobe || [])) }]);
+    const promoted = cloneNodes(p.tobe, false);
+    p.asis = promoted;
+    p.tobe = cloneNodes(promoted, true);
+    p.version = version;
+    p.updatedAt = at;
+    snapshot[p.id] = version;
+    await store.putDoc(wsId, 'process', p.id, p);
+    events.push({ action: 'release', ref: 'process:' + p.id, summary: `Released ${p.name} v${version}: to-be promoted to as-is (v${prevVersion} kept in history)` });
+  }
+  for (const gd of (docs.grant || []).filter(d => d.data.projectId === projectId)) {
+    const g = JSON.parse(JSON.stringify(gd.data));
+    const next = g.status === 'active' || g.status === 'approved' ? 'expired' : g.status === 'requested' ? 'denied' : null;
+    if (!next) continue;
+    g.status = next; g.expires = today;
+    g.log = (g.log || []).concat([{ at, by: actor, action: next === 'expired' ? 'expired at go-live' : 'denied at go-live' }]);
+    await store.putDoc(wsId, 'grant', g.id, g);
+    events.push({ action: 'update', ref: 'grant:' + g.id, summary: `Access grant ${next} at go-live` });
+  }
+  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
+  const approvers = [...new Set((docs.approval || []).map(d => d.data)
+    .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
+  const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
+  const release = {
+    id: relId, kind: 'golive', projectId, at, by: actor, approvers,
+    actions: [pipelineAction('golive', projectId, relId, snapshot),
+      ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
+        detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
+      { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
+        detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
+    exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')),
+    snapshot,
+  };
+  await store.putDoc(wsId, 'release', relId, release);
+  const proj = Object.assign({}, project, { status: 'live', liveAt: at });
+  await store.putDoc(wsId, 'project', projectId, proj);
+  events.push({ action: 'create', ref: 'release:' + relId, summary: `Go-live release recorded with ${release.actions.length} simulated action(s)` });
+  events.push({ action: 'golive', ref: 'project:' + projectId, summary: `${project.name} went live` });
+  for (const e of events) await store.appendEvent(wsId, Object.assign({ actor, at }, e));
+  return { status: 200, body: { ok: true, release, project: proj } };
+}
+
+async function rollback(wsId, docs, project, actor, reason) {
+  const projectId = project.id;
+  if (project.status !== 'live') return { status: 409, body: { error: 'only a live project can be rolled back', reasons: ['Project status is ' + (project.status || 'active') + '.'] } };
+  const at = new Date().toISOString();
+  const events = [], snapshot = {};
+  const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
+  for (const pd of procDocs) {
+    const p = JSON.parse(JSON.stringify(pd.data));
+    const cur = Number(p.version) || 1;
+    const released = p.released || [];
+    let idx = -1;
+    for (let i = released.length - 1; i >= 0; i--) if (!released[i].rolledBack && released[i].version === cur - 1) { idx = i; break; }
+    if (idx < 0) continue;
+    const prev = released[idx];
+    /* the rolled-back version stays viewable in history, flagged */
+    released.splice(idx, 1);
+    released.push({ version: cur, at, by: actor, asis: cloneNodes(p.asis, false), rolledBack: true });
+    p.released = released;
+    p.asis = cloneNodes(prev.asis, false);
+    p.tobe = prev.tobe ? JSON.parse(JSON.stringify(prev.tobe)) : JSON.parse(JSON.stringify(p.tobe || []));
+    p.version = cur - 1;
+    p.updatedAt = at;
+    snapshot[p.id] = p.version;
+    await store.putDoc(wsId, 'process', p.id, p);
+    events.push({ action: 'rollback', ref: 'process:' + p.id, summary: `Rolled ${p.name} back from v${cur} to v${cur - 1}` });
+  }
+  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
+  const relId = 'rel-' + projectId.slice(0, 36) + '-rb-' + Date.now().toString(36);
+  const owner = project.cutover && project.cutover.rollbackOwner;
+  const release = {
+    id: relId, kind: 'rollback', projectId, at, by: actor, approvers: [],
+    actions: [pipelineAction('rollback', projectId, relId, snapshot),
+      ...procDocs.filter(pd => snapshot[pd.id]).map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
+        detail: `Re-published v${snapshot[pd.id]} of ${pd.data.name} as the controlled SOP; v${snapshot[pd.id] + 1} was withdrawn.` })),
+      { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
+        detail: `Rollback notice for ${project.name}` + (owner && people[owner] ? `; rollback owner ${people[owner].name}.` : '.') }],
+    reason: String(reason || '').slice(0, 500), exceptions: [], snapshot,
+  };
+  await store.putDoc(wsId, 'release', relId, release);
+  const proj = Object.assign({}, project, { status: 'active', rolledBackAt: at });
+  delete proj.liveAt;
+  await store.putDoc(wsId, 'project', projectId, proj);
+  events.push({ action: 'create', ref: 'release:' + relId, summary: 'Rollback release recorded' });
+  events.push({ action: 'rollback', ref: 'project:' + projectId, summary: `${project.name} rolled back to the previous process versions` });
+  for (const e of events) await store.appendEvent(wsId, Object.assign({ actor, at }, e));
+  return { status: 200, body: { ok: true, release, project: proj } };
 }
 
 module.exports = async function (context, req) {
@@ -139,7 +273,10 @@ module.exports = async function (context, req) {
         const data = Object.assign({}, body.data, { id });
         if (Buffer.byteLength(JSON.stringify(data), 'utf8') > MAX_DOC) return fail(413, 'document exceeds 48 KB');
         const st = await store.getState(ws);
-        const exists = (st.docs[type] || []).some(d => d.id === id);
+        const prev = (st.docs[type] || []).find(d => d.id === id);
+        const exists = !!prev;
+        /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
+        if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,
           summary: summaryOf(body, `${exists ? 'Updated' : 'Created'} ${type} ${id}`) });
@@ -210,74 +347,17 @@ module.exports = async function (context, req) {
       return send(r.status, r.body);
     }
 
-    /* POST /ws/:ws/golive/:projectId */
-    if (action === 'golive' && seg.length === 4) {
+    /* POST /ws/:ws/golive/:projectId  and  POST /ws/:ws/rollback/:projectId */
+    if ((action === 'golive' || action === 'rollback') && seg.length === 4) {
       const projectId = seg[3];
       if (!ID_RE.test(projectId)) return fail(400, 'invalid project id');
-      const eng = engine();
-      if (!eng || typeof eng.readiness !== 'function') return fail(503, 'engine unavailable');
       const st = await store.getState(ws);
-      const docs = st.docs;
-      const project = ((docs.project || []).find(d => d.id === projectId) || {}).data;
+      const project = ((st.docs.project || []).find(d => d.id === projectId) || {}).data;
       if (!project) return fail(404, 'unknown project');
-      if (project.status === 'live') return fail(409, 'project is already live', ['Project status is live.']);
-      const gate = eng.readiness(docs, projectId, today);
-      if (!gate.pass) {
-        return fail(409, 'readiness gate failed', gate.checks.filter(c => !c.pass && !c.warning).map(c => `${c.label}: ${c.detail}`));
-      }
-      const actor = actorOf(body);
-      const at = new Date().toISOString();
-      const events = [];
-      const snapshot = {};
-      const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
-      for (const pd of procDocs) {
-        const p = JSON.parse(JSON.stringify(pd.data));
-        const version = (Number(p.version) || 1) + 1;
-        const promoted = cloneNodes(p.tobe, false);
-        p.released = (p.released || []).concat([{ version, at, by: actor, asis: promoted }]);
-        p.asis = promoted;
-        p.tobe = cloneNodes(promoted, true);
-        p.version = version;
-        snapshot[p.id] = version;
-        await store.putDoc(wsId, 'process', p.id, p);
-        events.push({ action: 'release', ref: 'process:' + p.id, summary: `Released ${p.name} v${version}: to-be promoted to as-is` });
-      }
-      for (const gd of (docs.grant || []).filter(d => d.data.projectId === projectId)) {
-        const g = JSON.parse(JSON.stringify(gd.data));
-        const next = g.status === 'active' || g.status === 'approved' ? 'expired' : g.status === 'requested' ? 'denied' : null;
-        if (!next) continue;
-        g.status = next; g.expires = today;
-        g.log = (g.log || []).concat([{ at, by: actor, action: next === 'expired' ? 'expired at go-live' : 'denied at go-live' }]);
-        await store.putDoc(wsId, 'grant', g.id, g);
-        events.push({ action: 'update', ref: 'grant:' + g.id, summary: `Grant ${g.id} ${next} at go-live` });
-      }
-      const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
-      const approvers = [...new Set((docs.approval || []).map(d => d.data)
-        .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
-      const exc = gate.checks.find(c => c.id === 'exceptions');
-      const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
-      const dispatch = { ref: 'main', inputs: { project: projectId, release: relId, processes: JSON.stringify(snapshot) } };
-      const release = {
-        id: relId, projectId, at, by: actor, approvers,
-        actions: [
-          { type: 'pipeline', target: 'github: northwind-traders/process-automation · release.yml', status: 'simulated-ok',
-            detail: 'POST https://api.github.com/repos/northwind-traders/process-automation/actions/workflows/release.yml/dispatches\n' +
-              'Accept: application/vnd.github+json\nAuthorization: Bearer <token from Key Vault>\n\n' + JSON.stringify(dispatch, null, 2) },
-          ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
-            detail: `Published the released process as the controlled SOP for ${pd.data.name}; the previous version was archived.` })),
-          { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
-            detail: `Go-live notice for ${project.name} sent to the project team and process owners.` },
-        ],
-        exceptions: exc && exc.items ? exc.items.map(w => ({ workId: w, note: 'Changed after business unit sign-off' })) : [],
-        snapshot,
-      };
-      await store.putDoc(wsId, 'release', relId, release);
-      const proj = Object.assign({}, project, { status: 'live', liveAt: at });
-      await store.putDoc(wsId, 'project', projectId, proj);
-      events.push({ action: 'create', ref: 'release:' + relId, summary: `Release ${relId} recorded with ${release.actions.length} simulated action(s)` });
-      events.push({ action: 'golive', ref: 'project:' + projectId, summary: `${project.name} went live` });
-      for (const e of events) await store.appendEvent(wsId, Object.assign({ actor, at }, e));
-      return send(200, { ok: true, release, project: proj });
+      const r = action === 'golive'
+        ? await goLive(wsId, st.docs, project, actorOf(body), today)
+        : await rollback(wsId, st.docs, project, actorOf(body), body && body.reason);
+      return send(r.status, r.body);
     }
 
     return fail(404, 'unknown route');
@@ -287,4 +367,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { clientIpHash, cloneNodes, localProfile, WS_RE, ID_RE };
+module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, WS_RE, ID_RE };
