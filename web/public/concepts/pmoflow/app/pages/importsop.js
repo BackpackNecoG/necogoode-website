@@ -11,16 +11,17 @@ const SAMPLE = `# Northwind Traders — Contractor Onboarding SOP (v3)
 Purpose: bring a new independent contractor from signed engagement to first approved invoice.
 Owner: Procurement
 Revision: 3
+The process starts when a hiring manager submits a contractor request.
 
 1. The hiring manager submits the contractor request form in the procurement portal with scope, start date and rate.
 2. The procurement coordinator sends the onboarding packet and collects the signed W-9 with the vendor legal name & Tax ID.
 3. Compliance screens the contractor against the restricted-party list and records the sanctions screening result.
-4. The contractor uploads a certificate of insurance; Compliance checks it.
+4. Compliance checks the certificate of insurance uploaded by the contractor.
    a. Confirm general liability coverage meets the minimum amount.
    b. Confirm the policy expiry date is after the engagement end date.
-5. If the contract value exceeds $50,000, Treasury reviews the engagement first.
+5. If the contract value exceeds $50,000, Treasury reviews the engagement first. Otherwise, Procurement approves the engagement directly.
 6. Treasury collects bank remittance details through the secure supplier form and confirms them with a call-back.
-7. Accounts Payable creates the vendor master record in the ERP.
+7. At the same time, Accounts Payable creates the vendor master record in the ERP and IT provisions contractor access in Workday.
 8. On the first invoice, Accounts Payable matches it to the approved contractor timesheet record before scheduling payment.`;
 
 const strip = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -49,6 +50,7 @@ function normStep(n) {
     owner: matchPerson(n.owner || n.ownerId || n.role),
     data: [...new Set((n.data || n.dataElements || []).map(matchData).filter(Boolean))],
     touches: Array.isArray(n.touches) ? n.touches.map(String) : [],
+    system: typeof n.system === 'string' ? n.system.trim() : '',
     subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: s, data: [] } : { title: String(s.title || s.text || '').trim(), data: [...new Set((s.data || []).map(matchData).filter(Boolean))] }).filter(s => s.title),
     newData: Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')).filter(Boolean) : [],
   };
@@ -75,7 +77,9 @@ function normalize(res) {
   let notes = res && (res.notes || res.note || res.warnings);
   notes = Array.isArray(notes) ? notes.map(String) : notes ? [String(notes)] : [];
   const src = res && res.source === 'rules' ? 'Rules' : 'AI';
-  return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger: res && (res.trigger || (res.process && res.process.trigger)) };
+  const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
+  const trigger = (res && (res.trigger || (res.process && res.process.trigger))) || (trigNode && trigNode.title) || '';
+  return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger };
 }
 
 /* Path helpers. Paths: "3" top-level node, "3.b1.0" step 0 of branch 1, "3.s2" sub-step 2 of top-level step 3. */
@@ -107,15 +111,15 @@ function dataChips(s) {
 }
 function stepBody(s, path, label) {
   return `<div class="is-body" data-path="${esc(path)}"><textarea class="is-title" data-f="title" rows="2" aria-label="${esc(label)} title">${esc(s.title)}</textarea>
-    <div class="is-row">${ownerSel(s)}${dataPicker(s, path)}</div>${dataChips(s)}
+    <div class="is-row">${ownerSel(s)}${dataPicker(s, path)}<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System"></div>${dataChips(s)}
     ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><input data-f="title" value="${esc(sb.title)}" aria-label="Sub-step ${k + 1}"><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
     <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
 }
 function gateBody(g, path) {
-  return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'Parallel' : 'Decision'}</span></div>
-    <textarea class="is-title" data-f="title" rows="2" aria-label="Decision question">${esc(g.title)}</textarea>
+  return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'Parallel: all branches run' : 'Decision'}</span></div>
+    <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Parallel gateway' : 'Decision question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
-      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint">${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : 'continues to the next step'}</span></div>
+      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint">${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
       ${b.nodes.map((s, k) => `<div class="is-bstep">${stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
 }
@@ -123,21 +127,23 @@ function gateBody(g, path) {
 export function render() {
   const d = ui.draft;
   const n = d ? countSteps(d.nodes) : 0;
-  const gates = d ? d.nodes.filter(x => x.type !== 'step').length : 0;
+  const gates = d ? d.nodes.filter(x => x.type === 'decision').length : 0;
+  const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>Proposed new data elements</h4>
       <p class="hint">The parser found data the SOP needs that matches no existing element closely enough to link. Tick the ones to create on import; they start as Missing and owned by you.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
         <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New data element name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(x.reason)}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : ''}</span></label>`).join('')}</div>` : '';
 
-  const draftHtml = d ? `<div class="card is-draft"><h3>Draft process<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span><span class="n">${n} steps${gates ? ` · ${gates} decision${gates === 1 ? '' : 's'}` : ''}</span></h3>
+  const draftHtml = d ? `<div class="card is-draft"><h3>Draft process<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span><span class="n">${n} steps${gates ? ` · ${gates} decision${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} parallel` : ''}</span></h3>
     ${ui.notes.length ? `<div class="note is-notes"><b>${ui.source === 'AI' ? 'AI notes' : 'Parser notes'}</b><ul>${ui.notes.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+    <div class="is-trig" data-trigger><span class="chip">Trigger</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
       <span class="is-n">${s.type === 'step' ? i + 1 : '◆'}</span>
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + (i + 1)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
-    <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add decision</button><button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Create process</button></div></div>` : '';
+    <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add decision</button><button class="btn sm" data-add-par>+ Add parallel</button><button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Create process</button></div></div>` : '';
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · Import SOP</div>
       <h1>Import an SOP</h1><p>Paste a written procedure. PMOFlow drafts the as-is process: steps, sub-steps, decisions, owners and the data each step needs. You review every step before anything is saved.</p></div>
@@ -160,6 +166,7 @@ function readDraft(root) {
     const own = sel => [...el.querySelectorAll(sel)].filter(x => x.closest('[data-path]') === el);
     const t = own('[data-f=title]')[0]; if (t) node.title = t.value;
     const o = own('[data-f=owner]')[0]; if (o) node.owner = o.value;
+    const sy = own('[data-f=system]')[0]; if (sy) node.system = sy.value.trim();
     if (node.type === 'step' && own('[data-f=data]').length) node.data = own('[data-f=data]').filter(x => x.checked).map(x => x.value);
   });
   root.querySelectorAll('[data-blabel]').forEach(el => { const [p, b] = el.dataset.blabel.split(/\.b(?=\d+$)/); const g = at(p); if (g && g.branches[+b]) g.branches[+b].label = el.value; });
@@ -200,13 +207,14 @@ export function bind(root) {
     li.querySelector(':scope > .is-ctl [data-rm]').onclick = () => { readDraft(root); ui.draft.nodes.splice(i, 1); store.emit(); };
   });
   root.querySelectorAll('[data-f=owner],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; rerender(); });
-  root.querySelectorAll('[data-f=title],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
+  root.querySelectorAll('[data-f=title],[data-f=system],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
   root.querySelectorAll('[data-rm-path]').forEach(b => b.onclick = () => { readDraft(root); removeAt(b.dataset.rmPath); store.emit(); });
   root.querySelectorAll('[data-add-sub]').forEach(b => b.onclick = () => { readDraft(root); const s = at(b.dataset.addSub); (s.subs = s.subs || []).push({ title: 'New sub-step', data: [] }); store.emit(); });
   root.querySelectorAll('[data-add-bstep]').forEach(b => b.onclick = () => { readDraft(root); const [p, j] = b.dataset.addBstep.split(/\.b(?=\d+$)/); at(p).branches[+j].nodes.push({ type: 'step', title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); });
   const add = root.querySelector('[data-add-step]'); if (add) add.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'step', title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); };
   const ag = root.querySelector('[data-add-gate]'); if (ag) ag.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'decision', title: 'Condition met?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] }); store.emit(); };
+  const ap = root.querySelector('[data-add-par]'); if (ap) ap.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'parallel', title: 'Do these at the same time', branches: [{ label: 'Branch A', nodes: [] }, { label: 'Branch B', nodes: [] }] }); store.emit(); };
   const cr = root.querySelector('[data-create]'); if (cr) cr.onclick = () => { readDraft(root); createProcess(); };
 }
 
@@ -237,7 +245,7 @@ async function createProcess() {
     title: 'Create process',
     body: `<div class="field"><label>Name</label><input name="name" value="${esc(guess.slice(0, 80))}"></div>
       <div class="field"><label>Description</label><textarea name="desc">${esc('Imported from SOP. ' + steps.length + ' steps.')}</textarea></div>
-      <div class="field"><label>Trigger</label><input name="trigger" value="${esc(d.trigger || (steps[0] ? steps[0].title.split(/[,.]/)[0].slice(0, 60) : '') || 'Request received')}"></div>
+      <div class="field"><label>Trigger</label><input name="trigger" value="${esc(d.trigger || 'Process starts')}"></div>
       ${picks.length ? `<div class="hint">Also creates ${picks.length} data element${picks.length === 1 ? '' : 's'}: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
       <div class="hint">Creates version 1 of the as-is process and a to-be copy you can redesign. Opens in the editor.</div>`,
     actions: [{ id: 'create', label: 'Create', primary: true }],
@@ -272,13 +280,14 @@ async function createProcess() {
     const extra = (s.newData || []).map(n => made.get(strip(n))).filter(Boolean);
     const node = { id: nid(), type: 'step', title: s.title.trim(), data: [...new Set(s.data.concat(extra))], touches: (s.touches || []).slice() };
     if (s.owner) node.owner = s.owner;
+    if (s.system) node.system = s.system;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
   };
   const mk = n => n.type === 'step' ? mkStep(n)
     : { id: nid(), type: n.type, title: n.title.trim(), branches: n.branches.map(b => ({ label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) })) };
-  const asis = [{ id: nid(), type: 'trigger', title: (r.form.trigger || 'Request received').trim(), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
+  const asis = [{ id: nid(), type: 'trigger', title: ((r.form.trigger || '').trim() || 'Process starts'), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
   const copy = n => { const c = Object.assign(clone(n), { id: nid(), from: n.id }); if (n.branches) c.branches = n.branches.map(b => ({ label: b.label, nodes: b.nodes.map(copy) })); return c; };
   const tobe = asis.map(copy);
   const pid = store.newId('proc');

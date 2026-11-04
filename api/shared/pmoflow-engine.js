@@ -160,6 +160,14 @@
     return { nodes, removed, changes };
   }
 
+  // Counts for every UI badge: gateways count as nodes in new/changed.
+  function diffSummary(process) {
+    const d = diffProcess(process);
+    const out = { new: 0, changed: 0, removed: d.removed.length, same: 0 };
+    Object.keys(d.nodes).forEach(k => { out[d.nodes[k]]++; });
+    return out;
+  }
+
   /* ------------------------------------------------------------------ */
   /* Forecast                                                            */
   /* ------------------------------------------------------------------ */
@@ -198,6 +206,7 @@
           consider(today, null);
         }
         res = { forecast: best, slipDays: best && isDate(w.due) ? Math.max(0, diffDays(best, w.due)) : 0 };
+        if (bestCause) res.via = bestCause;   // the dependency that sets this forecast (binding)
         if (isDate(w.due) && isDate(today) && w.due < today) res.sched = 'late';
         else if (best && isDate(w.due) && best > w.due) res.sched = 'slip';
         else if (isDate(w.due) && isDate(today) && diffDays(w.due, today) <= 5) res.sched = 'soon';
@@ -220,14 +229,37 @@
     return out;
   }
 
+  // Longest binding forecast chain ending at the project finish, root first. All done: the chain ending
+  // at the latest actual finish. A dependency is on the path only when it sets its successor's forecast.
+  function criticalPath(docs, projectId, today) {
+    const fc = forecastAll(docs, today);
+    const items = list(docs, 'workItem').filter(w => w.projectId === projectId);
+    if (!items.length) return [];
+    const finish = projectStats(docs, projectId, today).finish;
+    const allDone = items.every(w => w.status === 'done');
+    const ends = items.filter(w => (allDone ? (w.doneAt || w.due) : (w.status !== 'done' && fc[w.id].forecast)) === finish);
+    let best = [];
+    ends.forEach(w => {
+      const chain = [], seen = new Set();
+      let cur = w.id;
+      while (cur && !seen.has(cur)) { seen.add(cur); chain.unshift(cur); cur = fc[cur] && fc[cur].via; }
+      if (chain.length > best.length) best = chain;
+    });
+    return best;
+  }
+
   /* ------------------------------------------------------------------ */
   /* Data readiness, dependents, impact                                  */
   /* ------------------------------------------------------------------ */
-  function dataReady(docs, dataId) {
+  // Single source of truth for a data element's state: 'live' if avail is live or a resolver is done;
+  // otherwise its avail ('example' | 'missing'). Unknown elements are 'missing'.
+  function effectiveAvail(docs, dataId) {
     const d = get(docs, 'dataElement', dataId);
-    if (d && d.avail === 'live') return true;
-    return list(docs, 'workItem').some(w => w.resolves === dataId && w.status === 'done');
+    if (d && d.avail === 'live') return 'live';
+    if (list(docs, 'workItem').some(w => w.resolves === dataId && w.status === 'done')) return 'live';
+    return d && d.avail === 'example' ? 'example' : 'missing';
   }
+  function dataReady(docs, dataId) { return effectiveAvail(docs, dataId) === 'live'; }
 
   function dependents(docs, workId) {
     const work = list(docs, 'workItem');
@@ -267,7 +299,9 @@
       forecast: maxDate(items.map(w => fc[w.id] && fc[w.id].forecast)),
       next: minDate(open.map(w => w.due)),
       sched: status === 'done' ? 'done' : worstSched(open.map(w => fc[w.id].sched)),
-      blockers: open.length && step ? (step.data || []).filter(d => !dataReady(docs, d)) : [],
+      // Red blockers: effectively MISSING data only. Examples-only data is reported separately (amber).
+      blockers: open.length && step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'missing') : [],
+      needsLive: step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'example') : [],
     };
   }
 
@@ -300,16 +334,50 @@
   /* ------------------------------------------------------------------ */
   function latestBy(arr, key) { return arr.slice().sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''))).pop() || null; }
 
+  /* Plain-English helpers */
+  function joinList(arr, max) {
+    const a = arr.filter(x => x != null && x !== '').map(String);
+    if (max && a.length > max) { const rest = a.length - max; return a.slice(0, max).join(', ') + ' and ' + rest + ' more'; }
+    return a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
+  }
+  function capFirst(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+  function nWord(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function isAre(n) { return n === 1 ? 'is' : 'are'; }
+  function fmtDay(d) { const ms = toMs(d); if (isNaN(ms)) return String(d || ''); const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']; const x = new Date(ms); return M[x.getUTCMonth()] + ' ' + x.getUTCDate(); }
+
+  function finishCheck(c) {
+    c.status = c.warning ? (c.pass ? 'pass' : 'warn') : (c.pass ? 'pass' : 'fail');
+    return c;
+  }
+  function summarize(checks) {
+    const sm = { pass: 0, fail: 0, warn: 0 };
+    checks.forEach(c => { sm[c.status] = (sm[c.status] || 0) + 1; });
+    return sm;
+  }
+
   function readiness(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
-    if (!project) return { pass: false, checks: [{ id: 'project', label: 'Project exists', pass: false, detail: 'Project ' + projectId + ' not found.', items: [] }] };
+    if (!project) {
+      const checks = [finishCheck({ id: 'project', label: 'Project exists', pass: false, detail: 'This project could not be found.', items: [] })];
+      return { pass: false, checks, summary: summarize(checks) };
+    }
+    // Released projects: report the gate as evaluated at release; never re-evaluate (promotion must not fail it).
+    if (project.status === 'live') {
+      const rel = latestBy(list(docs, 'release').filter(r => r.projectId === projectId && r.kind !== 'rollback'), 'at');
+      const checks = rel && Array.isArray(rel.checks) ? rel.checks.map(c => finishCheck(Object.assign({}, c))) : [];
+      return { released: true, releasedAt: rel ? rel.at || null : null, versions: rel && rel.snapshot || null, pass: true, checks, summary: summarize(checks) };
+    }
     const people = personMap(docs);
     const procs = linkedProcesses(docs, project);
     const steps = [];
     procs.forEach(p => flatSteps(p.tobe).forEach(s => steps.push({ pid: p.id, s })));
     const usedData = [...new Set(steps.flatMap(x => stepData(x.s)))];
     const dataIdx = byId(list(docs, 'dataElement'));
+    const dn = d => (dataIdx[d] && dataIdx[d].name) || 'an unknown data element';
+    const pn = id => (people[id] && people[id].name) || 'an unassigned person';
     const work = list(docs, 'workItem').filter(w => w.projectId === projectId);
+    const workIdx = byId(work);
+    const wt = id => (workIdx[id] && workIdx[id].title) || 'a deleted work item';
     const checks = [];
     const buOf = pid => people[pid] && people[pid].bu || null;
     const stepOwner = {};
@@ -317,40 +385,50 @@
     const workBu = w => buOf(stepOwner[w.pid + '/' + w.step] || w.owner);
 
     // work-done
-    const open = work.filter(w => w.status !== 'done').map(w => w.id);
+    const open = work.filter(w => w.status !== 'done');
     checks.push({ id: 'work-done', label: 'All work items done', pass: open.length === 0,
-      detail: open.length ? open.length + ' of ' + work.length + ' work items still open.' : 'All ' + work.length + ' work items are done.', items: open });
+      detail: open.length ? open.length + ' of ' + nWord(work.length, 'work item') + ' ' + isAre(open.length) + ' still open: ' + joinList(open.map(w => w.title || 'untitled item'), 5) + '.'
+        : 'All ' + nWord(work.length, 'work item') + ' ' + isAre(work.length) + ' done.', items: open.map(w => w.id) });
 
-    // data-live
-    const notReady = usedData.filter(d => !dataReady(docs, d));
-    checks.push({ id: 'data-live', label: 'Required data is live', pass: notReady.length === 0,
-      detail: notReady.length ? notReady.length + ' data element(s) used by the to-be steps are not live and have no completed resolver.' : 'All ' + usedData.length + ' data elements are live or resolved.', items: notReady });
+    // data-live: examples-only data fails here (it needs a live source before go-live).
+    const missing = usedData.filter(d => effectiveAvail(docs, d) === 'missing');
+    const examples = usedData.filter(d => effectiveAvail(docs, d) === 'example');
+    const dl = [];
+    if (missing.length) dl.push(joinList(missing.map(dn)) + ' ' + isAre(missing.length) + ' missing.');
+    if (examples.length) dl.push(joinList(examples.map(dn)) + ' ' + (examples.length === 1 ? 'has' : 'have') + ' examples only and need' + (examples.length === 1 ? 's' : '') + ' a live source before go-live.');
+    if (!dl.length) dl.push('All ' + nWord(usedData.length, 'data element') + ' ' + isAre(usedData.length) + ' live.');
+    checks.push({ id: 'data-live', label: 'Required data is live', pass: !missing.length && !examples.length, detail: dl.join(' '),
+      items: missing.concat(examples), missing, examples });
 
-    // discovered-resolved: every discovered requirement on project data has `resolved`. Items are "<dataId>#<index>".
-    const unresolved = [];
-    usedData.forEach(d => ((dataIdx[d] && dataIdx[d].discovered) || []).forEach((x, i) => { if (x && !x.resolved) unresolved.push(d + '#' + i); }));
+    // discovered-resolved. Items are "<dataId>#<index>".
+    const unresolved = [], perData = {};
+    usedData.forEach(d => ((dataIdx[d] && dataIdx[d].discovered) || []).forEach((x, i) => { if (x && !x.resolved) { unresolved.push(d + '#' + i); perData[d] = (perData[d] || 0) + 1; } }));
     checks.push({ id: 'discovered-resolved', label: 'Discovered requirements resolved', pass: unresolved.length === 0,
-      detail: unresolved.length ? unresolved.length + ' discovered requirement(s) on project data are not resolved.' : 'No open discovered requirements.', items: unresolved });
+      detail: unresolved.length ? joinList(Object.keys(perData).map(d => nWord(perData[d], 'discovered requirement') + ' on ' + dn(d))) + ' ' + isAre(unresolved.length) + ' not resolved.'
+        : 'No open discovered requirements.', items: unresolved });
 
-    // process-valid: owners on every to-be step, no gateway with all branches empty, every goto target exists.
+    // process-valid
     const problems = [];
     procs.forEach(p => {
       const ids = allNodeIds(p.tobe);
-      flatSteps(p.tobe).forEach(s => { if (!s.owner) problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || s.id) + '" has no owner' }); });
+      const where = ' in ' + (p.name || 'a linked process');
+      flatSteps(p.tobe).forEach(s => { if (!s.owner) problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || 'untitled') + '"' + where + ' has no owner' }); });
       flatGateways(p.tobe).forEach(g => {
         const br = g.branches || [];
-        if (!br.some(b => b && ((b.nodes || []).length || b.goto))) problems.push({ pid: p.id, node: g.id, problem: 'Gateway "' + (g.title || g.id) + '" has no non-empty branch' });
-        br.forEach(b => { if (b && b.goto && !ids.has(b.goto)) problems.push({ pid: p.id, node: g.id, problem: 'Branch "' + (b.label || '') + '" loops back to missing node ' + b.goto }); });
+        if (!br.some(b => b && ((b.nodes || []).length || b.goto))) problems.push({ pid: p.id, node: g.id, problem: 'Gateway "' + (g.title || 'untitled') + '"' + where + ' has only empty branches' });
+        br.forEach(b => { if (b && b.goto && !ids.has(b.goto)) problems.push({ pid: p.id, node: g.id, problem: 'Branch "' + (b.label || 'unlabelled') + '" of "' + (g.title || 'untitled') + '"' + where + ' loops back to a step that no longer exists' }); });
       });
     });
     checks.push({ id: 'process-valid', label: 'Process design is valid', pass: problems.length === 0,
-      detail: problems.length ? problems.map(x => x.problem).join('; ') + '.' : 'Every step has an owner and every gateway is well formed.',
+      detail: problems.length ? problems.map(x => x.problem).join('. ') + '.' : 'Every step has an owner and every gateway is well formed.',
       items: problems.map(x => x.pid + ':' + x.node), problems });
 
-    // tests-passed
+    // tests-passed: latest run per env; failing counts only those runs; every project data element needs cases.
     const usedSet = new Set(usedData);
     const cases = list(docs, 'testCase').filter(c => usedSet.has(c.dataId));
+    const caseIdx = byId(cases);
     const scripts = Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, projectId);
+    const scriptIdx = byId(scripts);
     const runs = list(docs, 'testRun').filter(r => r.projectId === projectId);
     const lastDev = latestBy(runs.filter(r => r.env === 'dev'), 'at');
     const lastUat = latestBy(runs.filter(r => r.env === 'uat'), 'at');
@@ -364,30 +442,34 @@
       else if (x.outcome === 'blocked') blocked.add(rid(x));
     });
     const unrun = cases.map(c => c.id).concat(scripts.map(x => x.id)).filter(id => !coveredUat.has(id));
+    const noCases = usedData.filter(d => !cases.some(c => c.dataId === d));
     const defects = work.filter(w => w.kind === 'defect' && w.status !== 'done').map(w => w.id);
     const missingRuns = [cases.length && !lastDev ? 'dev' : null, (cases.length || scripts.length) && !lastUat ? 'uat' : null].filter(Boolean);
-    const tp = failing.size === 0 && blocked.size === 0 && unrun.length === 0 && defects.length === 0 && missingRuns.length === 0;
+    const tname = id => caseIdx[id] ? dn(caseIdx[id].dataId) + ' · ' + (caseIdx[id].field || 'case') + ' (' + (caseIdx[id].kind || 'case') + ')'
+      : scriptIdx[id] ? 'UAT script "' + (scriptIdx[id].title || 'untitled') + '"' : 'a test outside this project';
+    const tp = failing.size === 0 && blocked.size === 0 && unrun.length === 0 && defects.length === 0 && missingRuns.length === 0 && noCases.length === 0;
     const tDetail = [];
-    if (missingRuns.length) tDetail.push('No ' + missingRuns.join(' or ').toUpperCase() + ' run recorded.');
-    if (failing.size) tDetail.push(failing.size + ' failing in the latest dev/UAT run.');
-    if (blocked.size) tDetail.push(blocked.size + ' blocked in the latest UAT run.');
-    if (unrun.length) tDetail.push(unrun.length + ' case(s)/script(s) not covered by the latest UAT run.');
-    if (defects.length) tDetail.push(defects.length + ' open defect(s).');
-    if (tp) tDetail.push(cases.length + ' data case(s) and ' + scripts.length + ' UAT script(s) pass; no open defects.');
+    if (missingRuns.length) tDetail.push('No ' + joinList(missingRuns.map(e => e === 'dev' ? 'dev' : 'UAT')) + ' run has been recorded.');
+    if (noCases.length) tDetail.push(joinList(noCases.map(dn)) + (noCases.length === 1 ? ' has' : ' have') + ' no test cases.');
+    if (failing.size) tDetail.push(nWord(failing.size, 'test') + ' failed in the latest run: ' + joinList([...failing].map(tname), 3) + '.');
+    if (blocked.size) tDetail.push(nWord(blocked.size, 'test') + ' ' + (blocked.size === 1 ? 'was' : 'were') + ' blocked in the latest UAT run: ' + joinList([...blocked].map(tname), 3) + '.');
+    if (unrun.length) tDetail.push(nWord(unrun.length, 'test') + ' ' + (unrun.length === 1 ? 'was' : 'were') + ' not covered by the latest UAT run: ' + joinList(unrun.map(tname), 3) + '.');
+    if (defects.length) tDetail.push(nWord(defects.length, 'defect') + ' ' + isAre(defects.length) + ' still open: ' + joinList(defects.map(wt), 3) + '.');
+    if (tp) tDetail.push(nWord(cases.length, 'data test case') + ' and ' + nWord(scripts.length, 'UAT script') + ' passed; no open defects.');
     checks.push({ id: 'tests-passed', label: 'Tests passed in dev and UAT', pass: tp, detail: tDetail.join(' '),
-      items: [...new Set([...failing, ...blocked, ...unrun, ...defects])], failing: [...failing], blocked: [...blocked], unrun, defects, scripts: scripts.map(x => x.id) });
+      items: [...new Set([...failing, ...blocked, ...unrun, ...defects, ...noCases])], failing: [...failing], blocked: [...blocked], unrun, defects, noCases, scripts: scripts.map(x => x.id) });
 
     // grants-closed: requested/approved block; active ones are expired automatically at go-live.
     const grants = list(docs, 'grant').filter(g => g.projectId === projectId);
-    const blocking = grants.filter(g => g.status === 'requested' || g.status === 'approved').map(g => g.id);
-    const expiring = grants.filter(g => g.status === 'active').map(g => g.id);
-    checks.push({ id: 'grants-closed', label: 'Access grants closed', pass: blocking.length === 0,
-      detail: (blocking.length ? blocking.length + ' grant(s) still requested or approved; deny, revoke or activate them first. ' : 'No pending grants. ') +
-        'Active grants expire automatically at go-live' + (expiring.length ? ' (' + expiring.length + ' will be expired).' : '.'),
-      items: blocking.concat(expiring), blocking, expiring });
+    const gname = g => dn(g.dataId) + ' (' + String(g.env || '').toUpperCase() + ', ' + (g.access || 'access') + ')';
+    const blockG = grants.filter(g => g.status === 'requested' || g.status === 'approved');
+    const expG = grants.filter(g => g.status === 'active');
+    checks.push({ id: 'grants-closed', label: 'Access grants closed', pass: blockG.length === 0,
+      detail: (blockG.length ? 'Still ' + joinList([...new Set(blockG.map(g => g.status))]) + ': ' + joinList(blockG.map(gname)) + '. Deny, revoke or activate ' + (blockG.length === 1 ? 'it' : 'them') + ' first. ' : 'No pending access requests. ') +
+        'Active grants expire automatically at go-live' + (expG.length ? ' (' + joinList(expG.map(gname)) + ').' : '.'),
+      items: blockG.concat(expG).map(g => g.id), blocking: blockG.map(g => g.id), expiring: expG.map(g => g.id) });
 
-    // bu-signoff: each BU owning a to-be step needs its latest approval approved with stepUp and not stale.
-    // Stale: a work item or linked process in that BU's section has updatedAt > approval time (snapshotAt || at).
+    // bu-signoff: latest approval per BU approved with step-up and not stale.
     const approvals = list(docs, 'approval').filter(a => a.projectId === projectId);
     const bus = [...new Set(steps.map(x => buOf(x.s.owner)).filter(Boolean))].sort();
     const validFor = bu => {
@@ -398,43 +480,51 @@
     const changedSince = bu => {
       const a = validFor(bu); if (!a) return [];
       const t = apprAt(a), out = [];
-      work.forEach(w => { if (w.updatedAt && String(w.updatedAt) > t && workBu(w) === bu) out.push({ ref: 'workItem:' + w.id, label: w.title || w.id }); });
-      procs.forEach(p => { if (p.updatedAt && String(p.updatedAt) > t && flatSteps(p.tobe).some(s => buOf(s.owner) === bu)) out.push({ ref: 'process:' + p.id, label: p.name || p.id }); });
+      work.forEach(w => { if (w.updatedAt && String(w.updatedAt) > t && workBu(w) === bu) out.push({ ref: 'workItem:' + w.id, label: w.title || 'untitled item' }); });
+      procs.forEach(p => { if (p.updatedAt && String(p.updatedAt) > t && flatSteps(p.tobe).some(s => buOf(s.owner) === bu)) out.push({ ref: 'process:' + p.id, label: 'the ' + (p.name || 'linked') + ' process' }); });
       return out;
     };
     const unsigned = bus.filter(bu => !validFor(bu));
     const stale = bus.filter(bu => validFor(bu)).map(bu => ({ bu, changed: changedSince(bu) })).filter(x => x.changed.length);
+    const staleSet = new Set(stale.map(x => x.bu));
     const buDetail = [];
     if (!bus.length) buDetail.push('No business units own steps in the linked processes.');
-    if (unsigned.length) buDetail.push('Awaiting sign-off: ' + unsigned.join(', ') + '.');
-    stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + x.changed.map(c => c.label).join(', ') + '.'));
-    if (bus.length && !unsigned.length && !stale.length) buDetail.push('All ' + bus.length + ' business units approved with step-up.');
+    if (unsigned.length) buDetail.push('Waiting for sign-off from ' + joinList(unsigned) + '.');
+    stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + ' changed after sign-off.'));
+    if (bus.length && !unsigned.length && !stale.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
     checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0 && stale.length === 0,
       detail: buDetail.join(' '), items: unsigned.concat(stale.map(x => x.bu)), unsigned,
-      stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + x.changed.map(c => c.label).join(', ') })) });
+      stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)) })) });
 
-    // two-person
-    const approvers = [...new Set(bus.map(validFor).filter(Boolean).map(a => a.approver))];
+    // two-person: approved, non-stale approvals only (matches the sign-off panel).
+    const current = bus.filter(bu => validFor(bu) && !staleSet.has(bu)).map(validFor);
+    const approvers = [...new Set(current.map(a => a.approver))];
     checks.push({ id: 'two-person', label: 'Two-person rule', pass: approvers.length >= 2,
-      detail: approvers.length + ' distinct approver(s); at least 2 required.', items: approvers });
+      detail: approvers.length >= 2 ? 'Approved by ' + joinList(approvers.map(pn)) + '.'
+        : approvers.length === 1 ? 'Only ' + pn(approvers[0]) + ' has a current approval; a second approver is needed.'
+        : 'No current approvals; two different approvers are needed.', items: approvers });
 
     // cutover-plan
     const co = project.cutover || {};
-    const missingCo = ['rollbackOwner', 'rollbackPlan', 'hypercareOwner'].filter(k => !(co[k] && String(co[k]).trim()));
+    const coLabels = { rollbackOwner: 'rollback owner', rollbackPlan: 'rollback plan', hypercareOwner: 'hypercare owner' };
+    const missingCo = Object.keys(coLabels).filter(k => !(co[k] && String(co[k]).trim()));
     checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: missingCo.length === 0,
-      detail: missingCo.length ? 'Cutover plan is missing: ' + missingCo.join(', ') + '.' : 'Rollback owner, rollback plan and hypercare owner are set.', items: missingCo });
+      detail: missingCo.length ? capFirst(joinList(missingCo.map(k => coLabels[k]))) + ' ' + (missingCo.length === 1 ? 'is' : 'are') + ' not set.'
+        : 'Rollback owner (' + pn(co.rollbackOwner) + '), rollback plan and hypercare owner (' + pn(co.hypercareOwner) + ') are set.', items: missingCo });
 
-    // exceptions (warning only): work items whose updatedAt is after their BU's approval. Stale ones block via bu-signoff.
+    // exceptions (warning only): work items changed after their BU's approval. Stale ones block via bu-signoff.
     const exc = work.filter(w => {
       if (!w.updatedAt) return false;
       const bu = workBu(w);
       const appr = bu && validFor(bu);
       return appr && String(w.updatedAt) > apprAt(appr);
-    }).map(w => w.id);
+    });
     checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: exc.length === 0, warning: true,
-      detail: exc.length ? exc.length + ' work item(s) changed after their business unit approved; those sections need re-approval.' : 'No work changed after sign-off.', items: exc });
+      detail: exc.length ? joinList(exc.map(w => w.title || 'untitled item'), 5) + (exc.length === 1 ? ' was' : ' were') + ' changed after sign-off; ' + (exc.length === 1 ? 'its section needs' : 'those sections need') + ' re-approval.' : 'No work changed after sign-off.',
+      items: exc.map(w => w.id) });
 
-    return { pass: checks.filter(c => !c.warning).every(c => c.pass), checks };
+    checks.forEach(finishCheck);
+    return { pass: checks.filter(c => !c.warning).every(c => c.pass), checks, summary: summarize(checks) };
   }
 
   /* ------------------------------------------------------------------ */
@@ -535,6 +625,30 @@
     }
     return out.join('');
   }
+  // Plain-English description of a collapsed pattern: '9{8}' → '8 digits', 'Aa{5} Aa{6}' → 'two capitalized words',
+  // '9{2}-9{7}' → '2 digits, a hyphen, 7 digits'.
+  const NUMW = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+  const PUNCT = { '-': 'a hyphen', ' ': 'a space', '.': 'a period', ',': 'a comma', '/': 'a slash', '@': 'an @ sign', '_': 'an underscore', '(': 'an opening parenthesis', ')': 'a closing parenthesis', "'": 'an apostrophe', '&': 'an ampersand', '#': 'a # sign', '+': 'a plus sign', ':': 'a colon', '$': 'a dollar sign', '"': 'a quotation mark' };
+  function humanPattern(p) {
+    const runs = []; const re = /(.)(?:\{(\d+)\})?/gu; let m;
+    while ((m = re.exec(String(p || '')))) runs.push({ c: m[1], n: m[2] ? +m[2] : 1 });
+    const units = [];
+    for (let i = 0; i < runs.length; i++) {
+      const r = runs[i], nx = runs[i + 1];
+      if (r.c === 'A' && r.n === 1 && nx && nx.c === 'a') { units.push({ k: 'cap' }); i++; }
+      else if (r.c === 'a') units.push({ k: 'lower' });
+      else if (r.c === 'A') units.push({ k: 'upper', n: r.n });
+      else if (r.c === '9') units.push({ k: 'digits', n: r.n });
+      else units.push({ k: 'punct', c: r.c, n: r.n });
+    }
+    if (!units.length) return 'empty';
+    const words = units.filter((u, i) => i % 2 === 0), seps = units.filter((u, i) => i % 2 === 1);
+    const kinds = { cap: 'capitalized', lower: 'lowercase' };
+    if (units.length % 2 === 1 && kinds[words[0].k] && words.every(u => u.k === words[0].k) && seps.every(u => u.k === 'punct' && u.c === ' ' && u.n === 1))
+      return words.length === 1 ? 'a ' + kinds[words[0].k] + ' word' : (NUMW[words.length] || words.length) + ' ' + kinds[words[0].k] + ' words';
+    return units.map(u => u.k === 'digits' ? nWord(u.n, 'digit') : u.k === 'cap' ? 'a capitalized word' : u.k === 'lower' ? 'a lowercase word'
+      : u.k === 'upper' ? nWord(u.n, 'capital letter') : (u.n > 1 ? u.n + ' × ' : '') + (PUNCT[u.c] || '"' + u.c + '"')).join(', ');
+  }
   // Masking: keep first and last char; digits→9, letters→x/X, punctuation and spaces kept.
   // Values of 1–2 chars are fully masked. If the result would equal the raw value, mask fully;
   // if that still equals it (e.g. "999"), replace with '*'.
@@ -620,7 +734,7 @@
       else if (/^number$/i.test(fmt)) type = 'number';
       else type = 'text';
     }
-    const sp = { name: f.name, type, mask, required: f.required === true || (f.required == null && /required/i.test(String(f.rule || '')) && !/optional/i.test(String(f.rule || ''))) };
+    const sp = { name: f.name, type, mask, aba: /routing/i.test(String(f.name || '')), required: f.required === true || (f.required == null && /required/i.test(String(f.rule || '')) && !/optional/i.test(String(f.rule || ''))) };
     if (mask) { sp.maskShape = shapeOf(mask.replace(/#/g, '9')); sp.length = chars(mask).length; }
     else if (f.length != null) sp.length = +f.length;
     else { const m = /(\d+)\s*digits?/i.exec(fmt); if (m) sp.length = +m[1]; }
@@ -643,6 +757,18 @@
     if (sp.type === 'date') return new Set(['-', '/', ':', '.']);
     return null; // text/list: any
   }
+  // ABA routing checksum: 3·(d1+d4+d7) + 7·(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10).
+  function abaValid(s) {
+    if (!/^\d{9}$/.test(s)) return false;
+    const d = s.split('').map(Number);
+    return (3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5] + d[8])) % 10 === 0;
+  }
+  // Append the check digit to 8 digits.
+  function abaFrom(prefix8) {
+    const d = prefix8.split('').map(Number);
+    const sum = 3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5]);
+    return prefix8 + String((10 - (sum % 10)) % 10);
+  }
   function validDate(s) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s); if (!m) return false; const ms = toMs(s); return !isNaN(ms) && iso(ms) === s; }
   // Does `input` satisfy the field spec?
   function validate(sp, input) {
@@ -652,6 +778,7 @@
     if (sp.mask && shapeOf(s) !== sp.maskShape) return false;
     if (sp.regex && !sp.regex.test(s)) return false;
     if (sp.type === 'digits' && !sp.mask && !/^\d+$/.test(s)) return false;
+    if (sp.aba && !abaValid(s)) return false;
     if (sp.type === 'number' || sp.type === 'currency') {
       const t = sp.type === 'currency' ? s.replace(/[$,]/g, '') : s;
       if (!RE_NUM.test(t)) return false;
@@ -678,51 +805,76 @@
   /* ------------------------------------------------------------------ */
   /* Spec drift                                                          */
   /* ------------------------------------------------------------------ */
+  // "Routing number" → "routing number(s)"; "Tax ID (EIN)" → "tax ID(s)". Acronyms keep their case.
+  function nounOf(name, n) {
+    const words = String(name || 'value').replace(/\s*\([^)]*\)/g, '').trim().split(/\s+/).filter(Boolean)
+      .map(w => /^[A-Z0-9]{2,}$/.test(w) ? w : w.toLowerCase());
+    if (!words.length) words.push('value');
+    if (n !== 1) {
+      const w = words[words.length - 1];
+      words[words.length - 1] = /^[A-Z0-9]{2,}$/.test(w) ? w + 's' : /(s|x|ch|sh)$/.test(w) ? w + 'es' : /[^aeiou]y$/.test(w) ? w.slice(0, -1) + 'ies' : w + 's';
+    }
+    return words.join(' ');
+  }
+  function quoteChars(arr) { return joinList(arr.map(c => c === ' ' ? 'spaces' : '"' + c + '"')); }
+
   function specDrift(dataElement, profile) {
     const cols = columnsOf(profile);
+    const docRows = profile && !Array.isArray(profile) && profile.rows != null ? +profile.rows : null;
     const fields = (dataElement && dataElement.fields) || [];
     const out = [];
     const matched = new Set();
     for (const f of fields) {
       const sp = fieldSpec(f);
       const col = columnFor(f, cols);
-      if (!col) { out.push({ field: f.name, issue: 'missing-column', detail: 'Spec field "' + f.name + '" has no matching column in the profile.' }); continue; }
+      const N = (n) => nounOf(f.name, n);
+      if (!col) { out.push({ field: f.name, issue: 'missing-column', detail: 'No column in the extract matches "' + f.name + '".' }); continue; }
       matched.add(col.name);
-      const filled = col.rows - col.nulls;
-      if (sp.required && col.nulls > 0) out.push({ field: f.name, issue: 'required-nulls', detail: 'Required, but ' + col.nulls + ' of ' + col.rows + ' rows are empty.' });
+      const nulls = +col.nulls || 0;
+      const rows = col.rows != null ? +col.rows : docRows != null ? docRows : nulls + (col.patterns || []).reduce((a, p) => a + (p.count || 0), 0);
+      const filled = rows - nulls;
+      const hasHave = n => (n === 1 ? 'has' : 'have');
+      if (sp.required && nulls > 0) out.push({ field: f.name, issue: 'required-nulls', detail: nulls + ' of ' + rows + ' ' + N(rows) + ' ' + isAre(nulls) + ' empty; the spec says ' + N(1) + ' is required.' });
       if (filled <= 0) continue;
-      const lenRange = col.minLen === col.maxLen ? String(col.minLen) : col.minLen + '–' + col.maxLen;
-      if (sp.length != null && (col.minLen !== sp.length || col.maxLen !== sp.length))
-        out.push({ field: f.name, issue: 'length-mismatch', detail: 'Spec says length ' + sp.length + (sp.type === 'digits' ? ' digits' : '') + '; profile has values of length ' + lenRange + '.' });
-      if (sp.minLen != null && col.minLen < sp.minLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'Spec minimum length ' + sp.minLen + '; shortest observed value is ' + col.minLen + '.' });
-      if (sp.maxLen != null && col.maxLen > sp.maxLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'Spec maximum length ' + sp.maxLen + '; longest observed value is ' + col.maxLen + '.' });
+      const pats = col.patterns || [];
+      const isDigitsPat = p => /^9(\{\d+\})?$/.test(p);
+      if (sp.length != null && (col.minLen !== sp.length || col.maxLen !== sp.length)) {
+        const groups = {};
+        pats.forEach(p => { const L = chars(expandPattern(p.pattern)).length; if (L !== sp.length) { const k = L + (isDigitsPat(p.pattern) ? ' digits' : ' characters'); groups[k] = (groups[k] || 0) + p.count; } });
+        const unit = sp.type === 'digits' ? ' digits' : ' characters';
+        const parts = Object.keys(groups).map(k => groups[k] + ' of ' + rows + ' ' + N(rows) + ' ' + hasHave(groups[k]) + ' ' + k);
+        out.push({ field: f.name, issue: 'length-mismatch', detail: (parts.length ? parts.join('; ') : capFirst(N(2)) + ' range from ' + col.minLen + ' to ' + col.maxLen + unit) + '; the spec says ' + sp.length + (parts.length ? '' : unit) + '.' });
+      }
+      if (sp.minLen != null && col.minLen < sp.minLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'The shortest ' + N(1) + ' is ' + nWord(col.minLen, 'character') + '; the spec minimum is ' + sp.minLen + '.' });
+      if (sp.maxLen != null && col.maxLen > sp.maxLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'The longest ' + N(1) + ' is ' + nWord(col.maxLen, 'character') + '; the spec allows ' + sp.maxLen + '.' });
       const allowed = allowedSpecials(sp);
       if (sp.type === 'digits') {
-        const bad = (col.charClasses || []).filter(c => c === 'letters' || c === 'space' || c === 'unicode');
+        const bad = (col.charClasses || []).filter(c => c === 'letters' || c === 'space' || c === 'unicode').map(c => c === 'unicode' ? 'non-English characters' : c === 'space' ? 'spaces' : c);
         const badSp = (col.specials || []).filter(c => !(allowed && allowed.has(c)));
-        if (bad.length || badSp.length) out.push({ field: f.name, issue: 'non-digit', detail: 'Digits field contains ' + bad.concat(badSp.map(c => '"' + c + '"')).join(', ') + '.' });
+        if (bad.length || badSp.length) out.push({ field: f.name, issue: 'non-digit', detail: 'Some ' + N(2) + ' contain ' + joinList(bad.concat(badSp.length ? [quoteChars(badSp)] : [])) + '; the spec says digits only' + (sp.mask ? ' in the format ' + sp.mask : '') + '.' });
       } else if (allowed) {
         const badSp = (col.specials || []).filter(c => !allowed.has(c));
-        if (badSp.length) out.push({ field: f.name, issue: 'unexpected-specials', detail: 'Unexpected characters for a ' + sp.type + ' field: ' + badSp.map(c => '"' + c + '"').join(', ') + '.' });
+        if (badSp.length) out.push({ field: f.name, issue: 'unexpected-specials', detail: 'Some ' + N(2) + ' contain characters a ' + sp.type + ' field should not have: ' + quoteChars(badSp) + '.' });
       }
       if (sp.type === 'number' || sp.type === 'currency') {
         const hasLetters = (col.charClasses || []).some(c => c === 'letters' || c === 'unicode');
-        if (col.min == null && hasLetters) out.push({ field: f.name, issue: 'type-mismatch', detail: 'Spec says ' + sp.type + '; profile has non-numeric values.' });
-        if (col.min != null && sp.minVal != null && col.min < sp.minVal) out.push({ field: f.name, issue: 'out-of-range', detail: 'Values below the spec minimum ' + sp.minVal + '.' });
-        if (col.max != null && sp.maxVal != null && col.max > sp.maxVal) out.push({ field: f.name, issue: 'out-of-range', detail: 'Values above the spec maximum ' + sp.maxVal + '.' });
+        if (col.min == null && hasLetters) out.push({ field: f.name, issue: 'type-mismatch', detail: 'Some ' + N(2) + ' are not numbers; the spec says ' + sp.type + '.' });
+        if (col.min != null && sp.minVal != null && col.min < sp.minVal) out.push({ field: f.name, issue: 'out-of-range', detail: 'The smallest ' + N(1) + ' is ' + col.min + ', below the spec minimum of ' + sp.minVal + '.' });
+        if (col.max != null && sp.maxVal != null && col.max > sp.maxVal) out.push({ field: f.name, issue: 'out-of-range', detail: 'The largest ' + N(1) + ' is ' + col.max + ', above the spec maximum of ' + sp.maxVal + '.' });
       }
+      const offText = off => off.map(p => p.count + ' of ' + rows + ' ' + N(rows) + ' ' + (p.count === 1 ? 'looks' : 'look') + ' like ' + humanPattern(p.pattern)).join('; ');
       if (sp.mask) {
         const want = collapse(sp.maskShape);
-        const off = (col.patterns || []).filter(p => p.pattern !== want);
-        if (off.length) out.push({ field: f.name, issue: 'pattern-mismatch', detail: 'Spec format ' + sp.mask + ' (' + want + '); profile also has ' + off.map(p => p.pattern + ' ×' + p.count).join(', ') + '.' });
+        const off = pats.filter(p => p.pattern !== want);
+        if (off.length) out.push({ field: f.name, issue: 'pattern-mismatch', detail: offText(off) + '; the spec format is ' + sp.mask + ' (' + humanPattern(want) + ').' });
       } else if (sp.regex) {
-        const off = (col.patterns || []).filter(p => !sp.regex.test(expandPattern(p.pattern)));
-        if (off.length) out.push({ field: f.name, issue: 'pattern-mismatch', detail: 'Observed shapes do not match the spec pattern: ' + off.map(p => p.pattern + ' ×' + p.count).join(', ') + '.' });
+        const off = pats.filter(p => !sp.regex.test(expandPattern(p.pattern)));
+        if (off.length) out.push({ field: f.name, issue: 'pattern-mismatch', detail: offText(off) + ', which does not match the spec pattern.' });
       }
       if (sp.values && col.distinct > sp.values.length)
-        out.push({ field: f.name, issue: 'value-not-in-list', detail: col.distinct + ' distinct values observed; the spec allows ' + sp.values.length + '.' });
+        out.push({ field: f.name, issue: 'value-not-in-list', detail: capFirst(N(2)) + ' have ' + col.distinct + ' different values; the spec allows ' + sp.values.length + ': ' + joinList(sp.values) + '.' });
     }
-    cols.filter(c => !matched.has(c.name)).forEach(c => out.push({ field: c.name, issue: 'unspecified-column', detail: 'Column "' + c.name + '" is in the extract but not in the spec.' }));
+    cols.filter(c => !matched.has(c.name)).forEach(c => out.push({ field: c.name, issue: 'unspecified-column', detail: 'The extract has a column "' + c.name + '" that is not in the spec.' }));
     return out;
   }
 
@@ -736,6 +888,7 @@
 
   function validSample(sp) {
     if (sp.values) return sp.values[0];
+    if (sp.aba) return abaFrom('12345678');
     if (sp.mask) { let i = 0; return chars(sp.mask).map(c => c === '#' || c === '9' ? '1234567890'[i++ % 10] : c).join(''); }
     if (sp.type === 'number' || sp.type === 'currency') {
       const lo = sp.minVal, hi = sp.maxVal;
@@ -754,15 +907,33 @@
     return null;
   }
 
+  // Cross-field rule in free text: "Must match legal name", "same as X", "differs from X", "before/after X".
+  function crossRule(f, fields) {
+    const rule = String(f.rule || '');
+    const m = /\b(match(?:es)?|equals?|same as|differs? from|on or before|on or after|before|after)\s+(?:the\s+)?([^.;,]+)/i.exec(rule);
+    if (!m) return null;
+    const verb = m[1].toLowerCase();
+    const rel = /match|equal|same/.test(verb) ? 'equal' : /differ/.test(verb) ? 'differ' : /before/.test(verb) ? 'before' : 'after';
+    const rt = ' ' + tokens(rule) + ' ';
+    const other = fields.find(o => o !== f && tokens(o.name) && rt.includes(' ' + tokens(o.name) + ' '));
+    return { rel, other: other ? other.name : m[2].trim(), rule };
+  }
+  const SPECIAL_TEXT = [
+    ["O'Neill Supply", 'apostrophe'], ['Zoë Café', 'accented letters'], ['Ames & Sons', 'ampersand'],
+    ['Acme Rockets 🚀', 'emoji'], ['  Acme Ltd  ', 'leading and trailing spaces'],
+  ];
+
   function generateTests(dataElement, profile) {
     const de = dataElement || {};
     const cols = columnsOf(profile);
     const out = [], seen = new Set();
-    const add = (f, kind, input, expect, origin, note) => {
-      const key = f.name + '\u0000' + input;
+    const add = (f, kind, input, expect, origin, note, context) => {
+      const key = f.name + '\u0000' + input + '\u0000' + (context ? JSON.stringify(context) : '');
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ dataId: de.id, field: f.name, kind, input, expect, origin, note });
+      const tc = { dataId: de.id, field: f.name, kind, input, expect, origin, note };
+      if (context) tc.context = context;
+      out.push(tc);
     };
     for (const f of de.fields || []) {
       const sp = fieldSpec(f);
@@ -797,6 +968,30 @@
       if (hi != null) add(f, 'invalid', strOfLen(sp, hi + 5), 'reject', 'spec', 'Too long');
       if (sp.required) add(f, 'invalid', '', 'reject', 'spec', 'Empty but required');
 
+      // Routing numbers: ABA checksum-valid values and a checksum-invalid one.
+      if (sp.aba) {
+        const v2 = abaFrom('31415926');
+        add(f, 'valid', v2, ok(v2), 'spec', 'Valid ABA checksum');
+        const bad = valid.slice(0, 8) + String((+valid[8] + 1) % 10);
+        add(f, 'invalid', bad, 'reject', 'spec', 'Nine digits but the ABA checksum fails');
+      }
+
+      // Free-text fields: special characters.
+      if (sp.type === 'text' && !sp.values && !sp.mask && !sp.regex && sp.length == null)
+        SPECIAL_TEXT.forEach(([input, what]) => add(f, 'edge', input, ok(input), 'spec', 'Special characters: ' + what));
+
+      // Cross-field rules (expectation depends on the other field, given in `context`).
+      const cr = crossRule(f, de.fields || []);
+      if (cr) {
+        const isDate_ = sp.type === 'date';
+        const x = isDate_ ? '2026-01-10' : 'Northwind Supply Co', y = isDate_ ? '2026-01-20' : 'Northwind Supply Company';
+        const say = 'Cross-field: ' + cr.rule.trim();
+        if (cr.rel === 'equal') { add(f, 'valid', x, 'accept', 'spec', say + ' (same value)', { [cr.other]: x }); add(f, 'invalid', x, 'reject', 'spec', say + ' (different value)', { [cr.other]: y }); }
+        else if (cr.rel === 'differ') { add(f, 'valid', x, 'accept', 'spec', say + ' (different value)', { [cr.other]: y }); add(f, 'invalid', x, 'reject', 'spec', say + ' (same value)', { [cr.other]: x }); }
+        else if (cr.rel === 'before') { add(f, 'valid', x, 'accept', 'spec', say + ' (earlier)', { [cr.other]: y }); add(f, 'invalid', y, 'reject', 'spec', say + ' (later)', { [cr.other]: x }); }
+        else { add(f, 'valid', y, 'accept', 'spec', say + ' (later)', { [cr.other]: x }); add(f, 'invalid', x, 'reject', 'spec', say + ' (earlier)', { [cr.other]: y }); }
+      }
+
       // Profile edge cases
       const col = columnFor(f, cols);
       if (!col) continue;
@@ -812,7 +1007,7 @@
       }
       const numericCol = (col.patterns || []).some(p => /^9/.test(p.pattern));
       if (sp.type === 'digits' || sp.type === 'number' || sp.type === 'currency' || numericCol) {
-        const input = sp.type === 'digits' || sp.mask ? '0' + chars(valid).slice(1).join('') : '0' + valid;
+        const input = sp.aba ? abaFrom('0' + valid.slice(1, 8)) : sp.type === 'digits' || sp.mask ? '0' + chars(valid).slice(1).join('') : '0' + valid;
         add(f, 'edge', input, ok(input), 'profile', 'Leading zero');
       }
       if ((col.charClasses || []).includes('unicode')) {
@@ -889,36 +1084,64 @@
     return rows;
   }
 
-  function suggestWorkFromDiff(docs, projectId) {
+  // Rules-based suggestions in map order (linked processes in project order, steps in map order).
+  // For each new/changed step: first a resolver for each missing or examples-only data element it uses that
+  // has no resolver ("Make X available" / "Connect a live source for X"), then the step's own build item if the
+  // step has no work. Each suggestion: {key, pid, step, title, kind, owner, effortDays: 2, start, due, deps, resolves?}.
+  // `key` ("sug-1"...) identifies suggestions; `deps` holds keys of earlier suggestions and/or existing work ids.
+  // Scheduling is serial: start = max(anchor, previous suggestion's due, due/forecast of each dep); due = start + effortDays.
+  // anchor = today (optional 3rd argument), else the latest due date of the project's existing work, else null (no dates).
+  function suggestWorkFromDiff(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
     if (!project) return [];
     const work = list(docs, 'workItem');
     const data = byId(list(docs, 'dataElement'));
-    const out = [], seenData = new Set();
-    const pending = [];
+    const fc = forecastAll(docs, today);
+    const anchor = isDate(today) ? today : maxDate(work.filter(w => w.projectId === projectId).map(w => w.due));
+    const out = [], resolverKey = {};
+    let prevDue = null, n = 0;
+    const finishOf = dep => { const s_ = out.find(x => x.key === dep); if (s_) return s_.due; const w = work.find(x => x.id === dep); return w ? (w.status === 'done' ? (w.doneAt || w.due) : fc[w.id] && fc[w.id].forecast) : null; };
+    const push = sg => {
+      sg.key = 'sug-' + (++n);
+      sg.effortDays = 2;
+      if (anchor) {
+        const start = maxDate([anchor, prevDue].concat(sg.deps.map(finishOf)));
+        sg.start = start; sg.due = addDays(start, sg.effortDays); prevDue = sg.due;
+      } else { sg.start = null; sg.due = null; }
+      out.push(sg);
+      return sg;
+    };
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
       flatSteps(p.tobe).forEach(s => {
         const st = diff.nodes[s.id];
         if (st !== 'new' && st !== 'changed') return;
-        if (!work.some(w => w.projectId === projectId && w.pid === p.id && w.step === s.id))
-          out.push({ pid: p.id, step: s.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (s.title || s.id), kind: 'build' });
+        const needs = [];
         stepData(s).forEach(d => {
           const de = data[d];
-          if (seenData.has(d) || !de || de.avail !== 'missing') return;
-          seenData.add(d);
-          if (!work.some(w => w.resolves === d)) pending.push({ pid: p.id, step: s.id, title: 'Make ' + (de.name || d) + ' available', kind: 'build', resolves: d });
+          const eff = effectiveAvail(docs, d);
+          if (!de || eff === 'live') return;
+          const existing = work.find(w => w.resolves === d);
+          if (existing) { if (existing.status !== 'done') needs.push(existing.id); return; }
+          if (!resolverKey[d]) {
+            const sg = push({ pid: p.id, step: s.id, title: (eff === 'missing' ? 'Make ' : 'Connect a live source for ') + (de.name || 'data element') + (eff === 'missing' ? ' available' : ''),
+              kind: 'build', owner: de.owner || s.owner || null, deps: [], resolves: d });
+            resolverKey[d] = sg.key;
+          }
+          needs.push(resolverKey[d]);
         });
+        if (!work.some(w => w.projectId === projectId && w.pid === p.id && w.step === s.id))
+          push({ pid: p.id, step: s.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (s.title || 'untitled step'), kind: 'build', owner: s.owner || null, deps: [...new Set(needs)] });
       });
     });
-    return out.concat(pending);
+    return out;
   }
 
   return {
     // contract section 4
     flatSteps, diffProcess, forecastAll, stepState, dataReady, dependents, impactOfData,
     projectStats, readiness, profileCsv, specDrift, generateTests, workload, baselineVariance, suggestWorkFromDiff,
-    generateUatScripts, flatGateways,
+    generateUatScripts, flatGateways, effectiveAvail, diffSummary, criticalPath, humanPattern,
     // helpers (stable, safe to use from pages)
     parseCsv, maskValue, patternOf, expandPattern, fieldSpec, validate, addDays, diffDays,
   };

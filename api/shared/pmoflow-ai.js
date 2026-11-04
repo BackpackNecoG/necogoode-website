@@ -98,27 +98,52 @@ function statusFacts(docs, projectId, today, engine) {
   }).filter(Boolean);
   facts.openDiscovered = [...usedData].map(id => dataEls[id]).filter(Boolean)
     .flatMap(d => (d.discovered || []).filter(x => !x.resolved).map(x => ({ data: d.name, requirement: L.scrub(x.text) })));
+  const wById = Object.fromEntries(list(docs, 'workItem').map(w => [w.id, w]));
   facts.risks = list(docs, 'risk').filter(r => r.projectId === projectId && r.status === 'open')
-    .map(r => ({ title: r.title, impact: r.impact, likelihood: r.likelihood, owner: L.person(r.owner), mitigation: r.mitigation,
-      workItems: (r.workItems || []).map(L.label) }));
+    .map(r => {
+      const linked = (r.workItems || []).map(id => wById[id]).filter(Boolean);
+      return { title: r.title, impact: r.impact, likelihood: r.likelihood, owner: L.person(r.owner), mitigation: r.mitigation,
+        workItems: linked.map(w => w.title), likelyMitigated: linked.length > 0 && linked.every(w => w.status === 'done') };
+    });
+  facts.rag = ragOf(facts);
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
     .map(g => ({ data: L.label(g.dataId), env: g.env, access: g.access, requestedBy: L.person(g.requestedBy) }));
   return L.scrub(facts);
 }
 
+/* Portfolio rule (R3): red if any late item or forecast after target; amber if slipping or under 7 days of buffer; else green. */
+function ragOf(f) {
+  const s = f.stats || {}, reasons = [];
+  const late = (f.atRisk || []).filter(w => w.sched === 'late').length || s.late || 0;
+  const slipping = (f.atRisk || []).filter(w => w.sched === 'slip').length || s.slip || 0;
+  const finish = s.actualFinish || s.finish, target = f.project.target;
+  const buffer = finish && target ? Math.round((Date.parse(target + 'T12:00:00Z') - Date.parse(String(finish).slice(0, 10) + 'T12:00:00Z')) / 86400000) : null;
+  if (late) reasons.push(`${late} work item(s) late`);
+  if (buffer != null && buffer < 0) reasons.push(`forecast finish is ${-buffer} day(s) after target`);
+  if (reasons.length) return { status: 'red', reasons, bufferDays: buffer };
+  if (slipping) reasons.push(`${slipping} work item(s) slipping`);
+  if (buffer != null && buffer < 7) reasons.push(`only ${buffer} day(s) of buffer before target`);
+  if (reasons.length) return { status: 'amber', reasons, bufferDays: buffer };
+  return { status: 'green', reasons: [buffer != null ? `there are ${buffer} day(s) of buffer and nothing is late or slipping` : 'nothing is late or slipping'], bufferDays: buffer };
+}
+const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green' };
+const RAG_PHRASE = { red: 'off track', amber: 'at risk', green: 'on track' };
+
 function fd(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : d; }
 function statusRules(f) {
   const s = f.stats || {};
-  const onTrack = s.onTrack != null ? s.onTrack : !(f.atRisk || []).length;
+  const rag = f.rag || ragOf(f);
   const finish = s.finish ? `forecast finish ${fd(s.finish)}` : 'no forecast yet';
   return {
-    headline: `${f.project.name}: ${s.pct || 0}% done, ${onTrack ? 'on track' : 'at risk'} for ${fd(f.project.target)}`,
-    summary: `${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
+    rag: rag.status,
+    headline: `${RAG_WORD[rag.status]}: ${f.project.name} is ${RAG_PHRASE[rag.status]}, ${s.pct || 0}% done, ${finish} vs target ${fd(f.project.target)}`,
+    summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.join(' and ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
       `${(f.atRisk || []).length} item(s) are late or slipping and ${(f.blockers || []).length} data element(s) are still missing.`,
     highlights: [`${s.done || 0} of ${s.total || 0} work items complete`]
       .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${f.readiness.failing.length} check(s) open`] : []),
     risks: (f.atRisk || []).map(w => `"${w.title}" (${w.owner}) is ${w.sched === 'slip' ? 'slipping' : w.sched}${w.slipDays ? ` by ${w.slipDays} day(s)` : ''}${w.cause ? `, waiting on ${w.cause}` : ''}`)
-      .concat((f.risks || []).filter(r => r.impact === 'high').map(r => `${r.title} (impact ${r.impact}, likelihood ${r.likelihood}, owner ${r.owner})`)),
+      .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (impact ${r.impact}, likelihood ${r.likelihood}, owner ${r.owner})`))
+      .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `${r.title}: all linked work is done, so it is likely mitigated. ${r.owner}: confirm and close.`)),
     asks: (f.blockers || []).map(b => `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
       .concat((f.openDiscovered || []).map(x => `Resolve the discovered requirement on ${x.data}: ${x.requirement}`))
       .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`)),
@@ -130,7 +155,25 @@ const MAX_SOP = 20000;
 const STOP = new Set(['the', 'and', 'for', 'from', 'with', 'into', 'onto', 'that', 'this', 'are', 'was', 'per', 'via', 'each', 'all', 'any', 'new', 'its', 'their', 'then', 'when', 'than', 'over']);
 const VERBS = /^(collect|enter|send|receive|verify|check|review|email|upload|capture|update|create|key|record|pull|get|request|confirm|validate|approve|read|match|store|attach|notify|submit|file|scan|sign|route|export|import|look|obtain|gather|process|prepare|schedule|issue|post|log|add|set|open|close)(s|es|ed)?$/i;
 const DOMAINS = { vendor: /\b(vendors?|suppliers?)\b/i, employee: /\b(employees?|staff|payroll|personnel|new hires?|workers?)\b/i, customer: /\b(customers?|clients?)\b/i };
-const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?)\b\s*[:\-–—]/i;
+const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event)\b\s*[:\-–—]/i;
+const ELSE_RE = /^(otherwise|else|if not)\b[,:]?\s*(.*)$/i;
+const PAR_RE = /\b(at the same time|in parallel|simultaneously|concurrently)\b/i;
+const TRIGGER_LINE = /^(trigger|start(?:ing)? event|starts? when|begins? when)\s*[:\-–—]\s*(.+)$/i;
+const TRIGGER_PROSE = /\b(?:process|procedure|sop|workflow)\s+(?:starts|begins|is triggered|is initiated|kicks off)\s+(?:when|once|after|by)\s+(.+?)\.?$/i;
+const SYSTEMS = ['ERP', 'Concur', 'NetSuite', 'Workday', 'SharePoint', 'Teams', 'Outlook', 'DocuSign', 'Salesforce'];
+const ROLE_ALIASES = [
+  { bu: 'Accounts Payable', re: /\bAP\b|\b(ap|payables?)\s+(clerk|specialist|analyst|team|lead)\b/i },
+  { bu: 'Treasury', re: /\btreasury\s+(analyst|team|manager|ops|specialist)\b|\btreasurer\b|\bcash manager\b/i },
+  { bu: 'Compliance', re: /\bcompliance\s+(officer|analyst|team|manager)\b|\bsanctions analyst\b/i },
+  { bu: 'Procurement', re: /\bbuyer\b|\bpurchasing\s+(agent|team|manager)\b|\bprocurement\s+(specialist|officer|analyst|team)\b/i },
+  { bu: 'IT', re: /\bIT\s+(admin|team|support)\b|\bintegration engineer\b|\bsysadmin\b|\bhelp ?desk\b/i },
+  { bu: 'PMO', re: /\bproject manager\b/i },
+];
+/* "Finance Director must also approve" -> "Finance Director approves" */
+function modal(t) {
+  return String(t).replace(/\b(?:must|should|will|shall|needs to|has to)\s+(?:also\s+)?([a-z]+)/i, (m, v) =>
+    /(s|sh|ch|x|z|o)$/.test(v) ? v + 'es' : /[^aeiou]y$/.test(v) ? v.slice(0, -1) + 'ies' : v + 's').replace(/\s+also\s+/i, ' ').trim();
+}
 const COND = /^(if|unless)\b|\b(if|unless)\b|\bwhen\b.*\b(exceed\w*|over|above|greater|more than|below|under)\b|\bover \$|\babove \$|\bgreater than\b|\bmore than \$|\bexceed(s|ing)?\b|\bapproval (is )?required\b/i;
 const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
 const clip = (t, n) => (t.length > n ? t.slice(0, n - 3).replace(/\s+\S*$/, '') + '…' : t);
@@ -197,44 +240,104 @@ function sopRules(text, docs) {
     const full = people.find(p => p.name && lower.includes(p.name.toLowerCase()));
     if (full) return full.id;
     const bu = people.find(p => p.bu && (p.bu.length <= 3 ? new RegExp('\\b' + p.bu + '\\b') : new RegExp('\\b' + p.bu.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i')).test(line));
-    return bu ? bu.id : undefined;
+    if (bu) return bu.id;
+    const alias = ROLE_ALIASES.find(a => a.re.test(line));
+    const viaAlias = alias && people.find(p => p.bu === alias.bu);
+    return viaAlias ? viaAlias.id : undefined;
   };
+  const systemOf = (line) => { const m = SYSTEMS.find(x => new RegExp('\\b' + x + '\\b').test(line)); return m || undefined; };
   const makeStep = (title, line) => {
-    const n = { type: 'step', title: clip(cap(title.replace(/\s+/g, ' ').trim().replace(/[.;]$/, '')), 90) };
+    const n = { type: 'step', title: clip(cap(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, '')), 90) };
     const o = ownerOf(line); if (o) n.owner = o;
     const d = linkData(line); if (d.length) n.data = d;
+    const sys = systemOf(line); if (sys) n.system = sys;
     return n;
   };
   const splitCond = (t) => {
+    t = t.replace(/[.;]\s*$/, '');
     let m = /^(?:if|when|unless)\s+(.+?),(?!\d)\s*(?:then\s+)?(.+)$/i.exec(t);
     if (m) return { cond: m[1], action: m[2] };
-    m = /^(.+?),?\s+(?:only\s+)?(?:if|when|unless)\s+(.+?)\.?$/i.exec(t);
+    m = /^(.+?),?\s+(?:only\s+)?(?:if|when|unless)\s+(.+?)$/i.exec(t);
     if (m) return { cond: m[2], action: m[1] };
     m = /^(.+?)\s*[,(]\s*((?:for|on|where)?\s*[^,()]*?(?:over|above|exceed\w*|greater than|more than)\s+\$?[\d,.]+[^,()]*)\)?\s*(.*)$/i.exec(t);
     if (m) return { cond: m[2], action: (m[1] + ' ' + m[3]).trim() };
-    return { cond: t.replace(/\.$/, ''), action: t };
+    return { cond: t, action: t };
+  };
+  const decisionTitle = (cond) => {
+    let c = cond.replace(/[.;?]$/, '').trim();
+    if (/^(over|above|under|below|more than|greater than|less than|exceeds?)\b/i.test(c)) c = 'amount ' + c;
+    return clip(cap(c), 80) + '?';
+  };
+
+  /* state shared across lines */
+  const nodes = [];
+  let last = null, lastDecision = null;
+  const pushTop = n => { if (nodes.length < 40) nodes.push(n); };
+  const branchLabel = (step, i) => { const p = people.find(x => x.id === step.owner); return (p && p.bu) || 'Branch ' + (i + 1); };
+  /* One numbered line can hold several sentences: main step, inline condition, otherwise-clause, parallel work. */
+  const processSentences = (body) => {
+    const sentences = body.split(/(?<=[.;!])\s+(?=[A-Z(])/).map(x => x.trim()).filter(x => x.length >= 3);
+    for (const sen of sentences) {
+      const els = ELSE_RE.exec(sen);
+      if (els) {
+        const rest = els[2].trim();
+        if (lastDecision && rest.length >= 3) { const st = makeStep(modal(rest), rest); lastDecision.branches[1].nodes.push(st); last = st; continue; }
+      }
+      if (PAR_RE.test(sen)) {
+        const rest = sen.replace(PAR_RE, ' ').replace(/^\s*[,:;-]\s*|\s*[,]\s*$/g, '').replace(/\s+/g, ' ').trim();
+        const parts = rest.replace(/:$/, '').split(/\s*;\s*|,?\s+and\s+(?=(?:the\s+)?[A-Z])|,\s*while\s+/).map(x => x.trim()).filter(x => x.length >= 3);
+        if (parts.length >= 2) {
+          const steps = parts.map(x => makeStep(modal(x), x));
+          pushTop({ type: 'parallel', title: 'In parallel', branches: steps.map((st, i) => ({ label: branchLabel(st, i), nodes: [st] })) });
+          last = steps[steps.length - 1]; continue;
+        }
+        if (!parts.length || /:$/.test(rest)) { const g = { type: 'parallel', title: 'In parallel', branches: [] }; pushTop(g); last = g; continue; }
+        const st = makeStep(modal(parts[0]), parts[0]);
+        const prev = nodes[nodes.length - 1];
+        if (prev && prev.type === 'parallel') prev.branches.push({ label: branchLabel(st, prev.branches.length), nodes: [st] });
+        else if (prev && prev.type === 'step') nodes[nodes.length - 1] = { type: 'parallel', title: 'In parallel', branches: [prev, st].map((x, i) => ({ label: branchLabel(x, i), nodes: [x] })) };
+        else pushTop(st);
+        last = st; continue;
+      }
+      if (COND.test(sen)) {
+        const { cond, action } = splitCond(sen);
+        const st = makeStep(modal(action), sen);
+        const dec = { type: 'decision', title: decisionTitle(cond), branches: [{ label: 'Yes', nodes: [st] }, { label: 'No', nodes: [] }] };
+        pushTop(dec); lastDecision = dec; last = st; continue;
+      }
+      const st = makeStep(sen, sen); pushTop(st); last = st;
+    }
   };
 
   let raw = text.replace(/\t/g, '    ').split(/\r?\n/);
   if (raw.filter(l => l.trim()).length < 2) raw = text.split(/(?<=[.;])\s+/);
+  /* trigger: the stated start event, else "Process starts" (never a copy of step 1) */
+  let trigger = 'Process starts';
+  for (const rl of raw) {
+    const t = rl.trim();
+    const m = TRIGGER_LINE.exec(t) || TRIGGER_PROSE.exec(t);
+    if (m) { trigger = clip(cap(m[m.length - 1].replace(/[.;]$/, '').trim()), 80); break; }
+  }
   const NUM = /^(?:step\s+)?(\d+)[.):]\s+|^step\s+\d+\s*[-–:]\s*/i;
   const SUBNUM = /^\d+\.\d+[.)]?\s+/;
   const LETTER = /^(?:[a-z]|[ivx]{1,4})[.)]\s+/i;
   const BULLET = /^[-*•–]\s+/;
   const anyMarker = raw.some(l => NUM.test(l.trim()) || BULLET.test(l.trim()));
-  const nodes = [];
-  let last = null, sawNumbered = false, firstContent = true;
+  let sawNumbered = false, firstContent = true;
   for (const rl of raw) {
     if (!rl.trim()) continue;
     const indent = rl.match(/^\s*/)[0].length;
     const t = rl.trim();
     const wasFirst = firstContent; firstContent = false;
-    if (SKIP_LINE.test(t) || /^#+\s/.test(t)) continue;
+    if (SKIP_LINE.test(t) || /^#+\s/.test(t) || TRIGGER_LINE.test(t)) continue;
     const isNum = NUM.test(t) && !SUBNUM.test(t), isSubNum = SUBNUM.test(t), isLetter = !isNum && LETTER.test(t), isBullet = BULLET.test(t);
     const body = t.replace(NUM, '').replace(SUBNUM, '').replace(LETTER, '').replace(BULLET, '').trim();
     if (body.length < 3) continue;
     const asSub = last && (isSubNum || (isLetter && sawNumbered) || (isBullet && (indent > 0 || sawNumbered)) || (!isNum && !isBullet && !isLetter && indent >= 2));
     if (asSub) {
+      const els = ELSE_RE.exec(body);
+      if (els && lastDecision) { const st = makeStep(modal(els[2]), els[2]); lastDecision.branches[1].nodes.push(st); last = st; continue; }
+      if (last.type === 'parallel') { const st = makeStep(modal(body), body); last.branches.push({ label: branchLabel(st, last.branches.length), nodes: [st] }); continue; }
       const sub = { title: clip(cap(body.replace(/[.;]$/, '')), 90), data: linkData(body) };
       (last.subs || (last.subs = [])).push(sub);
       continue;
@@ -242,23 +345,18 @@ function sopRules(text, docs) {
     if (!isNum && !isBullet && !isLetter) {
       if (anyMarker) continue;                                   /* prose around a numbered list: title, intro, notes */
       if (wasFirst && !/[.!?]$/.test(t) && t.split(/\s+/).length <= 8) continue;   /* bare title line */
-      if (/:\s*$/.test(t)) continue;                             /* heading */
+      if (/:\s*$/.test(t) || TRIGGER_PROSE.test(t)) continue;    /* heading or start-event sentence */
     }
     if (isNum) sawNumbered = true;
-    let node;
-    if (COND.test(body)) {
-      const { cond, action } = splitCond(body);
-      const step = makeStep(action, body);
-      node = { type: 'decision', title: clip(cap(cond.replace(/[.;?]$/, '')), 80) + '?', branches: [{ label: 'Yes', nodes: [step] }, { label: 'No', nodes: [] }] };
-      last = step;
-    } else { node = makeStep(body, body); last = node; }
-    nodes.push(node);
+    processSentences(body);
     if (nodes.length >= 40) break;
   }
-  const decisions = nodes.filter(n => n.type === 'decision').length;
+  nodes.unshift({ type: 'trigger', title: trigger });
+  const decisions = nodes.filter(n => n.type === 'decision').length, parallels = nodes.filter(n => n.type === 'parallel').length;
   return { nodes, newData,
-    notes: `Parsed ${nodes.length} top-level step(s)${decisions ? `, including ${decisions} decision(s)` : ''}. Title, purpose and scope lines were skipped; sub-items were nested. ` +
-      'Owners link only on a full name or business unit; data links only on a strong match. Unmatched data is listed as proposals. Review before saving.' };
+    notes: `Parsed ${nodes.length - 1} top-level node(s) after the trigger "${trigger}"${decisions ? `, ${decisions} decision(s)` : ''}${parallels ? `, ${parallels} parallel gateway(s)` : ''}. ` +
+      'Title, purpose and scope lines were skipped; sub-items were nested. Owners link only on a full name, business unit or role alias; data links only on a strong match. ' +
+      'Unmatched data is listed as proposals. Review before saving.' };
 }
 
 function sanitizeSop(out, docs) {
@@ -267,15 +365,17 @@ function sanitizeSop(out, docs) {
   const cleanData = a => [...new Set((Array.isArray(a) ? a : []).filter(d => dataIds.has(d)))];
   const cleanNode = (n, depth) => {
     if (!n || typeof n.title !== 'string' || !n.title.trim()) return null;
-    if (n.type === 'decision' && depth === 0 && Array.isArray(n.branches)) {
+    if (n.type === 'trigger' && depth === 0) return { type: 'trigger', title: n.title.trim().slice(0, 100) };
+    if ((n.type === 'decision' || n.type === 'parallel') && depth === 0 && Array.isArray(n.branches)) {
       const branches = n.branches.slice(0, 4).map(b => ({ label: String((b && b.label) || '').slice(0, 30) || 'Branch',
         nodes: (Array.isArray(b && b.nodes) ? b.nodes : []).slice(0, 10).map(x => cleanNode(x, 1)).filter(Boolean) }));
-      return { type: 'decision', title: n.title.trim().slice(0, 100), branches };
+      return { type: n.type, title: n.title.trim().slice(0, 100), branches };
     }
     const node = { type: 'step', title: n.title.trim().slice(0, 120) };
     if (typeof n.owner === 'string' && peopleIds.has(n.owner)) node.owner = n.owner;
     const data = cleanData(n.data); if (data.length) node.data = data;
     const touches = strArr(n.touches, 4).map(x => x.slice(0, 40)); if (touches.length) node.touches = touches;
+    if (typeof n.system === 'string' && n.system.trim()) node.system = n.system.trim().slice(0, 40);
     const subs = (Array.isArray(n.subs) ? n.subs : []).filter(x => x && typeof x.title === 'string' && x.title.trim()).slice(0, 12)
       .map(x => ({ title: x.title.trim().slice(0, 120), data: cleanData(x.data) }));
     if (subs.length) node.subs = subs;
@@ -303,6 +403,11 @@ async function run(kind, body, docs, today) {
       const out = await chat(RULES + ' Convert the SOP into ordered process steps. Return {"nodes":[node],"newData":[{"name","reason"}],"notes"}. ' +
         'A node is {"type":"step","title","owner"?,"data"?,"touches"?,"subs"?:[{"title","data"}]} or, for a condition such as an amount threshold or "approval required", ' +
         '{"type":"decision","title":"<condition>?","branches":[{"label":"Yes","nodes":[step]},{"label":"No","nodes":[]}]}. ' +
+        'The first node is {"type":"trigger","title"} naming the SOP\'s stated start event, or "Process starts" if none is stated (never a copy of step 1). ' +
+        'Work done "at the same time", "in parallel" or "simultaneously" becomes {"type":"parallel","title","branches":[{"label","nodes":[step]}]}. ' +
+        '"Otherwise", "else" or "if not" goes in the No branch of the preceding decision. A step with an inline condition ' +
+        '("Manager approves. If over $5,000, Finance Director also approves.") becomes the main step followed by a decision whose Yes branch holds the conditional action. ' +
+        'Steps may carry "system" when a named system (e.g. ERP, Concur, NetSuite, Workday, SharePoint, Teams, Outlook, DocuSign, Salesforce) is used. ' +
         'Skip title, purpose, scope, owner and revision lines. Lettered or indented sub-items become subs of the step above them. ' +
         'owner must be a supplied person id, only on a full-name match or when the step names that person\'s business unit (bu). ' +
         'data must be a supplied data element id, only when the element is clearly the same information about the same kind of party ' +
@@ -310,7 +415,9 @@ async function run(kind, body, docs, today) {
         'touches are short system or team names mentioned in the text. Titles are short imperative phrases.',
         JSON.stringify({ people, dataElements: data, sop: text }), 1800);
       const clean = sanitizeSop(out, docs);
-      if (!clean.nodes.length) throw new Error('empty');
+      if (!clean.nodes.filter(n => n.type !== 'trigger').length) throw new Error('empty');
+      if (!clean.nodes.length || clean.nodes[0].type !== 'trigger') clean.nodes.unshift(fallback.nodes[0]);
+      clean.nodes = [clean.nodes[0]].concat(clean.nodes.slice(1).filter(n => n.type !== 'trigger'));
       return { status: 200, body: Object.assign(clean, { source: 'ai' }) };
     } catch (e) { return { status: 200, body: Object.assign(fallback, { source: 'rules' }) }; }
   }
@@ -328,11 +435,17 @@ async function run(kind, body, docs, today) {
     try {
       const out = await chat(RULES + ' Write a concise project status report for executives. Return ' +
         '{"headline": string, "summary": string (2-3 sentences), "highlights": [string], "risks": [string], "asks": [string]}. ' +
-        'Refer to work, data and people only by the names and titles given; never output identifiers.',
+        'Refer to work, data and people only by the names and titles given; never output identifiers. ' +
+        'The headline MUST start with the supplied rag status word (Red, Amber or Green) and must not contradict it. ' +
+        'Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close".',
         JSON.stringify(facts), 900);
       if (typeof out.headline !== 'string' || typeof out.summary !== 'string') throw new Error('shape');
+      /* the headline must agree with the computed RAG (R3) */
+      const want = facts.rag.status, other = Object.keys(RAG_WORD).filter(k => k !== want);
+      const conflicts = other.some(k => new RegExp('\\b(' + RAG_WORD[k] + '|' + RAG_PHRASE[k] + ')\\b', 'i').test(out.headline));
+      out.headline = conflicts ? fallback.headline : (new RegExp('^' + RAG_WORD[want] + '\\b').test(out.headline) ? out.headline : `${RAG_WORD[want]}: ${out.headline}`);
       return { status: 200, body: Object.assign(L.scrub({ headline: out.headline.slice(0, 200), summary: out.summary.slice(0, 1200),
-        highlights: strArr(out.highlights), risks: strArr(out.risks), asks: strArr(out.asks) }), { source: 'ai', facts }) };
+        highlights: strArr(out.highlights), risks: strArr(out.risks), asks: strArr(out.asks) }), { rag: facts.rag.status, source: 'ai', facts }) };
     } catch (e) { return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) }; }
   }
 

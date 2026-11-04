@@ -231,3 +231,65 @@ a.chip.block:hover{border-color:var(--late)}
 .pmo-capbtn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:0 6px;font-size:11px;color:var(--accent);margin-left:4px;line-height:18px}
 .pmo-capbtn:hover{border-color:var(--accent)}
 @media (max-width:1060px){ .pmo-wl-row{grid-template-columns:1fr} }
+
+/* ---- round 3 ---- */
+/* examples-only data: amber, never the red blocker style */
+.chip.pmo-amber{background:var(--soon-soft);border-color:#fde68a;color:#92400e;font-weight:600;white-space:normal;text-decoration:none}
+a.chip.pmo-amber:hover{border-color:var(--soon)}
+.pmo-amber-card h3{color:#92400e}
+.pmo-amber-dot{width:10px;height:10px;border-radius:50%;background:var(--soon);flex:none;margin-top:4px}
+.pmo-noplan{color:var(--late);font-weight:600}
+.pmo-amber-card .pmo-noplan{color:#b45309}
+/* gate-aware finish KPI */
+a.kpi.pmo-kpi-gate{text-decoration:none;color:inherit;border-color:#fde68a;background:var(--soon-soft);max-width:240px}
+a.kpi.pmo-kpi-gate b{font-size:14px;color:#92400e}
+a.kpi.pmo-kpi-gate:hover{border-color:var(--soon)}
+.kpi b small{font-size:12px;font-weight:600;color:var(--ink2)}
+.kpi span a{color:var(--accent)}
+/* new project */
+.pmo-sect-btn{margin-left:auto}
+.card h3.pmo-h3row .btn{text-transform:none;letter-spacing:0;font-size:12px}
+.card h3.pmo-h3row .n{margin-left:0}
+.card h3.pmo-h3row .btn{margin-left:auto}
+.pmo-np-people label span{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* suggest work modal */
+.modal.pmo-wide{width:min(860px,100%)}
+.pmo-sg-list{display:flex;flex-direction:column;gap:8px;max-height:min(56vh,520px);overflow:auto;padding-right:2px}
+.pmo-sg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fcfcfe}
+.pmo-sg-h{display:flex;gap:8px;align-items:flex-start}
+.pmo-sg-h > input[type=checkbox]{margin-top:8px;flex:none}
+.pmo-sg-n{flex:none;width:20px;height:20px;border-radius:50%;background:#eef2ff;color:var(--accent);font-size:11px;font-weight:700;display:grid;place-items:center;margin-top:5px}
+.pmo-sg-main{flex:1;min-width:0}
+.pmo-sg-t{font:inherit;font-weight:600;font-size:13px;width:100%;padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:#fff}
+.pmo-sg-t:disabled,.pmo-sg-f :disabled{background:#f8f9fb;color:var(--ink);opacity:1}
+.pmo-sg-f{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,.8fr) minmax(0,1fr) minmax(0,1fr);gap:8px;margin:8px 0 4px 28px}
+.pmo-sg-f label{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.4px;min-width:0}
+.pmo-sg-f select,.pmo-sg-f input{font:inherit;font-size:12.5px;padding:5px 7px;border:1px solid var(--line);border-radius:7px;background:#fff;width:100%;min-width:0;text-transform:none;letter-spacing:0;color:var(--ink)}
+.pmo-sg-deps{margin-left:28px;font-size:12px}
+.pmo-sg-deps summary{cursor:pointer;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pmo-sg-deps .pmo-checks{margin-top:6px;max-height:150px;background:#fff}
+@media (max-width:640px){
+  .pmo-sg-f{grid-template-columns:1fr 1fr;margin-left:0}
+  .pmo-sg-deps{margin-left:0}
+}
+/* timeline: arrows, critical path, drag */
+#pmoTl{position:relative}
+svg.pmo-arrows{position:absolute;left:0;top:0;pointer-events:none;z-index:1;overflow:visible}
+svg.pmo-arrows path{fill:none;stroke:#94a3b8;stroke-width:1.3;opacity:.85}
+svg.pmo-arrows path.crit{stroke:#b91c1c;stroke-width:1.8;opacity:1}
+button.tbar{border:0;font:inherit;font-size:10.5px;text-align:left;cursor:pointer}
+.tbar.pmo-drag{cursor:grab;touch-action:none;user-select:none;padding-left:10px}
+.tbar.pmo-drag::before{content:"";position:absolute;left:3px;top:5px;bottom:5px;width:3px;border-left:1px dotted rgba(255,255,255,.9);border-right:1px dotted rgba(255,255,255,.9)}
+.tbar.pmo-drag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tbar.dragging{cursor:grabbing;opacity:.85;box-shadow:0 4px 14px rgba(15,23,42,.3);z-index:3}
+.tbar.pmo-crit{box-shadow:0 0 0 2px #b91c1c}
+.tbar.pmo-crit.dragging{box-shadow:0 0 0 2px #b91c1c,0 4px 14px rgba(15,23,42,.3)}
+.pmo-crit-tag{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.4px;color:#fff;background:#b91c1c;border-radius:4px;padding:0 4px;vertical-align:1px}
+.pmo-dragtip{position:absolute;top:-7px;font-size:10.5px;font-weight:700;background:#0f172a;color:#fff;border-radius:5px;padding:1px 6px;white-space:nowrap;z-index:4;pointer-events:none}
+.pmo-sw-crit{background:#fff;border:2px solid #b91c1c !important}
+.pmo-sw-arrow{display:inline-block;width:18px;color:#64748b;font-weight:700;margin-right:4px}
+.pmo-draghint{margin:-4px 0 8px}
+/* checkboxes inside .field must not inherit the full-width input rule */
+.field .pmo-checks input[type=checkbox]{width:auto;padding:0;flex:none}
+.pmo-adot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--soon);flex:none}
+.pmo-checks label span.av{flex:none;min-width:0}

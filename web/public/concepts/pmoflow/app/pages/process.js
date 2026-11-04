@@ -32,8 +32,29 @@ export function dupDataName(name, exceptId, extra) {
 }
 export const dataEl = id => store.get('dataElement', id);
 export const dataName = id => (dataEl(id) || {}).name || id;
-export const availOf = id => (dataEl(id) || {}).avail || 'missing';
-export function readyCounts(ids) { ids = ids || []; return { live: ids.filter(d => availOf(d) === 'live').length, total: ids.length, missing: ids.filter(d => availOf(d) === 'missing').length }; }
+/* Effective availability (R3): the data element is the single source of truth.
+   'live' if avail is live or its resolver work item is done; otherwise 'example' or 'missing'. */
+export function effAvail(id) {
+  const r = eng('effectiveAvail', [docs(), id], null);
+  if (r === 'live' || r === 'example' || r === 'missing') return r;
+  const d = dataEl(id); if (!d) return 'missing';
+  if (d.avail === 'live' || store.list('workItem', w => w.resolves === id && w.status === 'done').length) return 'live';
+  return d.avail === 'example' ? 'example' : 'missing';
+}
+export const availOf = effAvail;
+/* dot coloured by effective availability */
+export function effDot(id) { const a = AVAIL[effAvail(id)]; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}" aria-hidden="true"></span>`; }
+export const NEEDS_LIVE = 'Needs a live source before go-live';
+export function readyCounts(ids) { ids = ids || []; const st = ids.map(effAvail); return { live: st.filter(a => a === 'live').length, total: ids.length, missing: st.filter(a => a === 'missing').length, example: st.filter(a => a === 'example').length }; }
+/* new/changed/removed counts (R3): every count shown comes from the engine's diffSummary */
+export function diffCounts(p) {
+  const r = eng('diffSummary', [p], null);
+  if (r && typeof r.new === 'number') return r;
+  const d = eng('diffProcess', [p], { nodes: {}, removed: [] }); const v = Object.values(d.nodes || {});
+  return { new: v.filter(x => x === 'new').length, changed: v.filter(x => x === 'changed').length, same: v.filter(x => x === 'same').length, removed: (d.removed || []).length };
+}
+/* plain-language profile pattern (R3): '9{8}' -> '8 digits' */
+export function humanPat(pt) { const r = eng('humanPattern', [pt], null); return typeof r === 'string' && r ? r : String(pt || ''); }
 export const projectsFor = pid => store.list('project', j => (j.processes || []).includes(pid));
 export const STATUS_LBL = { done: 'Done', prog: 'In progress', idle: 'Not started', none: 'No change' };
 export function workBadge(w, f) {
@@ -99,7 +120,7 @@ function nodeHTML(n, ctx, idx) {
   let body = '';
   if (trig) body = `<div class="stats">${(n.touches || []).map(touchChip).join('') || '<span class="hint">Kickoff</span>'}</div>`;
   else {
-    body = `<div class="stats"><span>Data <b>${rd.live}/${rd.total}</b> live</span>${rd.missing ? `<span style="color:var(--late)">${LOCK} ${rd.missing} missing</span>` : ''}<span>${(n.touches || []).length} area${(n.touches || []).length === 1 ? '' : 's'}</span>${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>${opsLine(n)}`;
+    body = `<div class="stats"><span>Data <b>${rd.live}/${rd.total}</b> live</span>${rd.missing ? `<span class="d-miss" title="Data with no source yet">${LOCK} ${rd.missing} missing</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}: examples only">${rd.example} need${rd.example === 1 ? 's' : ''} live source</span>` : ''}<span>${(n.touches || []).length} area${(n.touches || []).length === 1 ? '' : 's'}</span>${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>${opsLine(n)}`;
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
@@ -162,9 +183,10 @@ function flowHTML(nodes, ctx, key, counter) {
   if (ctx.edit && nodes.length && canInsert(nodes, nodes.length)) parts.push(insBtn(key, nodes.length));
   return parts.join('');
 }
-function removedHTML(diff) {
-  const gone = ((diff && diff.removed) || []).filter(isStep);
-  return gone.length ? `<div class="conn"></div><div class="hint d-removed-h">Removed from as-is <span class="n">${gone.length}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}">${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
+function removedHTML(diff, n) {
+  const gone = ((diff && diff.removed) || []).filter(g => g && g.type !== 'trigger' && g.type !== 'end');
+  const count = n != null ? n : gone.length;
+  return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from as-is <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
 }
 function lanesHTML(nodes, ctx) {
   /* rows in document order: each step sits in its owner's lane; each gateway gets its own full-width row */
@@ -188,63 +210,82 @@ function lanesHTML(nodes, ctx) {
 }
 
 /* ---------- BPMN 2.0 export ---------- */
+/* Layout: one vertical lane (column) per step owner; every flow node sits on its own row, in its lane.
+   Events and gateways sit in the lane of the node before them, so every node belongs to exactly one lane. */
 const xid = id => 'N_' + String(id).replace(/[^\w.-]/g, '_');
 const xe = s => esc(s);
+const LANE_W = 260, LANE_X0 = 40, ROW_GAP = 46, TOP = 60;
 export function bpmnXml(p, nodes, label) {
-  const els = [], flows = [], pos = {}; let y = 40, fi = 0;
+  const els = [], flows = [], pos = {}; let y = TOP, fi = 0;
   const SZ = { startEvent: [36, 36], endEvent: [36, 36], userTask: [170, 70], exclusiveGateway: [50, 50], parallelGateway: [50, 50] };
-  const add = (tag, id, x, inner, name) => { const [w, h] = SZ[tag]; els.push(`    <bpmn:${tag} id="${id}"${name != null ? ` name="${xe(name)}"` : ''}${inner ? `>\n${inner}\n    </bpmn:${tag}>` : ' />'}`); pos[id] = { x: Math.round(x - w / 2), y, w, h, tag }; y += h + 50; };
+  /* lanes: one per step owner, in order of first appearance */
+  const laneKeys = []; flat(nodes).forEach(n => { const k = n.owner || ''; if (!laneKeys.includes(k)) laneKeys.push(k); });
+  if (!laneKeys.length) laneKeys.push((nodes || []).find(n => n.type === 'trigger' && n.owner) ? nodes.find(n => n.type === 'trigger').owner : '');
+  const laneOf = k => Math.max(0, laneKeys.indexOf(k));
+  const laneRefs = laneKeys.map(() => []);
+  const trig = (nodes || []).find(n => n.type === 'trigger');
+  let curLane = trig && trig.owner && laneKeys.includes(trig.owner) ? laneOf(trig.owner) : 0;
+  const add = (tag, id, inner, name, lane) => {
+    if (lane != null) curLane = lane;
+    const [w, h] = SZ[tag]; const cx = LANE_X0 + curLane * LANE_W + LANE_W / 2;
+    els.push(`    <bpmn:${tag} id="${id}"${name != null ? ` name="${xe(name)}"` : ''}${inner ? `>\n${inner}\n    </bpmn:${tag}>` : ' />'}`);
+    pos[id] = { x: Math.round(cx - w / 2), y, w, h, tag }; laneRefs[curLane].push(id); y += h + ROW_GAP;
+  };
   const flow = (from, to, name) => flows.push({ id: 'Flow_' + (++fi), from, to, name });
   const connect = (tails, id) => tails.forEach(t => flow(t.id, id, t.name));
   const doc = n => { const bits = [];
     if (n.owner) bits.push('Owner: ' + pname(n.owner));
-    if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + (AVAIL[availOf(d)] || AVAIL.missing).short + ')').join(', '));
+    if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + AVAIL[availOf(d)].short + ')').join(', '));
     if (n.system) bits.push('System: ' + n.system); if (n.sla) bits.push('SLA: ' + n.sla); if (n.durationHrs) bits.push('Duration: ' + n.durationHrs + 'h');
     if ((n.subs || []).length) bits.push('Sub-steps: ' + n.subs.map(x => x.title).join('; '));
     return bits.length ? `      <bpmn:documentation>${xe(bits.join('. '))}</bpmn:documentation>` : ''; };
   const ids = new Set(allNodes(nodes).map(n => n.id));
-  let started = false, ended = false;
-  function emit(list, x, tails) {
+  let ended = false;
+  function emit(list, tails) {
     for (const n of list || []) {
       const id = xid(n.id);
-      if (n.type === 'trigger') { add('startEvent', id, x, '', n.title); started = true; connect(tails, id); tails = [{ id }]; }
-      else if (n.type === 'end') { add('endEvent', id, x, '', n.title); ended = true; connect(tails, id); tails = []; }
+      if (n.type === 'trigger') { add('startEvent', id, '', n.title); connect(tails, id); tails = [{ id }]; }
+      else if (n.type === 'end') { add('endEvent', id, '', n.title); ended = true; connect(tails, id); tails = []; }
       else if (isGw(n)) {
         const tag = n.type === 'parallel' ? 'parallelGateway' : 'exclusiveGateway';
-        add(tag, id, x, '', n.title); connect(tails, id);
-        const bs = n.branches || [], y0 = y; let yMax = y; const out = [];
-        bs.forEach((b, bi) => {
-          y = y0; const bx = x + (bi - (bs.length - 1) / 2) * 230;
+        add(tag, id, '', n.title); connect(tails, id);
+        const gwLane = curLane, out = [];
+        (n.branches || []).forEach(b => {
+          curLane = gwLane;
           const loop = b.goto && ids.has(b.goto) ? xid(b.goto) : null;
           if (!(b.nodes || []).length) { if (loop) flow(id, loop, b.label); else out.push({ id, name: b.label }); }
-          else { const t = emit(b.nodes, bx, [{ id, name: b.label }]); if (loop) t.forEach(tt => flow(tt.id, loop, tt.name)); else out.push(...t); }
-          yMax = Math.max(yMax, y);
+          else { const t = emit(b.nodes, [{ id, name: b.label }]); if (loop) t.forEach(tt => flow(tt.id, loop, tt.name)); else out.push(...t); }
         });
-        y = yMax;
-        if (out.length) { const jid = id + '_join'; add(tag, jid, x, '', null); connect(out, jid); tails = [{ id: jid }]; } else tails = [];
-      } else { add('userTask', id, x, doc(n), n.title); connect(tails, id); tails = [{ id }]; }
+        if (out.length) { const jid = id + '_join'; add(tag, jid, '', null, gwLane); connect(out, jid); tails = [{ id: jid }]; } else tails = [];
+      } else { add('userTask', id, doc(n), n.title, laneOf(n.owner || '')); connect(tails, id); tails = [{ id }]; }
     }
     return tails;
   }
   let tails = [];
-  if (!(nodes || []).length || nodes[0].type !== 'trigger') { add('startEvent', 'StartEvent_1', 400, '', 'Start'); started = true; tails = [{ id: 'StartEvent_1' }]; }
-  tails = emit(nodes, 400, tails);
-  if (tails.length || !ended) { add('endEvent', 'EndEvent_1', 400, '', 'End'); connect(tails, 'EndEvent_1'); }
+  if (!(nodes || []).length || nodes[0].type !== 'trigger') { add('startEvent', 'StartEvent_1', '', 'Start'); tails = [{ id: 'StartEvent_1' }]; }
+  tails = emit(nodes, tails);
+  if (tails.length || !ended) { add('endEvent', 'EndEvent_1', '', 'End'); connect(tails, 'EndEvent_1'); }
   const pidX = 'Process_' + String(p.id).replace(/[^\w.-]/g, '_');
+  const height = y - ROW_GAP + 40;
+  const lanes = laneKeys.map((k, i) => ({ id: 'Lane_' + (i + 1), name: k ? pname(k) : 'Unassigned', refs: laneRefs[i] }));
   const c = b => ({ x: b.x + b.w / 2, top: b.y, bot: b.y + b.h, mid: b.y + b.h / 2, right: b.x + b.w });
   const edges = flows.map(f => { const s = c(pos[f.from]), t = c(pos[f.to]); let pts;
     if (t.top > s.bot) pts = s.x === t.x ? [[s.x, s.bot], [t.x, t.top]] : [[s.x, s.bot], [s.x, (s.bot + t.top) / 2], [t.x, (s.bot + t.top) / 2], [t.x, t.top]];
-    else { const rx = Math.max(s.right, t.right) + 40; pts = [[s.right, s.mid], [rx, s.mid], [rx, t.mid], [t.right, t.mid]]; } /* loop back */
+    else { const rx = Math.max(s.right, t.right) + 30; pts = [[s.right, s.mid], [rx, s.mid], [rx, t.mid], [t.right, t.mid]]; } /* loop back */
     return `      <bpmndi:BPMNEdge id="${f.id}_di" bpmnElement="${f.id}">\n${pts.map(([px, py]) => `        <di:waypoint x="${Math.round(px)}" y="${Math.round(py)}" />`).join('\n')}\n      </bpmndi:BPMNEdge>`; });
   return `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_1" targetNamespace="https://www.necogoode.com/concepts/pmoflow" exporter="PMOFlow" exporterVersion="3">
   <bpmn:process id="${pidX}" name="${xe(p.name + ' (' + label + ')')}" isExecutable="false">
     <bpmn:documentation>${xe((p.desc || '') + ' Exported from PMOFlow, ' + label + '.')}</bpmn:documentation>
+    <bpmn:laneSet id="LaneSet_1">
+${lanes.map(l => `      <bpmn:lane id="${l.id}" name="${xe(l.name)}">\n${l.refs.map(r => `        <bpmn:flowNodeRef>${r}</bpmn:flowNodeRef>`).join('\n')}\n      </bpmn:lane>`).join('\n')}
+    </bpmn:laneSet>
 ${els.join('\n')}
 ${flows.map(f => `    <bpmn:sequenceFlow id="${f.id}" sourceRef="${f.from}" targetRef="${f.to}"${f.name ? ` name="${xe(f.name)}"` : ''} />`).join('\n')}
   </bpmn:process>
   <bpmndi:BPMNDiagram id="Diagram_1">
     <bpmndi:BPMNPlane id="Plane_1" bpmnElement="${pidX}">
+${lanes.map((l, i) => `      <bpmndi:BPMNShape id="${l.id}_di" bpmnElement="${l.id}" isHorizontal="false">\n        <dc:Bounds x="${LANE_X0 + i * LANE_W}" y="20" width="${LANE_W}" height="${height}" />\n      </bpmndi:BPMNShape>`).join('\n')}
 ${Object.entries(pos).map(([id, b]) => `      <bpmndi:BPMNShape id="${id}_di" bpmnElement="${id}"${b.tag === 'exclusiveGateway' ? ' isMarkerVisible="true"' : ''}>\n        <dc:Bounds x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" />\n      </bpmndi:BPMNShape>`).join('\n')}
 ${edges.join('\n')}
     </bpmndi:BPMNPlane>
@@ -253,9 +294,101 @@ ${edges.join('\n')}
 `;
 }
 
+/* ---------- BPMN 2.0 import (parsed in the browser with DOMParser) ----------
+   startEvent -> trigger, tasks -> steps, exclusive/inclusive/event-based gateway -> decision, parallelGateway -> parallel,
+   branches from outgoing sequence flows (a flow back to an earlier node becomes a loop-back), endEvent -> end,
+   lanes -> owners by name (unknown names -> the current persona). Pass-through merge gateways and intermediate events are skipped. */
+const TASKS = new Set(['task', 'userTask', 'manualTask', 'serviceTask', 'scriptTask', 'sendTask', 'receiveTask', 'businessRuleTask', 'callActivity', 'subProcess']);
+const GWS = { exclusiveGateway: 'decision', inclusiveGateway: 'decision', eventBasedGateway: 'decision', complexGateway: 'decision', parallelGateway: 'parallel' };
+export function parseBpmn(text, people, me) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('This file is not well-formed XML.');
+  const proc = doc.getElementsByTagNameNS('*', 'process')[0];
+  if (!proc) throw new Error('No BPMN process was found in this file.');
+  const kids = [...proc.children];
+  const nodes = {}, outs = {}, ins = {};
+  kids.forEach(el => { const t = el.localName; if (TASKS.has(t) || GWS[t] || /Event$/.test(t)) nodes[el.getAttribute('id')] = { el, tag: t, name: (el.getAttribute('name') || '').trim() }; });
+  kids.filter(el => el.localName === 'sequenceFlow').forEach(el => {
+    const f = { from: el.getAttribute('sourceRef'), to: el.getAttribute('targetRef'), name: (el.getAttribute('name') || '').trim() };
+    if (!nodes[f.from] || !nodes[f.to]) return;
+    (outs[f.from] = outs[f.from] || []).push(f); (ins[f.to] = ins[f.to] || []).push(f);
+  });
+  /* lanes -> owner ids by person name (exact, then first name), else the current persona */
+  const laneOwner = {}; const unknownLanes = new Set();
+  const byName = nm => { const k = nm.toLowerCase(); return people.find(x => x.name.toLowerCase() === k) || people.find(x => x.name.split(' ')[0].toLowerCase() === k) || null; };
+  [...proc.getElementsByTagNameNS('*', 'lane')].forEach(l => {
+    const nm = (l.getAttribute('name') || '').trim(); const person = nm ? byName(nm) : null;
+    if (!person && nm && nm !== 'Unassigned') unknownLanes.add(nm);
+    [...l.getElementsByTagNameNS('*', 'flowNodeRef')].forEach(r => { laneOwner[r.textContent.trim()] = person ? person.id : me; });
+  });
+  const ownerOf = id => laneOwner[id] || me;
+  const docText = el => { const d = [...el.children].find(c => c.localName === 'documentation'); return d ? d.textContent : ''; };
+  const emitted = {}; let pendingAlias = [];
+  const mark = (bid, nid) => { emitted[bid] = nid; pendingAlias.forEach(a => emitted[a] = nid); pendingAlias = []; };
+  const passThrough = id => { const n = nodes[id]; return n && ((GWS[n.tag] && (outs[id] || []).length <= 1) || (/Event$/.test(n.tag) && n.tag !== 'startEvent' && n.tag !== 'endEvent')); };
+  let stepN = 0, gwN = 0, trigger = null, hasEnd = false;
+  const mkStep = (id) => { const n = nodes[id]; const d = docText(n.el); const out = { id: store.newId('n'), type: 'step', title: n.name || 'Untitled step', owner: ownerOf(id), data: [], touches: [], subs: [] };
+    const sys = d.match(/System: ([^.]+)/), sla = d.match(/SLA: ([^.]+)/); if (sys) out.system = sys[1].trim(); if (sla) out.sla = sla[1].trim(); stepN++; return out; };
+  /* nodes reachable from start without passing through already-emitted nodes, with BFS distance */
+  function reach(start) {
+    const dist = new Map(); if (emitted[start] !== undefined) return dist;
+    const q = [[start, 0]]; dist.set(start, 0);
+    while (q.length) { const [c, d] = q.shift(); (outs[c] || []).forEach(f => { if (emitted[f.to] === undefined && !dist.has(f.to)) { dist.set(f.to, d + 1); q.push([f.to, d + 1]); } }); }
+    return dist;
+  }
+  function findJoin(flowsOut) {
+    const sets = flowsOut.map(f => reach(f.to));
+    const score = new Map();
+    sets.forEach(s => s.forEach((d, id) => { const v = score.get(id) || { n: 0, d: 0 }; v.n++; v.d += d; score.set(id, v); }));
+    let best = null;
+    score.forEach((v, id) => { if (v.n >= 2 && (!best || v.n > best.v.n || (v.n === best.v.n && v.d < best.v.d))) best = { id, v }; });
+    if (best) return best.id;
+    /* only one branch continues (the others loop back or end): its nearest pass-through merge gateway closes the split */
+    let mg = null; sets.forEach(s => s.forEach((d, id) => { if (nodes[id] && GWS[nodes[id].tag] && (ins[id] || []).length >= 1 && (outs[id] || []).length === 1 && (!mg || d < mg.d)) mg = { id, d }; }));
+    return mg ? mg.id : null;
+  }
+  function seq(start, stop) {
+    const list = []; let cur = start, guard = 0;
+    while (cur && cur !== stop && guard++ < 5000) {
+      if (emitted[cur] !== undefined) return { list, goto: emitted[cur] };
+      const n = nodes[cur]; const o = outs[cur] || [];
+      if (n.tag === 'startEvent') { const t = { id: store.newId('n'), type: 'trigger', title: n.name || 'Process starts', owner: ownerOf(cur), touches: [], data: [] }; mark(cur, t.id); list.push(t); trigger = t; cur = o[0] && o[0].to; continue; }
+      if (n.tag === 'endEvent') { const e = { id: store.newId('n'), type: 'end', title: n.name || 'Process complete' }; mark(cur, e.id); list.push(e); hasEnd = true; return { list }; }
+      if (passThrough(cur)) { pendingAlias.push(cur); emitted[cur] = null; cur = o[0] && o[0].to; continue; }
+      let kind = GWS[n.tag];
+      if (TASKS.has(n.tag)) { const st = mkStep(cur); mark(cur, st.id); list.push(st); if (o.length <= 1) { cur = o[0] && o[0].to; continue; } kind = o.every(f => f.name) ? 'decision' : 'parallel'; }
+      /* split: a gateway (or a task with several outgoing flows) */
+      const gw = { id: store.newId('d'), type: kind, title: TASKS.has(n.tag) ? (kind === 'parallel' ? 'In parallel' : 'Decision') : (n.name || (kind === 'parallel' ? 'In parallel' : 'Decision')), branches: [] };
+      if (!TASKS.has(n.tag)) mark(cur, gw.id);
+      gwN++;
+      const join = findJoin(o);
+      o.forEach((f, i) => {
+        const b = { label: f.name || (kind === 'parallel' ? 'Track ' + String.fromCharCode(65 + i) : 'Option ' + (i + 1)), nodes: [] };
+        if (f.to !== join) { const r = seq(f.to, join); b.nodes = r.list; if (r.goto) b.goto = r.goto; }
+        gw.branches.push(b);
+      });
+      list.push(gw);
+      if (!join) return { list };
+      cur = join;
+    }
+    return { list };
+  }
+  const starts = Object.keys(nodes).filter(id => nodes[id].tag === 'startEvent');
+  const first = starts[0] || Object.keys(nodes).find(id => !(ins[id] || []).length);
+  if (!first) throw new Error('The process has no start event.');
+  let list = seq(first, null).list;
+  /* loop-back targets that resolved to null (a skipped merge gateway with nothing after it) are dropped */
+  allNodes(list).forEach(n => isGw(n) && n.branches.forEach(b => { if (b.goto == null) delete b.goto; }));
+  if (!trigger) list.unshift({ id: store.newId('n'), type: 'trigger', title: 'Process starts', owner: me, touches: [], data: [] });
+  if (!list.length || list[list.length - 1].type !== 'end') list.push({ id: store.newId('n'), type: 'end', title: 'Process complete' });
+  const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
+  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes] };
+}
+
 /* ---------- module state ---------- */
 let hl = null;            /* highlighted data element on the map */
 let newOpen = false;      /* /new modal guard (the router re-renders on every store change) */
+let newImport = false;    /* the visitor chose "Import BPMN" on /new: do not re-open the create modal on re-render */
 
 /* which node list the page is showing, and its label */
 function shown(p, q) {
@@ -269,7 +402,7 @@ function shown(p, q) {
 
 /* ---------- render ---------- */
 export function render(params) {
-  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › New process</div><h1>New process</h1><p>Name it, then design the as-is and to-be maps.</p></div><div class="hdr-side"><button class="btn primary" data-new-open>Start</button></div></section>`;
+  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › New process</div><h1>New process</h1><p>Name it, then design the as-is and to-be maps.</p></div><div class="hdr-side"><div class="d-hdrtools"><button class="btn primary" data-new-open>Start</button>${importBtn()}</div></div></section>`;
   const pid = params.pid;
   const p = store.get('process', pid);
   if (!p) return notFound('Process “' + pid + '”');
@@ -280,19 +413,20 @@ export function render(params) {
   const steps = flat(tobe);
   const diff = eng('diffProcess', [p], { nodes: {}, removed: [], changes: {} });
   const dn = diff.nodes || {};
-  const nw = steps.filter(s => dn[s.id] === 'new').length, chg = steps.filter(s => dn[s.id] === 'changed').length;
+  const sum = diffCounts(p);
   const tdl = [...new Set(steps.flatMap(s => s.data || []))];
   const live = tdl.filter(d => availOf(d) === 'live').length;
   const asisById = {}; flat(asis).forEach(a => asisById[a.id] = a);
   const byId = {}; allNodes(view.nodes).forEach(n => byId[n.id] = n);
   const ctx = { pid, mode, diff, asisById, byId, readonly: !!rel, edit: mode === 'edit' && !rel ? { ver } : null };
 
-  const modes = [['asis', 'As-is'], ['tobe', 'To-be'], ['diff', 'Diff'], ['lanes', 'Swimlanes'], ['edit', 'Edit']];
+  /* a released version is read-only: no Edit tab, no authoring buttons */
+  const modes = [['asis', 'As-is'], ['tobe', 'To-be'], ['diff', 'Diff'], ['lanes', 'Swimlanes'], ['edit', 'Edit']].filter(([k]) => !(rel && k === 'edit'));
   const rels = (p.released || []).slice().sort((a, b) => b.version - a.version);
   const side = `<div class="seg d-modes" role="tablist" aria-label="View mode">${modes.map(([k, l]) => `<button role="tab" aria-selected="${!rel && mode === k}" data-mode="${k}" class="${!rel && mode === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     <div class="d-hdrtools"><label class="d-verlbl">Version <select class="d-sel" data-version aria-label="Version"><option value="">Current${p.version ? ' (v' + esc(p.version) + ')' : ''}</option>${rels.map(r => `<option value="${esc(r.version)}" ${rel && rel.version === r.version ? 'selected' : ''}>Released v${esc(r.version)} · ${esc(fmt(String(r.at || '').slice(0, 10)))}</option>`).join('')}</select></label>
-      <button class="btn sm" data-bpmn title="Download BPMN 2.0 XML for the ${esc(view.label)} map">Export BPMN</button></div>
-    <div class="kpis"><div class="kpi"><b>${steps.length}</b><span>To-be steps</span></div><div class="kpi"><b>${nw}+${chg}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Data live</span></div></div>`;
+      <button class="btn sm" data-bpmn title="Download BPMN 2.0 XML for the ${esc(view.label)} map">Export BPMN</button>${rel ? '' : importBtn()}</div>
+    <div class="kpis"><div class="kpi"><b>${steps.length}</b><span>To-be steps</span></div><div class="kpi" data-kpi-diff><b>${sum.new}+${sum.changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Data live</span></div></div>`;
 
   const res = p.resources || [];
   const people = store.state.people;
@@ -318,8 +452,9 @@ export function render(params) {
         <span class="lbl">Editing</span><div class="seg">${['asis', 'tobe'].map(v => `<button data-ver="${v}" class="${ver === v ? 'on' : ''}" aria-pressed="${ver === v}">${v === 'asis' ? 'As-is' : 'To-be'}</button>`).join('')}</div>
         <button class="btn sm" data-fork>Fork to-be from as-is</button>
         <span class="hint">Press + to insert a step, decision or parallel gateway. Every change is saved and logged.</span></div>
+      ${ver === 'asis' && !steps.length ? '<div class="d-firsthint" role="note" data-asis-hint><b>Map how it runs today, then fork to-be.</b> Add the as-is steps first. When they are in, press “Fork to-be from as-is” and redesign the copy.</div>' : ''}
       <div class="flow">${flowHTML(view.nodes, ctx, 'root')}</div>`;
-  } else canvas = `<div class="flow">${flowHTML(tobe, ctx, 'root')}${mode === 'diff' ? removedHTML(diff) : ''}</div>`;
+  } else canvas = `<div class="flow">${flowHTML(tobe, ctx, 'root')}${mode === 'diff' ? removedHTML(diff, sum.removed) : ''}</div>`;
 
   /* side panel: describes the map being shown (as-is, released or to-be) */
   const vsteps = flat(view.nodes);
@@ -327,21 +462,24 @@ export function render(params) {
   const dl = [...new Set(vsteps.flatMap(s => s.data || []))];
   const stepGo = s => rel ? '' : `data-go="/process/${esc(pid)}/step/${esc(s.id)}"`;
   const missingSteps = vsteps.filter(s => (s.data || []).some(d => availOf(d) === 'missing'));
+  const liveSteps = vsteps.filter(s => !missingSteps.includes(s) && (s.data || []).some(d => availOf(d) === 'example'));
   const ord = ['missing', 'example', 'live'];
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const used = vsteps.filter(s => (s.data || []).includes(d)).length;
-    return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${dataDot(d)}</span>
+    return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
       <div><div class="t">${esc(x.name || d)}</div><div class="s">${esc(x.source || 'Source not set')} · ${esc(pname(x.owner))}</div></div>
-      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)">${esc((AVAIL[x.avail] || AVAIL.missing).short)} ›</a><div class="s">${used} step${used === 1 ? '' : 's'}</div></div></div>`;
+      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)">${esc(AVAIL[effAvail(d)].short)} ›</a><div class="s">${used} step${used === 1 ? '' : 's'}</div></div></div>`;
   }).join('');
   const touches = {}; vsteps.forEach(s => (s.touches || []).forEach(t => touches[t] = (touches[t] || 0) + 1));
   const linked = projectsFor(pid);
   const sideHTML = `
-    <div class="card"><h3>${LOCK} Steps needing missing data <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${vname} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Needs ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('') : '<div class="s">Every data element has a source.</div>'}</div>
+    <div class="card"><h3>${LOCK} Steps needing missing data <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${vname} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Needs ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('') : '<div class="s">Every data element has a source.</div>'}
+      ${liveSteps.length ? `<div class="d-needlive-h">${NEEDS_LIVE} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${rel ? '' : 'click'}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Examples only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}</div>
     <div class="card" data-side-data="${view.key}"><h3>Data requirements <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">Data the ${vname} map uses. Tap a row to highlight every step that uses it</div>${dataRows || '<div class="s">Tag data on steps and this list builds itself.</div>'}
-      <div style="margin-top:10px"><button class="btn sm" data-newdata>+ New data element</button></div></div>
+      ${rel ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New data element</button></div>'}</div>
     <div class="card"><h3>Touches across operations</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch"># ${esc(t)} · ${c}</span>`).join('') || '<span class="s">No areas tagged yet.</span>'}</div></div>
-    <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · live' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not linked to a project yet.</div>'}</div>
+    <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · live' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not linked to a project yet.</div>'}
+      ${rel ? '' : `<div class="d-startprj">${steps.length ? `<button class="btn sm primary" data-start-project>Start a project from this to-be</button><span class="hint">Plans the work to close the gap between as-is and to-be.</span>` : '<span class="hint">Design the to-be in Edit, then start a project from it.</span>'}</div>`}</div>
     ${activityCard('process:' + pid)}`;
 
   return `<section class="hdr d-hdr"><div>${headLeft}</div><div class="hdr-side">${side}</div></section>
@@ -360,7 +498,7 @@ const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id
 const availOpts = sel => Object.entries(AVAIL).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
 const allData = () => store.list('dataElement').slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
 const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${(AVAIL[a] || AVAIL.missing).color}" title="${esc((AVAIL[a] || AVAIL.missing).label)}"></span>`;
-const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : dataDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
+const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : effDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
 function subRow(s, k) {
   const sel = new Set((s && s.data) || []);
   return `<div class="d-subrow" data-subrow>
@@ -506,6 +644,50 @@ async function simpleNodeModal(node) {
 }
 export const confirmBox = async (title, text, label) => (await modal({ title, body: `<p style="margin:0">${esc(text)}</p>`, actions: [{ id: 'yes', label: label || 'Confirm', danger: true }] })).action === 'yes';
 
+/* ---------- BPMN import + start project ---------- */
+function importBtn() { return `<label class="btn sm d-import">Import BPMN<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="Import a BPMN 2.0 file (.bpmn or .xml)" /></label>`; }
+function bindImport(root) {
+  root.querySelectorAll('[data-bpmn-file]').forEach(inp => inp.onchange = async () => {
+    const file = inp.files && inp.files[0]; inp.value = ''; if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB. Export a single process.'); return; }
+    let r;
+    try { r = parseBpmn(await file.text(), store.state.people, store.state.me); }
+    catch (e) { await modal({ title: 'Could not import BPMN', body: `<p style="margin:0">${esc(e.message)}</p><p class="hint">PMOFlow reads BPMN 2.0 XML: start and end events, tasks, exclusive and parallel gateways, sequence flows and lanes.</p>`, actions: [] }); return; }
+    if (!r.steps) { toast('No tasks found in that BPMN file'); return; }
+    const name = r.name || file.name.replace(/\.(bpmn|xml)$/i, '') || 'Imported process';
+    const id = store.newId('proc');
+    const asis = r.nodes, tobe = forkNodes(asis);
+    const owners = [...new Set(flat(asis).map(n => n.owner).filter(Boolean))];
+    const p = { id, name, desc: r.desc || `Imported from ${file.name}.`, owner: store.state.me, resources: [...new Set([store.state.me, ...owners])], version: 1, asis, tobe, released: [] };
+    try {
+      await store.save('process', id, p, `Imported process '${name}' from BPMN (${r.steps} step${r.steps === 1 ? '' : 's'}, ${r.gateways} gateway${r.gateways === 1 ? '' : 's'})`);
+      toast(`Imported '${name}': ${r.steps} step${r.steps === 1 ? '' : 's'}, ${r.gateways} gateway${r.gateways === 1 ? '' : 's'}${r.unknownLanes.length ? `. Lanes not matched to a person were assigned to you: ${r.unknownLanes.join(', ')}` : ''}`);
+      go(`/process/${id}?mode=edit`);
+    } catch (e) { toast('Could not import: ' + e.message); }
+  });
+}
+async function startProject(p, err, vals) {
+  vals = vals || {};
+  const def = new Date(store.state.today + 'T12:00:00'); def.setDate(def.getDate() + 60);
+  const r = await modal({
+    title: 'Start a project from this to-be',
+    body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">The project links <b>${esc(p.name)}</b>. Its work is the gap between the as-is and the to-be. You (${esc(pname(store.state.me))}) will own it.</p>
+      <div class="field"><label>Project name</label><input name="name" value="${esc(vals.name != null ? vals.name : p.name + ' rollout')}" /></div>
+      <div class="field"><label>Target go-live date</label><input name="target" type="date" min="${esc(store.state.today)}" value="${esc(vals.target || def.toISOString().slice(0, 10))}" /></div>
+      <div class="field"><label>Description</label><textarea name="desc" placeholder="Why this change, and what done looks like">${esc(vals.desc || '')}</textarea></div>`,
+    actions: [{ id: 'create', label: 'Start project', primary: true }],
+  });
+  if (r.action !== 'create') return;
+  const name = (r.form.name || '').trim(), target = r.form.target || '';
+  if (!name) return startProject(p, 'A project needs a name.', r.form);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) return startProject(p, 'Choose a target date.', r.form);
+  if (target < store.state.today) return startProject(p, 'The target date is in the past.', r.form);
+  const me = store.state.me, id = store.newId('prj');
+  const prj = { id, name, desc: (r.form.desc || '').trim(), owner: me, resources: [...new Set([me, ...(p.resources || [])])], target, processes: [p.id], status: 'active', baselines: [] };
+  try { await store.save('project', id, prj, `Started project '${name}' from the to-be of '${p.name}'`); toast(`Started '${name}'`); go(`/project/${id}`); }
+  catch (e) { toast('Could not create the project: ' + e.message); }
+}
+
 /* ---------- /new ---------- */
 async function openNew() {
   if (newOpen) return; newOpen = true;
@@ -514,8 +696,9 @@ async function openNew() {
     body: `<div class="field"><label>Name</label><input name="name" placeholder="e.g. Purchase Request Approval" /></div>
       <div class="field"><label>Description</label><textarea name="desc" placeholder="What this process does and where it ends"></textarea></div>
       <div class="field"><label>Owner</label><select name="owner">${personOpts(store.state.me)}</select></div>`,
-    actions: [{ id: 'create', label: 'Create process', primary: true }],
+    actions: [{ id: 'import', label: 'Import BPMN…' }, { id: 'create', label: 'Create process', primary: true }],
   });
+  if (r.action === 'import') { newOpen = false; newImport = true; const f = document.querySelector('[data-bpmn-file]'); if (f) f.click(); return; }
   if (r.action !== 'create') { newOpen = false; go('/'); return; }
   const name = (r.form.name || '').trim() || 'Untitled process';
   const id = store.newId('proc');
@@ -523,7 +706,7 @@ async function openNew() {
   const asis = mk(), tobe = mk(); tobe[0].from = asis[0].id;
   const p = { id, name, desc: (r.form.desc || '').trim(), owner: r.form.owner, resources: [r.form.owner], version: 1, asis, tobe, released: [] };
   /* keep the guard up until we have left /new: store.save re-renders this route before go() runs */
-  try { await store.save('process', id, p, `Created process '${name}'`); toast(`Created '${name}'`); go(`/process/${id}?mode=edit`); }
+  try { await store.save('process', id, p, `Created process '${name}'`); toast(`Created '${name}'`); go(`/process/${id}?mode=edit&v=asis`); }
   catch (e) { toast('Could not create: ' + e.message); }
   finally { newOpen = false; }
 }
@@ -535,7 +718,9 @@ function applyHl(root) {
 }
 
 export function bind(root, params) {
-  if (params.create) { const b = root.querySelector('[data-new-open]'); if (b) b.onclick = openNew; openNew(); return; }
+  bindImport(root);
+  if (params.create) { const b = root.querySelector('[data-new-open]'); if (b) b.onclick = () => { newImport = false; openNew(); }; if (!newImport) openNew(); return; }
+  newImport = false;
   const pid = params.pid; const cur = () => store.get('process', pid);
   if (!cur()) return;
   bindActivity(root);
@@ -569,6 +754,7 @@ export function bind(root, params) {
   /* keyboard open for clickable step cards */
   root.querySelectorAll('#canvas [data-go]').forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === el) go(el.dataset.go); }));
   const nd = root.querySelector('[data-newdata]'); if (nd) nd.onclick = () => newDataModal();
+  const sp = root.querySelector('[data-start-project]'); if (sp) sp.onclick = () => startProject(cur());
 
   if (q.mode !== 'edit' || q.rel) return;
   /* header meta */
@@ -578,7 +764,7 @@ export function bind(root, params) {
     if ((p[k] || '') === v) return; p[k] = v;
     saveProc(p, k === 'name' ? `Renamed process to '${v}'` : k === 'desc' ? 'Updated process description' : `Set process owner to ${pname(v)}`);
   }));
-  root.querySelectorAll('[data-res-del]').forEach(b => b.onclick = () => { const p = clone(cur()); const id = b.dataset.resDel; p.resources = (p.resources || []).filter(x => x !== id); saveProc(p, `Removed ${pname(id)} from resources`); });
+  root.querySelectorAll('[data-res-del]').forEach(b => b.onclick = async () => { const id = b.dataset.resDel; if (!await confirmBox('Remove resource?', `Remove ${pname(id)} from this process's resources?`, 'Remove')) return; const p = clone(cur()); p.resources = (p.resources || []).filter(x => x !== id); saveProc(p, `Removed ${pname(id)} from resources`); });
   const ra = root.querySelector('[data-res-add]'); if (ra) ra.onchange = () => { if (!ra.value) return; const p = clone(cur()); p.resources = [...new Set([...(p.resources || []), ra.value])]; saveProc(p, `Added ${pname(ra.value)} to resources`); };
 
   const fork = root.querySelector('[data-fork]');

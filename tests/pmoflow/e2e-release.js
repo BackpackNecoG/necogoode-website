@@ -46,6 +46,11 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     console.log('Gate initially blocked');
     await open('/release/' + PRJ);
     ok(await page.$('[data-gate=blocked]'), 'gate shows blocked');
+    const sum = await st(`const E = window.PMOEngine; return E.readiness(store.state.docs, a, store.state.today).summary;`, PRJ);
+    const cntTxt = (await page.textContent('.rl-main [data-counts]')).trim();
+    ok(cntTxt === [`${sum.pass} pass`, sum.warn ? `${sum.warn} warn` : '', sum.fail ? `${sum.fail} fail` : ''].filter(Boolean).join(' · '), 'checklist counts match the engine (warnings not passing): ' + cntTxt);
+    ok(await page.$('details[data-check=exceptions].warn'), 'exceptions shown as a warning');
+    ok(!/rollbackOwner|hypercareOwner/.test(await page.textContent('.rl-main')), 'no raw keys in check details');
     for (const id of ['discovered-resolved', 'process-valid', 'cutover-plan']) ok(await page.$(`details[data-check="${id}"]`), `renders the ${id} check`);
     await page.click('details[data-check=cutover-plan] summary');
     ok(/Rollback owner not set/.test(await page.textContent('details[data-check=cutover-plan] .rl-items')) && await page.$('details[data-check=cutover-plan] [data-anchor=cutover]'), 'cutover-plan items are readable and link to the cutover card');
@@ -80,6 +85,23 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.click(`tr[data-grant="${gid}"] [data-gact=approve]`);
     await stepUpOk();
     ok(/active/.test(await page.textContent(`tr[data-grant="${gid}"]`)), 'owner approves with step-up; grant active');
+    /* separation of duties: the data owner requests -> the project owner approves; the requester cannot */
+    const before2 = await st(`return store.list('notification').map(n => n.id);`);
+    await page.click('[data-request]');
+    await page.waitForSelector('.overlay select[name=dataId]');
+    await page.selectOption('.overlay select[name=dataId]', 'D2');
+    await page.selectOption('.overlay select[name=access]', 'write');
+    await page.fill('.overlay textarea[name=reason]', 'Load test remittance records into dev');
+    await page.click('.overlay [data-act=send]'); await settle(900);
+    const gid2 = await st(`return store.list('grant', g => g.projectId === a && g.requestedBy === 'lp' && g.status === 'requested').map(g => g.id).pop();`, PRJ);
+    ok(!!gid2 && !(await page.$(`tr[data-grant="${gid2}"] [data-gact=approve]`)), 'the data owner cannot approve their own request');
+    ok(/Awaiting Tom Alvarez/.test(await page.textContent(`tr[data-grant="${gid2}"]`)), 'their request routes to the project owner');
+    ok(await st(`return store.list('notification', n => !a.includes(n.id) && n.to === 'ta' && /requested write access/.test(n.text)).length > 0;`, before2), 'project owner notified to approve');
+    await setMe('ta');
+    await page.click(`tr[data-grant="${gid2}"] [data-gact=approve]`);
+    await stepUpOk();
+    ok(await st(`const g = store.get('grant', a); return g.status === 'active' && g.approvedBy === 'ta';`, gid2), 'project owner approved the owner-requested grant');
+    await setMe('lp');
     await shot('02-grant-active');
 
     /* ---------- 3. cutover plan (project owner only) ---------- */
@@ -109,6 +131,18 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.waitForSelector('.ts-driftsum', { timeout: 15000 }); await settle();
     ok(/Raw values were not stored/.test(await page.textContent('.ts-main .card')), 'profile stored as statistics only');
     await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 }); await settle();
+    ok(await page.$('#coverage tr.ts-zero[data-cov-row^="data:"]'), 'coverage matrix highlights data with zero cases');
+    const deIds = await page.$$eval('.ts-list [data-de]', as => as.map(a => a.dataset.de));
+    for (const d of deIds) {
+      if (d === 'D2') continue;
+      await page.click(`.ts-list [data-de="${d}"]`); await settle(300);
+      await page.click('[data-gen]');
+      const want = await st(`return window.PMOEngine.generateTests(store.get('dataElement', a)).length;`, d);
+      for (let t = 0; t < 120; t++) { if (await st(`return store.list('testCase', c => c.dataId === a).length;`, d) >= want) break; await settle(500); }
+      await settle(800);
+    }
+    ok(!(await page.$('#coverage tr.ts-zero[data-cov-row^="data:"]')), 'every data element now has cases (no red data rows)');
+    await page.click('.ts-list [data-de="D2"]'); await settle(300);
     const nCases = await st(`return store.list('testCase', c => c.dataId === 'D2').length;`);
     ok(nCases >= 10, 'generated test cases: ' + nCases);
     await page.click('[data-add-case]');
@@ -134,12 +168,15 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const sid = await st(`return store.get('project', a).uatScripts[0].id;`, PRJ);
     await page.click(`details[data-script="${sid}"] summary`); await settle(200);
     await page.click(`[data-edit-script="${sid}"]`);
-    await page.waitForSelector('.overlay textarea[name=then]');
-    await page.fill('.overlay textarea[name=then]', 'The vendor record shows the W-9 and COI as received, with the reviewer named');
+    await page.waitForSelector('.overlay [data-srows]');
+    await page.click('.overlay [data-sadd]');
+    await page.fill('.overlay [data-srow]:last-child [data-sa]', 'Open the vendor record');
+    await page.fill('.overlay [data-srow]:last-child [data-sx]', 'W-9 and COI show as received, with the reviewer named');
     await page.check('.overlay input[name=data][value=D3]');
     await page.click('.overlay [data-act=save]'); await settle(900);
     const sc0 = await st(`return store.get('project', a).uatScripts[0];`, PRJ);
-    ok(/reviewer named/.test(sc0.then) && sc0.data.includes('D3'), 'script given/when/then and data are editable');
+    ok(sc0.steps && sc0.steps.length === 2 && /reviewer named/.test(sc0.steps[1].expected) && sc0.data.includes('D3'), 'script is step-by-step: action + expected per step, editable');
+    ok((await page.$$(`details[data-script="${sid}"] .ts-ssteps li`)).length === 2, 'numbered steps rendered');
     await shot('03-uat-scripts');
 
     /* ---------- 6. dev run: rows start Not run; partial coverage is visible ---------- */
@@ -154,6 +191,11 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await (await cRows[3].$('select')).selectOption('fail');
     await (await cRows[3].$('input[name^=n_]')).fill('Validator accepted a 7-digit routing number');
     await (await cRows[3].$('input[name^=e_]')).fill('https://ci.northwind.example/runs/4812');
+    ok(!(await page.$('.overlay [data-all]')), 'no bulk "All pass" control');
+    await (await cRows[3].$('input[name^=n_]')).fill('');
+    await page.click('.overlay [data-act=save]'); await settle(300);
+    ok(await page.$('.overlay [data-err]:not([hidden])') && /note for the failing case/.test(await page.textContent('.overlay [data-err]')), 'a fail without a note cannot be saved');
+    await (await cRows[3].$('input[name^=n_]')).fill('Validator accepted a 7-digit routing number');
     await page.click('.overlay [data-act=save]');
     await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 });
     ok(/create defects\?/i.test(await page.textContent('.overlay h2')), 'a fail auto-offers Create defect');
@@ -179,17 +221,24 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
 
     /* ---------- 7. UAT run with a script failure -> defect -> closed ---------- */
     console.log('UAT run: defect on a failing script');
+    /* No bulk pass: every visible row and every script step is set one at a time. */
+    const fillVisible = async (failScript) => {
+      const sels = page.locator('.overlay .ts-cases select:visible');
+      const n = await sels.count();
+      for (let k = 0; k < n; k++) await sels.nth(k).selectOption('pass');
+      if (failScript) {
+        const row = page.locator(`.overlay [data-row="s:${failScript}"]`);
+        await row.locator('[data-step-row="1"] select').selectOption('fail');
+        await row.locator('[data-step-row="1"] input').fill('W-9 marked received but COI missing');
+        await row.locator('input[name^=e_]').fill('Screenshot in UAT ticket NW-UAT-214');
+      }
+      return n;
+    };
     const recordAll = async (env, failScript) => {
       await page.click('[data-record]');
       await page.waitForSelector('.overlay .ts-case');
       await page.selectOption('.overlay select[name=env]', env); await settle(200);
-      await page.click('.overlay [data-all=pass]');
-      if (failScript) {
-        const row = await page.$(`.overlay [data-row="s:${failScript}"]`);
-        await (await row.$('select')).selectOption('fail');
-        await (await row.$('input[name^=n_]')).fill('W-9 marked received but COI missing');
-        await (await row.$('input[name^=e_]')).fill('Screenshot in UAT ticket NW-UAT-214');
-      }
+      await fillVisible(failScript);
       await page.click('.overlay [data-act=save]'); await settle(1200);
     };
     await setMe('ar');
@@ -204,6 +253,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(dfx && dfx.kind === 'defect' && dfx.owner === expectOwner && dfx.due === due3 && dfx.testRef && dfx.testRef.scriptId === sid && dfx.testRef.runId === uatRun.id && dfx.step === sc0.step && dfx.pid === sc0.pid,
       `defect: kind defect, owner = step owner (${expectOwner}), due +3 days, testRef and step link`);
     ok(uatRun.results.length > nCases, 'UAT run covers data cases and scripts: ' + uatRun.results.length);
+    ok(sres.outcome === 'fail' && sres.steps.length === 2 && sres.steps[0].outcome === 'fail' && sres.steps[1].outcome === 'pass', 'script fails when any step fails; step outcomes recorded');
     ok(await page.$(`[data-run="${uatRun.id}"] [data-defect="${dfx.id}"]`), 'defect link shown in the run detail');
     ok(await st(`return store.list('notification', n => n.to === a && /defect/i.test(n.text)).length > 0;`, expectOwner), 'defect owner notified');
     ok(!(await check('tests-passed')).pass, 'tests-passed blocked while the defect is open');
@@ -244,8 +294,39 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
       for (const d of chk.items) { const de = store.get('dataElement', d); await store.save('dataElement', d, Object.assign({}, de, { avail: 'live' }), de.name + ' is live (e2e)'); }
     `, PRJ);
     await open('/testing/' + PRJ);
-    await recordAll('dev', null);
-    await recordAll('uat', null);
+    /* CI import: JUnit XML with every project case, one failure, one unmatched and one skipped test */
+    const caseIds = await st(`const E = window.PMOEngine; const ids = new Set(); store.get('project', a).processes.forEach(p => E.flatSteps(store.get('process', p).tobe).forEach(s => (s.data || []).forEach(d => ids.add(d)))); return store.list('testCase', c => ids.has(c.dataId)).map(c => c.id);`, PRJ);
+    const failId = caseIds[0];
+    const xml = `<?xml version="1.0"?><testsuites><testsuite name="vendor-integration" tests="${caseIds.length + 2}">` +
+      caseIds.map(id => `<testcase classname="northwind.vendor" name="${id} validates">${id === failId ? '<failure message="Checksum not validated">expected reject</failure>' : ''}</testcase>`).join('') +
+      `<testcase classname="northwind.smoke" name="portal login page loads"/><testcase classname="northwind.vendor" name="${caseIds[1]} slow path"><skipped/></testcase></testsuite></testsuites>`;
+    await page.click('[data-ci]');
+    await page.waitForSelector('.overlay [data-ci-xml]');
+    await page.fill('.overlay [data-ci-xml]', xml);
+    await page.click('.overlay [data-act=import]');
+    await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 });
+    await page.click('.overlay [data-act=cancel]'); await settle(1000);
+    const ciRun = await st(`return store.list('testRun', r => r.projectId === a && r.source === 'ci')[0];`, PRJ);
+    ok(ciRun && ciRun.env === 'dev' && ciRun.results.length === caseIds.length && ciRun.ciUnmatched === 1, `CI JUnit import created a dev run (${ciRun && ciRun.results.length} matched, ${ciRun && ciRun.ciUnmatched} unmatched)`);
+    ok(ciRun.results.find(x => x.caseId === failId).outcome === 'fail' && /Checksum/.test(ciRun.results.find(x => x.caseId === failId).note), 'CI failure mapped with its message as the note');
+    ok(await page.$(`[data-run="${ciRun.id}"] [data-source=ci]`), 'run labelled as a CI import');
+    /* retest dev failures: only the failed case, earlier passes carried forward */
+    await page.click('[data-retest=dev]');
+    await page.waitForSelector('.overlay .ts-case');
+    ok((await page.$$('.overlay .ts-cases > .ts-case')).length === 1, 'dev retest is prefilled with only the failed item');
+    await fillVisible(null);
+    await page.click('.overlay [data-act=save]'); await settle(1200);
+    const devRe = await st(`return store.list('testRun', r => r.projectId === a && r.env === 'dev').sort((x, y) => y.at.localeCompare(x.at))[0];`, PRJ);
+    ok(devRe.cycle === 2 && devRe.retestOf === ciRun.id && devRe.results.length === ciRun.results.length && devRe.results.filter(x => !x.carriedFrom).length === 1, 'dev retest recorded as cycle 2 with passes carried forward');
+    /* retest UAT failures: only the failed script */
+    await page.click('[data-retest=uat]');
+    await page.waitForSelector('.overlay .ts-case');
+    ok((await page.$$('.overlay [data-script-row]')).length === 1 && (await page.$$('.overlay .ts-cases > .ts-case')).length === 0, 'UAT retest is prefilled with only the failed script');
+    await fillVisible(null);
+    await page.click('.overlay [data-act=save]'); await settle(1200);
+    const uatRe = await st(`return store.list('testRun', r => r.projectId === a && r.env === 'uat').sort((x, y) => y.at.localeCompare(x.at))[0];`, PRJ);
+    ok(uatRe.cycle === 2 && uatRe.results.find(x => x.scriptId === sid).outcome === 'pass', 'UAT retest cycle 2 passes the script');
+    ok(await page.$(`[data-run="${uatRe.id}"] [data-cycle="2"]`), 'run shows the retest cycle');
     const tp = await check('tests-passed');
     ok(tp.pass, 'tests-passed: ' + tp.detail);
     ok(/^(\d+)\/\1/.test((await page.textContent('[data-cov=uat]')).trim()), 'UAT coverage KPI is complete: ' + (await page.textContent('[data-cov=uat]')).trim());
@@ -266,6 +347,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(signed.includes('Procurement'), 'stale Procurement section re-approved through the UI');
     ok((await page.$$('.rl-bu.approved')).length === (await page.$$('.rl-bu')).length, 'all BU sections signed off');
     ok((await check('bu-signoff')).pass && (await check('two-person')).pass, 'bu-signoff and two-person pass');
+    const twoN = +(/(\d+) distinct approver/.exec(await page.textContent('.rl-two')) || [])[1];
+    ok(twoN === (await check('two-person')).items.length, `two-person count matches the sign-off panel (${twoN})`);
     /* a Treasury work item changes after sign-off */
     const tw = await st(`const w = store.list('workItem', w => w.projectId === a && store.person(w.owner) && store.person(w.owner).bu === 'Treasury')[0]; await store.save('workItem', w.id, Object.assign({}, w, { title: w.title + ' (incl. call-back script)', updatedAt: new Date().toISOString() }), 'Changed scope of ' + w.title); return store.get('workItem', w.id);`, PRJ);
     await settle(800);
@@ -302,6 +385,14 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const vAfter = await st(`return Object.fromEntries(store.get('project', a).processes.map(p => [p, store.get('process', p).version]));`, PRJ);
     ok(Object.keys(vBefore).every(k => vAfter[k] === vBefore[k] + 1), 'process versions incremented: ' + JSON.stringify(vAfter));
     ok(await page.$('[data-gate=live]'), 'gate shows released');
+    ok(/Released v\d+ on .+ by Tom Alvarez/.test(await page.textContent('[data-released]')), 'release summary: ' + (await page.textContent('[data-released] .rl-rel-h b')).trim());
+    ok(!(await page.$('.rl-check')) && !(await page.$('[data-check-at-release] .rl-ic.fail')), 'no failing checklist after release; checks shown as at release');
+    ok(!(await page.$('.rl-bu.stale')), 'no BU flagged stale after go-live');
+    ok(await page.$('.rl-rec [data-stepup]'), 'release record shows step-up verified');
+    await page.waitForTimeout(800);
+    const audit1 = await page.textContent('[data-rl-history]');
+    ok(/Go-live approved with step-up by Tom Alvarez/.test(audit1), 'audit shows go-live step-up by name');
+    ok(!/\b(D\d+|TR\d+|G\d+|W\d+|TC\d+)\b/.test(audit1), 'audit uses names, not ids');
     await shot('09-released');
 
     /* ---------- 12. rollback ---------- */
@@ -328,7 +419,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.reload(); await page.waitForSelector('.rl-latest', { timeout: 20000 }); await settle(1500);
     ok(await page.$('.rl-latest [data-kind=rollback]') && /Leo Park/.test(await page.textContent('#cutover')), 'rollback + cutover persist after reload');
     const audit = await page.textContent('[data-rl-history]');
-    ok(/rolled back/.test(audit), 'gate audit log shows the rollback');
+    ok(/rolled back/.test(audit) && /Rollback approved with step-up by Leo Park/.test(audit), 'gate audit log shows the rollback and its step-up');
     ok((await st(`return (await store.events('project:' + a, 200)).map(e => e.summary).join(' | ');`, PRJ)).includes('Updated the cutover plan'), 'project history records the cutover change');
 
     /* ---------- 14. Import SOP: decision, sub-steps, newData ---------- */
@@ -342,6 +433,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(!!gate, 'decision node rendered');
     const labels = await page.$$eval('.is-step[data-type=decision] .is-blabel', els => els.map(e => e.value));
     ok(labels.join(',') === 'Yes,No', 'Yes/No branches rendered: ' + labels.join(','));
+    ok(await page.$('.is-step[data-type=parallel]') && (await page.$$('.is-step[data-type=parallel] .is-branch')).length === 2, 'parallel gateway rendered with its branches');
+    ok((await page.$$eval('.is-sys', els => els.map(e => e.value))).includes('ERP'), 'systems from the parser shown (ERP)');
+    ok(/A hiring manager submits a contractor request/.test(await page.textContent('[data-trigger]')), 'stated trigger used');
     ok((await page.$$('.is-step[data-type=decision] .is-branch')).length === 2 && (await page.$$('.is-step[data-type=decision] .is-branch >> nth=0 >> .is-bstep')).length >= 1, 'conditional step nested in the Yes branch');
     const subs = await page.$$eval('.is-sub input', els => els.map(e => e.value));
     ok(subs.length >= 2 && subs.some(s => /expiry date/.test(s)), 'sub-steps nested under their step: ' + subs.length);
@@ -373,9 +467,11 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await settle(1500);
     await page.reload(); await page.waitForSelector('#app .hdr', { timeout: 20000 }); await settle();
     const proc = await st(`const p = store.get('process', a); const de = store.list('dataElement', d => d.name === 'Contractor timesheet record'); const dg = p.asis.find(n => n.type === 'decision'); const withSubs = p.asis.find(n => (n.subs || []).length);
-      return { v: p.version, de: de.map(d => d.id), dg: dg && { labels: dg.branches.map(b => b.label), n: dg.branches[0].nodes.length }, subs: withSubs && withSubs.subs.length, linked: de[0] && p.asis.some(n => (n.data || []).includes(de[0].id)), tobeGate: p.tobe.some(n => n.type === 'decision' && n.from === (dg && dg.id) && n.branches[0].nodes[0].from === dg.branches[0].nodes[0].id) };`, newPid);
+      const par = p.asis.find(n => n.type === 'parallel');
+      return { par: par && par.branches.map(b => b.nodes.map(x => x.system || '').join(',')).join('|'), trig: p.asis[0].title, v: p.version, de: de.map(d => d.id), dg: dg && { labels: dg.branches.map(b => b.label), n: dg.branches[0].nodes.length }, subs: withSubs && withSubs.subs.length, linked: de[0] && p.asis.some(n => (n.data || []).includes(de[0].id)), tobeGate: p.tobe.some(n => n.type === 'decision' && n.from === (dg && dg.id) && n.branches[0].nodes[0].from === dg.branches[0].nodes[0].id) };`, newPid);
     ok(proc.v === 1 && proc.dg && proc.dg.labels.join('|') === 'Over $50k|Up to $50k' && proc.dg.n === 1, 'decision persisted with edited branch labels: ' + JSON.stringify(proc.dg));
     ok(proc.subs >= 2, 'sub-steps persisted');
+    ok(proc.par === 'ERP|Workday' && proc.trig === 'A hiring manager submits a contractor request', 'parallel gateway, systems and trigger persisted: ' + proc.par);
     ok(proc.de.length === 1 && proc.linked, 'new data element created once and linked to its step');
     ok(proc.tobeGate, 'to-be copy keeps the decision with from links');
     await shot('12-imported-process');

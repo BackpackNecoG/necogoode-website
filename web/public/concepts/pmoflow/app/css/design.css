@@ -137,3 +137,24 @@ a.d-wi:hover .t{color:var(--accent)}
   .d-lane-gw .diamond{max-width:100%}
 }
 .d-lanes .d-ops{white-space:normal}
+
+/* == round 3 == */
+/* effective data state on map cards: red = missing, amber = examples only (needs a live source before go-live) */
+.d-miss{color:var(--late);font-weight:600;display:inline-flex;gap:4px;align-items:center}
+.d-needlive{color:#b45309;background:var(--soon-soft);border:1px solid #fde68a;border-radius:999px;padding:0 7px;font-weight:600;font-size:11.5px}
+.d-needlive-h{margin:12px 0 4px;font-size:12px;font-weight:650;color:#b45309;display:flex;gap:6px;align-items:center}
+.d-needlive-h .n{background:var(--soon-soft);color:#b45309;border-radius:99px;padding:0 7px;font-size:11px}
+.d-needlive-s{font-size:11px;color:#b45309;margin-top:3px;font-weight:600}
+.d-resolve-amber{border-color:#fde68a}
+.d-b-amber{background:var(--soon-soft);color:#b45309;border:1px solid #fde68a}
+.d-noplan{color:var(--late);font-weight:600}
+.d-noplan-amber{color:#b45309}
+.d-pat{font-size:12.5px;white-space:nowrap}
+/* start a project / import / first-run hint */
+.d-startprj{display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.d-import{cursor:pointer;position:relative}
+.d-import:focus-within{outline:3px solid #a5b4fc;outline-offset:2px}
+.d-firsthint{max-width:760px;margin:-8px auto 16px;background:#eef2ff;border:1px solid #c7d2fe;color:#3730a3;border-radius:12px;padding:9px 12px;font-size:13px}
+/* grid children must be allowed to shrink below their table's min-content width (390 px) */
+.two > .card{min-width:0}
+.d-rule{overflow-wrap:anywhere}

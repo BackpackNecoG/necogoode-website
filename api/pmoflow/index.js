@@ -76,6 +76,33 @@ function cloneNodes(nodes, asFrom) {
   });
 }
 
+const shortDate = iso => { const t = Date.parse(iso); return isFinite(t) ? new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''; };
+const ENV = e => (String(e || '').toLowerCase() === 'uat' ? 'UAT' : 'Dev');
+
+/* Human label for a doc in event summaries (R3: names, never ids). */
+function describe(type, data, docs) {
+  data = data || {};
+  const get = (t, id) => (((docs[t] || []).find(d => d.id === id) || {}).data) || null;
+  const nm = (t, id) => { const d = get(t, id); return d ? (d.name || d.title || 'an item') : 'an item'; };
+  switch (type) {
+    case 'workItem': return `work item "${data.title || 'untitled'}"`;
+    case 'dataElement': return `data element "${data.name || 'untitled'}"`;
+    case 'process': return `process "${data.name || 'untitled'}"`;
+    case 'project': return `project "${data.name || 'untitled'}"`;
+    case 'person': return data.name || 'a person';
+    case 'grant': return `${ENV(data.env)} ${data.access || 'read'} access to ${nm('dataElement', data.dataId)}`;
+    case 'testRun': return `${ENV(data.env)} run, ${shortDate(data.at) || 'undated'}`;
+    case 'testCase': return `"${data.field || 'field'}" test case for ${nm('dataElement', data.dataId)}`;
+    case 'approval': return `${data.bu || 'business unit'} sign-off`;
+    case 'risk': return `risk "${data.title || 'untitled'}"`;
+    case 'profile': return `profile of ${nm('dataElement', data.dataId)}`;
+    case 'release': return `${data.kind === 'rollback' ? 'rollback' : 'go-live'} release`;
+    case 'comment': { const [t, id] = String(data.ref || '').split(':'); return `comment on ${get(t, id) ? describe(t, get(t, id), docs) : 'an item'}`; }
+    case 'notification': return 'notification';
+    default: return type;
+  }
+}
+
 const names = docs => {
   const m = {};
   ['person', 'dataElement', 'process', 'project', 'workItem'].forEach(t => (docs[t] || []).forEach(d => { m[t + ':' + d.id] = d.data.name || d.data.title || d.id; }));
@@ -123,8 +150,7 @@ async function goLive(wsId, docs, project, actor, today) {
     const promoted = cloneNodes(p.tobe, false);
     p.asis = promoted;
     p.tobe = cloneNodes(promoted, true);
-    p.version = version;
-    p.updatedAt = at;
+    p.version = version;          /* no updatedAt stamp: promotion must never make approvals stale (R3) */
     snapshot[p.id] = version;
     await store.putDoc(wsId, 'process', p.id, p);
     events.push({ action: 'release', ref: 'process:' + p.id, summary: `Released ${p.name} v${version}: to-be promoted to as-is (v${prevVersion} kept in history)` });
@@ -136,7 +162,19 @@ async function goLive(wsId, docs, project, actor, today) {
     g.status = next; g.expires = today;
     g.log = (g.log || []).concat([{ at, by: actor, action: next === 'expired' ? 'expired at go-live' : 'denied at go-live' }]);
     await store.putDoc(wsId, 'grant', g.id, g);
-    events.push({ action: 'update', ref: 'grant:' + g.id, summary: `Access grant ${next} at go-live` });
+    events.push({ action: 'update', ref: 'grant:' + g.id, summary: `${describe('grant', g, docs)} ${next} at go-live` });
+  }
+  /* R3: data whose resolver is done becomes live (the data element is the single source of truth) */
+  const promotedData = [];
+  for (const dd of (docs.dataElement || [])) {
+    const eff = typeof eng.effectiveAvail === 'function' ? eng.effectiveAvail(docs, dd.id)
+      : (dd.data.avail === 'live' || (docs.workItem || []).some(w => w.data.resolves === dd.id && w.data.status === 'done') ? 'live' : dd.data.avail);
+    if (eff === 'live' && dd.data.avail !== 'live') {
+      const d = Object.assign({}, dd.data, { avail: 'live' });
+      await store.putDoc(wsId, 'dataElement', d.id, d);
+      promotedData.push(d.name);
+      events.push({ action: 'update', ref: 'dataElement:' + d.id, summary: `${d.name} set live at go-live (its resolver is done)` });
+    }
   }
   const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
   const approvers = [...new Set((docs.approval || []).map(d => d.data)
@@ -150,6 +188,8 @@ async function goLive(wsId, docs, project, actor, today) {
       { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
         detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
     exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')),
+    checks: JSON.parse(JSON.stringify(gate.checks)),
+    dataSetLive: promotedData,
     snapshot,
   };
   await store.putDoc(wsId, 'release', relId, release);
@@ -278,13 +318,17 @@ module.exports = async function (context, req) {
         /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
+        const after = Object.assign({}, st.docs, { [type]: (st.docs[type] || []).filter(d => d.id !== id).concat([{ id, data }]) });
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,
-          summary: summaryOf(body, `${exists ? 'Updated' : 'Created'} ${type} ${id}`) });
+          summary: ai.labeler(after).scrub(summaryOf(body, `${exists ? 'Updated' : 'Created'} ${describe(type, data, after)}`)) });
         return send(200, { ok: true, doc: { type, id, data }, event: ev });
       }
       if (method === 'DELETE') {
+        const st = await store.getState(ws);
+        const prev = (st.docs[type] || []).find(d => d.id === id);
         await store.deleteDoc(wsId, type, id);
-        const ev = await store.appendEvent(wsId, { actor, action: 'delete', ref: `${type}:${id}`, summary: summaryOf(body, `Deleted ${type} ${id}`) });
+        const ev = await store.appendEvent(wsId, { actor, action: 'delete', ref: `${type}:${id}`,
+          summary: ai.labeler(st.docs).scrub(summaryOf(body, `Deleted ${prev ? describe(type, prev.data, st.docs) : type}`)) });
         return send(200, { ok: true, event: ev });
       }
       return fail(405, 'method not allowed');
@@ -367,4 +411,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, WS_RE, ID_RE };
+module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, describe, WS_RE, ID_RE };

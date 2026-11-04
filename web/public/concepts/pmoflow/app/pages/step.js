@@ -1,7 +1,7 @@
 /* Step drill-down (stream D): /process/:pid/step/:sid. Ported from v2. */
 import { store } from '../store.js';
-import { esc, fmt, link, av, personChip, pname, badge, dataDot, AVAIL, LOCK, commentsPanel, historyPanel, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, dataEl, dataName, availOf, projectsFor, STATUS_LBL, workBadge, notFound } from './process.js';
+import { esc, fmt, link, av, personChip, pname, AVAIL, LOCK, commentsPanel, historyPanel, bindActivity } from '../ui.js';
+import { eng, docs, today, flat, dataEl, dataName, availOf, effDot, NEEDS_LIVE, projectsFor, STATUS_LBL, workBadge, notFound } from './process.js';
 
 export function render(params) {
   const { pid, sid } = params;
@@ -17,8 +17,10 @@ export function render(params) {
   const projects = projectsFor(pid);
   const prj = projects[0];
   const st = prj && version === 'tobe' ? eng('stepState', [docs(), prj.id, pid, sid, today()], null) : null;
-  const ready = data.filter(d => eng('dataReady', [docs(), d], availOf(d) === 'live')).length;
-  const blockers = st ? (st.blockers || []) : data.filter(d => !eng('dataReady', [docs(), d], availOf(d) !== 'missing'));
+  /* R3: effective availability everywhere. Red blockers are effectively-missing data only; examples-only data is amber. */
+  const ready = data.filter(d => availOf(d) === 'live').length;
+  const blockers = data.filter(d => availOf(d) === 'missing' && !(st && st.status === 'done'));
+  const needLive = data.filter(d => availOf(d) === 'example');
   /* other steps sharing data, grouped */
   const shared = {};
   data.forEach(d => eng('impactOfData', [docs(), d], []).forEach(u => {
@@ -51,21 +53,21 @@ export function render(params) {
     <div class="kc"><span>Project status</span><b>${st ? esc(STATUS_LBL[st.status] || st.status) : '—'}</b><small>${prj ? (st && st.items && st.items.length ? `${st.done}/${st.items.length} work items · ${esc(prj.name)}` : 'nothing to build') : 'not in a project'}</small></div>
     <div class="kc"><span>Forecast</span><b style="color:${schedColor}">${st && st.forecast ? esc(fmt(st.forecast)) : '—'}</b><small>${st && st.due ? (st.forecast > st.due ? 'planned ' + esc(fmt(st.due)) : 'on plan') : 'no work'}</small></div>
     <div class="kc"><span>Data ready</span><b>${ready}/${data.length}</b><small>live or resolved</small></div>
-    <div class="kc"><span>Blockers</span><b style="color:${blockers.length ? 'var(--late)' : 'inherit'}">${blockers.length}</b><small>${blockers.length ? 'missing data' : 'none'}</small></div>
+    <div class="kc"><span>Blockers</span><b style="color:${blockers.length ? 'var(--late)' : 'inherit'}">${blockers.length}</b><small>${blockers.length ? 'missing data' : needLive.length ? `${needLive.length} need${needLive.length === 1 ? 's' : ''} a live source` : 'none'}</small></div>
     <div class="kc"><span>Shared with</span><b>${sharedList.length}</b><small>steps using the same data</small></div>
   </div>
   <div class="two">
-    <div class="card"><h3>How this step runs <span class="n">process</span></h3>${(s.subs || []).length ? `<div class="subs">${s.subs.map((x, k) => { const sd = x.data || []; const miss = sd.filter(d => availOf(d) === 'missing'); return `<div class="sub ${miss.length ? 'blocked' : ''}"><span class="dotc">${miss.length ? '!' : k + 1}</span><div><div class="t" style="font-weight:600">${esc(x.title)}</div><div class="s">${sd.length ? sd.map(d => `${dataDot(d)} ${esc(dataName(d))}`).join(' &nbsp; ') : 'No data needed'}</div></div></div>`; }).join('')}</div>` : `<div class="s">No sub-steps yet. Add them in the process editor.</div>`}</div>
+    <div class="card"><h3>How this step runs <span class="n">process</span></h3>${(s.subs || []).length ? `<div class="subs">${s.subs.map((x, k) => { const sd = x.data || []; const miss = sd.filter(d => availOf(d) === 'missing'); return `<div class="sub ${miss.length ? 'blocked' : ''}"><span class="dotc">${miss.length ? '!' : k + 1}</span><div><div class="t" style="font-weight:600">${esc(x.title)}</div><div class="s">${sd.length ? sd.map(d => `${effDot(d)} ${esc(dataName(d))}`).join(' &nbsp; ') : 'No data needed'}</div></div></div>`; }).join('')}</div>` : `<div class="s">No sub-steps yet. Add them in the process editor.</div>`}</div>
     <div class="card"><h3>Work to deliver it <span class="n">${work.length}</span></h3>${work.length ? work.map(w => { const f = fc[w.id] || {}; return `<a class="wi d-wi" href="${link('/project/' + w.projectId + '?mode=work')}" data-link>${av(w.owner)}<div style="flex:1;min-width:0"><div class="t" style="font-weight:600">${esc(w.title)}</div>
         <div class="dep">${esc((store.get('project', w.projectId) || {}).name || w.projectId)}${w.resolves ? ` · Makes <b>${esc(dataName(w.resolves))}</b> available` : ''}${(w.deps || []).length ? ` · After ${w.deps.map(d => { const x = W(d); return x ? esc(x.title) + (x.status === 'done' ? ' ✓' : ' (open)') : ''; }).filter(Boolean).join(', ')}` : ''}</div></div>
         <div style="text-align:right">${workBadge(w, f)}<div class="s" style="font-size:11px;margin-top:3px">${esc(fmt(w.start))} → ${esc(fmt(w.due))}</div></div></a>`; }).join('') : `<div class="s">${version === 'asis' ? 'As-is steps describe today; work is planned against to-be steps.' : 'No work items yet. Plan them on the project page.'}</div>`}</div>
   </div>
   <div class="two">
-    <div class="card"><h3>Data this step needs <span class="n">${data.length}</span></h3>${data.length ? `<div class="tbl-wrap"><table><tr><th>Element</th><th>Owner</th><th>Availability</th></tr>${data.map(d => { const x = dataEl(d) || {}; return `<tr class="click" data-go="/data/${esc(d)}"><td><a href="${link('/data/' + d)}" data-link><b>${esc(x.name || d)}</b></a><div style="color:var(--ink2);font-size:12px">${esc(x.source || 'Source not set')} · ${(x.fields || []).length} fields</div></td><td>${esc(pname(x.owner))}</td><td><span class="chip">${dataDot(d)}${esc((AVAIL[x.avail] || AVAIL.missing).short)}</span>${blockers.includes(d) ? `<div class="d-blk">${LOCK} blocks this step</div>` : ''}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No data tagged on this step.</div>'}</div>
+    <div class="card"><h3>Data this step needs <span class="n">${data.length}</span></h3>${data.length ? `<div class="tbl-wrap"><table><tr><th>Element</th><th>Owner</th><th>Availability</th></tr>${data.map(d => { const x = dataEl(d) || {}; return `<tr class="click" data-go="/data/${esc(d)}"><td><a href="${link('/data/' + d)}" data-link><b>${esc(x.name || d)}</b></a><div style="color:var(--ink2);font-size:12px">${esc(x.source || 'Source not set')} · ${(x.fields || []).length} fields</div></td><td>${esc(pname(x.owner))}</td><td><span class="chip">${effDot(d)}${esc(AVAIL[availOf(d)].short)}</span>${blockers.includes(d) ? `<div class="d-blk">${LOCK} blocks this step</div>` : availOf(d) === 'example' ? `<div class="d-needlive-s">${NEEDS_LIVE}</div>` : ''}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No data tagged on this step.</div>'}</div>
     <div class="card"><h3>Also touched by this change <span class="n">${sharedList.length}</span></h3>${sharedList.length ? sharedList.map(x => `<div class="row click" data-go="/process/${esc(x.pid)}/step/${esc(x.stepId)}"><div><div class="t">${esc(x.s.title)}</div><div class="s">${esc(x.p.name)} · shares ${x.data.map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(x.s.owner)}</div></div>`).join('') : '<div class="s">No other steps share this data.</div>'}</div>
   </div>
   ${version === 'tobe' ? `<div class="card" style="margin-top:16px"><h3>UAT scripts for this step <span class="n">${uat.length}</span></h3>${prj ? `<div class="hint" style="margin:-4px 0 8px">${esc(uatSrc)} · <a href="${link('/testing/' + prj.id)}" data-link style="color:var(--accent)">Open testing ›</a></div>` : ''}
-    ${uat.length ? `<div class="d-uat">${uat.map(u => `<div class="d-uatc" data-uat="${esc(u.id)}"><div class="t">${esc(u.title)}</div><dl><dt>Given</dt><dd>${esc(u.given)}</dd><dt>When</dt><dd>${esc(u.when)}</dd><dt>Then</dt><dd>${esc(u.then)}</dd></dl>${(u.data || []).length ? `<div class="s">${u.data.map(d => `${dataDot(d)} ${esc(dataName(d))}`).join(' &nbsp; ')}</div>` : ''}</div>`).join('')}</div>`
+    ${uat.length ? `<div class="d-uat">${uat.map(u => `<div class="d-uatc" data-uat="${esc(u.id)}"><div class="t">${esc(u.title)}</div><dl><dt>Given</dt><dd>${esc(u.given)}</dd><dt>When</dt><dd>${esc(u.when)}</dd><dt>Then</dt><dd>${esc(u.then)}</dd></dl>${(u.data || []).length ? `<div class="s">${u.data.map(d => `${effDot(d)} ${esc(dataName(d))}`).join(' &nbsp; ')}</div>` : ''}</div>`).join('')}</div>`
       : `<div class="s">${prj ? 'No UAT scripts for this step. Unchanged steps do not need one.' : 'Link this process to a project to plan UAT.'}</div>`}</div>` : ''}
   <div class="two"><div class="card"><h3>Comments</h3>${commentsPanel('step:' + pid + '/' + sid)}</div>
     <div class="card"><h3>History <span class="n">process</span></h3><div class="hint" style="margin:-4px 0 8px">Changes to ${esc(p.name)}, which holds this step</div>${historyPanel('process:' + pid)}</div></div>`;

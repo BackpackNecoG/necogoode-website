@@ -35,6 +35,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const settle = async () => { await page.waitForLoadState('networkidle').catch(() => {}); await sleep(400); };
   const kpiPct = async () => parseInt(await page.locator('.hdr .kpi b').first().innerText(), 10);
   const workRow = title => page.locator('tr[data-wid]', { hasText: title });
+  const STORE = ROOT + '/app/store.js';
+  const getDoc = (type, id) => page.evaluate(async ([u, t, i]) => (await import(u)).store.get(t, i), [STORE, type, id]);
+  const asPersona = async re => { const id = await page.$eval('#persona', (s, r) => [...s.options].find(o => new RegExp(r).test(o.text)).value, re); await page.selectOption('#persona', id); await settle(); return id; };
+  /* icon-only controls (no visible text) must carry an aria-label */
+  const unlabelled = () => page.evaluate(() => [...document.querySelectorAll('#app button, #app a, .overlay button')].filter(b => b.offsetParent && !b.textContent.replace(/[^\p{L}\p{N}]/gu, '').length && !b.getAttribute('aria-label') && !b.getAttribute('aria-labelledby')).map(b => b.outerHTML.slice(0, 80)));
 
   /* ---------------- home ---------------- */
   console.log('home');
@@ -52,8 +57,58 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('[data-scope="mine"]');
   check('process tiles', await page.locator('.home-grid a[href*="/process/"]').count() >= 2);
   check('project tiles with progress', await page.locator('.home-grid a[href*="/project/"] .bar').count() >= 1);
+  const dcMismatch = await page.evaluate(async u => { const { store } = await import(u); return [...document.querySelectorAll('.home-grid a[href*="/process/"]')].map(a => {
+    const pid = decodeURIComponent(a.getAttribute('href').split('/process/')[1]); const ds = window.PMOEngine.diffSummary(store.get('process', pid));
+    const t = a.querySelector('[data-diffcount]').textContent; return t.startsWith(`${ds.new} new + ${ds.changed} changed`) ? null : { pid, t, ds }; }).filter(Boolean); }, STORE);
+  check('home diff counts come from diffSummary', dcMismatch.length === 0, dcMismatch);
+  const missMismatch = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('.home-grid a[href*="/process/"]')].map(a => {
+    const p = store.get('process', decodeURIComponent(a.getAttribute('href').split('/process/')[1]));
+    const ids = new Set(E.flatSteps(p.tobe).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])]));
+    const miss = [...ids].filter(d => E.effectiveAvail(store.state.docs, d) === 'missing').length;
+    const el = a.querySelector('[data-miss]'); const shown = el ? parseInt(el.textContent.replace(/\D+/g, ''), 10) : 0; return shown === miss ? null : { id: p.id, shown, miss }; }).filter(Boolean); }, STORE);
+  check('home missing counts use effectiveAvail', missMismatch.length === 0, missMismatch);
+  check('home: "+ New project" in hero and projects section', await page.locator('.pmo-hero [data-new-project]').count() === 1 && await page.locator('.sect [data-new-project]').count() === 1);
+  check('home: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
   check('home no overflow @1440', await noOverflow());
   await shot('01-home-1440');
+
+  /* ---------------- new project ---------------- */
+  console.log('new project');
+  const NP = 'E2E Northwind supplier payments uplift';
+  await page.click('.pmo-hero [data-new-project]'); await modalOpen();
+  const meId = await page.$eval('#persona', s => s.value);
+  check('new project: owner defaults to me', await page.inputValue('.overlay select[name="owner"]') === meId);
+  check('new project: me preselected as resource', await page.locator(`.overlay input[name="resources"][value="${meId}"]`).isChecked());
+  await shot('00-new-project-modal-1440', false);
+  await page.click('.overlay [data-act="create"]'); await page.waitForSelector('.overlay .banner', { timeout: 8000 });
+  check('new project: name required', (await page.locator('.overlay .banner').innerText()).includes('name'));
+  await page.fill('.overlay input[name="name"]', NP);
+  await page.fill('.overlay textarea[name="desc"]', 'Move supplier payment approvals onto captured data.');
+  await page.fill('.overlay input[name="target"]', '2027-02-15');
+  await page.locator('.overlay input[name="resources"]').nth(4).check();
+  await page.locator('.overlay input[name="processes"]').last().check();
+  const npProc = await page.locator('.overlay input[name="processes"]').last().getAttribute('value');
+  await act('create'); await page.waitForURL(/\/project\/prj-/, { timeout: 10000 }); await page.waitForSelector('.canvas.pm'); await settle();
+  const npId = decodeURIComponent(new URL(page.url()).pathname.split('/project/')[1]);
+  check('new project: navigates to it', (await page.locator('.hdr h1').innerText()).includes(NP));
+  const npDoc = await getDoc('project', npId);
+  check('new project: doc shape', npDoc && npDoc.status === 'active' && Array.isArray(npDoc.baselines) && npDoc.baselines.length === 0 && npDoc.owner === meId && npDoc.target === '2027-02-15'
+    && npDoc.processes.length === 1 && npDoc.processes[0] === npProc && npDoc.resources.includes(meId) && npDoc.resources.length === 2 && npDoc.desc.length > 5, npDoc);
+  check('new project: linked process on its map', await page.locator('.pgroup').count() === 1);
+  await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('[data-add-work]');
+  await page.click('[data-add-work]'); await modalOpen();
+  const resNp = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
+    const used = new Set(prj.processes.flatMap(pid => E.flatSteps((store.get('process', pid) || {}).tobe || []).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
+    const opts = [...document.querySelectorAll('.overlay select[name="resolves"] option')].map(o => o.value).filter(Boolean);
+    return { ok: opts.length > 0 && opts.every(v => used.has(v)), n: opts.length, all: store.list('dataElement').length }; }, STORE);
+  check('"Resolves" excludes data of unlinked processes', resNp.ok && resNp.n < resNp.all, resNp);
+  await act('cancel');
+  await sleep(800); await page.reload(); await page.waitForSelector('.hdr h1');
+  check('reload: new project persisted', (await page.locator('.hdr h1').innerText()).includes(NP));
+  await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('new project: history shows creation', (await page.locator('[data-history]').innerText()).includes('Created project'));
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  check('new project: tile on home', await page.locator('.home-grid a.tile', { hasText: NP }).count() === 1);
 
   /* ---------------- project map ---------------- */
   console.log('project map');
@@ -62,10 +117,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const prjPath = new URL(page.url()).pathname;
   check('map renders step nodes', await page.locator('.canvas.pm .node[data-step]').count() > 3);
   check('map has NEW/CHANGED badges', await page.locator('.canvas.pm .chip.diff-new, .canvas.pm .chip.diff-changed').count() > 0);
-  check('map has "Waiting on" blocker chips', await page.locator('.canvas.pm .chip.block', { hasText: 'Waiting on' }).count() > 0);
+  const mapData = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    const ids = sel => [...document.querySelectorAll(sel)].map(a => decodeURIComponent(a.getAttribute('href').split('/data/')[1]));
+    return { red: ids('.canvas.pm .chip.block').map(d => E.effectiveAvail(store.state.docs, d)), amber: ids('.canvas.pm .chip.pmo-amber').map(d => E.effectiveAvail(store.state.docs, d)) }; }, STORE);
+  check('map shows data chips (red or amber)', mapData.red.length + mapData.amber.length > 0, mapData);
+  check('map red "Waiting on" only for effectively missing data', mapData.red.every(e => e === 'missing'), mapData.red);
+  check('map amber chips only for examples-only data', mapData.amber.every(e => e === 'example'), mapData.amber);
+  const noPlan = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    return [...document.querySelectorAll('.side .row')].filter(r => r.querySelector('.pmo-noplan')).map(r => { const d = r.dataset.go.split('/data/')[1]; return { d, eff: E.effectiveAvail(store.state.docs, d), res: store.list('workItem', w => w.resolves === d).length }; }); }, STORE);
+  check('"No resolution plan" only for missing/example data without a resolver', noPlan.every(x => x.eff !== 'live' && x.res === 0), noPlan);
   check('map has open-design pills', await page.locator('.pgroup-h').count() >= 1);
   check('side panel: biggest blockers', await page.locator('.side .card h3', { hasText: 'Biggest blockers' }).count() === 1);
   check('side panel: up next', await page.locator('.side .card h3', { hasText: 'Up next' }).count() === 1);
+  check('header finish KPI shows forecast for open project', /Forecast · target/.test(await page.locator('[data-kpi-finish]').innerText()));
+  check('project: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
   const dl = await page.locator('.side .pmo-dl').allInnerTexts();
   check('one schedule format: "Due X · forecast Y (+Nd)"', dl.length > 0 && dl.every(t => /^Due [A-Z][a-z]{2} \d{1,2} · (forecast|done) [A-Z][a-z]{2} \d{1,2}( \(\+\d+d\))?$/.test(t.trim())), dl.slice(0, 3));
   const collapsedBefore = await page.locator('.collapsed').count();
@@ -85,6 +150,27 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('timeline bars show dates, not "unblocks"', (await page.locator('.tl .tbar').allInnerTexts()).every(t => !t.includes('unblocks')));
   check('timeline label subtitle carries "unblocks"', (await page.locator('.tl .lab .s').allInnerTexts()).some(t => t.includes('unblocks')));
   check('timeline has today + target lines', await page.locator('.tl .tday').count() > 0 && await page.locator('.tl .tgt').count() > 0);
+  await sleep(300);
+  const depCount = await page.evaluate(async u => { const { store } = await import(u); const ids = new Set([...document.querySelectorAll('.tl [data-bar]')].map(b => b.dataset.bar));
+    return [...ids].reduce((a, id) => a + ((store.get('workItem', id) || {}).deps || []).filter(d => ids.has(d)).length, 0); }, STORE);
+  check('timeline: one SVG arrow per dependency', depCount > 0 && await page.locator('svg.pmo-arrows path[data-from]').count() === depCount, { depCount, arrows: await page.locator('svg.pmo-arrows path[data-from]').count() });
+  const arrowGeom = await page.evaluate(() => { const box = document.querySelector('#pmoTl'), br = box.getBoundingClientRect();
+    return [...document.querySelectorAll('svg.pmo-arrows path[data-from]')].slice(0, 6).map(p => { const m = p.getAttribute('d').match(/^M([\d.]+),([\d.]+) .* ([\d.]+),([\d.]+)$/);
+      const f = document.querySelector(`[data-bar="${p.dataset.from}"]`).getBoundingClientRect(), t = document.querySelector(`[data-bar="${p.dataset.to}"]`).getBoundingClientRect();
+      return Math.abs(+m[1] - (f.right - br.left + box.scrollLeft)) < 2 && Math.abs(+m[3] - (t.left - br.left + box.scrollLeft - 1)) < 2; }); });
+  check('timeline: arrows run from dep bar end to dependent start', arrowGeom.length > 0 && arrowGeom.every(Boolean), arrowGeom);
+  const cpIds = await page.evaluate(async u => { const { store } = await import(u); const prj = location.pathname.split('/project/')[1]; return window.PMOEngine.criticalPath(store.state.docs, decodeURIComponent(prj), store.state.today); }, STORE);
+  const critBars = await page.locator('.tl .tbar.pmo-crit').evaluateAll(bs => bs.map(b => b.dataset.bar));
+  check('timeline: critical path highlighted from E().criticalPath', cpIds.length > 0 && critBars.length === cpIds.length && cpIds.every(id => critBars.includes(id)), { cpIds, critBars });
+  check('timeline: critical arrows emphasised', await page.locator('svg.pmo-arrows path.crit').count() >= Math.min(1, cpIds.length - 1));
+  await page.uncheck('[data-crit-toggle]'); await sleep(250);
+  check('timeline: critical path toggle off', await page.locator('.tl .tbar.pmo-crit').count() === 0);
+  await page.check('[data-crit-toggle]'); await sleep(250);
+  check('timeline: critical path toggle on', await page.locator('.tl .tbar.pmo-crit').count() === cpIds.length);
+  const dragOwn = await page.evaluate(async u => { const { store } = await import(u); const me = store.state.me; const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
+    return [...document.querySelectorAll('.tl button.tbar[data-bar]')].map(b => store.get('workItem', b.dataset.bar)).every(w => w.owner === me || prj.owner === me); }, STORE);
+  check('timeline: only owner/PM bars are draggable', dragOwn);
+  check('timeline: draggable bars have aria-labels', await page.locator('.tl button.tbar:not([aria-label])').count() === 0);
   check('project no overflow @1440 (timeline)', await noOverflow());
   await shot('03-project-timeline-1440');
 
@@ -154,6 +240,52 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot('04b-work-grouped-1440');
   await page.click('[data-wgroup="flat"]'); await page.waitForSelector('table.pmo-work:not(.grouped)');
 
+  /* resolves select: only data used by this project's processes */
+  await page.click('[data-add-work]'); await modalOpen();
+  const resOk = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
+    const used = new Set(prj.processes.flatMap(pid => E.flatSteps((store.get('process', pid) || {}).tobe || []).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
+    const opts = [...document.querySelectorAll('.overlay select[name="resolves"] option')].map(o => o.value).filter(Boolean);
+    return { ok: opts.length > 0 && opts.every(v => used.has(v)), n: opts.length, all: store.list('dataElement').length }; }, STORE);
+  check('"Resolves" lists only this project\'s data', resOk.ok, resOk);
+  await act('cancel');
+
+  /* ---------------- timeline drag (PM) ---------------- */
+  console.log('timeline drag');
+  await page.click('.pmo-tabs a:has-text("Timeline")'); await page.waitForSelector('.tl button.tbar'); await sleep(300);
+  const bar = page.locator('.tl button.tbar[data-bar]').first();
+  await bar.scrollIntoViewIfNeeded();
+  const dragId = await bar.getAttribute('data-bar');
+  const before = await getDoc('workItem', dragId);
+  const geo = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); return { x: r.left + Math.min(20, r.width / 2), y: r.top + r.height / 2, pxDay: b.parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span) }; }, dragId);
+  await page.mouse.move(geo.x, geo.y); await page.mouse.down();
+  for (let k = 1; k <= 6; k++) await page.mouse.move(geo.x + geo.pxDay * 3 * k / 6, geo.y);
+  check('drag shows a live date tip', /\(\+3d\)/.test(await page.locator('.pmo-dragtip').innerText().catch(() => '')));
+  await page.mouse.up(); await settle();
+  const after = await getDoc('workItem', dragId);
+  const shift = (a, b) => Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
+  check('drag: start moved +3d', shift(before.start || before.due, after.start) === 3, { before: before.start, after: after.start });
+  check('drag: duration kept (due +3d)', shift(before.due, after.due) === 3, { before: before.due, after: after.due });
+  check('drag: no modal opened by the drag', await page.locator('.overlay').count() === 0);
+  await page.waitForSelector('.tl button.tbar');
+  check('drag: bar re-rendered at new date', (await page.locator(`.tl [data-bar="${dragId}"]`).getAttribute('aria-label')).includes(await page.evaluate(d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), after.due)));
+  /* drag back 2 days to the left */
+  const geo2 = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); return { x: r.left + Math.min(20, r.width / 2), y: r.top + r.height / 2 }; }, dragId);
+  await page.mouse.move(geo2.x, geo2.y); await page.mouse.down();
+  for (let k = 1; k <= 5; k++) await page.mouse.move(geo2.x - geo.pxDay * 2 * k / 5, geo2.y);
+  await page.mouse.up(); await settle();
+  const after2 = await getDoc('workItem', dragId);
+  check('drag left: -2d', shift(after.start, after2.start) === -2 && shift(after.due, after2.due) === -2, { after2 });
+  /* a plain click (no drag) opens the edit modal: the keyboard alternative */
+  await page.locator(`.tl [data-bar="${dragId}"]`).focus(); await page.keyboard.press('Enter'); await modalOpen();
+  check('Enter on a bar opens the edit modal with its dates', await page.inputValue('.overlay input[name="due"]') === after2.due);
+  await act('cancel');
+  await shot('05a-timeline-dragged-1440');
+  await sleep(800); await page.reload(); await page.waitForSelector('.tl button.tbar');
+  check('reload: dragged dates persisted', (await getDoc('workItem', dragId)).due === after2.due);
+  await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
+  check('history shows "Rescheduled" with a summary', /Rescheduled “.+” on the timeline: .+ → .+ \(\+3d\)/.test(await page.locator('[data-feed="prj-work"]').innerText()));
+  await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
+
   /* push an open item's due out by editing it, so baseline variance has something to show (after baseline below) */
   /* ---------------- baseline ---------------- */
   console.log('baseline');
@@ -176,18 +308,46 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ---------------- suggest work ---------------- */
   console.log('suggest work');
+  await asPersona('^Leo Park'); await page.waitForSelector('table.pmo-work');
+  await page.click('[data-suggest]'); await modalOpen();
+  check('non-owner: suggestions preview explains who can create', (await page.locator('.overlay .pmo-ro-note').innerText()).includes('project owner'));
+  check('non-owner: no "Create selected" action', await page.locator('.overlay [data-act="create"]').count() === 0);
+  check('non-owner: suggestion fields read-only', await page.locator('.overlay .pmo-sg-f select:not([disabled])').count() === 0);
+  await act('cancel');
+  await asPersona('Project Manager'); await page.waitForSelector('table.pmo-work');
   const countBeforeSuggest = await page.locator('tr[data-wid]').count();
   await page.click('[data-suggest]'); await modalOpen();
   const src = (await page.locator('.overlay .pmo-src').innerText()).trim();
   check('suggestion source labelled', /AI|Rules/.test(src), src);
   const nSugg = await page.locator('.overlay input[name="pick"]').count();
   check('suggestions offered', nSugg > 0, nSugg);
+  check('each suggestion shows owner, effort, start, due, deps', nSugg > 0 && await page.locator('.overlay .pmo-sg select[name^="o_"]').count() === nSugg && await page.locator('.overlay .pmo-sg input[name^="e_"]').count() === nSugg
+    && await page.locator('.overlay .pmo-sg input[name^="s_"]').count() === nSugg && await page.locator('.overlay .pmo-sg input[name^="d_"]').count() === nSugg && await page.locator('.overlay .pmo-sg-deps').count() === nSugg);
+  const starts = await page.locator('.overlay .pmo-sg input[name^="s_"]').evaluateAll(xs => xs.map(x => x.value));
+  check('suggestions chained in order (starts non-decreasing)', starts.every((v, i) => !i || v >= starts[i - 1]), starts);
   await shot('06-suggest-modal-1440', false);
-  if (nSugg > 0) {
-    for (let i = 1; i < nSugg; i++) await page.locator('.overlay input[name="pick"]').nth(i).uncheck();
+  if (nSugg > 1) {
+    for (let i = 2; i < nSugg; i++) await page.locator('.overlay input[name="pick"]').nth(i).uncheck();
+    const SG = 'E2E suggested item (edited)';
+    await page.fill('.overlay input[name="t_1"]', SG);
+    const otherOwner = await page.$eval('.overlay select[name="o_1"]', s => [...s.options].find(o => o.value !== s.value).value);
+    await page.selectOption('.overlay select[name="o_1"]', otherOwner);
+    await page.fill('.overlay input[name="e_1"]', '4');
+    const s1 = await page.inputValue('.overlay input[name="s_1"]'), d1 = await page.inputValue('.overlay input[name="d_1"]');
+    const ns = await page.evaluate(d => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 5); return x.toISOString().slice(0, 10); }, s1);
+    await page.fill('.overlay input[name="s_1"]', ns); await page.locator('.overlay input[name="s_1"]').dispatchEvent('change');
+    const nd = await page.inputValue('.overlay input[name="d_1"]');
+    check('moving a suggestion start keeps its duration', shift(s1, ns) === shift(d1, nd), { s1, d1, ns, nd });
+    await page.locator('.overlay .pmo-sg[data-sg="1"] summary').click();
+    const depBox = page.locator('.overlay input[name="dep_1"][value="S:0"]');
+    if (!(await depBox.isChecked())) await depBox.check();
     await act('create'); await settle();
-    check('one suggested item created', await page.locator('tr[data-wid]').count() === countBeforeSuggest + 1);
-  } else await act('cancel');
+    check('two suggested items created', await page.locator('tr[data-wid]').count() === countBeforeSuggest + 2);
+    const sg = await page.evaluate(async ([u, t]) => { const { store } = await import(u); const w = store.list('workItem', x => x.title === t)[0]; return w && Object.assign({}, w, { depTitles: (w.deps || []).map(d => (store.get('workItem', d) || {}).title) }); }, [STORE, SG]);
+    check('edited suggestion saved with owner/effort/dates', sg && sg.owner === otherOwner && sg.effortDays === 4 && sg.start === ns && sg.due === nd, sg);
+    check('suggestion dependency resolved to the created item', sg && sg.deps.length >= 1 && sg.depTitles.every(Boolean), sg && sg.depTitles);
+  } else if (nSugg === 1) { await act('create'); await settle(); check('one suggested item created', await page.locator('tr[data-wid]').count() === countBeforeSuggest + 1); }
+  else await act('cancel');
 
   /* ---------------- link a process ---------------- */
   console.log('link process');
@@ -304,13 +464,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await open.first().selectOption('done'); await settle();
     }
     const fin = await page.locator('[data-kpi-finish]').innerText();
-    check('all done -> KPI shows "Finished <date>"', /Finished [A-Z][a-z]{2} \d{1,2}/.test(fin) && fin.includes('Actual finish'), fin);
+    check('all done, gate pending -> "Work done · awaiting go-live"', fin.includes('Work done · awaiting go-live') && !/Finished|early/.test(fin), fin);
+    check('awaiting KPI links to the release page', /\/release\//.test(await page.locator('[data-kpi-finish]').getAttribute('href') || ''));
     await sleep(800); await page.reload(); await page.waitForSelector('[data-kpi-finish]');
-    check('reload: Finished persists', (await page.locator('[data-kpi-finish]').innerText()).includes('Finished'));
+    check('reload: awaiting go-live persists', (await page.locator('[data-kpi-finish]').innerText()).includes('awaiting go-live'));
+    await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
+    const prow = await page.locator('.pmo-ptable tbody tr', { has: page.locator('[data-when]') }).allInnerTexts();
+    check('portfolio: no "Finished · early" while gate pending', prow.some(t => /Awaiting go-live/.test(t)) && prow.every(t => !/early|Finished/.test(t)), prow);
+    await page.goto(ROOT + other.replace(/^\/concepts\/pmoflow/, '') + '?mode=timeline');
     await page.click('.pmo-tabs a:has-text("Timeline")'); await page.waitForSelector('.tl .tbar');
     check('timeline shows actual finish markers', await page.locator('.tl .pmo-actual').count() > 0);
     await shot('15-finished-project-1440');
   } else check('second project exists for Finished check', false);
+
+  /* ---------------- live project header ---------------- */
+  console.log('live header');
+  await page.evaluate(async ([u, id]) => { const { store } = await import(u); const j = store.get('project', id);
+    await store.save('release', 'rel-e2e-' + id, { id: 'rel-e2e-' + id, projectId: id, at: new Date().toISOString(), by: store.state.me, kind: 'golive', approvers: [], actions: [], exceptions: [], snapshot: {} }, 'E2E release fixture');
+    await store.save('project', id, Object.assign({}, j, { status: 'live' }), 'E2E: mark project live'); }, [STORE, npId]);
+  await page.goto(ROOT + '/project/' + npId); await page.waitForSelector('[data-kpi-finish]');
+  const liveTxt = await page.locator('[data-kpi-finish]').innerText();
+  check('live project: "Live since <date> (vN)"', /Live since [A-Z][a-z]{2} \d{1,2} \(v\d+\)/.test(liveTxt), liveTxt);
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
+  check('portfolio: live row shows "Live since"', (await page.locator('.pmo-ptable tr', { hasText: NP }).innerText()).includes('Live since'));
+  check('portfolio: "+ New project" button', await page.locator('.pmo-ptable').count() === 1 && await page.locator('[data-new-project]').count() === 1);
+  await page.click('[data-new-project]'); await modalOpen();
+  check('portfolio: new project modal opens', (await page.locator('.overlay h2').innerText()) === 'New project');
+  await act('cancel');
+  check('portfolio: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
 
   /* ---------------- phone width ---------------- */
   console.log('phone 390');
@@ -326,6 +507,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       culprits: [...document.querySelectorAll('body *')].filter(e => !e.closest('.tl,.tbl-wrap,.canvas') && e.getBoundingClientRect().right > innerWidth + 1).slice(0, 3).map(e => e.tagName + '.' + e.className) })));
     await shot(name);
   }
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  await page.locator('.pmo-hero [data-new-project]').click(); await modalOpen(); await sleep(200);
+  check('new project modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
+  await shot('16-new-project-390', false); await act('cancel');
+  await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=work'); await page.waitForSelector('table.pmo-work');
+  await page.click('[data-suggest]'); await modalOpen(); await sleep(200);
+  check('suggest modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
+  await shot('17-suggest-390', false); await act('cancel');
   /* timeline scrolls inside its own box at 390 */
   await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=timeline'); await page.waitForSelector('.tl .tbar');
   check('timeline scrolls in its container @390', await page.evaluate(() => { const t = document.querySelector('.tl'); return t.scrollWidth > t.clientWidth; }));

@@ -41,7 +41,7 @@ function baseDocs() {
     { id: 'D6', name: 'Contract terms', avail: 'live', fields: [] },
     { id: 'D7', name: 'Approver matrix', avail: 'live', fields: [] },
     { id: 'D8', name: 'Vendor risk tier', avail: 'example', fields: [] },
-    { id: 'D9', name: 'Payment hold list', avail: 'missing', fields: [] },
+    { id: 'D9', name: 'Payment hold list', owner: 'ar', avail: 'missing', fields: [] },
   ];
   const process = [
     { id: 'vendor-onboarding', name: 'Vendor Onboarding', owner: 'mc', resources: [], version: 1, released: [],
@@ -126,10 +126,13 @@ function readyDocs() {
     { id: 'T2', dataId: 'D2', field: 'Routing number', kind: 'boundary', input: '12345678', expect: 'reject', origin: 'spec' },
     { id: 'TX', dataId: 'DX-unused', field: 'x', kind: 'valid', input: 'a', expect: 'accept', origin: 'user' },
   ]);
+  // R3: every project data element needs at least one test case.
+  ['D1', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9'].forEach(id => d.testCase.push({ id: 'C' + id, data: { id: 'C' + id, dataId: id, field: 'f', kind: 'valid', input: 'x', expect: 'accept', origin: 'user' } }));
   d.testRun = wrap([
     { id: 'R1', projectId: PRJ, env: 'dev', at: '2026-11-01T09:00:00Z', by: 'dk', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }, { caseId: 'TX', outcome: 'pass' }] },
     { id: 'R2', projectId: PRJ, env: 'uat', at: '2026-11-02T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'pass' }, { caseId: 'T2', outcome: 'pass' }] },
   ]);
+  d.testCase.filter(e => e.id.startsWith('C')).forEach(e => { d.testRun[0].data.results.push({ caseId: e.id, outcome: 'pass' }); d.testRun[1].data.results.push({ caseId: e.id, outcome: 'pass' }); });
   E.generateUatScripts(d, PRJ).forEach(sc => d.testRun[1].data.results.push({ scriptId: sc.id, outcome: 'pass', evidence: 'screenshot' }));
   d.project[0].data.cutover = { window: 'Sat 06:00-10:00', rollbackOwner: 'dk', rollbackPlan: 'Restore v1 as-is', hypercareDays: 10, hypercareOwner: 'ta', comms: 'Teams' };
   d.grant = wrap([{ id: 'G1', projectId: PRJ, dataId: 'D2', env: 'uat', access: 'read', reason: 'UAT', requestedBy: 'dk', status: 'active', expires: '2026-12-01', log: [] }]);
@@ -345,7 +348,7 @@ test('specDrift flags an 8-digit routing number against a 9-digit spec, and more
   const drift = E.specDrift(d2, { columns: E.profileCsv(CSV, {}) });
   const has = (field, issue) => drift.some(x => x.field === field && x.issue === issue);
   assert.ok(has('Routing number', 'length-mismatch'));
-  assert.match(drift.find(x => x.field === 'Routing number').detail, /length 9 digits.*length 8–9/);
+  assert.equal(drift.find(x => x.field === 'Routing number' && x.issue === 'length-mismatch').detail, '1 of 4 routing numbers has 8 digits; the spec says 9.');
   assert.ok(has('Bank name', 'required-nulls'));
   assert.ok(has('Notes', 'unspecified-column'));
   assert.ok(!has('Account number', 'missing-column'));  // matched case/punctuation-insensitively
@@ -380,12 +383,12 @@ test('generateTests produces valid/boundary/invalid/edge cases, synthetic and de
   assert.ok(cases.some(c => c.origin === 'profile' && /special character/.test(c.note)));
   assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '1000000.01' && c.expect === 'reject'));
   cases.forEach(c => { assert.equal(c.id, undefined); assert.equal(c.dataId, 'D2'); });
-  const keys = cases.map(c => c.field + '|' + c.input);
+  const keys = cases.map(c => c.field + '|' + c.input + '|' + JSON.stringify(c.context || null));
   assert.equal(new Set(keys).size, keys.length);           // deduped
   const raws = RAW_ROWS.flat().filter(v => v.length >= 3);
   cases.forEach(c => assert.ok(!raws.some(r => c.input.includes(r)), 'raw value in input ' + c.input));
   // expectations agree with the engine's own validator
-  cases.forEach(c => assert.equal(E.validate(E.fieldSpec(d2.fields.find(f => f.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
+  cases.filter(c => !c.context).forEach(c => assert.equal(E.validate(E.fieldSpec(d2.fields.find(f => f.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
   assert.ok(E.generateTests(d2).every(c => c.origin === 'spec'));
 });
 
@@ -481,7 +484,8 @@ test('R2 readiness: discovered-resolved, process-valid, cutover-plan', () => {
   c = check(E.readiness(d, PRJ, TODAY), 'process-valid');
   assert.equal(c.pass, false);
   assert.deepEqual(c.items.sort(), ['vendor-onboarding:d1', 'vendor-onboarding:g9', 'vendor-onboarding:s5']);
-  assert.match(c.detail, /missing node nope/);
+  assert.match(c.detail, /loops back to a step that no longer exists/);
+  assert.ok(!/\bnope\b|s5|d1\b/.test(c.detail), c.detail);   // plain English, no ids
   d = readyDocs();
   d.process[0].data.tobe.find(n => n.id === 'd1').branches[1].goto = 's1';    // valid loop-back
   assert.equal(check(E.readiness(d, PRJ, TODAY), 'process-valid').pass, true);
@@ -601,4 +605,167 @@ test('R2 workload: capacity-aware', () => {
   const one = E.workload({ person: d.person, workItem: [d.workItem.find(e => e.id === 'W11')] }, TODAY)[0];
   assert.equal(one.effortNext14, Math.round(8 / 11 * 100) / 100);
   ['person', 'open', 'late', 'dueNext7', 'effortNext14', 'capacityNext14', 'overloaded'].forEach(k => assert.ok(k in dk, k));
+});
+
+/* ================================ Round 3 ================================ */
+const IDS = /\b(W\d+|D\d+|AP\d+|G\d+|T\d+|s\d+a?|i\d+|sug-\d+)\b/;
+
+test('R3 effectiveAvail drives blockers (missing only) and data-live (fails on examples)', () => {
+  const docs = deepFreeze(baseDocs());
+  assert.equal(E.effectiveAvail(docs, 'D4'), 'live');
+  assert.equal(E.effectiveAvail(docs, 'D1'), 'example');
+  assert.equal(E.effectiveAvail(docs, 'D2'), 'missing');
+  assert.equal(E.effectiveAvail(docs, 'nope'), 'missing');
+  const d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.status = 'done';
+  assert.equal(E.effectiveAvail(d, 'D2'), 'live');
+  const s2 = E.stepState(docs, PRJ, 'vendor-onboarding', 's2', TODAY);
+  assert.deepEqual(s2.blockers, ['D5']);                        // red: missing only
+  assert.deepEqual(s2.needsLive, ['D1', 'D8']);                 // amber: examples only
+  const r = readyDocs(); r.dataElement.find(e => e.id === 'D1').data.avail = 'example';
+  const c = check(E.readiness(r, PRJ, TODAY), 'data-live');
+  assert.equal(c.pass, false); assert.equal(c.status, 'fail');
+  assert.deepEqual(c.examples, ['D1']);
+  assert.equal(c.detail, 'Vendor legal name & Tax ID has examples only and needs a live source before go-live.');
+});
+
+test('R3 released project: frozen readiness, staleness ignored', () => {
+  const d = readyDocs();
+  const atRelease = E.readiness(d, PRJ, TODAY);
+  d.project[0].data.status = 'live';
+  d.release = wrap([{ id: 'REL1', projectId: PRJ, kind: 'golive', at: '2026-11-04T15:00:00Z', by: 'ta', snapshot: { 'vendor-onboarding': 2 }, checks: atRelease.checks }]);
+  d.workItem[5].data.updatedAt = '2026-11-05T00:00:00Z';         // promotion-time edits must not matter
+  d.process[0].data.updatedAt = '2026-11-05T00:00:00Z';
+  d.workItem[0].data.status = 'prog';
+  const r = E.readiness(deepFreeze(d), PRJ, TODAY);
+  assert.equal(r.released, true); assert.equal(r.pass, true);
+  assert.equal(r.releasedAt, '2026-11-04T15:00:00Z');
+  assert.deepEqual(r.versions, { 'vendor-onboarding': 2 });
+  assert.deepEqual(r.checks.map(c => c.id), atRelease.checks.map(c => c.id));
+  assert.ok(r.checks.every(c => c.status === 'pass'));
+  // a rollback release is not "the" release
+  const d2 = readyDocs(); d2.project[0].data.status = 'live';
+  d2.release = wrap([{ id: 'REL2', projectId: PRJ, kind: 'rollback', at: '2026-11-05T00:00:00Z' }]);
+  assert.deepEqual(E.readiness(d2, PRJ, TODAY).checks, []);
+});
+
+test('R3 diffSummary counts gateways; criticalPath', () => {
+  const docs = deepFreeze(baseDocs());
+  assert.deepEqual(E.diffSummary(docs.process[0].data), { new: 2, changed: 6, removed: 1, same: 0 });
+  assert.deepEqual(E.diffSummary(docs.process[1].data), { new: 1, changed: 2, removed: 0, same: 1 });
+  assert.deepEqual(E.criticalPath(docs, PRJ, TODAY), ['W6', 'W8', 'W10']);
+  const d = baseDocs(); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
+  assert.deepEqual(E.criticalPath(d, PRJ, TODAY), ['W10']);     // W10 + W11 finish Nov 20; no binding chain when done
+  const cyc = baseDocs(); cyc.workItem.find(e => e.id === 'W6').data.deps = ['W10'];
+  assert.ok(Array.isArray(E.criticalPath(cyc, PRJ, TODAY)));    // terminates on cycles
+  assert.deepEqual(E.criticalPath(docs, 'nope', TODAY), []);
+});
+
+test('R3 check status and summary counts', () => {
+  const base = E.readiness(deepFreeze(baseDocs()), PRJ, TODAY);
+  base.checks.forEach(c => assert.ok(['pass', 'fail', 'warn'].includes(c.status)));
+  base.checks.forEach(c => assert.equal(c.status === 'pass', c.pass));
+  assert.equal(base.summary.pass + base.summary.fail + base.summary.warn, base.checks.length);
+  const d = readyDocs(); d.workItem[5].data.updatedAt = '2026-11-02T08:00:00Z';
+  const r = E.readiness(d, PRJ, TODAY);
+  assert.equal(check(r, 'exceptions').status, 'warn');
+  assert.equal(r.summary.warn, 1);
+  assert.equal(r.summary.pass, r.checks.filter(c => c.pass).length);  // warnings never counted as passing
+  const ok = E.readiness(readyDocs(), PRJ, TODAY);
+  assert.deepEqual(ok.summary, { pass: 10, fail: 0, warn: 0 });
+});
+
+test('R3 two-person counts approved non-stale approvals only', () => {
+  const d = readyDocs();                                          // ta approved Compliance and Accounts Payable
+  d.workItem.find(e => e.id === 'W2').data.updatedAt = '2026-11-02T00:00:00Z';   // Compliance section
+  d.workItem.find(e => e.id === 'W10').data.updatedAt = '2026-11-02T00:00:00Z';  // Accounts Payable section
+  const c = check(E.readiness(d, PRJ, TODAY), 'two-person');
+  assert.equal(c.pass, false); assert.deepEqual(c.items, ['mc']);
+  assert.equal(c.detail, 'Only Maya Chen has a current approval; a second approver is needed.');
+  assert.equal(check(E.readiness(readyDocs(), PRJ, TODAY), 'two-person').detail, 'Approved by Tom Alvarez and Maya Chen.');
+});
+
+test('R3 details are plain English with names, never ids', () => {
+  const variants = [baseDocs(), readyDocs()];
+  const v = readyDocs(); v.grant.push({ id: 'G2', data: { id: 'G2', projectId: PRJ, dataId: 'D2', env: 'dev', access: 'write', status: 'requested', log: [] } });
+  v.testRun[1].data.results[0].outcome = 'fail'; v.workItem[5].data.updatedAt = '2026-11-02T08:00:00Z';
+  variants.push(v);
+  variants.forEach(d => E.readiness(d, PRJ, TODAY).checks.forEach(c => assert.ok(!IDS.test(c.detail) && !/undefined/.test(c.detail), c.id + ': ' + c.detail)));
+  const r = E.readiness(baseDocs(), PRJ, TODAY);
+  assert.equal(check(r, 'cutover-plan').detail, 'Rollback owner, rollback plan and hypercare owner are not set.');
+  assert.match(check(r, 'work-done').detail, /^9 of 11 work items are still open: Sign screening vendor contract, /);
+  assert.match(check(r, 'data-live').detail, /Sanctions screening result, Bank remittance details and Payment hold list are missing\./);
+  assert.match(check(E.readiness(v, PRJ, TODAY), 'grants-closed').detail, /Still requested: Bank remittance details \(DEV, write\)/);
+});
+
+test('R3 tests-passed: latest run per env, zero-case elements fail', () => {
+  let d = readyDocs();
+  d.testRun.push({ id: 'R0', data: { id: 'R0', projectId: PRJ, env: 'dev', at: '2026-10-01T00:00:00Z', results: [{ caseId: 'T1', outcome: 'fail' }] } });
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'tests-passed').pass, true);   // older dev failure ignored
+  d = readyDocs(); d.testCase = d.testCase.filter(e => e.id !== 'CD9');
+  const c = check(E.readiness(d, PRJ, TODAY), 'tests-passed');
+  assert.equal(c.pass, false); assert.deepEqual(c.noCases, ['D9']);
+  assert.match(c.detail, /Payment hold list has no test cases\./);
+});
+
+function aba(s) { const d = s.split('').map(Number); return /^\d{9}$/.test(s) && (3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + d[2] + d[5] + d[8]) % 10 === 0; }
+test('R3 generateTests: every field, special characters, cross-field, ABA routing', () => {
+  const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
+  const cases = E.generateTests(d2);
+  d2.fields.forEach(f => assert.ok(cases.some(c => c.field === f.name), 'no cases for ' + f.name));
+  const bank = cases.filter(c => c.field === 'Bank name');
+  ["O'Neill Supply", 'Zoë Café', 'Ames & Sons', 'Acme Rockets 🚀', '  Acme Ltd  '].forEach(x => assert.ok(bank.some(c => c.input === x && c.kind === 'edge'), x));
+  const holder = cases.filter(c => c.field === 'Account holder' && c.context);
+  assert.deepEqual(holder.map(c => [c.expect, c.context['legal name'] === c.input]), [['accept', true], ['reject', false]]);
+  const rt = cases.filter(c => c.field === 'Routing number');
+  const validRt = rt.filter(c => c.kind === 'valid');
+  assert.ok(validRt.length >= 2 && validRt.every(c => aba(c.input) && c.expect === 'accept'));
+  const bad = rt.find(c => /ABA checksum fails/.test(c.note));
+  assert.ok(bad && /^\d{9}$/.test(bad.input) && !aba(bad.input) && bad.expect === 'reject');
+  // same-element cross-field: "Must be after Start date"
+  const dates = E.generateTests({ id: 'DX', fields: [{ name: 'Start date', type: 'date' }, { name: 'End date', type: 'date', rule: 'Must be after Start date' }] });
+  const cross = dates.filter(c => c.context);
+  assert.equal(cross.length, 2);
+  cross.forEach(c => { assert.ok('Start date' in c.context); assert.equal(c.expect === 'accept', c.input > c.context['Start date']); });
+});
+
+test('R3 specDrift plain English; row count from the profile doc; humanPattern', () => {
+  const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
+  const cols = E.profileCsv(CSV, {}).map(c => { const x = Object.assign({}, c); delete x.rows; return x; });  // server profiles may omit per-column rows
+  const drift = E.specDrift(d2, { rows: 4, columns: cols });
+  drift.forEach(x => assert.ok(!/undefined|NaN|9\{|A\{|a\{/.test(x.detail), x.detail));
+  assert.equal(drift.find(x => x.field === 'Bank name').detail, '1 of 4 bank names is empty; the spec says bank name is required.');
+  assert.equal(drift.find(x => x.field === 'Routing number' && x.issue === 'length-mismatch').detail, '1 of 4 routing numbers has 8 digits; the spec says 9.');
+  const tax = E.specDrift({ fields: [{ name: 'Tax ID (EIN)', format: '##-#######' }] }, { rows: 3, columns: E.profileCsv('tax_id\n12-3456789\n123456789\n98-7654321\n', {}) });
+  assert.equal(tax.find(x => x.issue === 'pattern-mismatch').detail, '1 of 3 tax IDs looks like 9 digits; the spec format is ##-####### (2 digits, a hyphen, 7 digits).');
+  assert.equal(E.humanPattern('9{8}'), '8 digits');
+  assert.equal(E.humanPattern('Aa{5} Aa{6}'), 'two capitalized words');
+  assert.equal(E.humanPattern('Aa{4}'), 'a capitalized word');
+  assert.equal(E.humanPattern('a{3} a{2} a{4}'), 'three lowercase words');
+  assert.equal(E.humanPattern('9{2}-9{7}'), '2 digits, a hyphen, 7 digits');
+  assert.equal(E.humanPattern('A{2}9{4}'), '2 capital letters, 4 digits');
+});
+
+test('R3 suggestWorkFromDiff: map order, owners, effort, chained dates and deps', () => {
+  const docs = deepFreeze(baseDocs());
+  const sug = E.suggestWorkFromDiff(docs, PRJ, TODAY);
+  assert.deepEqual(sug.map(s => [s.key, s.step, s.resolves || null]), [
+    ['sug-1', 's1', 'D1'], ['sug-2', 's1', 'D3'], ['sug-3', 's2', 'D8'], ['sug-4', 's5', null], ['sug-5', 'i4', 'D9'], ['sug-6', 'i4', null]]);
+  assert.equal(sug[0].title, 'Connect a live source for Vendor legal name & Tax ID');   // examples-only data gets a resolver too
+  assert.equal(sug[4].title, 'Make Payment hold list available');
+  assert.equal(sug[4].owner, 'ar');                              // data owner for resolvers
+  assert.equal(sug[5].owner, 'ps');                              // step owner otherwise
+  assert.deepEqual(sug[5].deps, ['sug-5']);
+  assert.ok(sug.every(s => s.effortDays === 2));
+  assert.deepEqual(sug.map(s => [s.start, s.due]), [
+    ['2026-11-04', '2026-11-06'], ['2026-11-06', '2026-11-08'], ['2026-11-08', '2026-11-10'],
+    ['2026-11-10', '2026-11-12'], ['2026-11-12', '2026-11-14'], ['2026-11-14', '2026-11-16']]);
+  // a step needing an unfinished existing resolver depends on it and starts after its forecast (W6 → Nov 11)
+  const d = baseDocs();
+  d.process[1].data.tobe.splice(1, 0, { id: 'i0', title: 'Check bank on file', owner: 'lp', data: ['D2'] });
+  d.dataElement.forEach(e => { if (e.data.avail === 'example') e.data.avail = 'live'; });
+  const s2 = E.suggestWorkFromDiff(d, PRJ, TODAY).find(s => s.step === 'i0');
+  assert.deepEqual(s2.deps, ['W6']);
+  assert.ok(s2.start >= '2026-11-11', s2.start);
+  // without a today argument dates anchor on the project's latest due date
+  assert.equal(E.suggestWorkFromDiff(docs, PRJ)[0].start, '2026-11-20');
 });

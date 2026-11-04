@@ -268,16 +268,16 @@ function seed(createdAtISODate) {
   work.forEach(w => add('workItem', w));
 
   add('grant', { id: 'G1', projectId: 'vendor-modernization', dataId: 'D4', env: 'dev', access: 'read',
-    reason: 'Build and test the ERP vendor write integration (W8)', requestedBy: 'dk', status: 'active', approvedBy: 'ar',
+    reason: 'Build and test the ERP vendor write integration', requestedBy: 'dk', status: 'active', approvedBy: 'ar',
     expires: addDays(day, 20), log: [{ at: at(-3, 14), by: 'dk', action: 'requested' }, { at: at(-3, 17), by: 'ar', action: 'approved' }, { at: at(-2, 9), by: 'dk', action: 'activated' }] });
   add('grant', { id: 'G2', projectId: 'vendor-modernization', dataId: 'D2', env: 'uat', access: 'read',
-    reason: 'UAT of bank capture and micro-deposit verification (W6, W7)', requestedBy: 'dk', status: 'requested',
+    reason: 'UAT of bank capture and micro-deposit verification', requestedBy: 'dk', status: 'requested',
     expires: addDays(day, 30), log: [{ at: at(-1, 21), by: 'dk', action: 'requested' }] });
   add('grant', { id: 'G3', projectId: 'vendor-modernization', dataId: 'D1', env: 'dev', access: 'read',
-    reason: 'Prototype the W-9 upload parser (W1)', requestedBy: 'mc', status: 'expired', approvedBy: 'ps',
+    reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ps',
     expires: addDays(day, -3), log: [{ at: at(-28, 11), by: 'mc', action: 'requested' }, { at: at(-27, 9), by: 'ps', action: 'approved' }, { at: at(-3, 0), by: 'system', action: 'expired' }] });
   add('grant', { id: 'G4', projectId: 'access-review-automation', dataId: 'D7', env: 'dev', access: 'read',
-    reason: 'Join entitlements to managers for review campaigns (A2)', requestedBy: 'dk', status: 'active', approvedBy: 'ps',
+    reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ps',
     expires: addDays(day, 14), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ps', action: 'approved' }] });
 
   add('approval', { id: 'AP1', projectId: 'vendor-modernization', bu: 'Procurement', approver: 'mc', decision: 'approved',
@@ -287,7 +287,7 @@ function seed(createdAtISODate) {
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract slips past legal review', impact: 'high', likelihood: 'med', owner: 'ps',
     mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'open' });
-  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank capture (W6) not started; blocks micro-deposits and ERP write', impact: 'high', likelihood: 'high', owner: 'lp',
+  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank capture not started; blocks micro-deposits and ERP write', impact: 'high', likelihood: 'high', owner: 'lp',
     mitigation: 'Daily check-in with Treasury; pull Integration Eng. in to pair.', status: 'open' });
   add('risk', { id: 'R3', projectId: 'vendor-modernization', title: 'UAT window overlaps quarter-end close', impact: 'med', likelihood: 'med', owner: 'ta',
     mitigation: 'Book AP testers now; keep a fallback UAT week after close.', status: 'open' });
@@ -301,6 +301,8 @@ function seed(createdAtISODate) {
   tc('TC4', 'D2', 'Account holder', 'invalid', '', 'reject', 'Required value is blank');
   tc('TC5', 'D1', 'Tax ID (EIN)', 'valid', '12-3456789', 'accept', 'Matches ##-#######');
   tc('TC6', 'D1', 'Tax ID (EIN)', 'invalid', '123456789', 'reject', 'Missing hyphen');
+  tc('TC7', 'D7', 'Cost center', 'valid', 'CC1042', 'accept', 'Matches CC####');
+  tc('TC8', 'D7', 'Cost center', 'invalid', '1042', 'reject', 'Missing CC prefix');
 
   add('testRun', { id: 'TR1', projectId: 'vendor-modernization', env: 'dev', at: at(-1, 18), by: 'dk', results: [
     { caseId: 'TC1', outcome: 'pass', note: '' }, { caseId: 'TC2', outcome: 'pass', note: '' },
@@ -308,29 +310,30 @@ function seed(createdAtISODate) {
     { caseId: 'TC5', outcome: 'pass', note: '' }, { caseId: 'TC6', outcome: 'pass', note: '' }] });
 
   add('comment', { id: 'C1', ref: 'workItem:W6', author: 'mc', at: at(-1, 20), mentions: ['ta'],
-    text: '@Tom Alvarez W6 is due today and has not started, and W7, W8 and W10 all wait on it. Can we escalate with Treasury?' });
+    text: '@Tom Alvarez Bank capture is due today and has not started; micro-deposit verification, the ERP write and the remit-to check all wait on it. Can we escalate with Treasury?' });
   add('comment', { id: 'C2', ref: 'process:vendor-onboarding', author: 'ps', at: at(-1, 15), mentions: [],
-    text: 'Risk-tier thresholds are drafted. I need sign-off on them before the EDD checklist (W5) can start.' });
+    text: 'Risk-tier thresholds are drafted. I need sign-off on them before the EDD checklist can start.' });
 
-  add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on W6: Stand up structured bank capture', ref: 'workItem:W6', at: at(-1, 20), read: false });
-  add('notification', { id: 'N2', to: 'lp', text: 'Dev Kumar requested UAT read access to Bank remittance details (D2)', ref: 'grant:G2', at: at(-1, 21), read: false });
+  add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on "Stand up structured bank capture"', ref: 'workItem:W6', at: at(-1, 20), read: false });
+  add('notification', { id: 'N2', to: 'lp', text: 'Dev Kumar requested UAT read access to Bank remittance details', ref: 'grant:G2', at: at(-1, 21), read: false });
 
+  const md = n => new Date(addDays(day, n) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const ev = (n, hh, actor, action, ref, summary) => ({ at: at(n, hh), actor, action, ref, summary, seeded: true });
   const events = [
     ev(-30, 15, 'ta', 'create', 'project:vendor-modernization', 'Created project Vendor Onboarding Modernization'),
     ev(-30, 16, 'ta', 'baseline', 'project:vendor-modernization', 'Saved baseline "Kickoff plan"'),
-    ev(-28, 11, 'mc', 'request', 'grant:G3', 'Requested dev read access to D1'),
-    ev(-15, 17, 'mc', 'update', 'workItem:W1', 'W1 marked done'),
-    ev(-7, 10, 'ps', 'update', 'workItem:W2', 'W2 started'),
-    ev(-5, 16, 'dk', 'update', 'workItem:W9', 'W9 marked done'),
-    ev(-3, 17, 'ar', 'approve', 'grant:G1', 'Approved dev read access to D4'),
-    ev(-3, 0, 'system', 'expire', 'grant:G3', 'Grant G3 expired'),
+    ev(-28, 11, 'mc', 'request', 'grant:G3', 'Requested Dev read access to Vendor legal name & Tax ID'),
+    ev(-15, 17, 'mc', 'update', 'workItem:W1', 'Work item "Launch vendor portal W-9/COI upload" marked done'),
+    ev(-7, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign screening vendor contract" started'),
+    ev(-5, 16, 'dk', 'update', 'workItem:W9', 'Work item "Notification automation" marked done'),
+    ev(-3, 17, 'ar', 'approve', 'grant:G1', 'Approved Dev read access to Vendor master record'),
+    ev(-3, 0, 'system', 'expire', 'grant:G3', 'Dev read access to Vendor legal name & Tax ID expired'),
     ev(-2, 16, 'mc', 'approve', 'approval:AP1', 'Procurement sign-off (step-up verified)'),
     ev(-1, 15, 'ps', 'comment', 'process:vendor-onboarding', 'Commented on Vendor Onboarding'),
     ev(-1, 14, 'dk', 'approve', 'approval:AP2', 'IT sign-off on access review (step-up verified)'),
-    ev(-1, 18, 'dk', 'create', 'testRun:TR1', 'Dev test run: 5 pass, 1 fail'),
-    ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on W6 and mentioned Tom Alvarez'),
-    ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to D2'),
+    ev(-1, 18, 'dk', 'create', 'testRun:TR1', `Dev run, ${md(-1)}: 5 pass, 1 fail`),
+    ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on work item "Stand up structured bank capture" and mentioned Tom Alvarez'),
+    ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to Bank remittance details'),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
   enrichR2(docs, day, at);
@@ -389,11 +392,12 @@ function enrichR2(docs, day, at) {
     { id: 'uat-access-review-r3', pid: 'access-review', step: 'r3', title: 'Auto-remove uncertified access',
       given: 'One rejected account', when: 'The removal job runs', then: 'Access is removed and the evidence pack lists it', data: [] },
   ];
+  const d7Cases = ['TC7', 'TC8'].map(caseId => ({ caseId, outcome: 'pass', note: '' }));
   /* vendor-modernization intentionally has no cutover plan: it shows as an open gate item */
   docs.testRun.push({ id: 'TR2', data: { id: 'TR2', projectId: 'access-review-automation', env: 'dev', at: at(-4, 15), by: 'dk',
-    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '' })) } });
+    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '' })).concat(d7Cases) } });
   docs.testRun.push({ id: 'TR3', data: { id: 'TR3', projectId: 'access-review-automation', env: 'uat', at: at(-2, 15), by: 'ps',
-    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '', evidence: 'Screenshot pack in UAT folder' })) } });
+    results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '', evidence: 'Screenshot pack in UAT folder' })).concat(d7Cases) } });
 }
 
 module.exports = { seed, DOC_TYPES, addDays, dayOf };

@@ -1,7 +1,7 @@
 /* PMOFlow — workspace home (stream P). Route: / */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, av, pname, LOCK } from '../ui.js';
-import { eng, forecasts, flatSteps, projectStats, rag, ragBadge, dataName, rerender, finishInfo, dueLine } from './project.js';
+import { forecasts, flatSteps, projectStats, rag, ragBadge, dataName, rerender, dueLine, effAvail, diffCounts, gateInfo, newProject } from './project.js';
 
 let scope = 'mine'; /* 'mine' | 'all' */
 
@@ -73,24 +73,24 @@ function attnHTML() {
 
 function processTile(p) {
   const st = flatSteps(p.tobe);
-  const dp = eng('diffProcess', { nodes: {} }, p) || { nodes: {} };
-  const kinds = Object.values(dp.nodes || {});
-  const nw = kinds.filter(k => k === 'new').length, chg = kinds.filter(k => k === 'changed').length;
-  const dl = new Set(st.flatMap(s => s.data || []));
-  const miss = [...dl].filter(d => (store.get('dataElement', d) || {}).avail === 'missing').length;
+  const dc = diffCounts(p); /* R3: every count from diffSummary */
+  const dl = new Set(st.flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])]));
+  const eff = [...dl].map(effAvail); /* R3: effective state, so a finished resolver counts as live */
+  const miss = eff.filter(e => e === 'missing').length, ex = eff.filter(e => e === 'example').length;
   return `<a class="tile" href="${link('/process/' + encodeURIComponent(p.id))}" data-link><div class="pmo-tile-h"><h4>${esc(p.name)}</h4>${p.version ? `<span class="chip">v${esc(p.version)}</span>` : ''}</div>
     ${p.desc ? `<p>${esc(p.desc)}</p>` : ''}
-    <div class="chips"><span class="chip">${st.length} steps</span><span class="chip">${nw} new + ${chg} changed vs as-is</span><span class="chip">${dl.size} data elements</span>${miss ? `<span class="chip block">${LOCK} ${miss} missing</span>` : ''}</div>
+    <div class="chips"><span class="chip">${st.length} steps</span><span class="chip" data-diffcount>${dc.new} new + ${dc.changed} changed vs as-is</span><span class="chip">${dl.size} data elements</span>${miss ? `<span class="chip block" data-miss>${LOCK} ${miss} missing</span>` : ''}${ex ? `<span class="chip pmo-amber" data-ex><i class="pmo-adot"></i>${ex} examples only</span>` : ''}</div>
     <div class="pmo-tile-f">${av(p.owner)}<span class="hint">${esc(pname(p.owner))}</span></div></a>`;
 }
 function projectTile(j) {
-  const s = projectStats(j.id), r = rag(j, s), fi = finishInfo(j, s);
-  const over = fi.over;
+  const s = projectStats(j.id), r = rag(j, s), gi = gateInfo(j, s), fi = gi.fi;
+  const over = gi.k === 'forecast' && fi.over;
+  const when = gi.k === 'live' ? esc(gi.label) : gi.k === 'awaiting' ? `Work done · awaiting go-live${gi.blocking ? ` (${gi.blocking} gate check${gi.blocking === 1 ? '' : 's'} blocking)` : ''}` : `Forecast ${esc(fmt(fi.date))} · target ${esc(fmt(j.target))}`;
   return `<a class="tile" href="${link('/project/' + encodeURIComponent(j.id))}" data-link><div class="pmo-tile-h"><h4>${esc(j.name)}</h4>${ragBadge(r)}</div>
     ${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
     <div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div>
     <div class="chips"><span class="chip">${s.done}/${s.total} work done</span>${s.late + s.slip ? `<span class="chip block">${s.late} late · ${s.slip} slipping</span>` : ''}
-      <span class="chip ${over ? 'block' : ''}">${fi.label} ${esc(fmt(fi.date))} · target ${esc(fmt(j.target))}</span><span class="chip">${(j.processes || []).length} linked process${(j.processes || []).length === 1 ? '' : 'es'}</span></div>
+      <span class="chip ${over ? 'block' : gi.k === 'awaiting' ? 'pmo-amber' : ''}" data-finish>${when}</span><span class="chip">${(j.processes || []).length} linked process${(j.processes || []).length === 1 ? '' : 'es'}</span></div>
     <div class="pmo-tile-f">${av(j.owner)}<span class="hint">${esc(pname(j.owner))}</span></div></a>`;
 }
 
@@ -98,15 +98,16 @@ export function render() {
   const procs = store.list('process'), projects = store.list('project');
   return `<section class="hdr pmo-hero"><div><div class="crumbs">Northwind Traders · Workspace</div><h1>Process-first planning</h1>
       <p>Analysts design the process; the project is the work that gets you from how it runs today to the designed version. One map for both, with blockers computed from the data each step needs.</p></div>
-    <div class="hdr-side"><div class="pmo-hero-acts"><a class="btn primary" href="${link('/new')}" data-link>+ New workflow</a><a class="btn" href="${link('/import')}" data-link>Import an SOP</a><a class="btn" href="${link('/portfolio')}" data-link>Portfolio</a></div></div></section>
+    <div class="hdr-side"><div class="pmo-hero-acts"><a class="btn primary" href="${link('/new')}" data-link>+ New workflow</a><button class="btn primary" data-new-project>+ New project</button><a class="btn" href="${link('/import')}" data-link>Import an SOP</a><a class="btn" href="${link('/portfolio')}" data-link>Portfolio</a></div></div></section>
     ${attnHTML()}
     <div class="sect"><h2>Processes</h2><span class="hint">As-is, to-be and the diff, with data requirements and owners</span></div>
     ${procs.length ? `<div class="home-grid">${procs.map(processTile).join('')}</div>` : `<div class="card" style="margin-top:12px"><div class="empty">No processes yet. <a href="${link('/new')}" data-link style="color:var(--accent)">Create a workflow</a> or <a href="${link('/import')}" data-link style="color:var(--accent)">import an SOP</a>.</div></div>`}
-    <div class="sect"><h2>Projects</h2><span class="hint">Work items attached to to-be steps, with dependencies and forecasts</span></div>
-    ${projects.length ? `<div class="home-grid">${projects.map(projectTile).join('')}</div>` : '<div class="card" style="margin-top:12px"><div class="empty">No projects yet.</div></div>'}`;
+    <div class="sect"><h2>Projects</h2><span class="hint">Work items attached to to-be steps, with dependencies and forecasts</span><button class="btn sm pmo-sect-btn" data-new-project>+ New project</button></div>
+    ${projects.length ? `<div class="home-grid">${projects.map(projectTile).join('')}</div>` : '<div class="card" style="margin-top:12px"><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>'}`;
 }
 
 export function bind(root) {
+  root.querySelectorAll('[data-new-project]').forEach(b => b.addEventListener('click', () => newProject()));
   root.querySelectorAll('[data-scope]').forEach(b => b.addEventListener('click', () => { scope = b.dataset.scope; rerender(); }));
   root.querySelectorAll('[data-open-bell]').forEach(b => b.addEventListener('click', () => { const bell = document.getElementById('bell'); if (bell) bell.click(); }));
 }

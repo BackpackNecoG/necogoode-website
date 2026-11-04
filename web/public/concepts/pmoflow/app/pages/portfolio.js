@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, effortOf, BUG } from './project.js';
+import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -12,21 +12,25 @@ const dayDiff = (a, b) => Math.round((new Date(a + 'T12:00:00') - new Date(b + '
 
 /* ---------------------------------------------------------------- projects */
 function projectsHTML(projects) {
-  if (!projects.length) return '<div class="card"><h3>Projects</h3><div class="empty">No projects yet.</div></div>';
+  if (!projects.length) return '<div class="card"><h3>Projects</h3><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>';
   const rows = projects.map(j => {
-    const s = projectStats(j.id), r = rag(j, s), fi = finishInfo(j, s);
+    const s = projectStats(j.id), r = rag(j, s), gi = gateInfo(j, s), fi = gi.fi;
     const buf = fi.date && j.target ? dayDiff(j.target, fi.date) : null;
+    /* Gate-aware: never "Finished · Nd early" while go-live is still pending the readiness gate. */
+    const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">target ${esc(fmt(j.target))}</div>`
+      : gi.k === 'awaiting' ? `<b>Work done ${esc(fmt(fi.date))}</b><div class="hint"><a href="${link('/release/' + encodeURIComponent(j.id))}" data-link class="${gi.blocking ? 'fail' : ''}">Awaiting go-live${gi.blocking ? ` · ${gi.blocking} blocking` : ''} ›</a></div>`
+      : `<b style="color:${buf != null && buf < 0 ? 'var(--late)' : 'inherit'}">${esc(fmt(fi.date))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${buf == null ? '—' : buf < 0 ? `<span class="fail">${-buf}d over</span>` : `${buf}d buffer`}</div>`;
     const rel = store.list('release', x => x.projectId === j.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
     return `<tr class="click" data-go="/project/${esc(j.id)}">
       <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} ${esc(pname(j.owner))}</div></td>
       <td>${ragBadge(r)}</td>
       <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
-      <td class="pmo-nowrap"><b style="color:${buf != null && buf < 0 ? 'var(--late)' : 'inherit'}">${fi.done ? 'Finished ' : ''}${esc(fmt(fi.date))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${buf == null ? '—' : buf < 0 ? `<span class="fail">${-buf}d over</span>` : fi.done ? `${buf}d early` : `${buf}d buffer`}</div></td>
+      <td class="pmo-nowrap" data-when>${when}</td>
       <td class="pmo-nowrap"><span class="${s.late ? 'fail' : ''}"><b>${s.late}</b> late</span> · <span class="${s.slip ? 'warn' : ''}"><b>${s.slip}</b> slipping</span></td>
       <td>${j.status === 'live' ? `<span class="badge b-done">Live</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not released ›</a>`}</td></tr>`;
   }).join('');
-  return `<div class="card"><h3>Projects <span class="n">${projects.length}</span></h3>
-    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Forecast or finish / target</th><th>Schedule</th><th>Release</th></tr></thead><tbody>${rows}</tbody></table></div>
+  return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length}</span><button class="btn sm primary" data-new-project>+ New project</button></h3>
+    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Forecast / target</th><th>Schedule</th><th>Release</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="pmo-rule"><span class="rag rag-red"><i></i>Red</span><span class="rag rag-amber"><i></i>Amber</span><span class="rag rag-green"><i></i>Green</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
 }
 
@@ -265,6 +269,7 @@ export function render() {
 
 export function bind(root) {
   const on = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', e => { e.preventDefault(); fn(el); }));
+  on('[data-new-project]', () => newProject());
   on('[data-add-risk]', () => editRisk(null));
   on('[data-edit-risk]', el => { const r = store.get('risk', el.dataset.editRisk); if (r) editRisk(r); });
   on('[data-del-risk]', el => { const r = store.get('risk', el.dataset.delRisk); if (r) deleteRisk(r); });

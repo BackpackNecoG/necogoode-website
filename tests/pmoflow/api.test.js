@@ -111,8 +111,9 @@ test('PUT/DELETE doc persist and append events (newest first)', async () => {
   r = await call('GET', `ws/${ws}/events`, null, { ref: 'workItem:W99' });
   assert.equal(r.status, 200);
   assert.equal(r.body.events.length, 2);
-  assert.equal(r.body.events[0].summary, 'Started W99');
-  assert.equal(r.body.events[1].summary, 'Added W99');
+  /* R3: ids in client summaries are replaced by names */
+  assert.equal(r.body.events[0].summary, 'Started Link contract to vendor ID');
+  assert.equal(r.body.events[1].summary, 'Added Link contract to vendor ID');
   r = await call('GET', `ws/${ws}/events`, null, { limit: '200' });
   assert.ok(r.body.events.length >= 14, 'seeded history plus new events');
   for (let i = 1; i < r.body.events.length; i++) assert.ok(r.body.events[i - 1].at >= r.body.events[i].at, 'newest first');
@@ -196,13 +197,15 @@ test('AI endpoints fall back to rules when Azure OpenAI is not configured', asyn
   r = await call('POST', `ws/${ws}/ai/sop-import`, { text: sop });
   assert.equal(r.status, 200);
   assert.equal(r.body.source, 'rules');
-  assert.equal(r.body.nodes.length, 5);
-  assert.equal(r.body.nodes[0].owner, 'mc');
-  assert.deepEqual(r.body.nodes[0].data, ['D1']);
-  assert.equal(r.body.nodes[1].owner, 'ps');
-  assert.equal(r.body.nodes[2].owner, 'lp');
-  assert.deepEqual(r.body.nodes[2].data, ['D2']);
-  assert.equal(r.body.nodes[4].owner, undefined, '"Dev environment" must not map to a person');
+  assert.equal(r.body.nodes[0].type, 'trigger');
+  const steps = r.body.nodes.slice(1);
+  assert.equal(steps.length, 5);
+  assert.equal(steps[0].owner, 'mc');
+  assert.deepEqual(steps[0].data, ['D1']);
+  assert.equal(steps[1].owner, 'ps');
+  assert.equal(steps[2].owner, 'lp');
+  assert.deepEqual(steps[2].data, ['D2']);
+  assert.equal(steps[4].owner, undefined, '"Dev environment" must not map to a person');
   assert.equal(typeof r.body.notes, 'string');
 
   r = await call('POST', `ws/${ws}/ai/suggest-work`, { projectId: 'vendor-modernization' });
@@ -428,29 +431,182 @@ test('SOP import rules parser (grader cases 5 and 6)', () => {
     '   - Confirm the payment file totals',
   ].join('\n');
   const r = ai.sopRules(sop, docs);
-  const titles = r.nodes.map(n => n.title);
-  assert.equal(r.nodes.length, 5, JSON.stringify(titles));
+  assert.deepEqual(r.nodes[0], { type: 'trigger', title: 'Process starts' });
+  const rs = r.nodes.slice(1);
+  const titles = rs.map(n => n.title);
+  assert.equal(rs.length, 5, JSON.stringify(titles));
   assert.ok(!titles.some(t => /reimbursement sop|purpose|scope|revision|owner:/i.test(t)), 'title/purpose/scope/owner/revision skipped');
-  assert.deepEqual(r.nodes[0].subs.map(x => x.title), ['Attach itemized receipts', 'Code each line to a cost center'], 'lettered items nest');
-  const dec = r.nodes[2];
+  assert.deepEqual(rs[0].subs.map(x => x.title), ['Attach itemized receipts', 'Code each line to a cost center'], 'lettered items nest');
+  const dec = rs[2];
   assert.equal(dec.type, 'decision');
   assert.match(dec.title, /\$5,000\?$/);
   assert.deepEqual(dec.branches.map(b => b.label), ['Yes', 'No']);
   assert.equal(dec.branches[0].nodes[0].title, 'The Finance Director approves');
   assert.deepEqual(dec.branches[1].nodes, []);
-  const bank = r.nodes[3];
+  const bank = rs[3];
   assert.equal(bank.data, undefined, 'employee bank details must not link to vendor Bank remittance details');
   assert.equal(bank.owner, 'ar', 'BU match');
   assert.ok(r.newData.some(x => x.name === 'Employee bank details' && /Bank remittance details/.test(x.reason)));
-  assert.equal(r.nodes[4].owner, 'lp', 'full-name match');
-  assert.equal(r.nodes[4].subs[0].title, 'Confirm the payment file totals');
-  assert.equal(r.nodes[1].owner, undefined, '"Manager" is neither a full name nor a BU');
+  assert.equal(rs[4].owner, 'lp', 'full-name match');
+  assert.equal(rs[4].subs[0].title, 'Confirm the payment file totals');
+  assert.equal(rs[1].owner, undefined, '"Manager" is neither a full name nor a BU');
   /* strong matches still link */
   const ok = ai.sopRules('1. Leo Park records the vendor bank remittance details\n2. Vendor uploads the certificate of insurance', docs);
-  assert.deepEqual(ok.nodes[0].data, ['D2']);
-  assert.deepEqual(ok.nodes[1].data, ['D3']);
+  const oks = ok.nodes.slice(1);
+  assert.deepEqual(oks[0].data, ['D2']);
+  assert.deepEqual(oks[1].data, ['D3']);
   /* other condition phrasings */
   const c = ai.sopRules('1. Approval required for new vendors over $10,000\n2. Pay the invoice when the amount exceeds the PO\n3. File the receipt', docs);
-  assert.deepEqual(c.nodes.map(n => n.type), ['decision', 'decision', 'step']);
-  assert.equal(c.nodes[1].branches[0].nodes[0].title, 'Pay the invoice');
+  const cs = c.nodes.slice(1);
+  assert.deepEqual(cs.map(n => n.type), ['decision', 'decision', 'step']);
+  assert.equal(cs[1].branches[0].nodes[0].title, 'Pay the invoice');
+});
+
+/* ------------------------------ Round 3 ------------------------------ */
+const hasR3Engine = !!(engine && typeof engine.effectiveAvail === 'function');
+
+test('R3 go-live: resolved data set live, checks stored, promotion does not stale approvals', { skip: !hasR3Engine && 'R3 engine (effectiveAvail) not present yet' }, async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  /* make D7 examples-only with a done resolver (A1); keep A1's old updatedAt so IT's approval stays fresh */
+  await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: Object.assign({}, find(st, 'dataElement', 'D7').data, { avail: 'example' }) });
+  await call('PUT', `ws/${ws}/doc/workItem/A1`, { actor: 'dk', data: Object.assign({}, find(st, 'workItem', 'A1').data, { resolves: 'D7', updatedAt: '2020-01-01T00:00:00.000Z' }) });
+  const a4 = find(st, 'workItem', 'A4').data;
+  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today }) });
+  const at = new Date(Date.now() + 1000).toISOString();
+  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  st = await state(ws);
+  assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'live');
+  const gate = engine.readiness(st.docs, 'access-review-automation', st.today);
+  assert.equal(gate.pass, true, JSON.stringify(gate.checks.filter(c => !c.pass)));
+  const r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(Array.isArray(r.body.release.checks) && r.body.release.checks.length >= 6);
+  assert.ok(r.body.release.checks.every(c => c.id === 'exceptions' || c.pass));
+  st = await state(ws);
+  assert.equal(find(st, 'dataElement', 'D7').data.avail, 'live');
+  assert.equal(find(st, 'process', 'access-review').data.updatedAt, undefined, 'promotion is not stamped as an edit');
+  const after = engine.readiness(st.docs, 'access-review-automation', st.today);
+  assert.equal(after.pass, true);
+  const ev = await call('GET', `ws/${ws}/events`, null, { ref: 'dataElement:D7' });
+  assert.match(ev.body.events[0].summary, /^Approver matrix set live/);
+});
+
+test('R3 status report: RAG agrees with the headline; risk reconciliation', async () => {
+  const ws = await newWs();
+  let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  assert.equal(r.body.rag, 'red');
+  assert.equal(r.body.facts.rag.status, 'red');
+  assert.match(r.body.headline, /^Red: /);
+  assert.ok(!/on track/i.test(r.body.headline));
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
+  assert.equal(r.body.rag, 'green');
+  assert.match(r.body.headline, /^Green: .*on track/);
+  /* amber: under 7 days of buffer, nothing late */
+  let st = await state(ws);
+  const proj = find(st, 'project', 'access-review-automation').data;
+  const finish = r.body.facts.stats.finish;
+  const target = new Date(Date.parse(finish + 'T12:00:00Z') + 3 * 86400000).toISOString().slice(0, 10);
+  await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target }) });
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
+  assert.equal(r.body.rag, 'amber');
+  assert.match(r.body.headline, /^Amber: /);
+  assert.ok(/buffer/.test(r.body.summary));
+  /* risk reconciliation: R1 links W2+W3; finish both */
+  for (const id of ['W2', 'W3']) {
+    const w = find(st, 'workItem', id).data;
+    await call('PUT', `ws/${ws}/doc/workItem/${id}`, { actor: 'ps', data: Object.assign({}, w, { status: 'done', doneAt: st.today }) });
+  }
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  const rk = r.body.facts.risks.find(x => x.title.startsWith('Screening vendor contract'));
+  assert.equal(rk.likelyMitigated, true);
+  assert.ok(r.body.risks.some(x => x.startsWith('Screening vendor contract') && /likely mitigated/.test(x) && /confirm and close/.test(x)));
+});
+
+test('R3 AI path: a headline that contradicts the RAG is corrected (mocked Azure OpenAI)', async () => {
+  const ws = await newWs();
+  const saved = global.fetch;
+  Object.assign(process.env, { AZURE_OPENAI_ENDPOINT: 'https://example.invalid', AZURE_OPENAI_KEY: 'k', AZURE_OPENAI_DEPLOYMENT: 'd' });
+  let sentBody = null;
+  try {
+    const st = await state(ws);   /* load state before mocking fetch (storage uses fetch too) */
+    global.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+      headline: 'Green: everything on track (W6 fine)', summary: 'All good with D2.', highlights: ['W1 done'], risks: [], asks: [] }) } }] }) }; };
+    const r = await ai.run('status-report', { projectId: 'vendor-modernization' }, st.docs, st.today);
+    assert.equal(r.body.source, 'ai');
+    assert.equal(r.body.rag, 'red');
+    assert.match(r.body.headline, /^Red: /);
+    assert.ok(!r.body.summary.includes('D2') && !r.body.highlights[0].includes('W1'), 'ids scrubbed from AI output');
+    assert.ok(sentBody.messages[0].content.includes('rag status'));
+    assertNoIds(JSON.parse(sentBody.messages[1].content), st.docs, 'facts sent to the model');
+  } finally {
+    global.fetch = saved;
+    ['AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_KEY', 'AZURE_OPENAI_DEPLOYMENT'].forEach(k => delete process.env[k]);
+  }
+});
+
+test('R3 event summaries use names, never ids', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, find(st, 'grant', 'G2').data, { status: 'approved', approvedBy: 'lp' }) });
+  await call('PUT', `ws/${ws}/doc/testRun/TR7`, { actor: 'ps', data: { projectId: 'vendor-modernization', env: 'uat', at: '2026-11-04T15:00:00.000Z', by: 'ps', results: [] } });
+  await call('PUT', `ws/${ws}/doc/workItem/W5`, { actor: 'ps', summary: 'Moved W5 after W4 and D8 review', data: find(st, 'workItem', 'W5').data });
+  await call('DELETE', `ws/${ws}/doc/risk/R3`, { actor: 'ta' });
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '500' })).body.events;
+  const s = ref => ev.find(e => e.ref === ref).summary;
+  assert.equal(s('grant:G2'), 'Updated UAT read access to Bank remittance details');
+  assert.equal(s('testRun:TR7'), 'Created UAT run, Nov 4');
+  assert.equal(s('workItem:W5'), 'Moved EDD checklist & sign-off form after Define risk-tier scoring rules and Vendor risk tier review');
+  assert.equal(s('risk:R3'), 'Deleted risk "UAT window overlaps quarter-end close"');
+  st = await state(ws);
+  assertNoIds(ev.map(e => e.summary), st.docs, 'event summaries (incl. seeded)');
+  assertNoIds(st.docs.notification.map(n => n.data.text).concat(st.docs.comment.map(c => c.data.text)), st.docs, 'seeded notification/comment text');
+  assert.equal(find(st, 'notification', 'N2').data.to, 'lp');
+});
+
+test('R3 SOP rules parser: reviewer repro, else->No, parallel, role aliases, systems, trigger', () => {
+  const docs = seed('2026-11-04').docs;
+  /* reviewer repro */
+  let r = ai.sopRules('1. Employee submits the expense report\n2. Manager reviews and approves. If over $5,000, Finance Director must also approve.\n3. AP clerk pays the expense', docs);
+  let n = r.nodes;
+  assert.deepEqual(n.map(x => x.type), ['trigger', 'step', 'step', 'decision', 'step']);
+  assert.equal(n[2].title, 'Manager reviews and approves', 'main step stays top level');
+  assert.equal(n[3].title, 'Amount over $5,000?');
+  assert.deepEqual(n[3].branches[0].nodes.map(x => x.title), ['Finance Director approves'], 'conditional action is kept');
+  assert.deepEqual(n[3].branches[1].nodes, []);
+  assert.equal(n[4].owner, 'ar', 'AP clerk -> Accounts Payable');
+  assert.deepEqual(n[0], { type: 'trigger', title: 'Process starts' }, 'no stated start: generic trigger, not step 1');
+  /* else -> No, stated trigger, systems, aliases, parallel */
+  r = ai.sopRules([
+    'Invoice Approval SOP',
+    'The process starts when an invoice arrives in the AP inbox.',
+    '1. AP clerk keys the invoice into NetSuite',
+    '2. If the PO matches, the treasury analyst schedules payment. Otherwise, the AP clerk emails the requester.',
+    '3. At the same time, Compliance screens the vendor and IT archives the invoice in SharePoint',
+    '4. Leo Park releases the payment run',
+    '5. Simultaneously, the compliance officer files the evidence in Teams',
+    '6. If the amount is over $10,000, the controller approves',
+    '7. Else, close the request in DocuSign',
+  ].join('\n'), docs);
+  n = r.nodes;
+  assert.deepEqual(n[0], { type: 'trigger', title: 'An invoice arrives in the AP inbox' });
+  assert.equal(n[1].system, 'NetSuite');
+  assert.equal(n[1].owner, 'ar');
+  assert.equal(n[2].type, 'decision');
+  assert.equal(n[2].branches[0].nodes[0].owner, 'lp', 'treasury analyst -> Treasury');
+  assert.equal(n[2].branches[1].nodes[0].title, 'The AP clerk emails the requester', 'otherwise -> No');
+  assert.equal(n[3].type, 'parallel');
+  assert.deepEqual(n[3].branches.map(b => b.nodes[0].owner), ['ps', 'dk']);
+  assert.equal(n[3].branches[1].nodes[0].system, 'SharePoint');
+  assert.equal(n[4].type, 'parallel', 'single-clause "simultaneously" pairs with the previous step');
+  assert.deepEqual(n[4].branches.map(b => b.nodes[0].owner), ['lp', 'ps']);
+  assert.equal(n[4].branches[1].nodes[0].system, 'Teams');
+  assert.equal(n[5].type, 'decision');
+  assert.equal(n[5].title, 'The amount is over $10,000?');
+  assert.equal(n[5].branches[1].nodes[0].system, 'DocuSign', 'else -> No of the preceding decision');
+  assert.ok(!n.some(x => x.title === 'Invoice Approval SOP'));
+  /* "In parallel:" with lettered branches */
+  r = ai.sopRules('1. Vendor signs the contract\n2. In parallel:\n   a. Treasury sets up the bank account\n   b. Procurement activates the contract', docs);
+  assert.equal(r.nodes[2].type, 'parallel');
+  assert.deepEqual(r.nodes[2].branches.map(b => b.label), ['Treasury', 'Procurement']);
 });
