@@ -36,12 +36,14 @@ function firstProcess() { const p = store.list('process')[0]; return p ? p.id : 
 
 function renderChrome(active) {
   const prj = firstProject(), proc = firstProcess();
-  const items = [['home', '/', 'Workspace'], ['process', '/processes', 'Processes'], ['project', '/project/' + prj, 'Project'],
-    ['release', '/release/' + prj, 'Release'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio'], ['dashboard', '/dashboard', 'Dashboard']];
+  const items = [['home', '/', 'Home'], ['process', '/processes', 'Processes'], ['project', '/project/' + prj, 'Projects'],
+    ['release', '/release/' + prj, 'Launch'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio']]
+    .concat(store.advanced ? [['dashboard', '/dashboard', 'Dashboard']] : []);
   document.getElementById('nav').innerHTML = items.map(([k, p, l]) => `<a href="${link(p)}" data-link class="${active === k ? 'on' : ''}">${l}</a>`).join('');
   document.getElementById('brand').setAttribute('href', link('/'));
   const sel = document.getElementById('persona');
   sel.innerHTML = store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === store.state.me ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('');
+  const adv = document.getElementById('adv'); if (adv) adv.checked = store.advanced;
   const unread = store.list('notification', n => n.to === store.state.me && !n.read).length;
   const bn = document.getElementById('bellN'); bn.hidden = !unread; bn.textContent = unread;
 }
@@ -101,6 +103,7 @@ document.addEventListener('click', async e => {
     if (r.action === 'reset') { await store.reset(); toast('Demo data reset'); }
   }
 });
+document.getElementById('adv').addEventListener('change', e => { store.setAdvanced(e.target.checked); toast(e.target.checked ? 'Advanced tools shown' : 'Simple view'); });
 document.getElementById('persona').addEventListener('change', e => { store.setMe(e.target.value); toast('Now viewing as ' + e.target.selectedOptions[0].text.split(' — ')[0]); });
 window.addEventListener('popstate', render);
 window.addEventListener('pmo:route', render);

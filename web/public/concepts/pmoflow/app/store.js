@@ -5,6 +5,7 @@
 const API = '/api/pmoflow';
 const WS_KEY = 'pmoflow.ws';
 const ME_KEY = 'pmoflow.me';
+const ADV_KEY = 'pmoflow.advanced';
 
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } }
@@ -53,6 +54,10 @@ export const store = {
   },
 
   setMe(id) { store.state.me = id; lsSet(ME_KEY, id); store.emit(); },
+
+  /* Simple by default; advanced tools (EV, sprints, BPMN, versions, coverage matrix...) only when the user opts in. */
+  advanced: lsGet(ADV_KEY) === '1',
+  setAdvanced(v) { store.advanced = !!v; lsSet(ADV_KEY, v ? '1' : '0'); store.emit(); },
 
   list(type, fn) { const arr = (store.state.docs[type] || []).map(d => d.data); return fn ? arr.filter(fn) : arr; },
   get(type, id) { const d = (store.state.docs[type] || []).find(x => x.id === id); return d ? d.data : null; },
