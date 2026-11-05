@@ -2,7 +2,7 @@
    data state counts and linked projects; search; "+ New workflow", "Import BPMN" and "Import SOP". */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname } from '../ui.js';
-import { flat, diffCounts, effAvail, projectsFor, importBtn, bindImport, isAdv, AV, HAVE, NOTYET } from './process.js';
+import { flat, stepChangeCounts, changeText, effAvail, projectsFor, importBtn, bindImport, isAdv, AV, HAVE, NOTYET } from './process.js';
 
 let query = ''; /* kept across re-renders (the router re-renders on every store change) */
 
@@ -13,7 +13,7 @@ function rowOf(p) {
   const st = ids.map(effAvail);
   const n = k => st.filter(a => a === k).length;
   const prjs = projectsFor(p.id);
-  return { p, steps: steps.length, sum: diffCounts(p), data: { total: ids.length, live: n('live'), pending: n('pending'), example: n('example'), missing: n('missing') }, prjs,
+  return { p, steps: steps.length, sum: stepChangeCounts(p), data: { total: ids.length, live: n('live'), pending: n('pending'), example: n('example'), missing: n('missing') }, prjs,
     hay: norm([p.name, p.desc, pname(p.owner), ...prjs.map(j => j.name), ...steps.map(s => s.title)].join(' ')) };
 }
 const matches = (r, q) => !q || norm(q).split(/\s+/).filter(Boolean).every(t => r.hay.includes(t));
@@ -36,9 +36,9 @@ export function render() {
     const p = r.p, hidden = !matches(r, query);
     return `<div class="d-prow" data-prow="${esc(p.id)}" ${hidden ? 'hidden' : ''}>
       <div class="d-pname"><a href="${link('/process/' + p.id)}" data-link><b>${esc(p.name)}</b></a>${adv ? ` <span class="badge b-idle" data-ver>v${esc(p.version || 1)}</span>` : ''}${p.desc ? `<div class="s d-desc">${esc(p.desc)}</div>` : ''}</div>
-      <div class="d-pcell" data-col="owner"><span class="d-plbl">Owner</span>${p.owner ? `${av(p.owner)} ${esc(pname(p.owner))}` : '<span class="hint">None</span>'}</div>
+      <div class="d-pcell" data-col="owner"><span class="d-plbl">Owner</span>${p.owner && store.person(p.owner) ? `${av(p.owner)} ${esc(pname(p.owner))}` : '<span class="hint">Nobody yet</span>'}</div>
       <div class="d-pcell" data-col="steps"><span class="d-plbl">Steps</span><b>${r.steps}</b></div>
-      <div class="d-pcell" data-col="diff"><span class="d-plbl">What changed</span><b title="${r.sum.new} new, ${r.sum.changed} changed">${r.sum.new}+${r.sum.changed}</b></div>
+      <div class="d-pcell" data-col="diff" data-diffcounts="${r.sum.new}/${r.sum.changed}/${r.sum.removed}"><span class="d-plbl">What changed</span>${changeText(r.sum) ? `<span>${esc(changeText(r.sum))}</span>` : '<span class="hint">No changes yet</span>'}</div>
       <div class="d-pcell" data-col="data"><span class="d-plbl">Information</span>${dataCell(r.data)}</div>
       <div class="d-pcell" data-col="projects"><span class="d-plbl">Projects</span>${r.prjs.length ? r.prjs.map(j => `<a class="chip" href="${link('/project/' + j.id)}" data-link>${esc(j.name)}${j.status === 'live' ? ' · launched' : ''}</a>`).join('') : '<span class="hint">Not in a project</span>'}</div>
     </div>`;

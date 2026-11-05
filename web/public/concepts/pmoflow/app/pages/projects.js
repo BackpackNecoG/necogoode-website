@@ -2,18 +2,18 @@
    R8 §8: "Projects" in the nav and "Check on a project" on home land here. One row per project, every value from
    projectTruth (label, sentence, expected finish, late, blocking), the ones that need attention first. */
 import { store } from '../store.js';
-import { esc, fmt, link, av, pname } from '../ui.js';
-import { summaryOf, summaryHTML, projectStats, factsHTML, whoActs, newProject, isSimple, truthOf } from './project.js';
+import { esc, fmt, link, pname } from '../ui.js';
+import { summaryOf, summaryHTML, projectStats, factsHTML, whoLineHTML, newProject, isSimple, truthOf } from './project.js';
 
 const ORDER = { red: 0, amber: 1, none: 2, green: 3, live: 4 };
 
 function rowHTML(j) {
-  const s = projectStats(j.id), sm = summaryOf(j), who = j.status === 'live' ? [] : whoActs(j, 2);
+  const s = projectStats(j.id), sm = summaryOf(j);
   return `<a class="card pmo-plist-row" href="${link('/project/' + encodeURIComponent(j.id))}" data-link data-plist="${esc(j.id)}">
     <div class="pmo-plist-h"><h3>${esc(j.name)}</h3><span class="pmo-chev" aria-hidden="true">›</span></div>
     ${summaryHTML(sm)}
     <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}${factsHTML(j, { cost: !isSimple() })}<span>Deadline <b>${esc(fmt(j.target))}</b></span></div>
-    ${who.length ? `<div class="pmo-who" data-who><span class="lbl">Who needs to act</span>${who.map(x => `<span class="pmo-who-r">${av(x.person)}<span><b>${esc(pname(x.person))}</b>${x.action ? ': ' + esc(x.action) : ''}</span></span>`).join('')}</div>` : ''}
+    ${whoLineHTML(j, 2, 'Who needs to act')}
     <div class="hint">Project manager ${esc(pname(j.owner))}</div></a>`;
 }
 

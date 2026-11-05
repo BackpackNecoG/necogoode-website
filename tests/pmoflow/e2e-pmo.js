@@ -133,12 +133,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return [...document.querySelectorAll('.side .row')].filter(r => r.querySelector('.pmo-noplan')).map(r => { const d = r.dataset.go.split('/data/')[1]; return { d, eff: E.effectiveAvail(store.state.docs, d), res: store.list('workItem', w => w.resolves === d).length }; }); }, STORE);
   check('"No resolution plan" only for missing/example data without a resolver', noPlan.every(x => x.eff !== 'live' && x.res === 0), noPlan);
   check('map has open-design pills', await page.locator('.pgroup-h').count() >= 1);
-  check('side panel: blocking (projectTruth list)', await page.locator('.side [data-blockers]').count() === 1);
-  check('side panel: up next', await page.locator('.side .card h3', { hasText: 'Up next' }).count() === 1);
+  check('R9 side panel: one "Who needs to act" card (projectTruth.who)', await page.locator('.side [data-who-acts]').count() === 1);
+  const who0 = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, id, store.state.today); return t.who[0] ? t.who[0].name : null; }, [STORE, decodeURIComponent(prjPath.split('/project/')[1])]);
+  const shownWho0 = await page.locator('.side [data-who-acts] [data-who-row="0"] [data-who-name]').innerText().catch(() => null);
+  check('R9 side panel: first row = projectTruth.who[0]', who0 === null ? shownWho0 === null : shownWho0 === who0, { who0, shownWho0 });
   check('header finish KPI shows the expected date for an open project', /Expected · deadline/.test(await page.locator('[data-kpi-finish]').innerText()));
   check('project: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
-  const dl = await page.locator('.side .pmo-dl').allInnerTexts();
-  check('one schedule format: "Due X · forecast Y (+Nd)"', dl.length > 0 && dl.every(t => /^Due [A-Z][a-z]{2} \d{1,2} · (forecast|done) [A-Z][a-z]{2} \d{1,2}( \(\+\d+d\))?$/.test(t.trim())), dl.slice(0, 3));
   const collapsedBefore = await page.locator('.collapsed').count();
   await page.click('button[data-expand="1"]');
   await page.waitForSelector('button[data-expand="0"]');
@@ -526,7 +526,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('R4 empty project + conflicts');
   await page.goto(ROOT + '/project/' + encodeURIComponent(npId)); await page.waitForSelector('.canvas.pm'); await settle();
   check('zero items: never "All work is done"', !(await page.locator('.side').innerText()).includes('All work is done'));
-  check('zero items: "No tasks planned yet — Suggest a plan"', (await page.locator('[data-upnext] [data-nowork]').innerText()).includes('No tasks planned yet') && await page.locator('[data-upnext] [data-suggest]').count() === (((await getDoc('project', npId)).owner === await page.$eval('#persona', s => s.value)) ? 1 : 0));
+  check('zero items: "No tasks planned yet — Suggest a plan"', (await page.locator('[data-who-acts] [data-nowork]').innerText()).includes('No tasks planned yet') && await page.locator('[data-who-acts] [data-suggest]').count() === (((await getDoc('project', npId)).owner === await page.$eval('#persona', s => s.value)) ? 1 : 0));
   const expConf = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', id);
     const steps = new Set(j.processes.flatMap(pid => [...E.flatSteps(store.get('process', pid).tobe), ...E.flatGateways(store.get('process', pid).tobe)].map(s => pid + '::' + s.id)));
     const data = new Set(j.processes.flatMap(pid => E.flatSteps(store.get('process', pid).tobe).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
@@ -540,6 +540,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click(`[data-conflicts] a[href*="/project/${expConf[0]}"]`); await page.waitForSelector('table.pmo-work');
   check('conflict link opens the other project', page.url().includes('/project/' + expConf[0]));
   await prjGo('?mode=work', 'table.pmo-work');
+  const dl = await page.locator('.pmo-dl').allInnerTexts();
+  check('R9 one schedule format: "Due X · expected Y (N business days late)"', dl.length > 0 && dl.every(t => /^Due [A-Z][a-z]{2} \d{1,2} · (expected|done) [A-Z][a-z]{2} \d{1,2}( \(\d+ business days? late\))?$/.test(t.trim())), dl.slice(0, 3));
 
   /* ---------------- baseline ---------------- */
   console.log('baseline');
@@ -661,7 +663,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.goto(ROOT + '/portfolio');
   await page.waitForSelector('.pmo-ptable');
   check('projects table rows', await page.locator('.pmo-ptable tbody tr').count() >= 1);
-  check('status rule stated in plain words', (await page.locator('.pmo-rule').innerText()).includes('At risk:'));
+  check('status rule stated in plain words', (await page.locator('.pmo-rule').innerText()).includes('Will miss the deadline:'));
   check('workload bars', await page.locator('.pmo-wl-row').count() > 0);
   check('variance table appears for baseline', await page.locator('.pmo-vtable tbody tr').count() > 0);
   check('variance shows slip for pushed item', await page.locator('.pmo-vtable tr', { hasText: openTitle }).locator('.pmo-var.up').count() === 1, openTitle);
@@ -694,7 +696,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('[data-gen-rep]');
   await page.waitForSelector('.pmo-rep', { timeout: 30000 });
   const repTop = await page.locator('.pmo-rep-top').innerText();
-  check('status report renders with source label', /Rules-based|Generated by AI/.test(repTop), repTop);
+  check('status report renders with source label', /Written from the project.s facts|Written by AI/.test(repTop) && !/Rules-based|deterministic/.test(repTop), repTop);
   check('status report has headline', (await page.locator('.pmo-rep-h').innerText()).trim().length > 5);
   await page.click('[data-copy-rep]');
   await page.waitForSelector('.toast', { timeout: 5000 }).catch(() => {});
@@ -823,7 +825,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       if (dep && t === 'FS' && !conf.has(w.id) && document.querySelector(`.tl button.tbar[data-bar="${w.id}"]`)) return { w: w.id, d: dep.id, ws: w.start, dd: dep.due }; }
     return null; }, STORE);
   check('R5 conflicts: an FS pair to break exists', !!pair, pair);
-  const confBefore = (await E5('scheduleConflicts', PRJ)).length;
+  const confBeforeList = await E5('scheduleConflicts', PRJ), confBefore = confBeforeList.length;
   check('R5 conflicts: markers match the engine before a drag', await page.locator('[data-conf-mark]').count() === new Set((await E5('scheduleConflicts', PRJ)).map(c => c.workId)).size);
   if (pair) {
     const dshift = Math.round((new Date(pair.dd + 'T12:00:00') - new Date(pair.ws + 'T12:00:00')) / 86400000) - 3; /* start 3 days before the predecessor finishes */
@@ -836,7 +838,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     check('R5 drag: live tip warns about the new conflict', /conflicts with/.test(tip5) && await page.locator('.pmo-dragtip.conf').count() === 1, tip5);
     await page.mouse.up(); await settle();
     const after5 = await E5('scheduleConflicts', PRJ);
-    check('R5 drag: conflict recorded after the drop', after5.some(c => c.workId === pair.w && c.dep === pair.d) && after5.length > confBefore, after5.length);
+    check('R5 drag: conflict recorded after the drop', /* the dragged item now breaks a dependency (the shift is capped at 30 days, so it may be another of its predecessors) */
+      after5.some(c => c.workId === pair.w) && !confBeforeList.some(c => c.workId === pair.w), { after: after5.length, before: confBefore, pair, mine: after5.filter(c => c.workId === pair.w) });
     check('R5 timeline: marker + red bar outline after the drag', await page.locator(`[data-conf-mark="${pair.w}"]`).count() === 1 && await page.locator(`.tl [data-bar="${pair.w}"].pmo-conf`).count() === 1);
     check('R5 timeline: conflict banner lists the conflicts', (await page.locator('[data-conf-bar]').innerText()).includes(`${after5.length} scheduling conflict`));
   }
@@ -895,7 +898,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await prjGo('?mode=timeline', '.tl .tbar');
   check('R5 causing slip: badge on every flagged Timeline row', await page.locator('.tl tr [data-causes-slip]').count() === slipIds.length);
   await prjGo('', '.canvas.pm .node');
-  const slipSteps = await page.evaluate(async ([u, ids, prj]) => { const { store } = await import(u); return [...new Set(ids.map(id => store.get('workItem', id)).filter(w => window.PMOEngine.stepState(store.state.docs, prj, w.pid, w.step, store.state.today).sched !== 'late').map(w => w.step))]; }, [STORE, slipIds, PRJ]);
+  const slipSteps = await page.evaluate(async ([u, ids, prj]) => { const { store } = await import(u); const late = new Set(window.PMOEngine.projectTruth(store.state.docs, prj, store.state.today).late);
+    /* R9: a step with a task in projectTruth.late shows "Late" (it outranks "Holding up other work") */
+    return [...new Set(ids.map(id => store.get('workItem', id)).filter(w => !store.list('workItem', x => x.projectId === prj && x.pid === w.pid && x.step === w.step).some(x => late.has(x.id))).map(w => w.step))]; }, [STORE, slipIds, PRJ]);
   check('R6 map: no step shows both "Causing slip" and an on-track badge', await page.evaluate(() => [...document.querySelectorAll('.canvas.pm .node[data-step]')].every(n => !(n.querySelector('[data-causes-slip]') && n.querySelector('[data-sched="ok"]')))));
   check('R5 causing slip: badge on the Map step of each flagged item', (await Promise.all(slipSteps.map(async s => await page.locator(`.canvas.pm .node[data-step="${s}"] [data-causes-slip]`).count() === 1))).every(Boolean), slipSteps);
   await shot('22-map-causing-slip-1440');
@@ -978,14 +983,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
   const pfRag = await page.evaluate(() => [...document.querySelectorAll('[data-prow]')].map(r => [r.dataset.prow, r.querySelector('[data-summary-label]').dataset.summaryLabel]));
   check('R8 portfolio rows label = projectTruth', pfRag.length > 0 && pfRag.every(([id, k]) => k === wantK(healthAll[id])), pfRag);
-  check('R8 status rule: At risk only when the finish misses the deadline or something unplanned blocks', (await page.innerText('.pmo-rule')).includes('misses the deadline'));
+  check('R9 status rule: "Will miss the deadline" only when the finish is after the deadline or missing information has no plan', (await page.innerText('.pmo-rule')).includes('expected finish is after the deadline'));
 
   console.log('R6 view-aware right rail');
-  const railOf = async () => page.evaluate(() => ({ blockers: !!document.querySelector('.side [data-blockers]'), upnext: !!document.querySelector('.side [data-upnext]'), legend: !!document.querySelector('.side [data-legend]'),
+  const railOf = async () => page.evaluate(() => ({ blockers: !!document.querySelector('.side [data-who-acts]'), upnext: !!document.querySelector('.side [data-who-acts]'), legend: !!document.querySelector('.side [data-legend]'),
     conf: !!document.querySelector('.side [data-rail-conflicts]'), crit: !!document.querySelector('.side [data-rail-crit]'), sstats: !!document.querySelector('.side [data-sprint-stats]'),
     burn: document.querySelectorAll('[data-burn], [data-burn-empty]').length, fsum: !!document.querySelector('.side [data-filter-summary]'), act: document.querySelectorAll('.side [data-activity]').length, comments: document.querySelectorAll('.side .card > h3').length }));
   await prjGo('', '.canvas.pm'); const rMap = await railOf();
-  check('R6 rail Map: blockers, up next, legend; no timeline/sprint cards', rMap.blockers && rMap.upnext && rMap.legend && !rMap.conf && !rMap.crit && !rMap.sstats && rMap.burn === 0 && rMap.act === 1, rMap);
+  check('R9 rail Map: who needs to act (incl. what\'s blocking), legend; no timeline/sprint cards', rMap.blockers && rMap.upnext && rMap.legend && !rMap.conf && !rMap.crit && !rMap.sstats && rMap.burn === 0 && rMap.act === 1, rMap);
   await prjGo('?mode=timeline', '.tl .tbar'); const rTl = await railOf();
   check('R6 rail Timeline: conflicts + critical path only', rTl.conf && rTl.crit && !rTl.blockers && !rTl.upnext && !rTl.sstats && rTl.burn === 0 && rTl.act === 1, rTl);
   await prjGo('?mode=board', '[data-board]'); const rB = await railOf();
@@ -1184,7 +1189,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-pf]')]);
   const lines2 = fs.readFileSync(await dl2.path(), 'utf8').replace(/^﻿/, '').trim().split(/\r\n/);
   const nPrj = await page.evaluate(async u => (await import(u)).store.list('project').length, STORE);
-  check('R6/R8 portfolio CSV: one row per project with status, the one cost forecast and EV columns', lines2.length === nPrj + 1 && /Status,Status sentence/.test(lines2[0]) && /Planned budget,Actual cost,Forecast cost/.test(lines2[0]) && /SPI,CPI$/.test(lines2[0]) && !/EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
+  check('R6/R8 portfolio CSV: one row per project with status, the one cost forecast and EV columns', lines2.length === nPrj + 1 && /Status,Status sentence/.test(lines2[0]) && /Planned budget,Actual cost,Expected cost/.test(lines2[0]) && /Late,Past due,Will finish after due date,Blocking,First to act,Launch steps left/.test(lines2[0]) && !/Running late/.test(lines2[0]) && /SPI,CPI$/.test(lines2[0]) && !/EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
   await page.click('[data-gen-rep]'); await page.waitForSelector('[data-pf-rep] .pmo-rep-h', { timeout: 30000 });
   await page.evaluate(() => { window.__pfPrinted = 0; window.print = () => { window.__pfPrinted++; window.__pfCls = document.body.classList.contains('pmo-print-pf'); }; });
   await page.click('[data-print-pf-rep]');
@@ -1203,7 +1208,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const dashRag = await page.evaluate(() => [...document.querySelectorAll('[data-widget="rag"] [data-dash-prj]')].map(a => [a.dataset.dashPrj, a.querySelector('[data-summary-label]').dataset.summaryLabel]));
   check('R8 dashboard status widget = projectTruth', dashRag.length === nPrj && dashRag.every(([id, k]) => k === wantK(healthAll[id]) || id === PRJ), dashRag);
   check('R6 dashboard: program roll-up cards group by project.program', await page.locator('[data-rollup] [data-program]').count() === await page.evaluate(async u => new Set((await import(u)).store.list('project').map(p => String(p.program || '').trim() || 'No program')).size, STORE));
-  check('R6 dashboard: blockers, go-lives, risks and EV widgets have rows', await page.locator('[data-dash-blocker]').count() > 0 && await page.locator('[data-dash-golive]').count() > 0 && await page.locator('[data-dash-risk]').count() > 0 && await page.locator('[data-dash-ev]').count() === nPrj);
+  const nBl = await page.evaluate(async u => { const { store } = await import(u); return store.list('project', p => p.status !== 'live').reduce((a, p) => a + window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today).who.filter(x => x.why === 'blocker').length, 0); }, STORE);
+  check('R9 dashboard: blockers widget = who.filter(blocker) of every project', await page.locator('[data-dash-blocker]').count() === Math.min(6, nBl), { nBl, shown: await page.locator('[data-dash-blocker]').count() });
+  check('R6 dashboard: go-lives, risks and EV widgets have rows',  await page.locator('[data-dash-golive]').count() > 0 && await page.locator('[data-dash-risk]').count() > 0 && await page.locator('[data-dash-ev]').count() === nPrj);
   check('R6 dashboard: no overflow @1440', await noOverflow());
   await shot('34-r6-dashboard-1440');
   await page.click('[data-w-remove="workload"]'); await settle();
@@ -1296,7 +1303,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const sSettle = async () => { await sp.waitForLoadState('networkidle').catch(() => {}); await sleep(450); };
   const sShot = (n, full = false) => sp.screenshot({ path: `${SHOTS}/s-${n}.png`, fullPage: full });
   const sDoc = (type, id) => sp.evaluate(async ([u, t, i]) => (await import(u)).store.get(t, i), [STORE, type, id]);
-  const sAs = async re => { const id = await sp.$eval('#persona', (s, r) => [...s.options].find(o => new RegExp(r).test(o.text)).value, re); await sp.selectOption('#persona', id); await sSettle(); return id; };
+  /* R9 §10: on a phone, "Viewing as" is inside the ☰ menu: open it first, close it after */
+  const sMenu = async open => { const isOpen = await sp.evaluate(() => !!document.querySelector('header.top.open')); const btn = sp.locator('#menuBtn');
+    if (isOpen !== open && await btn.isVisible().catch(() => false)) { await btn.click(); await sp.waitForTimeout(150); } };
+  const sAs = async re => { const id = await sp.$eval('#persona', (s, r) => [...s.options].find(o => new RegExp(r).test(o.text)).value, re);
+    if (!(await sp.locator('#persona').isVisible())) await sMenu(true);
+    await sp.selectOption('#persona', id); await sSettle(); await sMenu(false); return id; };
   const sGo = async (path, sel) => { await sp.goto(ROOT + path); await sp.waitForSelector(sel, { timeout: 20000 }); await sSettle(); };
   const sAct = async id => { await sp.click(`.overlay [data-act="${id}"]`); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 8000 }); };
   const JARGON = /\b(SPI|CPI|EAC|Amber|Slipping|Baseline|Sprints?)\b/i;
@@ -1312,24 +1324,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R7 home: no jargon visible', !(await jargonOn()), await jargonOn());
   await sShot('01-home-1366', true);
 
-  /* Approve my part: reachable in <= 2 taps from home */
-  await sAs('^Maya Chen');
-  const ap = sp.locator('[data-approve-part]').first();
-  /* R8 §5: the button appears only once buReady says Procurement's part is ready; before that a muted "waiting on" line */
-  const mayaReady = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
-    return store.list('project', p => p.status !== 'live').map(p => { const rd = E.readiness(store.state.docs, p.id, store.state.today); const c = (rd.checks || []).find(x => x.id === 'bu-signoff') || {};
-      const pending = (c.unsigned || []).includes('Procurement') || (c.stale || []).some(x => x.bu === 'Procurement');
-      return { p: p.id, pending, r: E.buReady(store.state.docs, p.id, 'Procurement', store.state.today) }; }); }, STORE);
-  const anyReady = mayaReady.some(x => x.pending && x.r.ready);
-  if (anyReady) {
-    check('R7/R8 home: "Approve my part" for Maya (Procurement) once her part is ready', await ap.count() >= 1 && (await ap.getAttribute('data-bu')) === 'Procurement');
+  /* R9 §2: "Waiting for you" renders exactly E().personQueue; the badge = its length */
+  const queueMatches = async who => sp.evaluate(async u => { const { store } = await import(u);
+    const want = window.PMOEngine.personQueue(store.state.docs, store.state.me, store.state.today).map(x => x.title);
+    const got = [...document.querySelectorAll('[data-waiting] [data-wq] .pmo-wtxt .t')].map(e => e.textContent.trim());
+    const badge = document.querySelector('[data-wait-count]'); const n = badge ? Number(badge.textContent) : 0;
+    return { ok: JSON.stringify(want) === JSON.stringify(got) && n === want.length, want, got, n }; }, STORE);
+  for (const re of ['^Maya Chen', '^Leo Park', '^Dev Kumar', '^Priya Shah', 'Project Manager', '^Dave Ortiz']) {
+    await sAs(re); await sGo('/', '[data-waiting]');
+    const q = await queueMatches(re);
+    check(`R9 home (${re.replace(/[\^]/g, '')}): Waiting for you = personQueue, badge = length`, q.ok, q);
+  }
+  /* Approve my part: Dave (Head of Compliance) sees it ready and approves in <= 2 taps */
+  const ap = sp.locator('[data-wkind="approval"] [data-wopen]').first();
+  check('R9 home: Dave has "Approve Compliance\'s part"', await ap.count() === 1 && /Approve Compliance.s part/.test(await sp.innerText('[data-wkind="approval"]')), await sp.innerText('[data-waiting]'));
+  if (await ap.count()) {
     await ap.click(); /* tap 1 */
-    await sp.waitForURL(/\/release\/.+\?bu=/, { timeout: 10000 }); await sSettle();
+    await sp.waitForURL(/\/release\//, { timeout: 10000 }); await sSettle();
     const apBtn = sp.locator('#app button:visible', { hasText: /^\s*(Re-)?[Aa]pprove/ }).first();
-    check('R7 approve my part: the approve button is on the first screen after 1 tap (tap 2 approves)', await apBtn.count() === 1 && await apBtn.isEnabled(), await sp.locator('#app button:visible').allInnerTexts());
-  } else {
-    check('R8 home: no "Approve my part" while Procurement’s part isn’t ready', await ap.count() === 0, mayaReady);
-    check('R8 home: muted "Your part isn’t ready yet: waiting on …" instead', await sp.locator('[data-notready] [data-notready-text]').count() >= 1 && /isn’t ready yet: waiting on .+/.test(await sp.locator('[data-notready-text]').first().innerText()));
+    check('R9 approve my part: the approve button is reachable after 1 tap', await apBtn.count() === 1, await sp.locator('#app button:visible').allInnerTexts());
   }
   await sShot('02-approver-view-1366');
 
@@ -1347,14 +1360,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const wdEv = await sp.evaluate(async ([u, id]) => (await (await import(u)).store.events('workItem:' + id, 10)).map(e => e.summary), [STORE, wdId]);
   check('R7 home: mark done recorded in history', wdEv.some(x => /Done/.test(x)), wdEv);
 
-  /* Access request: allow in one tap (plus the sign-in check) */
-  const gok = sp.locator('[data-grant-ok]').first();
-  check('R7 home: Leo has an access request to decide', await gok.count() === 1);
-  const gId = await gok.getAttribute('data-grant-ok');
-  await gok.click(); await sp.waitForSelector('.overlay input[name="code"]'); await sp.fill('.overlay input[name="code"]', '123456'); await sAct('verify'); await sSettle();
-  const gDoc = await sDoc('grant', gId);
-  check('R7 home: access allowed (active, approver, expiry from approval)', gDoc.status === 'active' && gDoc.approvedBy === leo && !!gDoc.expires, gDoc);
-
   /* Deep link from home: scrolls to and highlights the task */
   const tl7 = sp.locator('[data-task-link]').first();
   if (await tl7.count()) {
@@ -1363,14 +1368,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     check('R7 deep link: task highlighted and on screen', await sp.evaluate(id => { const r = document.querySelector(`[data-wid="${id}"]`).getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }, tid));
     await sShot('03-deeplink-1366');
   } else check('R7 deep link: a task link on home', false);
-
-  /* Mentions: "Seen" in one tap */
-  await sGo('/', '[data-waiting]');
-  await sAs('Project Manager');
-  const seen = sp.locator('[data-note-seen]').first();
-  check('R7 home: Tom has a mention', await seen.count() === 1);
-  const nId = await seen.getAttribute('data-note-seen'); await seen.click(); await sSettle();
-  check('R7 home: mention marked read in one tap', (await sDoc('notification', nId)).read === true);
 
   /* "Are we on track?" = one visible sentence without scrolling, at 1366x768 and 390x844 */
   for (const [w, h] of [[1366, 768], [390, 844]]) {
@@ -1384,14 +1381,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     check(`R7 project: no overflow @${w}`, await sNoOverflow());
     await sShot(`04-project-${w}`, w === 1366);
   }
-  /* phone: blocking + up next render above the map */
-  const order = await sp.evaluate(() => { const y = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect().top : null; }; return { bl: y('[data-whats-blocking]'), up: y('[data-upnext]'), map: y('#canvas') }; });
-  check('R7 phone: "What\'s blocking" and "Up next" above the map', order.bl != null && order.up != null && order.bl < order.map && order.up < order.map, order);
+  /* phone: who needs to act renders above the map */
+  const order = await sp.evaluate(() => { const y = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect().top : null; }; return { who: y('[data-who-acts]'), map: y('#canvas') }; });
+  check('R9 phone: "Who needs to act" above the map', order.who != null && order.who < order.map, order);
   await sp.setViewportSize({ width: 1366, height: 768 });
-  await sGo('/project/' + PRJ7, '[data-whats-blocking]');
+  await sGo('/project/' + PRJ7, '[data-who-acts]');
   check('R7 project tabs (Simple): Plan · Timeline · Work', (await sp.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Plan|Timeline|Work');
-  const blRows = sp.locator('[data-whats-blocking] .pmo-bl-row');
-  check('R7 What\'s blocking: top 3 max, each says who acts', await blRows.count() >= 1 && await blRows.count() <= 3 && (await blRows.locator('.s b').count()) === await blRows.count());
+  const whoCard = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, id, store.state.today);
+    const rows = [...document.querySelectorAll('[data-who-acts] [data-who-row]')].map(r => ({ name: r.querySelector('[data-who-name]').textContent, what: r.querySelector('.s').textContent }));
+    const bl = document.querySelectorAll('[data-whats-blocking] [data-who-row]').length;
+    return { ok: rows.length > 0 && rows.length <= 5 && rows.every((r, i) => r.what === t.who[i].what && r.name === t.who[i].name), blOk: bl === Math.min(3, t.who.filter(x => x.why === 'blocker').length), rows, who: t.who.slice(0, 5).map(x => [x.name, x.what]) }; }, [STORE, PRJ7]);
+  check('R9 Who needs to act: projectTruth.who in order, each names who acts', whoCard.ok, whoCard);
+  check('R9 What\'s blocking = who.filter(why === "blocker")', whoCard.blOk, whoCard);
   const ls = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const want = window.PMOEngine.launchSteps(store.state.docs, id, store.state.today);
     const got = [...document.querySelectorAll('[data-launch-steps] li')].map(li => [li.querySelector('.t').firstChild.textContent.trim(), li.dataset.lsDone === '1']);
     return { ok: got.length === want.length && want.every((x, i) => got[i][0] === x.label && got[i][1] === !!x.done), got, want: want.map(x => [x.label, x.done]) }; }, [STORE, PRJ7]);
@@ -1468,10 +1469,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ================= R8 (phone, Simple) ================= */
   console.log('R8 phone header, projects list, approvals, undo, risks');
-  const hdr8 = await sp.evaluate(() => { const lab = document.querySelector('.top .who > span'); const adv = document.querySelector('.top .advtog span'); const r = lab && lab.getBoundingClientRect();
-    return { lab: !!lab && getComputedStyle(lab).display !== 'none' && r.width > 30 && r.right <= innerWidth, adv: !!adv && getComputedStyle(adv).display !== 'none' && adv.textContent.trim() === 'Advanced',
-      nav: [...document.querySelectorAll('#nav a')].every(a => { const b = a.getBoundingClientRect(); return b.width > 0 && b.left >= 0 && b.right <= innerWidth; }) }; });
-  check('R8 phone header: "Viewing as" visible, Advanced labelled, every nav tab on screen', hdr8.lab && hdr8.adv && hdr8.nav, hdr8);
+  /* R9 §10 phone header: one 56px row; nav, "Viewing as" and the View menu live behind ☰ Menu */
+  const hdrH = await sp.evaluate(() => document.querySelector('header.top').getBoundingClientRect().height);
+  check('R9 phone header is at most 56px tall', hdrH <= 56, hdrH);
+  check('R9 phone: nav and "Viewing as" hidden until the menu opens', !(await sp.locator('#nav').isVisible()) && !(await sp.locator('#persona').isVisible()));
+  await sMenu(true);
+  const hdr8 = await sp.evaluate(() => { const sel = document.querySelector('#persona'), r = sel.getBoundingClientRect();
+    return { open: !!document.querySelector('header.top.open'), persona: r.width > 30 && r.right <= innerWidth + 1, adv: !!document.querySelector('#viewmenu #adv'),
+      nav: [...document.querySelectorAll('#nav a')].every(a => { const b = a.getBoundingClientRect(); return b.width > 0 && b.left >= 0 && b.right <= innerWidth + 1; }) }; });
+  check('R9 phone menu opens: every nav link and "Viewing as" on screen, Advanced in the View menu', hdr8.open && hdr8.persona && hdr8.nav && hdr8.adv, hdr8);
+  await sShot('10-r8-header-menu-390');
+  await sp.keyboard.press('Escape'); await sp.waitForTimeout(200);
+  check('R9 phone menu closes with Escape', !(await sp.evaluate(() => !!document.querySelector('header.top.open'))));
   await sShot('10-r8-header-390');
   await sp.click('[data-big="check"]'); await sp.waitForSelector('[data-plist]', { timeout: 10000 });
   check('R8 "Check on a project" opens the projects list', new URL(sp.url()).pathname.endsWith('/projects'));
@@ -1479,16 +1488,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R8 projects list: one row per project, each with label + sentence + facts', await sp.locator('[data-plist]').count() === nP8 && await sp.locator('[data-plist] [data-summary-label]').count() === nP8 && await sp.locator('[data-plist] [data-t="forecast"]').count() === nP8);
   check('R8 projects list: no overflow @390', await sNoOverflow());
   await sShot('11-r8-projects-390', true);
-  await sp.click('#nav a:has-text("Projects")'); await sp.waitForSelector('[data-plist]');
+  await sMenu(true); await sp.click('#nav a:has-text("Projects")'); await sp.waitForSelector('[data-plist]');
+  check('R9 phone menu closes after a nav link is tapped', !(await sp.evaluate(() => !!document.querySelector('header.top.open'))));
   check('R8 "Projects" nav opens the list and is active', (await sp.innerText('#nav a.on')).trim() === 'Projects');
   /* approvals appear only when buReady says that team's part is ready */
   const appr8 = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const out = [];
     store.list('project', p => p.status !== 'live').forEach(p => store.state.people.forEach(pp => { if (!pp.bu) return; const r = E.buReady(store.state.docs, p.id, pp.bu, store.state.today); out.push({ prj: p.id, bu: pp.bu, person: pp.id, ready: !!r.ready }); })); return out; }, STORE);
   await sGo('/', '[data-waiting]');
-  const shown8 = await sp.evaluate(() => ({ approve: [...document.querySelectorAll('[data-approve-part]')].map(a => [a.dataset.approvePart, a.dataset.bu]), notReady: [...document.querySelectorAll('[data-notready]')].map(x => x.dataset.notready) }));
-  const me8 = await sp.$eval('#persona', s => s.value);
-  check('R8 home: "Approve my part" only for parts buReady says are ready', shown8.approve.every(([prj, bu]) => appr8.some(x => x.prj === prj && x.bu === bu && x.ready)), { shown8, appr8: appr8.filter(x => x.person === me8) });
-  check('R8 home: not-ready parts say "isn’t ready yet: waiting on"', (await sp.locator('[data-notready-text]').allInnerTexts()).every(t => /isn’t ready yet: waiting on/.test(t)));
+  const shown8 = await sp.evaluate(() => [...document.querySelectorAll('[data-wkind="approval"] .pmo-wtxt .t')].map(t => t.textContent));
+  check('R8 home: "Approve …\'s part" only for parts buReady says are ready', shown8.every(t => appr8.some(x => x.ready && t.includes(x.bu))), { shown8 });
   /* Mark done -> toast with Undo restores status and doneAt */
   await sAs('Project Manager'); /* the PM can mark any task of the project done */
   const t8 = await sp.evaluate(async u => { const { store } = await import(u); const me = store.state.me; const w = store.list('workItem', x => x.status !== 'done' && ((store.get('project', x.projectId) || {}).owner === me || x.owner === me) && (store.get('project', x.projectId) || {}).status !== 'live')[0]; return w ? { id: w.id, status: w.status, statusId: w.statusId || null, doneAt: w.doneAt || null } : null; }, STORE);

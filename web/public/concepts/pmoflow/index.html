@@ -14,10 +14,16 @@
 <body>
 <header class="top">
   <a class="brand" id="brand" href="/concepts/pmoflow/" data-link><span class="mark">▾</span>PMOFlow</a>
-  <nav id="nav"></nav>
-  <div class="who"><span>Viewing as</span><select id="persona" aria-label="Viewing as"></select>
-    <label class="advtog" title="Show advanced tools such as earned value, sprints, BPMN and version compare"><input type="checkbox" id="adv" /> <span>Advanced</span></label>
-    <button class="bell" id="bell" aria-label="Notifications">🔔<span class="n" id="bellN" hidden></span></button></div>
+  <button class="menubtn" id="menuBtn" aria-expanded="false" aria-controls="topmenu"><span aria-hidden="true">☰</span> Menu</button>
+  <div class="topmenu" id="topmenu">
+    <nav id="nav" aria-label="Main"></nav>
+    <div class="who"><span>Viewing as</span><select id="persona" aria-label="Viewing as"></select>
+      <details class="viewmenu" id="viewmenu"><summary title="View options">⚙ View</summary>
+        <div class="vm-pop"><label class="advtog"><input type="checkbox" id="adv" /> <span>Advanced tools</span></label>
+        <div class="hint">Adds earned value, sprints, BPMN and version compare. Everything else stays the same.</div></div></details>
+    </div>
+  </div>
+  <button class="bell" id="bell" aria-label="Notifications">🔔<span class="n" id="bellN" hidden></span></button>
 </header>
 <main id="app"><div class="empty">Loading workspace…</div></main>
 <!-- engine: classic UMD script shared byte-for-byte with the API -->

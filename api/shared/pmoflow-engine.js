@@ -25,6 +25,7 @@
   function get(docs, type, id) { return list(docs, type).find(x => x.id === id) || null; }
 
   // People come from docs.person; docs.people (array or id-keyed map) is accepted as a fallback.
+  function personList(docs) { const m = personMap(docs); return Object.keys(m).map(k => m[k]).filter(Boolean); }
   function personMap(docs) {
     const m = byId(list(docs, 'person'));
     const extra = docs && docs.people;
@@ -110,11 +111,16 @@
     if (rem.length) out.push(label + ' removed: ' + rem.join(', '));
     return out;
   }
-  function stepChanges(a, n) {
+  // R9 §13: with `nm` (from namesFor(docs)) person and information ids read as names; empty reads "Nobody".
+  function stepChanges(a, n, nm) {
     const ch = [];
+    const pName = id => id ? (nm ? nm.person(id) : id) : (nm ? 'Nobody' : '(none)');
+    const dNames = arr => (arr || []).map(id => nm ? nm.data(id) : id);
     const t = textChange('Title', a.title, n.title); if (t) ch.push(t);
-    if ((a.owner || '') !== (n.owner || '')) ch.push('Owner ' + (a.owner || '(none)') + ' → ' + (n.owner || '(none)'));
-    setDiff('Data', a.data, n.data).forEach(x => ch.push(x));
+    if ((a.owner || '') !== (n.owner || '') || (a.ownerRole || '') !== (n.ownerRole || ''))
+      ch.push('Owner ' + (a.owner ? pName(a.owner) : a.ownerRole || pName(null)) + ' → ' + (n.owner ? pName(n.owner) : n.ownerRole || pName(null)));
+    if (nm) setDiff('Information', dNames(stepData(a)), dNames(stepData(n))).forEach(x => ch.push(x));
+    else setDiff('Data', a.data, n.data).forEach(x => ch.push(x));
     const s = textChange('SLA', a.sla, n.sla); if (s) ch.push(s);
     const y = textChange('System', a.system, n.system); if (y) ch.push(y);
     // R6 node types: subprocess {calls: processId}, wait {wait: text}, message {direction: send|receive, party}.
@@ -127,7 +133,7 @@
       const am = {}; a.subs.forEach(x => { if (x) am[x.title || ''] = x; });
       (n.subs || []).forEach(x => {
         const o = x && am[x.title || ''];
-        if (o) setDiff('Sub-step "' + x.title + '" data', o.data, x.data).forEach(c => ch.push(c));
+        if (o) setDiff('Sub-step "' + x.title + '" ' + (nm ? 'information' : 'data'), nm ? dNames(o.data) : o.data, nm ? dNames(x.data) : x.data).forEach(c => ch.push(c));
       });
       if (!ch.some(c => c.startsWith('Sub-step')) && at.join('\u0000') !== nt.join('\u0000')) ch.push('Sub-steps reordered');
     }
@@ -145,7 +151,14 @@
   }
 
   // Classifies to-be steps AND gateways (trigger/end ignored). Gateways match as-is gateways via `from`.
-  function diffProcess(process) {
+  // R9 §13 id → name resolvers for history and diff text (person ids → names, information ids → names).
+  function namesFor(docs) {
+    const people = personMap(docs), data = byId(list(docs, 'dataElement'));
+    return { person: id => (people[id] && people[id].name) || (id ? 'someone' : 'Nobody'), data: id => (data[id] && data[id].name) || 'some information' };
+  }
+  // R9: pass `docs` to get names instead of ids in the change text (diffProcess(process, docs)).
+  function diffProcess(process, docs) {
+    const nm = docs ? namesFor(docs) : null;
     const asisSteps = flatSteps(process && process.asis), asisGw = flatGateways(process && process.asis);
     const asis = byId(asisSteps), asisG = byId(asisGw);
     const nodes = {}, changes = {}, used = new Set();
@@ -157,7 +170,7 @@
       nodes[n.id] = ch.length ? 'changed' : 'same';
       changes[n.id] = ch;
     };
-    flatSteps(process && process.tobe).forEach(n => classify(n, n.from && asis[n.from], 'step', stepChanges));
+    flatSteps(process && process.tobe).forEach(n => classify(n, n.from && asis[n.from], 'step', (a, x) => stepChanges(a, x, nm)));
     flatGateways(process && process.tobe).forEach(n => classify(n, n.from && asisG[n.from], 'gateway', gatewayChanges));
     const removed = asisSteps.concat(asisGw).filter(a => !used.has(a.id));
     return { nodes, removed, changes };
@@ -220,15 +233,40 @@
   }
   // R8: information that appears on any Today (as-is) step, and the owner of each piece of information
   // (data.owner, else the owner of the first to-be step that uses it: "new information's owner is the step's owner").
+  // R9 §8: the owner (or role) of the first Future step using it, else of the first Today step. stepRole holds the
+  // role when that step has only a role. R9 §6: `problem` = information with an open defect (defect.dataId, else
+  // the information of the test it came from, else the only information on its step).
   function availCtx(docs) {
-    const asis = new Set(), stepOwner = {};
+    const asis = new Set(), stepOwner = {}, stepRole = {}, stepInfo = {};
+    const claim = st => stepData(st).forEach(d => {
+      if (stepOwner[d] || stepRole[d]) return;
+      if (st.owner) stepOwner[d] = st.owner; else if (String(st.ownerRole || '').trim()) stepRole[d] = String(st.ownerRole).trim();
+    });
     list(docs, 'process').forEach(p => {
       flatSteps(p.asis).forEach(st => stepData(st).forEach(d => asis.add(d)));
-      flatSteps(p.tobe).forEach(st => stepData(st).forEach(d => { if (!stepOwner[d] && st.owner) stepOwner[d] = st.owner; }));
+      flatSteps(p.tobe).forEach(st => { claim(st); stepInfo[p.id + '/' + st.id] = stepData(st); });
     });
-    return { asis, stepOwner };
+    list(docs, 'process').forEach(p => flatSteps(p.asis).forEach(claim));
+    const problem = new Map();
+    list(docs, 'workItem').forEach(w => {
+      if (w.kind !== 'defect' || w.status === 'done' || String(w.defectStatus || '').toLowerCase() === 'closed') return;
+      const tc = w.testRef && w.testRef.caseId ? get(docs, 'testCase', w.testRef.caseId) : null;
+      const onStep = stepInfo[w.pid + '/' + w.step] || [];
+      const did = w.dataId || (tc && tc.dataId) || (onStep.length === 1 ? onStep[0] : null);
+      if (did) { if (!problem.has(did)) problem.set(did, []); problem.get(did).push(w.id); }
+    });
+    return { asis, stepOwner, stepRole, problem };
   }
   function dataOwnerOf(docs, d, ctx) { return !d ? null : d.owner || ((ctx || availCtx(docs)).stepOwner[d.id] || null); }
+  // R9 §8 {person, role, name}: never empty while a step uses the information (person, else the step's role).
+  function dataOwner(docs, dataId) {
+    const ctx = availCtx(docs), d = get(docs, 'dataElement', dataId);
+    const person = dataOwnerOf(docs, d || { id: dataId }, ctx);
+    const role = person ? null : (d && d.ownerRole) || ctx.stepRole[dataId] || null;
+    return { person: person || null, role, name: person ? nameOf(docs, person) : role || 'Nobody' };
+  }
+  // R9 §8 the default owner for information added on a step: the step's owner, else its role (never the mapper).
+  function defaultDataOwner(step) { return step ? (step.owner ? { owner: step.owner } : String(step.ownerRole || '').trim() ? { ownerRole: String(step.ownerRole).trim() } : {}) : {}; }
   // R8: the owner finishing the fix task counts as their confirmation.
   function fixedByOwner(docs, d, work, ctx) {
     const owner = dataOwnerOf(docs, d, ctx);
@@ -265,6 +303,11 @@
   function availOf(d, work, docs, ctx) {
     if (!d) return 'missing';
     ctx = ctx || availCtx(docs);
+    const st = availCore(d, work, docs, ctx);
+    // R9 §6 (B14): an open problem keeps it from "We have it", even when its fix task is done.
+    return (st === 'live' || st === 'pending') && ctx.problem && ctx.problem.has(d.id) ? 'problem' : st;
+  }
+  function availCore(d, work, docs, ctx) {
     if (ctx.asis.has(d.id) && d.avail !== 'missing') return 'live';
     const owner = dataOwnerOf(docs, d, ctx);
     const confirmed = d.avail === 'live' || !!(d.liveConfirmedBy && d.liveConfirmedBy === owner && d.liveSource);
@@ -298,10 +341,12 @@
       let res;
       if (w.status === 'done') {
         const fin = isDate(w.doneAt) ? w.doneAt : isDate(w.due) ? w.due : null;
-        res = { forecast: fin, start: isDate(w.start) ? w.start : fin, sched: 'done', slipDays: fin && isDate(w.due) ? Math.max(0, diffDays(fin, w.due)) : 0, basis: { kind: 'done' } };
+        res = { forecast: fin, start: isDate(w.start) ? w.start : fin, sched: 'done', late: false, pastDueDays: 0, slipDays: fin && isDate(w.due) ? Math.max(0, businessDaysBetween(w.due, fin)) : 0, basis: { kind: 'done' } };
       } else {
         const dur = duration(w);
-        let best = isDate(w.due) ? w.due : null, basis = { kind: 'due' };
+        // R9 §3: a weekend due date counts as the next Monday; no forecast lands on a weekend.
+        const due = isDate(w.due) ? addBusinessDays(w.due, 0) : null;
+        let best = due, basis = { kind: 'due' };
         const consider = (date, b) => { if (isDate(date) && (!best || date > best)) { best = date; basis = b; } };
         normDeps(w).forEach(d => {
           const dep = idx[d.id];
@@ -326,16 +371,20 @@
         if (isDate(today)) {
           if (w.status === 'idle' && isDate(w.start) && w.start < today && (hasEffort(w) || (isDate(w.due) && w.due < today)))
             consider(addBusinessDays(today, dur), { kind: 'late-start', from: today, dur });
-          consider(today, { kind: 'today' });
+          consider(addBusinessDays(today, 0), { kind: 'today' });
         }
-        res = { forecast: best, start: best ? addBusinessDays(best, -dur) : null, slipDays: best && isDate(w.due) ? Math.max(0, diffDays(best, w.due)) : 0, basis };
+        // R9 §3: slipDays is business days (never calendar days).
+        res = { forecast: best, start: best ? addBusinessDays(best, -dur) : null, slipDays: best && due ? Math.max(0, businessDaysBetween(due, best)) : 0, basis };
         const viaId = basis.kind === 'dep' ? basis.ref : basis.kind === 'data' ? basis.resolver : null;
         if (viaId) res.via = viaId;   // the item that sets this forecast (binding)
-        if (isDate(w.due) && isDate(today) && w.due < today) res.sched = 'late';
-        else if (best && isDate(w.due) && best > w.due) res.sched = 'slip';
-        else if (isDate(w.due) && isDate(today) && diffDays(w.due, today) <= 5) res.sched = 'soon';
+        if (due && isDate(today) && due < today) res.sched = 'late';
+        else if (best && due && best > due) res.sched = 'slip';
+        else if (due && isDate(today) && diffDays(due, today) <= 5) res.sched = 'soon';
         else res.sched = 'ok';
-        if (viaId && best && isDate(w.due) && best > w.due) {
+        // R9 §1 one notion of late: past due ('late') or forecast after due ('slip').
+        res.late = res.sched === 'late' || res.sched === 'slip';
+        res.pastDueDays = res.sched === 'late' ? businessDaysBetween(due, isDate(today) ? today : due) : 0;
+        if (viaId && best && due && best > due) {
           if (basis.kind === 'data') { res.cause = basis.ref; res.causeWork = basis.resolver; }
           else {
             const up = memo[viaId];
@@ -353,7 +402,7 @@
     const out = {};
     for (const w of work) out[w.id] = JSON.parse(JSON.stringify(calc(w.id)));
     // "Causing slip": an item whose forecast is the binding reason a dependent finishes after its due date.
-    work.forEach(w => { const r = out[w.id]; if (r.via && r.forecast && isDate(w.due) && r.forecast > w.due && out[r.via]) out[r.via].causesSlip = true; });
+    work.forEach(w => { const r = out[w.id]; if (r.via && r.forecast && isDate(w.due) && r.forecast > addBusinessDays(w.due, 0) && out[r.via]) out[r.via].causesSlip = true; });
     work.forEach(w => { if (!out[w.id].causesSlip) out[w.id].causesSlip = false; });
     return out;
   }
@@ -471,7 +520,7 @@
       sched: status === 'done' ? 'done' : worstSched(open.map(w => fc[w.id].sched)),
       // Red blockers: effectively MISSING data only. Examples-only and pending (awaiting owner confirmation) are amber.
       blockers: open.length && step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'missing') : [],
-      needsLive: step ? (step.data || []).filter(d => { const e = effectiveAvail(docs, d); return e === 'example' || e === 'pending'; }) : [],
+      needsLive: step ? (step.data || []).filter(d => { const e = effectiveAvail(docs, d); return e === 'example' || e === 'pending' || e === 'problem'; }) : [],
       pending: step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'pending') : [],
       // R6: work done but data not effectively live = "Built · awaiting live data" (amber), never green Done.
       built: status === 'done',
@@ -493,8 +542,9 @@
     const out = {
       total: items.length, done,
       pct: items.length ? Math.round(done / items.length * 100) : 0,
-      late: items.filter(w => fc[w.id].sched === 'late').length,
-      slip: items.filter(w => fc[w.id].sched === 'slip').length,
+      late: items.filter(w => fc[w.id].late).length,          // R9 §1: one late count (past due + finishing after due)
+      slip: items.filter(w => fc[w.id].sched === 'slip').length, // finishing after due (Advanced breakdown)
+      pastDue: items.filter(w => fc[w.id].sched === 'late').length,
       blocked: items.filter(w => w.status !== 'done' && depIds(w).some(d => idx[d] && idx[d].status !== 'done')).length,
       finish, target,
       onTrack: !target || !finish || finish <= target,
@@ -542,11 +592,14 @@
     })));
     return out.sort((a, b) => (a.planned - b.planned) || b.held - a.held || a.name.localeCompare(b.name));
   }
-  // R8 schedule truth (the single status rule). rag/label:
-  //   red   "At risk"  = the forecast finish misses the deadline, or an unplanned blocker exists;
-  //   amber "On track, some tasks running late" = otherwise, when any open task is late or running late;
-  //   green "On track"; grey "Not planned" (no work). Late = open and due before today (due today is not late).
+  // R9 §1 schedule truth (the single status rule). One notion of late: an open task is late when its due date is
+  // before today (pastDue) or its forecast finish is after its due date (finishAfterDue). rag/label:
+  //   red   "Will miss the deadline" (Advanced: "At risk") = the forecast misses the deadline, or an unplanned blocker;
+  //   amber "Some tasks late" = otherwise, when any task is late;
+  //   green "On track" = nothing late, no unplanned blockers, forecast on or before the deadline (planned blockers are
+  //   mentioned in the reasons, since work to get them is scheduled); grey "Not planned" (no work).
   //   bufferDays = business days from the forecast (or actual) finish to the deadline.
+  // `runningLate` is kept as a deprecated alias of finishAfterDue.
   function scheduleCore(docs, project, today, fc) {
     fc = fc || forecastAll(docs, today);
     const items = project ? list(docs, 'workItem').filter(w => w.projectId === project.id) : [];
@@ -555,10 +608,11 @@
     const finish = allDone ? maxDate(items.map(w => w.doneAt || w.due)) : maxDate(open.map(w => fc[w.id] && fc[w.id].forecast));
     const target = project && isDate(project.target) ? project.target : null;
     const bufferDays = target && finish ? businessDaysBetween(finish, target) : null;
-    const late = open.filter(w => fc[w.id] && fc[w.id].sched === 'late').map(w => w.id);
-    const runningLate = open.filter(w => fc[w.id] && fc[w.id].sched === 'slip').map(w => w.id);
+    const pastDue = open.filter(w => fc[w.id] && fc[w.id].sched === 'late').map(w => w.id);
+    const finishAfterDue = open.filter(w => fc[w.id] && fc[w.id].sched === 'slip').map(w => w.id);
+    const late = open.filter(w => fc[w.id] && fc[w.id].late).map(w => w.id);
     const blockers = project ? blockersOf(docs, project, items) : [];
-    const unplanned = blockers.filter(b => !b.planned);
+    const unplanned = blockers.filter(b => !b.planned), plannedB = blockers.filter(b => b.planned);
     const misses = !!(target && finish && finish > target);
     const reasons = [];
     let rag;
@@ -567,16 +621,17 @@
       rag = 'red';
       if (misses) reasons.push('Forecast finish ' + fmtDay(finish) + ' is after the ' + fmtDay(target) + ' deadline');
       if (unplanned.length) reasons.push(joinList(unplanned.map(b => b.name), 3) + ' ' + isAre(unplanned.length) + ' not available yet and no work is planned to get ' + (unplanned.length === 1 ? 'it' : 'them'));
-    } else if (late.length || runningLate.length) {
+    } else if (late.length) {
       rag = 'amber';
-      if (late.length) reasons.push(nWord(late.length, 'task') + ' late' + (target ? ', but the finish still meets the deadline' : ''));
-      if (runningLate.length) reasons.push(nWord(runningLate.length, 'task') + ' running late' + (target && !late.length ? ', but the finish still meets the deadline' : ''));
+      reasons.push(nWord(late.length, 'task') + ' late' + (target ? ', but the finish still meets the deadline' : ''));
+      if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
     } else {
       rag = 'green';
-      reasons.push(allDone ? (blockers.length ? 'Every task is finished, but ' + nWord(blockers.length, 'piece') + ' of information ' + isAre(blockers.length) + ' not available yet' : 'All work done')
-        : bufferDays == null ? 'On track; no deadline set' : 'On track: ' + nWord(bufferDays, 'business day') + ' of buffer');
+      reasons.push(allDone ? 'All work done' : bufferDays == null ? 'On track; no deadline set' : 'On track: ' + nWord(bufferDays, 'business day') + ' of buffer');
+      if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
     }
-    return { project, items, open, allDone, finish, target, bufferDays, late, runningLate, blockers, rag, label: RAG_LABEL[rag], reasons, fc };
+    return { project, items, open, allDone, finish, target, bufferDays, late, pastDue, finishAfterDue, runningLate: finishAfterDue, blockers, rag,
+      label: RAG_LABEL[rag], labelAdvanced: RAG_LABEL_ADVANCED[rag], reasons, fc };
   }
   function healthOf(docs, project, items, fc, finish, allDone, today) {
     const c = scheduleCore(docs, project, today, fc);
@@ -589,17 +644,20 @@
 
   // R6 one schedule badge per item, by priority: late > causing slip > slipping > due soon > on track.
   // R8 plain words (no "slip"): keys are unchanged.
-  const BADGE_LABEL = { done: 'Done', late: 'Late', causing: 'Holding up other work', slipping: 'Running late', soon: 'Due soon', ontrack: 'On track' };
+  // R9 §1: Simple has one "Late" (past due or finishing after its due date); `late` is true for both and the
+  // Advanced breakdown is advancedLabel. A late item that also holds up others stays "Late" (holdsUp: true).
+  const BADGE_LABEL = { done: 'Done', late: 'Late', causing: 'Holding up other work', slipping: 'Late', soon: 'Due soon', ontrack: 'On track' };
+  const BADGE_ADVANCED = { done: 'Done', late: 'Past due', causing: 'Holding up other work', slipping: 'Will finish after its due date', soon: 'Due soon', ontrack: 'On track' };
   function badgeOf(w, r) {
     let key;
     if (!w || !r) key = 'ontrack';
     else if (w.status === 'done') key = 'done';
     else if (r.sched === 'late') key = 'late';
-    else if (r.causesSlip) key = 'causing';
     else if (r.sched === 'slip') key = 'slipping';
+    else if (r.causesSlip) key = 'causing';
     else if (r.sched === 'soon') key = 'soon';
     else key = 'ontrack';
-    return { key, label: BADGE_LABEL[key] };
+    return { key, label: BADGE_LABEL[key], advancedLabel: BADGE_ADVANCED[key], late: key === 'late' || key === 'slipping', holdsUp: !!(r && r.causesSlip) };
   }
   function scheduleBadge(docs, workId, today) {
     const w = get(docs, 'workItem', workId);
@@ -792,7 +850,9 @@
     const missing = usedData.filter(d => (av[d] || 'missing') === 'missing');
     const examples = usedData.filter(d => av[d] === 'example');
     const pendingD = usedData.filter(d => av[d] === 'pending');
+    const problemD = usedData.filter(d => av[d] === 'problem');
     const dl = [];
+    if (problemD.length) dl.push(joinList(problemD.map(dn)) + ' ' + (problemD.length === 1 ? 'has' : 'have') + ' an open problem.');
     if (missing.length) dl.push(joinList(missing.map(dn)) + ' ' + isAre(missing.length) + ' missing.');
     if (examples.length) dl.push(joinList(examples.map(dn)) + ' ' + (examples.length === 1 ? 'has' : 'have') + ' examples only and need' + (examples.length === 1 ? 's' : '') + ' a live source before go-live.');
     pendingD.forEach(d => {
@@ -802,8 +862,8 @@
     const attested = usedData.filter(d => av[d] === 'live' && (evidenceOf(docs, dataIdx[d]) || {}).type === 'attested');
     if (attested.length) dl.push(joinList(attested.map(dn)) + ' ' + (attested.length === 1 ? 'is' : 'are') + ' live on attested evidence only (a link and a note), which is weaker than a profile or connection check.');
     if (!dl.length) dl.push('All ' + nWord(usedData.length, 'data element') + ' ' + isAre(usedData.length) + ' live.');
-    checks.push({ id: 'data-live', label: 'Required data is live', pass: !missing.length && !examples.length && !pendingD.length, soft: attested.length > 0, detail: dl.join(' '),
-      items: missing.concat(examples, pendingD), missing, examples, pending: pendingD, attested,
+    checks.push({ id: 'data-live', label: 'Required data is live', pass: !missing.length && !examples.length && !pendingD.length && !problemD.length, soft: attested.length > 0, detail: dl.join(' '),
+      items: missing.concat(examples, pendingD, problemD), missing, examples, pending: pendingD, problems: problemD, attested,
       awaiting: pendingD.map(d => ({ dataId: d, owner: (dataIdx[d] && dataIdx[d].owner) || null, text: 'awaiting ' + pn(dataIdx[d] && dataIdx[d].owner) + ' to confirm' })) });
 
     // discovered-resolved. Items are "<dataId>#<index>".
@@ -953,23 +1013,31 @@
     const bus = sectionBus(docs, project, people);
     // R7 eligibility: BU members other than the PM and launch owner, plus project.approvers[bu] (never the PM or
     // launch owner). A section with nobody eligible needs an approver chosen; suggestion = the process owner.
+    // R9 §13 separation of duties ("two different people"): when one person recorded every test result of a
+    // section, that person cannot approve it; someone else must. Never a dead end: the section then needs an
+    // approver chosen (needsApprover, sodBlockedBy names the recorder).
+    const recordersOf = bu => [...new Set(runs.filter(r => r.by && (r.results || []).some(x => { const k = x && (x.caseId || x.scriptId); return k && testBus(k).includes(bu); })).map(r => r.by))].sort();
+    const soleRecorder = {};
+    bus.forEach(bu => { const rc = recordersOf(bu); soleRecorder[bu] = rc.length === 1 ? rc[0] : null; });
     const validForRaw = bu => {
       const latest = latestBy(approvals.filter(a => a.bu === bu), 'at');
-      return latest && latest.decision === 'approved' && latest.stepUp === true ? latest : null;
+      return latest && latest.decision === 'approved' && latest.stepUp === true && latest.approver !== soleRecorder[bu] ? latest : null;
     };
     const overrides = project.approvers && typeof project.approvers === 'object' ? project.approvers : {};
-    const eligible = {};
+    const eligible = {}, sodBlocked = {};
     bus.forEach(bu => {
       const e = Object.keys(people).filter(id => people[id] && people[id].bu === bu && !excluded.includes(id));
       const o = overrides[bu];
       if (o && people[o] && !excluded.includes(o) && !e.includes(o)) e.push(o);
-      eligible[bu] = e;
+      const ok = e.filter(id => id !== soleRecorder[bu]);
+      if (e.length && !ok.length) sodBlocked[bu] = soleRecorder[bu];
+      eligible[bu] = ok;
     });
     const needsApprover = bus.filter(bu => !eligible[bu].length && !validForRaw(bu));
     const suggestions = {};
     needsApprover.forEach(bu => {
       const p = procs.find(pp => allNodes(pp.tobe).some(n => n && !isGateway(n) && stepBus(n).includes(bu)));
-      const cand = [p && p.owner].concat(procs.map(pp => pp.owner)).find(id => id && people[id] && !excluded.includes(id));
+      const cand = [p && p.owner].concat(procs.map(pp => pp.owner)).find(id => id && people[id] && !excluded.includes(id) && id !== soleRecorder[bu]);
       suggestions[bu] = cand || null;
     });
     const noPerson = needsApprover;
@@ -1015,8 +1083,8 @@
     const staleSet = new Set(stale.map(x => x.bu));
     const pnSafe = id => (people[id] && people[id].name) || null;
     const buDetail = [];
-    if (!bus.length) buDetail.push('No business units own steps in the linked processes.');
-    needsApprover.forEach(b => buDetail.push('No approver in ' + b + ': assign one.' + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
+    if (!bus.length) buDetail.push("No team's part changed, so no approvals are needed.");
+    needsApprover.forEach(b => buDetail.push((sodBlocked[b] ? pn(sodBlocked[b]) + ' recorded these tests, so someone else must approve ' + b + "'s part: choose who." : 'No approver in ' + b + ': assign one.') + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
     if (unsigned.length) buDetail.push('Waiting for sign-off from ' + joinList(unsigned) + '.');
     stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + ' changed after sign-off.'));
     if (bus.length && !unsigned.length && !stale.length && !needsApprover.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
@@ -1028,8 +1096,11 @@
     const coAt = [project.cutoverUpdatedAt].concat(coTasks.map(x => x.updatedAt)).filter(Boolean).map(String).sort().pop() || null;
     const launchOwnerReview = { person: releaseManager, needed: !!(coAt && currentAts.length && coAt > currentAts[currentAts.length - 1]) };
     const sectionStatus = bus.map(bu => ({ bu, approved: !!validFor(bu), approval: validFor(bu) ? validFor(bu).id || null : null, stale: staleSet.has(bu),
-      needsApprover: needsApprover.includes(bu), eligible: eligible[bu].slice(), suggestion: suggestions[bu] || null, override: overrides[bu] || null }));
-    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0,
+      needsApprover: needsApprover.includes(bu), eligible: eligible[bu].slice(), suggestion: suggestions[bu] || null, override: overrides[bu] || null,
+      approver: validFor(bu) ? validFor(bu).approver || null : null, approvedAt: validFor(bu) ? validFor(bu).at || null : null,
+      sodBlockedBy: sodBlocked[bu] || null, recorders: recordersOf(bu) }));
+    // R9 §13: a team that does not need to approve is never a gate condition (no changed teams → nothing to approve).
+    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0,
       detail: buDetail.join(' '), items: needsApprover.concat(unsigned, stale.map(x => x.bu)), unsigned, noPerson, needsApprover, eligible, suggestions, sectionStatus, launchOwnerReview,
       sections: bus, excludedApprover: project.owner || null, excludedApprovers: excluded, releaseManager,
       stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)) })) });
@@ -1037,8 +1108,13 @@
     // two-person: approved, non-stale approvals only (matches the sign-off panel).
     const current = bus.filter(bu => validFor(bu) && !staleSet.has(bu)).map(validFor);
     const approvers = [...new Set(current.map(a => a.approver))];
-    checks.push({ id: 'two-person', label: 'Two-person rule', pass: approvers.length >= 2,
-      detail: (approvers.length >= 2 ? 'Approved by ' + joinList(approvers.map(pn)) + '.'
+    // R9 §13 deadlock-free: with one changed team, its one approval (never the PM, launch owner or the person who
+    // recorded all its tests) already makes two different people; with none, nothing is needed.
+    const tpPass = bus.length === 0 ? true : bus.length === 1 ? current.length === 1 : approvers.length >= 2;
+    checks.push({ id: 'two-person', label: 'Two-person rule', pass: tpPass,
+      detail: (bus.length === 0 ? "No team's part changed, so no approvals are needed."
+        : bus.length === 1 && current.length === 1 ? 'Approved by ' + pn(approvers[0]) + '; only one team\'s part changed, so one approval is enough.'
+        : approvers.length >= 2 ? 'Approved by ' + joinList(approvers.map(pn)) + '.'
         : approvers.length === 1 ? 'Only ' + pn(approvers[0]) + ' has a current approval; a second approver is needed.'
         : 'No current approvals; two different approvers are needed.') + (ownerApprovals ? ' ' + capFirst(exclRole) + ' (' + exclNames + ') ' + (excluded.length > 1 ? 'do' : 'does') + ' not count.' : ''), items: approvers });
 
@@ -1261,12 +1337,29 @@
     if (!rows.length) return [];
     const header = rows[0].map((h, i) => String(h).trim() || 'column_' + (i + 1));
     const data = rows.slice(1, 1 + maxRows);
+    // R9 §13: with opts.fields (or opts.dataElement) every column is checked against its field's rules using the
+    // real values (only counts and row numbers are kept, never values).
+    const specFields = (opts && (opts.fields || (opts.dataElement && opts.dataElement.fields))) || null;
     return header.map((name, j) => {
       const vals = data.map(r => (r[j] == null ? '' : r[j]));
       const present = vals.filter(v => v.trim() !== '');
       const lens = present.map(v => chars(v).length);
       const classes = new Set(), specials = [];
-      const pcount = {};
+      const pcount = {}, pfirst = {}, pvalid = {};
+      const fld = specFields ? specFields.find(f => f && columnFor(f, [{ name }])) : null;
+      const sp = fld ? fieldSpec(fld) : null;
+      const check = sp ? { rejected: 0, firstRow: null, blank: 0, wrongLength: 0, badChars: 0, pattern: 0 } : null;
+      let nullRow = null;
+      vals.forEach((v, i) => {
+        if (v.trim() === '' && nullRow == null) nullRow = i + 1;
+        if (!check || validate(sp, v)) return;
+        check.rejected++; if (check.firstRow == null) check.firstRow = i + 1;
+        const len = chars(v).length;
+        if (v.trim() === '') check.blank++;
+        else if ((sp.length != null && len !== sp.length) || (sp.minLen != null && len < sp.minLen) || (sp.maxLen != null && len > sp.maxLen)) check.wrongLength++;
+        else if ((sp.type === 'digits' && !sp.mask && !/^\d+$/.test(v)) || (sp.mask && shapeOf(v) !== sp.maskShape && chars(v).length === sp.length)) check.badChars++;
+        else check.pattern++;
+      });
       present.forEach(v => {
         chars(v).forEach(c => {
           if (RE_DIGIT.test(c)) classes.add('digits');
@@ -1278,6 +1371,7 @@
           if (!RE_ALNUM_SPACE.test(c) && !specials.includes(c) && specials.length < 15) specials.push(c);
         });
         const p = patternOf(v); pcount[p] = (pcount[p] || 0) + 1;
+        if (!(p in pfirst)) { pfirst[p] = vals.indexOf(v) + 1; if (sp) pvalid[p] = validate(sp, v); }
       });
       const col = {
         name, rows: vals.length, nulls: vals.length - present.length, distinct: new Set(present).size,
@@ -1293,7 +1387,9 @@
       if (numeric && !idLike) { const ns = trimmed.map(Number); col.min = Math.min(...ns); col.max = Math.max(...ns); }
       col.charClasses = ['digits', 'letters', 'space', 'punct', 'unicode'].filter(c => classes.has(c));
       col.specials = specials;
-      col.patterns = Object.keys(pcount).map(p => ({ pattern: p, count: pcount[p] }))
+      if (nullRow != null) col.nullRow = nullRow;
+      if (check) col.check = check;
+      col.patterns = Object.keys(pcount).map(p => Object.assign({ pattern: p, count: pcount[p], row: pfirst[p] }, sp ? { valid: pvalid[p] } : {}))
         .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern)).slice(0, 5);
       const ex = [];
       for (const v of [...new Set(present)]) { const m = maskValue(v); if (!ex.includes(m)) ex.push(m); if (ex.length >= 3) break; }
@@ -1359,13 +1455,14 @@
     if (/ (zip|postal|postcode) /.test(t)) return 'postal';
     if (/ (address|street|addr) /.test(t)) return 'address';
     if (/ (city|town) /.test(t)) return 'city';
+    if (/ (employee|staff|manager|requester|approver|person|people|user|first|last|surname|given|full name) /.test(t)) return 'person';   // R9 §13: people, never vendor names
     if (/ (name|holder|payee|contact) /.test(t)) return 'name';
     if (/ (id|ids|number|no|num|code|ref|reference|account|iban|swift|bic|ein|ssn|tin|sku) /.test(t)) return 'id';
     if (/ (vendor|company|supplier|bank) /.test(t)) return 'name';
     return 'text';
   }
   const SEM_SAMPLE = { email: 'ap@northwind.example', phone: '+1 555 0142', postal: '75201', address: '125 Harbor Way, Suite 4',
-    city: 'Lakeview', id: 'NW100245', name: 'Northwind Supply Co', text: 'Standard terms apply' };
+    city: 'Lakeview', id: 'NW100245', name: 'Northwind Supply Co', person: 'Dana Whitfield', text: 'Standard terms apply' };
   // Free text: special-character cases apply only here (never to ids, emails, phones, postal codes or patterned fields).
   function isFreeText(sp) { return sp.type === 'text' && sp.sem !== 'file' && !sp.values && !sp.mask && !sp.regex && sp.length == null && !['id', 'email', 'phone', 'postal'].includes(sp.sem); }
   function allowedSpecials(sp) {
@@ -1548,6 +1645,7 @@
   // R6: special-character cases tailored to the kind of free text; emoji only in name fields.
   const SPECIAL_BY_SEM = {
     name: SPECIAL_TEXT,
+    person: [["Dana O'Neil", 'apostrophe'], ['Zoë Martín', 'accented letters'], ['Ana-Lucía Ruiz', 'hyphen'], ['  Dana Whitfield  ', 'leading and trailing spaces']],
     address: [["12 O'Connell St", 'apostrophe'], ['8 Rue Saint-Rémy, Montréal', 'accented letters'], ['Unit #4, 9 Elm Rd', 'hash and comma'], ['  125 Harbor Way  ', 'leading and trailing spaces']],
     city: [["Coeur d'Alene", 'apostrophe'], ['São Paulo', 'accented letters'], ['  Lakeview  ', 'leading and trailing spaces']],
     text: [["Vendor's terms", 'apostrophe'], ['Résumé on file', 'accented letters'], ['Net 30 & 2% discount', 'ampersand and percent'], ['  Standard terms  ', 'leading and trailing spaces']],
@@ -1590,6 +1688,19 @@
       picked.forEach(x => keep.add(x.i));
     });
     return out.filter((tc, i) => keep.has(i));
+  }
+  // R9 §13: a synthetic value of an observed shape that a pattern rule (regex) also accepts, by using the rule's own
+  // literal letters ("E" in E\d{5}); null when none fits.
+  function fitRegex(sp, input) {
+    if (!sp.regex || validate(sp, input)) return input;
+    const src = sp.regex.source.replace(/\\./g, '').replace(/\[[^\]]*\]|\{[^}]*\}/g, '');
+    const lits = [...new Set((src.match(/[A-Za-z]/g) || []))];
+    for (const L of lits) {
+      const up = L.toUpperCase(), lo = L.toLowerCase();
+      const cand = chars(input).map(c => RE_LU.test(c) ? up : RE_L.test(c) ? lo : c).join('');
+      if (validate(sp, cand)) return cand;
+    }
+    return null;
   }
   function generateTestsAll(dataElement, profile) {
     const de = dataElement || {};
@@ -1659,7 +1770,7 @@
       const cr = sp.type === 'text' || sp.type === 'date' ? crossRule(f, de.fields || []) : null;   // R8: text/date values only
       if (cr) {
         const isDate_ = sp.type === 'date';
-        const x = isDate_ ? '2026-01-10' : 'Northwind Supply Co', y = isDate_ ? '2026-01-20' : 'Northwind Supply Company';
+        const x = isDate_ ? '2026-01-10' : sp.sem === 'person' ? 'Dana Whitfield' : 'Northwind Supply Co', y = isDate_ ? '2026-01-20' : sp.sem === 'person' ? 'Dana Whitfield-Ray' : 'Northwind Supply Company';
         const say = 'Cross-field: ' + cr.rule.trim();
         if (cr.rel === 'equal') { add(f, 'valid', x, 'accept', 'spec', say + ' (same value)', { [cr.other]: x }); add(f, 'invalid', x, 'reject', 'spec', say + ' (different value)', { [cr.other]: y }); }
         else if (cr.rel === 'differ') { add(f, 'valid', x, 'accept', 'spec', say + ' (different value)', { [cr.other]: y }); add(f, 'invalid', x, 'reject', 'spec', say + ' (same value)', { [cr.other]: x }); }
@@ -1691,13 +1802,20 @@
         // Digits shifted by one so a shape case never collides with (and is deduped into) a spec case.
         let input = expandPattern(pt.pattern).replace(/[0-9]/g, c => String((+c + 1) % 10));
         if (sp.aba && /^\d{9}$/.test(input)) input = abaFrom(input.slice(0, 8));
-        const bad = outlier(pt);
-        add(f, 'edge', input, bad ? 'reject' : ok(input), 'profile', 'Observed shape: ' + humanPattern(pt.pattern) + ' (' + pt.count + ' of ' + colRows(col, profile) + ' rows)' + (bad && ok(input) === 'accept' ? '; unlike most values, so it should be rejected' : ''));
+        if (pt.valid !== false && sp.regex) input = fitRegex(sp, input) || input;
+        // R9 §13: when the profile checked the real values against the rules, that decides (a real value the
+        // rules reject is a "should be rejected" test); the test links to the sample row it came from.
+        const bad = outlier(pt) || pt.valid === false;
+        const expect = bad ? 'reject' : ok(input);
+        const before = out.length;
+        add(f, 'edge', input, expect, 'profile', 'Observed shape: ' + humanPattern(pt.pattern) + ' (' + pt.count + ' of ' + colRows(col, profile) + ' rows)'
+          + (pt.valid === false ? '; the rules reject it' : bad && ok(input) === 'accept' ? '; unlike most values, so it should be rejected' : ''));
+        if (out.length > before && pt.row) out[out.length - 1].sampleRow = pt.row;
       });
       if (col.maxLen > 0 && !sp.values && sp.type !== 'file') {
         // Built to be otherwise valid for the spec, so the expectation is decided by length alone.
-        const input = specValidOfLen(sp, col.maxLen);
-        add(f, 'edge', input, ok(input), 'profile', 'Longest observed length (' + col.maxLen + ')');
+        const input = sp.regex ? fitRegex(sp, specValidOfLen(sp, col.maxLen)) : specValidOfLen(sp, col.maxLen);
+        if (input != null) add(f, 'edge', input, ok(input), 'profile', 'Longest observed length (' + col.maxLen + ')');
       }
       const numericCol = (col.patterns || []).some(p => /^9/.test(p.pattern));
       if (sp.type === 'digits' || sp.type === 'number' || sp.type === 'currency' || numericCol) {
@@ -1708,7 +1826,7 @@
         const input = 'Zoë Ñandú';
         add(f, 'edge', input, ok(input), 'profile', 'Unicode characters observed in the extract');
       }
-      if (col.nulls > 0) add(f, 'edge', '', ok(''), 'profile', 'Empty values observed (' + col.nulls + ')');
+      if (col.nulls > 0) { const before = out.length; add(f, 'edge', '', ok(''), 'profile', 'Empty values observed (' + col.nulls + ')'); if (out.length > before && col.nullRow) out[out.length - 1].sampleRow = col.nullRow; }
     }
     return out;
   }
@@ -1731,9 +1849,13 @@
         const longN = pats.filter(p => (want != null && lenOf(p) > want) || (sp.maxLen != null && lenOf(p) > sp.maxLen)).reduce((a, p) => a + (p.count || 0), 0);
         if (shortN) bits.push(shortN + ' ' + isAre(shortN) + ' too short');
         if (longN) bits.push(longN + ' ' + isAre(longN) + ' too long');
+        // R9 §13: values the rules reject (from the real-value check when the profile has one, else from the shapes).
+        const lenBad = p => (want != null && lenOf(p) !== want) || (sp.minLen != null && lenOf(p) < sp.minLen) || (sp.maxLen != null && lenOf(p) > sp.maxLen);
+        const misN = pats.filter(p => !lenBad(p) && (p.valid === false || (p.valid == null && !sp.regex && !validate(sp, expandPattern(p.pattern))))).reduce((a, p) => a + (p.count || 0), 0);
+        if (misN) bits.push(misN + ' ' + (misN === 1 ? "doesn't" : "don't") + ' match the pattern');
         const other = specDrift({ fields: [f] }, { rows, columns: [Object.assign({}, col, { name: col.name })] })
           .filter(x => x.field === f.name && !['length-mismatch', 'required-nulls', 'unspecified-column', 'missing-column'].includes(x.issue));
-        if (other.length && !shortN && !longN) bits.push('some do not match the rules');
+        if (other.length && !shortN && !longN && !misN) bits.push('some do not match the rules');
       }
       if (!f && nulls) bits.push(nulls + ' ' + isAre(nulls) + ' empty');
       return { column: col.name, field: f ? f.name : null, problems: bits.length, text: (f ? f.name : col.name) + ': ' + nWord(filled, 'value') + (bits.length ? ', ' + bits.join(', ') : '') };
@@ -1887,22 +2009,33 @@
       const w = work.find(x => x.id === dep);
       return w ? (w.status === 'done' ? (w.doneAt || w.due) : fc[w.id] && fc[w.id].forecast) : null;
     };
+    // R9 §4 (B11) owners come from the step: its owner, else its role (ownerRole, shown in Simple), and only when
+    // the step has neither, the PM.
+    const ownerOf = (st, fallbackPerson) => st && st.owner ? { owner: st.owner } : st && String(st.ownerRole || '').trim() ? { owner: null, ownerRole: String(st.ownerRole).trim() }
+      : fallbackPerson ? { owner: fallbackPerson } : { owner: project.owner || null };
     const push = sg => {
       sg.key = 'sug-' + (++n);
       sg.effortDays = SUGGEST_EFFORT;
+      if (!sg.owner && !sg.ownerRole) sg.owner = project.owner || null;
+      if (!sg.ownerRole) delete sg.ownerRole;
       out.push(sg);
       return sg;
     };
     // R6 dates: an item with no open dependency ("can start now") starts on the anchor (today); otherwise the
     // business day after its latest dependency finishes (FS). Spans = effortDays stretched by one factor (1–2×)
     // so the chain spreads toward the target while keeping a buffer of max(5, 15%) business days before it.
+    // R9 §4 levelled: one suggested task at a time per person (or role), in dependency order, so nobody is double
+    // booked; a person's next task starts the business day after their previous one is due.
     const schedule = factor => {
       const span = Math.max(1, Math.round(SUGGEST_EFFORT * factor));
+      const free = {};
       out.forEach(sg => {
         if (!anchor) { sg.start = null; sg.due = null; return; }
         const fins = sg.deps.map(finishOf).filter(isDate);
-        sg.start = fins.length ? maxDate([anchor, addBusinessDays(maxDate(fins), 1)]) : anchor;
+        const who = sg.owner || ('role:' + (sg.ownerRole || ''));
+        sg.start = maxDate([anchor, fins.length ? addBusinessDays(maxDate(fins), 1) : anchor, free[who] || anchor]);
         sg.due = addBusinessDays(sg.start, span);
+        free[who] = addBusinessDays(sg.due, 1);
       });
     };
     const hasWork = (pid, nodeId) => work.some(w => w.projectId === projectId && w.pid === pid && w.step === nodeId);
@@ -1916,8 +2049,8 @@
         const existing = work.find(w => w.resolves === d);
         if (existing) { if (existing.status !== 'done') needs.push(existing.id); return; }
         if (!resolverKey[d]) {
-          const sg = push({ pid: p.id, step: st.id, title: 'Make ' + (de.name || 'the information') + ' available',   // R8: one plain wording for "Not available yet"
-            kind: 'build', owner: de.owner || st.owner || null, deps: [], resolves: d });
+          const sg = push(Object.assign({ pid: p.id, step: st.id, title: 'Make ' + (de.name || 'the information') + ' available',   // R8: one plain wording for "Not available yet"
+            kind: 'build', deps: [], resolves: d }, de.owner ? { owner: de.owner } : ownerOf(st)));
           resolverKey[d] = sg.key;
         }
         needs.push(resolverKey[d]);
@@ -1932,8 +2065,8 @@
           const st = diff.nodes[nd.id];
           if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
             const firstStep = flatSteps((nd.branches || []).flatMap(b => (b && b.nodes) || []))[0];
-            const g = push({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
-              kind: 'build', owner: (firstStep && firstStep.owner) || p.owner || null, deps: flowPrev.slice() });
+            const g = push(Object.assign({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
+              kind: 'build', deps: flowPrev.slice() }, ownerOf(firstStep, p.owner)));
             flowPrev = [g.key];
           }
           // each branch follows the gateway; the step after the gateway follows every branch's last work
@@ -1947,8 +2080,8 @@
         const needs = resolversFor(p, nd);
         const st = diff.nodes[nd.id];
         if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
-          const sg = push({ pid: p.id, step: nd.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (nd.title || 'untitled step'), kind: 'build', owner: nd.owner || p.owner || null,
-            deps: [...new Set(flowPrev.concat(needs))] });
+          const sg = push(Object.assign({ pid: p.id, step: nd.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (nd.title || 'untitled step'), kind: 'build',
+            deps: [...new Set(flowPrev.concat(needs))] }, ownerOf(nd)));
           flowPrev = [sg.key];
         } else {
           const open = work.filter(w => w.projectId === projectId && w.pid === p.id && w.step === nd.id && w.status !== 'done').map(w => w.id);
@@ -1967,8 +2100,45 @@
       const usable = avail - Math.max(5, Math.ceil(avail * 0.15));
       const needed = businessDaysBetween(anchor, maxDate(out.map(x => x.due)));
       if (needed > 0 && usable > needed) schedule(Math.min(2, usable / needed));
+      // R9 §4: each due date is its own forecast finish (+0 buffer) once accepted, so nothing is late on day 0.
+      for (let i = 0; i < 6; i++) {
+        const fc2 = forecastAll(withPlan(docs, projectId, out), today);
+        let moved = false;
+        out.forEach(sg => { const f = fc2[sg.key] && fc2[sg.key].forecast; if (isDate(f) && f > sg.due) { sg.due = f; moved = true; } });
+        if (!moved) break;
+      }
     }
     return out;
+  }
+  // R9 §4 the exact work items "Accept" stores for a suggested plan (status idle, dates, effort, deps, owner/role).
+  function planToWork(projectId, suggestions) {
+    return (suggestions || []).filter(Boolean).map(s => {
+      const w = { id: s.key, projectId, pid: s.pid, step: s.step, title: s.title, owner: s.owner || null, status: 'idle', start: s.start, due: s.due,
+        effortDays: s.effortDays, deps: (s.deps || []).slice(), kind: s.kind || 'build' };
+      if (s.ownerRole) w.ownerRole = s.ownerRole;
+      if (s.resolves) w.resolves = s.resolves;
+      return w;
+    });
+  }
+  function withPlan(docs, projectId, suggestions) {
+    const add = planToWork(projectId, suggestions).map(w => ({ id: w.id, data: w }));
+    return Object.assign({}, docs, { workItem: ((docs && docs.workItem) || []).concat(add) });
+  }
+  // R9 §4 what the plan dialog says before Accept. forecastFinish equals projectTruth.forecastFinish after Accept
+  // (planToWork stored as-is). {forecastFinish, deadline, fits, lateCount, message}.
+  function planFit(docs, projectId, today, suggestions) {
+    const sug = suggestions || suggestWorkFromDiff(docs, projectId, today);
+    const t = projectTruth(withPlan(docs, projectId, sug), projectId, today);
+    if (!t) return { forecastFinish: null, deadline: null, fits: false, lateCount: 0, message: 'This project could not be found.' };
+    const fin = t.forecastFinish, dl = t.deadline;
+    const fits = !dl || !fin || fin <= dl;
+    const keys = new Set(sug.map(s => s.key));
+    const lateCount = t.late.filter(id => keys.has(id)).length;
+    const message = !fin ? 'This plan has no dates yet.'
+      : !dl ? 'Done by about ' + fmtDay(fin) + '. No deadline is set.'
+      : fits ? 'Done by about ' + fmtDay(fin) + ', ' + nWord(t.bufferDays, 'business day') + ' before your ' + fmtDay(dl) + ' deadline.'
+      : 'This plan needs until ' + fmtDay(fin) + ', past your ' + fmtDay(dl) + ' deadline.';
+    return { forecastFinish: fin, deadline: dl, fits, lateCount, message };
   }
 
   /* ------------------------------------------------------------------ */
@@ -2020,7 +2190,7 @@
   // Compare two versions (current process, a draft, or a released entry: {tobe} or {asis} or a node array).
   // Nodes match by id. Output shape = diffProcess.
   function versionNodes(v) { return Array.isArray(v) ? v : v ? (v.tobe || v.asis || []) : []; }
-  function diffVersions(a, b) {
+  function diffVersions(a, b, docs) {
     const A = versionNodes(a), B = versionNodes(b);
     const ids = allNodeIds(A);
     const tag = nodes => (nodes || []).map(n => {
@@ -2030,7 +2200,7 @@
       if (Array.isArray(n.branches)) c.branches = n.branches.map(br => Object.assign({}, br, { nodes: tag(br && br.nodes) }));
       return c;
     });
-    return diffProcess({ asis: A, tobe: tag(B) });
+    return diffProcess({ asis: A, tobe: tag(B) }, docs);
   }
 
   // Planned-date conflicts: a successor's planned start/finish violates its dependency
@@ -2209,15 +2379,15 @@
   }
   // R6 earned value. Each item's value = workCost, scaled so values sum to BAC when budget.planned is set.
   //  PV: value scheduled by today (linear across start→due in business days; due ≤ today = all).
-  //  EV: done = full value; in progress = value × fraction (progress 0–1, else pct 0–100, else 0.5); idle = 0.
+  //  EV: done = full value; otherwise value × logged progress (progress 0–1, else pct 0–100); no logged progress = 0
+  //      (R9 §5: an untouched or merely "in progress" task earns nothing).
   //  AC: Σ time[].hours × dayRate/8 (rate of the person who logged, else the owner, else 800).
   //  SPI = EV/PV, CPI = EV/AC (null when the divisor is 0); EAC = BAC/CPI, or BAC when CPI is null.
   function progressOf(w) {
     if (w.status === 'done') return 1;
-    if (w.status === 'idle' || !w.status) return 0;
-    if (w.progress != null && isFinite(+w.progress)) return Math.min(1, Math.max(0, +w.progress));
-    if (w.pct != null && isFinite(+w.pct)) return Math.min(1, Math.max(0, +w.pct / 100));
-    return 0.5;
+    if (w.progress != null && w.progress !== '' && isFinite(+w.progress)) return Math.min(1, Math.max(0, +w.progress));
+    if (w.pct != null && w.pct !== '' && isFinite(+w.pct)) return Math.min(1, Math.max(0, +w.pct / 100));
+    return 0;
   }
   function scheduledFraction(w, today) {
     if (!isDate(today) || !isDate(w.due)) return 0;
@@ -2247,7 +2417,10 @@
         AC += h * rate / 8;
       });
     });
-    const SPI = PV > 0 ? r2(EV / PV) : null, CPI = AC > 0 ? r2(EV / AC) : null;
+    // R9 §5: SPI only once PV > 0 and at least one task has started (in progress, done, progress or hours logged).
+    // ("started" = done, logged progress or logged hours: an "in progress" flag alone earns nothing to compare).
+    const started = items.some(w => w.status === 'done' || progressOf(w) > 0 || (Array.isArray(w.time) && w.time.length));
+    const SPI = PV > 0 && started ? r2(EV / PV) : null, CPI = AC > 0 ? r2(EV / AC) : null;
     // R8: EAC is the one cost forecast. With actuals: BAC / CPI; before any hours are logged: the bottom-up
     // estimate (Σ workCost), so an estimate above the budget shows as over budget from day one.
     const EAC = CPI ? r2(BAC / (EV / AC)) : r2(total > 0 ? total : BAC);
@@ -2469,6 +2642,7 @@
     example: { key: 'sample', label: 'Sample only', tone: 'amber' },
     missing: { key: 'notyet', label: 'Not available yet', tone: 'red' },
     pending: { key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' },
+    problem: { key: 'problem', label: 'Has a problem', tone: 'amber' },
   };
   // R8 Simple has two states only: "We have it" / "Not available yet" (state = the effective state; needsConfirm
   // when only the owner's confirmation is missing). {advanced: true} returns the detailed R7 labels.
@@ -2476,6 +2650,7 @@
   function availLabel(docs, dataId, opts) {
     const st = effectiveAvail(docs, dataId);
     if (opts && opts.advanced) return Object.assign({ state: st }, AVAIL_LABELS[st] || AVAIL_LABELS.missing);
+    if (st === 'problem') return Object.assign({ state: st, needsConfirm: false }, AVAIL_LABELS.problem);
     return Object.assign({ state: st, needsConfirm: st === 'pending' }, st === 'live' ? SIMPLE_AVAIL.have : SIMPLE_AVAIL.notyet, st === 'pending' || st === 'example' ? { tone: 'amber' } : {});
   }
   // R8 "Confirm all": information waiting for this person's confirmation (fix done by someone else).
@@ -2492,109 +2667,139 @@
     return 'about ' + nWord(Math.round(days / 30), 'month');
   }
   // R8: "At risk" only when the forecast misses the deadline or an unplanned blocker exists.
-  const RAG_LABEL = { green: 'On track', amber: 'On track, some tasks running late', red: 'At risk', grey: 'Not planned' };
+  // R9 §1: the Simple labels. Advanced may keep "At risk" for red.
+  const RAG_LABEL = { green: 'On track', amber: 'Some tasks late', red: 'Will miss the deadline', grey: 'Not planned' };
+  const RAG_LABEL_ADVANCED = { green: 'On track', amber: 'Some tasks late', red: 'At risk', grey: 'Not planned' };
 
-  // R8 "Are we on track?" in plain words, from scheduleCore (the same facts as projectTruth).
-  // who: [{person (person id), name, action}] — the people who need to act, most important first.
-  function statusOf(docs, project, c) {
-    const rag = c.rag, label = c.label;
-    const who = [];
-    const addWho = (person, action) => { if (person && !who.some(x => x.person === person && x.action === action)) who.push({ person, name: nameOf(docs, person), action }); };
-    if (rag === 'grey') {
-      addWho(project.owner, 'Add the work or accept a suggested plan');
-      return { sentence: 'No work has been planned yet, so there is nothing to track. Next: add the work or accept a suggested plan.', rag, label, who };
-    }
+  // R9 §1 the one ranked "who needs to act" list. Ranks: unplanned blockers, past due, late items delaying others,
+  // other late items, information being made available / open problems, approvals ready, tests to run.
+  // [{person, name, what, why, href, ref, rank, action}] (action = what, kept for R8 callers).
+  const WHO_RANK = { plan: 5, blocker: 10, 'past-due': 20, deadline: 25, delaying: 30, late: 40, info: 45, problem: 47, approval: 50, test: 60 };
+  function q(t) { return '“' + (t || 'untitled task') + '”'; }
+  function problemTitle(w) { return capFirst(String((w && w.title) || 'untitled problem').replace(/^\s*fix\s*:\s*/i, '')); }
+  function taskHref(project, w) { return '/project/' + (w.projectId || (project && project.id) || '') + '?task=' + encodeURIComponent(w.id); }
+  function whoOf(docs, project, c, extra) {
+    extra = extra || {};
+    const out = [], seen = new Set();
+    const add = (person, what, why, href, ref) => {
+      const key = ref || (why + ':' + person + ':' + what);
+      if (seen.has(key)) return; seen.add(key);
+      out.push({ person: person || null, name: person ? nameOf(docs, person) : 'Nobody', what, why, href: href || '/project/' + project.id, ref: ref || null, rank: WHO_RANK[why] || 99, action: what });
+    };
+    if (c.rag === 'grey') { add(project.owner, 'Add the work or accept a suggested plan', 'plan', '/project/' + project.id, 'plan:' + project.id); return out; }
+    const fc = c.fc;
+    const openIds = new Set(c.open.map(w => w.id));
+    const holding = w => dependents(docs, w.id).filter(id => openIds.has(id)).length;
+    const verb = w => w.kind === 'defect' ? 'Fix the problem: ' + q(problemTitle(w)) : 'Finish ' + q(w.title);
+    c.blockers.filter(b => !b.planned).forEach(b => add(b.owner, 'Plan work to get ' + b.name, 'blocker', '/data/' + b.dataId, 'data:' + b.dataId));
+    const byHold = arr => arr.map(w => ({ w, n: holding(w) })).sort((x, y) => y.n - x.n || String(x.w.due || '').localeCompare(String(y.w.due || '')));
+    byHold(c.open.filter(w => c.pastDue.includes(w.id))).forEach(({ w }) =>
+      add(w.owner, verb(w) + (isDate(w.due) ? ' (was due ' + fmtDay(w.due) + ')' : ''), 'past-due', taskHref(project, w), 'work:' + w.id));
+    if (c.finish && c.target && c.finish > c.target && !c.late.length) add(project.owner, 'Review the plan: the work finishes after the deadline', 'deadline', '/project/' + project.id, 'deadline:' + project.id);
+    const fad = byHold(c.open.filter(w => c.finishAfterDue.includes(w.id)));
+    fad.filter(x => x.n > 0 || (fc[x.w.id] && fc[x.w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id));
+    // not late itself, but the reason another task finishes after its due date
+    byHold(c.open.filter(w => !c.late.includes(w.id) && fc[w.id] && fc[w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id));
+    fad.forEach(({ w }) => add(w.owner, (w.kind === 'defect' ? 'Fix the problem: ' + q(problemTitle(w)) : 'Get ' + q(w.title) + ' back on schedule'), 'late', taskHref(project, w), 'work:' + w.id));
+    // a planned blocker whose fix task is already listed above is not listed twice
+    c.blockers.filter(b => b.planned && !(b.resolver && seen.has('work:' + b.resolver))).forEach(b => add(b.resolverOwner || b.owner, 'Get ' + b.name + ' ready', 'info', '/data/' + b.dataId, 'data:' + b.dataId));
+    c.open.filter(w => w.kind === 'defect').forEach(w => add(w.owner, 'Fix the problem: ' + q(problemTitle(w)), 'problem', taskHref(project, w), 'work:' + w.id));
+    (extra.approvals || []).forEach(a => {
+      if (!a.needed || a.approved || !a.ready) return;
+      if (a.blockedBy) add(project.owner, a.blockedBy.fix, 'approval', '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu), 'approval:' + a.bu);
+      else if (a.approver) add(a.approver, 'Approve ' + a.bu + "'s part", 'approval', '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu), 'approval:' + a.bu);
+    });
+    const t = extra.testing;
+    if (t && t.stage && t.stage !== 'done' && t.next) add(project.testLead || project.owner, t.next, 'test', '/testing/' + project.id, 'testing:' + project.id);
+    return out.sort((x, y) => x.rank - y.rank);
+  }
+  // R9 §1 status sentence: the forecast and the deadline, then the late count and the first name to act.
+  function sentenceOf(docs, project, c, who) {
+    if (c.rag === 'grey') return 'No work has been planned yet, so there is nothing to track. Next: add the work or accept a suggested plan.';
     const { finish, target, allDone, blockers } = c;
     const bd = n => nWord(Math.abs(n), 'business day');
     let timing;
     if (allDone) timing = blockers.length ? 'Every planned task is finished' + (finish ? ' (' + fmtDay(finish) + ')' : '') + '.' : 'All work is done' + (finish ? ', finished ' + fmtDay(finish) : '') + '.';
     else if (!finish) timing = 'The work has no dates yet.';
     else if (!target) timing = 'Expected ' + fmtDay(finish) + '. No deadline is set.';
-    else if (finish === target) timing = 'Expected ' + fmtDay(finish) + ', right on the deadline.';
+    else if (finish === target) timing = 'Expected ' + fmtDay(finish) + ', right on the ' + fmtDay(target) + ' deadline.';
     else if (finish < target) timing = 'Expected ' + fmtDay(finish) + ', ' + bd(c.bufferDays) + ' before the ' + fmtDay(target) + ' deadline.';
     else timing = 'Expected ' + fmtDay(finish) + ', ' + bd(c.bufferDays) + ' after the ' + fmtDay(target) + ' deadline.';
-    const issues = [];
-    blockers.forEach(b => issues.push({ text: b.text + (b.planned ? '; work is planned to get it' : '') + (b.owner ? ' (' + nameOf(docs, b.owner) + ')' : ''),
-      person: b.planned ? (b.resolverOwner || b.owner) : b.owner, action: b.planned ? 'Get ' + b.name + ' ready' : 'Plan work to get ' + b.name, planned: b.planned }));
-    const items = c.items, fc = c.fc;
-    const openIds = new Set(c.open.map(w => w.id));
-    const holding = w => dependents(docs, w.id).filter(id => openIds.has(id)).length;
-    const lateW = c.open.filter(w => c.late.includes(w.id)).map(w => ({ w, n: holding(w) })).sort((a, b) => b.n - a.n);
-    const schedIssues = [];
-    lateW.forEach(({ w, n }) => schedIssues.push({
-      text: capFirst(w.title || 'A task') + ' is late' + (n ? ' and holding up ' + nWord(n, 'other task') : '') + (w.owner ? ' (' + nameOf(docs, w.owner) + ')' : ''),
-      person: w.owner, action: 'Finish ' + (w.title || 'the late task') + (isDate(w.due) ? ' (was due ' + fmtDay(w.due) + ')' : '') }));
-    const causing = c.open.filter(w => fc[w.id] && fc[w.id].sched !== 'late' && fc[w.id].causesSlip).map(w => ({ w, n: holding(w) })).sort((a, b) => b.n - a.n);
-    causing.forEach(({ w, n }) => schedIssues.push({
-      text: capFirst(w.title || 'A task') + ' is delaying ' + (n ? nWord(n, 'other task') : 'other work') + (w.owner ? ' (' + nameOf(docs, w.owner) + ')' : ''),
-      person: w.owner, action: 'Get “' + (w.title || 'this task') + '” back on schedule' }));
-    const rl = c.runningLate.length;
-    if (!lateW.length && !causing.length && rl) schedIssues.push({ text: nWord(rl, 'task') + ' ' + isAre(rl) + ' running late', person: project.owner, action: 'Review the tasks that are running late' });
-    // Order: unplanned blockers, the deadline miss / schedule issues, then planned blockers.
-    const ordered = issues.filter(x => !x.planned).concat(schedIssues, issues.filter(x => x.planned));
-    if (!allDone && c.bufferDays != null && c.bufferDays >= 0 && c.bufferDays < 5 && rag !== 'red')
-      ordered.push({ text: 'There ' + (c.bufferDays === 1 ? 'is' : 'are') + ' only ' + bd(c.bufferDays) + ' to spare before the deadline', person: project.owner, action: 'Look for work that can finish sooner' });
-    if (rag === 'red' && c.finish && c.target && c.finish > c.target && !ordered.length) ordered.push({ text: 'The work will not finish by the deadline', person: project.owner, action: 'Review the plan' });
-    if (!ordered.length) {
-      // Green with nothing open to report (never while blockers exist: they are listed above).
-      return { sentence: timing + (allDone ? '' : ' Nothing needs attention right now.'), rag, label, who };
+    const parts = [timing];
+    const nm = p => p ? ' (' + nameOf(docs, p) + ')' : '';
+    const unplanned = blockers.filter(b => !b.planned);
+    if (unplanned.length) parts.push(capFirst(unplanned[0].text) + nm(unplanned[0].owner) + '.' + (unplanned.length > 1 ? ' ' + nWord(unplanned.length - 1, 'other piece') + ' of information ' + (unplanned.length === 2 ? 'is' : 'are') + ' missing too.' : ''));
+    if (c.late.length) {
+      const first = who.find(x => (x.why === 'past-due' || x.why === 'delaying' || x.why === 'late') && x.ref && c.late.includes(x.ref.slice(5)));
+      const w = first ? c.open.find(x => 'work:' + x.id === first.ref) : c.open.find(x => c.late.includes(x.id));
+      parts.push((c.late.length === 1 ? '1 task is late: ' : c.late.length + ' tasks are late; first: ') + q(w && w.title) + nm(w && w.owner) + '.');
+    } else if (!unplanned.length) {
+      const pb = blockers.find(b => b.planned);
+      if (pb) parts.push(capFirst(pb.name) + ' is not available yet; work is planned to get it' + nm(pb.resolverOwner || pb.owner) + '.');
+      else if (who.length) parts.push('Next: ' + who[0].what.charAt(0).toLowerCase() + who[0].what.slice(1) + nm(who[0].person) + '.');
+      else if (!allDone) parts.push('Nothing needs attention right now.');
     }
-    ordered.forEach(x => addWho(x.person, x.action));
-    const more = ordered.length - 1;
-    const sentence = timing + ' ' + capFirst(ordered[0].text) + '.' + (more > 0 ? ' ' + nWord(more, 'other thing') + ' also need' + (more === 1 ? 's' : '') + ' attention.' : '');
-    return { sentence, rag, label, who };
+    return parts.join(' ');
   }
+  // R8 compatibility: {sentence, rag, label, who} — now read from projectTruth so every caller agrees.
   function projectSummary(docs, prj, today) {
-    const project = projOf(docs, prj);
-    if (!project) return { sentence: 'This project could not be found.', rag: 'grey', label: RAG_LABEL.grey, who: [] };
-    return statusOf(docs, project, scheduleCore(docs, project, today));
+    const t = projectTruth(docs, prj, today);
+    if (!t) return { sentence: 'This project could not be found.', rag: 'grey', label: RAG_LABEL.grey, who: [] };
+    return { sentence: t.sentence, rag: t.rag, label: t.label, who: t.who };
   }
 
-  // R7 "Is testing finished?" in one line. done mirrors the tests-passed gate check.
+  // R7 "Is testing finished?" in one line. R9: the same object as projectTruth(...).testing.
   function testingSummary(docs, prj, today) {
-    const project = projOf(docs, prj);
-    if (!project) return { done: false, sentence: 'This project could not be found.', nextAction: { key: 'none', label: 'Nothing to do' } };
-    return testingCore(docs, project, readiness(docs, project.id, today || null));
+    const t = projectTruth(docs, prj, today || null);
+    if (!t) return { done: false, sentence: 'This project could not be found.', nextAction: { key: 'none', label: 'Nothing to do' }, stage: 'create', next: '', perBU: {} };
+    return t.testing;
   }
-  // R8 one number ("6 of 34 tests passed": a test's latest result in any stage is a pass), two stages
-  // ("Try it out", "Business sign-off"), one next action. Only information the project changes needs tests.
+  // R9 §6 the one testing count. needTests (information the project changes), haveTests (with at least one test),
+  // total / passed / failed / notRun (latest result in any stage; blocked counts as not run), stage
+  // 'create'|'tryout'|'business'|'done', and ONE plain `next` sentence every screen shows. perBU is added by
+  // projectTruth. R8 fields (done, count, sentence, stages, nextAction, changedInformation) are kept.
   function testingCore(docs, project, r) {
     const c = (r.checks || []).find(x => x.id === 'tests-passed');
-    if (r.released) return { done: true, passed: null, total: null, count: '', sentence: 'Yes: testing was finished before launch.', stages: [], nextAction: { key: 'none', label: 'Nothing left to test' } };
-    if (!c) return { done: false, passed: 0, total: 0, count: '0 of 0 tests passed', sentence: 'Not yet: no tests have been set up.', stages: [], nextAction: { key: 'generate', label: 'Create the tests' } };
+    const READY = 'Ready for business sign-off';
+    if (r.released) return { done: true, passed: null, total: null, failed: 0, notRun: 0, needTests: 0, haveTests: 0, count: '', stage: 'done', next: 'Testing was finished before launch',
+      sentence: 'Yes: testing was finished before launch.', stages: [], nextAction: { key: 'none', label: 'Testing was finished before launch' }, perBU: {} };
+    if (!c) return { done: false, passed: 0, total: 0, failed: 0, notRun: 0, needTests: 0, haveTests: 0, count: '0 of 0 tests passed', stage: 'create', next: 'Add the work first',
+      sentence: 'Not yet: no tests have been set up.', stages: [], nextAction: { key: 'create', label: 'Add the work first' }, perBU: {} };
     const n = a => (a || []).length;
-    const total = c.total || 0, passed = c.passed || 0;
+    const out = latestAnyStage(docs, project.id);
+    const ids = (c.cases || []).concat(c.scripts || []);
+    const total = ids.length;
+    const passed = ids.filter(id => out[id] === 'pass').length, failed = ids.filter(id => out[id] === 'fail').length;
+    const notRun = total - passed - failed;
+    const needTests = n(c.changedData), haveTests = needTests - n(c.noCases);
+    const toAdd = [...new Set((c.noCases || []).concat((c.uncoveredFields || []).map(x => x.dataId)))];
     const count = passed + ' of ' + nWord(total, 'test') + ' passed';
     const stages = [c.stages.system, c.stages.uat].map(x => Object.assign({}, x));
-    const base = { passed, total, count, stages, changedInformation: (c.changedData || []).length };
-    if (c.pass) {
-      if (!total) return Object.assign(base, { done: true, sentence: 'Yes: nothing this project changes needs testing.', nextAction: { key: 'none', label: 'Nothing left to test' } });
-      return Object.assign(base, { done: true, sentence: 'Yes: ' + count + ' and no problems are open.', nextAction: { key: 'none', label: 'Nothing left to test' } });
+    let stage, next, key;
+    const fixN = n(c.defects) || n(c.failing);
+    if (c.pass) { stage = 'done'; next = READY; key = 'none'; }
+    else if (toAdd.length) { stage = 'create'; key = 'generate'; next = 'Add tests for ' + nWord(toAdd.length, 'new piece') + ' of information'; }
+    else {
+      stage = !c.stages.system.done ? 'tryout' : 'business';
+      if (fixN) { key = 'fix'; next = 'Fix ' + nWord(fixN, 'problem') + ', then re-run ' + (fixN === 1 ? 'its test' : 'their tests'); }
+      else if (notRun) { key = 'run'; next = 'Run the ' + nWord(notRun, 'test') + " that haven't run"; }
+      else if (stage === 'tryout') { key = 'run-build'; next = 'Try out the ' + nWord(n(c.cases), 'test'); }
+      else if (stages[1].total - stages[1].passed > 0) { key = 'run'; next = 'Run the business check for ' + nWord(stages[1].total - stages[1].passed, 'test'); }
+      else if (n(c.noEvidence)) { key = 'evidence'; next = 'Add evidence to ' + nWord(n(c.noEvidence), 'passed test'); }
+      else { key = 'review'; next = 'Review the test results'; }
     }
-    const parts = [];
-    if (n(c.failing)) parts.push(nWord(n(c.failing), 'test') + ' failed');
-    if (n(c.blocked)) parts.push(nWord(n(c.blocked), 'test') + ' ' + isAre(n(c.blocked)) + ' blocked');
-    if (n(c.noCases) || n(c.uncoveredFields)) parts.push('some information has no tests yet');
-    if (n(c.defects)) parts.push(nWord(n(c.defects), 'problem') + ' ' + isAre(n(c.defects)) + ' still open');
-    if (n(c.noEvidence)) parts.push(nWord(n(c.noEvidence), 'passed test') + ' ' + (n(c.noEvidence) === 1 ? 'needs' : 'need') + ' evidence');
-    let next;
-    if (n(c.uncoveredFields) || n(c.noCases)) next = { key: 'generate', label: 'Create the tests' };
-    else if (n(c.failing)) next = { key: 'fix', label: 'Fix the failed tests' };
-    else if (n(c.defects)) next = { key: 'problems', label: 'Close the open problems' };
-    else if (!c.stages.system.done) next = { key: 'run-build', label: 'Try it out' };
-    else if (n(c.unrun) || n(c.blocked)) next = { key: 'run', label: 'Run the business sign-off test' };
-    else if (n(c.noEvidence)) next = { key: 'evidence', label: 'Add evidence to the passed tests' };
-    else next = { key: 'review', label: 'Review the test results' };
-    return Object.assign(base, { done: false, sentence: 'Not yet: ' + count + (parts.length ? '; ' + joinList(parts) : '') + '. Next: ' + next.label.charAt(0).toLowerCase() + next.label.slice(1) + '.', nextAction: next });
+    const done = !!c.pass;
+    const sentence = done ? (total ? 'Yes: ' + count + ' and no problems are open.' : 'Yes: nothing this project changes needs testing.')
+      : 'Not yet: ' + count + '. Next: ' + next.charAt(0).toLowerCase() + next.slice(1) + '.';
+    return { done, passed, total, failed, notRun, needTests, haveTests, count, stage, next, sentence, stages,
+      changedInformation: n(c.changedData), problems: n(c.defects), nextAction: { key, label: next } };
   }
 
   // R7 "Steps to launch": the readiness checks as an ordered plain checklist.
   // [{key, label, done, who: [personId], action, next}] — `next` marks the first step not done.
   function launchSteps(docs, prj, today) {
-    const project = projOf(docs, prj);
-    if (!project) return [];
-    const r = readiness(docs, project.id, today);
-    return launchStepsCore(docs, project, today, r, testingCore(docs, project, r));
+    const t = projectTruth(docs, prj, today);
+    return t ? t.launchSteps : [];
   }
   function launchStepsCore(docs, project, today, r, testing) {
     const ck = id => (r.checks || []).find(c => c.id === id) || { pass: !!r.released };
@@ -2617,15 +2822,16 @@
       action: !planned ? 'Plan the work first' : open.length ? nWord(open.length, 'task') + ' still open' : 'Done' });
     // 3. Information connected (data-live + discovered requirements)
     const dl = ck('data-live'), dr = ck('discovered-resolved');
-    const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || []));
+    const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || [], dl.problems || []));
     const dataOwners = uniq(notLive.map(id => dataOwnerOf(docs, get(docs, 'dataElement', id))));
     const nDr = (dr.items || []).length;
     steps.push({ key: 'information', label: 'Information available', done: live || (!!dl.pass && !!dr.pass), who: dataOwners.length ? dataOwners : (dl.pass && dr.pass ? [] : uniq([owner])),
       action: dl.pass && dr.pass ? 'Done' : [notLive.length ? nWord(notLive.length, 'piece') + ' of information ' + (notLive.length === 1 ? 'is' : 'are') + ' not available yet: ' + joinList(notLive.map(id => dataName(docs, id)), 3) : '',
         nDr ? nWord(nDr, 'new requirement') + ' found during the work ' + (nDr === 1 ? 'needs' : 'need') + ' a decision' : ''].filter(Boolean).join('; ') });
     // 4. Tests passed
-    const ts = live ? { done: true, nextAction: { label: 'Done' } } : testing;
-    steps.push({ key: 'tests', label: 'Tests passed', done: !!ts.done, who: ts.done ? [] : uniq([owner]), action: ts.done ? 'Done' : ts.nextAction.label });
+    // R9 §6: the same sentence as projectTruth.testing.next (never "Create the tests").
+    const ts = live ? { done: true, next: 'Done' } : testing;
+    steps.push({ key: 'tests', label: 'Tests passed', done: !!ts.done, who: ts.done ? [] : uniq([project.testLead || owner]), action: ts.done ? 'Done' : ts.next });
     // 5. Each team approved its part (bu-signoff + two-person)
     const bu = ck('bu-signoff'), tp = ck('two-person');
     const waiting = uniq([].concat(bu.unsigned || [], (bu.stale || []).map(x => x.bu)));
@@ -2633,12 +2839,13 @@
     const elig = bu.eligible || {};
     const apprWho = uniq(waiting.flatMap(b => elig[b] || Object.keys(people).filter(id => people[id] && people[id].bu === b && id !== owner && id !== lo)));
     const apprActs = [];
+    (bu.sectionStatus || []).filter(x => x.needsApprover && x.sodBlockedBy).forEach(x => apprActs.push(nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else in ' + x.bu + ' must approve'));
     if (needs.length) apprActs.push('Choose who approves ' + joinList(needs) + "'s part");
     if ((bu.unsigned || []).length) apprActs.push('Waiting for ' + joinList(bu.unsigned) + ' to approve ' + ((bu.unsigned || []).length === 1 ? 'its' : 'their') + ' part');
     if ((bu.stale || []).length) apprActs.push(joinList(bu.stale.map(x => x.bu)) + ' must approve again after changes');
     if (!apprActs.length && !tp.pass) apprActs.push('Two different people need to approve');
     steps.push({ key: 'approvals', label: 'Each team approved its part', done: live || (!!bu.pass && !!tp.pass), who: (bu.pass && tp.pass) ? [] : (needs.length ? uniq([owner]).concat(apprWho) : apprWho),
-      action: (bu.pass && tp.pass) ? 'Done' : apprActs.join('; ') });
+      action: (bu.pass && tp.pass) ? 'Done' : apprActs.map(x => x.replace(/\.$/, '')).join('. ') + '.' });
     // 6. Launch-day plan ready (cutover-plan)
     const co = ck('cutover-plan');
     steps.push({ key: 'launch-plan', label: 'Launch-day plan ready', done: live || !!co.pass, who: co.pass ? [] : uniq([lo]),
@@ -2707,7 +2914,10 @@
   // the information those steps use is available, and its tests passed. {bu, ready, waiting:[{kind, text}], sentence}.
   function buReady(docs, prj, bu) {
     const project = projOf(docs, prj);
-    if (!project) return { bu, ready: false, waiting: [], sentence: 'This project could not be found.' };
+    if (!project) return { bu, needed: false, ready: false, waiting: [], sentence: 'This project could not be found.' };
+    // R9 §13: a team whose part did not change does not approve, and is never a gate condition.
+    const needed = sectionBus(docs, project, personMap(docs)).includes(bu);
+    if (!needed) return { bu, needed, ready: false, waiting: [], waitingOn: 0, steps: 0, tests: { passed: 0, total: 0 }, sentence: bu + "'s part did not change, so it doesn't need to approve anything." };
     const sc = sectionScope(docs, project, bu);
     const work = list(docs, 'workItem'), ctx = availCtx(docs);
     const waiting = [];
@@ -2720,7 +2930,7 @@
     const notPassed = tests.filter(id => out[id] !== 'pass');
     if (notPassed.length) waiting.push({ kind: 'tests', count: notPassed.length, items: notPassed, text: nWord(notPassed.length, 'test') + ' to pass' });
     const ready = !waiting.length;
-    return { bu, ready, waiting, steps: sc.steps.length, tests: { passed: tests.length - notPassed.length, total: tests.length },
+    return { bu, needed, ready, waiting, waitingOn: waiting.reduce((a, x) => a + x.count, 0), steps: sc.steps.length, tests: { passed: tests.length - notPassed.length, total: tests.length },
       sentence: ready ? 'Ready for your approval.' : 'Not ready for your approval yet: waiting on ' + joinList(waiting.map(x => x.text)) + '.' };
   }
   // R8 prefilled "What you checked", built from facts, never boilerplate.
@@ -2763,36 +2973,187 @@
     return out;
   }
 
+  // R9 §6 per-team test counts: only the tests on the information and steps that team owns (sectionScope).
+  function testsPerBU(docs, project, sections) {
+    const out = latestAnyStage(docs, project.id), res = {};
+    sections.forEach(bu => {
+      const sc = sectionScope(docs, project, bu), ids = sc.caseIds.concat(sc.scriptIds);
+      const passed = ids.filter(id => out[id] === 'pass').length, failed = ids.filter(id => out[id] === 'fail').length;
+      res[bu] = { total: ids.length, passed, failed, notRun: ids.length - passed - failed };
+    });
+    return res;
+  }
+  // R9 §13 the one approvals list the launch gate and the approver pages read.
+  // [{bu, needed, ready, approved, stale, approver, eligible, suggestion, blockedBy: null|{rule, person, text, fix}, waiting, waitingOn, sentence}]
+  // After launch: every team that approved (from the release record, else the approval docs).
+  function approvalsOf(docs, project, r) {
+    const bu = (r.checks || []).find(x => x.id === 'bu-signoff') || {};
+    if (r.released) {
+      const fromCheck = (bu.sectionStatus || []).filter(x => x.approved);
+      const rows = fromCheck.length ? fromCheck.map(x => ({ bu: x.bu, approver: x.approver || null }))
+        : [...new Set(list(docs, 'approval').filter(a => a.projectId === project.id).map(a => a.bu))].sort().map(b => {
+          const l = latestBy(list(docs, 'approval').filter(a => a.projectId === project.id && a.bu === b), 'at');
+          return l && l.decision === 'approved' ? { bu: b, approver: l.approver || null } : null;
+        }).filter(Boolean);
+      return rows.map(x => ({ bu: x.bu, needed: true, ready: true, approved: true, stale: false, approver: x.approver, approverName: x.approver ? nameOf(docs, x.approver) : null,
+        eligible: [], suggestion: null, blockedBy: null, waiting: [], waitingOn: 0, sentence: 'Approved' + (x.approver ? ' by ' + nameOf(docs, x.approver) : '') + '.' }));
+    }
+    return (bu.sectionStatus || []).map(x => {
+      const br = buReady(docs, project, x.bu);
+      const approved = !!x.approved && !x.stale;
+      const approver = approved ? x.approver : (x.override && x.eligible.includes(x.override) ? x.override : x.eligible[0] || null);
+      let blockedBy = null;
+      if (!approved && x.needsApprover) {
+        const fix = 'Choose who approves ' + x.bu + "'s part";
+        blockedBy = x.sodBlockedBy
+          ? { rule: 'separation-of-duties', person: x.sodBlockedBy, text: nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else in ' + x.bu + ' must approve.', fix, suggestion: x.suggestion || null }
+          : { rule: 'no-approver', person: null, text: 'Nobody in ' + x.bu + ' can approve this part yet.', fix, suggestion: x.suggestion || null };
+      }
+      const sentence = approved ? 'Approved by ' + nameOf(docs, x.approver) + '.' : x.stale ? 'Changed after approval: ' + x.bu + ' must approve again.'
+        : blockedBy ? blockedBy.text + ' ' + blockedBy.fix + '.' : br.sentence;
+      return { bu: x.bu, needed: true, ready: br.ready, approved, stale: !!x.stale, approver, approverName: approver ? nameOf(docs, approver) : null, eligible: x.eligible.slice(),
+        suggestion: x.suggestion || null, blockedBy, waiting: br.waiting, waitingOn: br.waitingOn || 0, sentence };
+    });
+  }
+
   // R8 ONE TRUTH: every number, date and label a page, report, CSV, dashboard or portfolio shows for a project.
-  // projectSummary, projectHealth, testingSummary, launchSteps and earnedValue are the functions this uses, so
-  // nothing can disagree. Dates are YYYY-MM-DD; bufferDays is business days.
+  // R9: one late list, the ranked `who`, stepsLeft, testing (one count + perBU + next), approvals, EV/SPI note.
+  // projectSummary, testingSummary and launchSteps return parts of this object. Dates are YYYY-MM-DD; bufferDays,
+  // lateness and "days behind" are business days.
   function projectTruth(docs, prj, today) {
     const project = projOf(docs, prj);
     if (!project) return null;
     const c = scheduleCore(docs, project, today);
-    const st = statusOf(docs, project, c);
     const r = readiness(docs, project.id, today);
     const testing = testingCore(docs, project, r);
+    const buCk = (r.checks || []).find(x => x.id === 'bu-signoff') || {};
+    if (!r.released) testing.perBU = testsPerBU(docs, project, buCk.sections || []);
+    const approvals = approvalsOf(docs, project, r);
     const launch = launchStepsCore(docs, project, today, r, testing);
+    const who = whoOf(docs, project, c, { approvals, testing });
+    const sentence = sentenceOf(docs, project, c, who);
     const ev = earnedValue(docs, project.id, today);
     const planned = project.budget && project.budget.planned != null && isFinite(+project.budget.planned) ? +project.budget.planned : null;
     const cost = costOf(project, planned, ev);
+    const hasRates = planned != null || personList(docs).some(p => p.dayRate != null && isFinite(+p.dayRate));
+    // R9 §5 Advanced-only note: the label stays driven by §1.
+    const advancedNote = ev.SPI != null && ev.SPI < 0.95 && c.rag === 'green' ? 'Behind plan on effort (SPI ' + ev.SPI.toFixed(2) + ')' : null;
     return {
       projectId: project.id, name: project.name || '', today: today || null,
       tasks: { total: c.items.length, done: c.items.length - c.open.length, open: c.open.length },
       forecastFinish: c.finish, actualFinish: c.allDone ? c.finish : null, target: c.target, deadline: c.target,
       bufferDays: c.bufferDays, bufferUnit: 'business days',
-      lateCount: c.late.length, late: c.late.slice(), runningLateCount: c.runningLate.length, runningLate: c.runningLate.slice(),
+      late: c.late.slice(), lateCount: c.late.length,
+      pastDue: c.pastDue.slice(), pastDueCount: c.pastDue.length, finishAfterDue: c.finishAfterDue.slice(), finishAfterDueCount: c.finishAfterDue.length,
+      runningLate: c.finishAfterDue.slice(), runningLateCount: c.finishAfterDue.length,   // deprecated (R8): use finishAfterDue
       blockers: c.blockers, unplannedBlockers: c.blockers.filter(b => !b.planned).length,
-      rag: c.rag, label: c.label, sentence: st.sentence, who: st.who, reasons: c.reasons.slice(),
-      status: { rag: c.rag, label: c.label, sentence: st.sentence, reasons: c.reasons.slice(), who: st.who },
-      launchSteps: launch, testing,
-      cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget },
+      rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, who, reasons: c.reasons.slice(),
+      status: { rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, reasons: c.reasons.slice(), who },
+      launchSteps: launch, stepsLeft: launch.filter(s => !s.done).length, testing, approvals,
+      cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget, show: hasRates },
       ev, burndown: burndownStatus(docs, project.id, today, ev),
     };
   }
 
+  // R9 §2 one personal queue: every open item for one person, across active projects, in `who` rank order.
+  // Work items (late, or due within 10 business days), fix tasks, problems, practice reviews (kind 'test'),
+  // confirmations, approvals that are ready, tests assigned to them, and every `who` entry naming them.
+  // [{kind, projectId, id, title, due, late, href, oneTap, why, rank, what}]; Home's badge = list.length.
+  const QUEUE_DAYS = 10;
+  function personQueue(docs, person, today) {
+    if (!person) return [];
+    const out = [], seen = new Set();
+    const pname = id => { const p = get(docs, 'project', id); return p ? p.name || '' : ''; };
+    const add = it => {
+      const k = it.kind === 'information' || it.kind === 'confirm' ? it.kind + ':' + it.id : it.kind + ':' + it.projectId + ':' + it.id;
+      if (seen.has(k)) return; seen.add(k); it.projectName = pname(it.projectId); out.push(it);
+    };
+    const fc = forecastAll(docs, today);
+    const projects = list(docs, 'project').filter(p => p.status !== 'live' && p.status !== 'closed');
+    const kindOf = w => w.kind === 'defect' ? 'problem' : w.kind === 'test' ? 'practice' : w.resolves ? 'fix' : 'work';
+    projects.forEach(project => {
+      const t = projectTruth(docs, project, today);
+      const whoRank = {};
+      t.who.forEach(x => { if (x.ref && !(x.ref in whoRank)) whoRank[x.ref] = x; });
+      list(docs, 'workItem').filter(w => w.projectId === project.id && w.owner === person && w.status !== 'done').forEach(w => {
+        const r = fc[w.id] || {};
+        const kind = kindOf(w);
+        const soon = isDate(w.due) && isDate(today) && businessDaysBetween(today, addBusinessDays(w.due, 0)) <= QUEUE_DAYS;
+        if (!(r.late || soon || kind !== 'work')) return;
+        const wx = whoRank['work:' + w.id];
+        add({ kind, projectId: project.id, id: w.id, title: kind === 'problem' ? problemTitle(w) : w.title || 'Untitled task', due: w.due || null, late: !!r.late, href: taskHref(project, w),
+          oneTap: { action: 'done', label: kind === 'problem' ? 'Mark fixed' : 'Mark done' }, why: wx ? wx.why : r.late ? 'late' : 'work',
+          rank: wx ? wx.rank : r.late ? WHO_RANK.late : kind === 'problem' ? WHO_RANK.problem : 70,
+          what: wx ? wx.what : (kind === 'problem' ? 'Fix the problem: ' : 'Finish ') + q(w.title) });
+      });
+      t.approvals.filter(a => a.needed && a.ready && !a.approved && !a.blockedBy && a.approver === person).forEach(a =>
+        add({ kind: 'approval', projectId: project.id, id: a.bu, title: 'Approve ' + a.bu + "'s part", due: null, late: false, href: '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu),
+          oneTap: null, why: 'approval', rank: WHO_RANK.approval, what: 'Approve ' + a.bu + "'s part" }));
+      const outc = latestAnyStage(docs, project.id);
+      list(docs, 'testCase').filter(c => c.assignee === person && outc[c.id] !== 'pass' && changedInformation(docs, project).some(x => x.dataId === c.dataId)).forEach(c =>
+        add({ kind: 'test', projectId: project.id, id: c.id, title: 'Run the test for ' + dataName(docs, c.dataId) + (c.field ? ' · ' + c.field : ''), due: null, late: false,
+          href: '/testing/' + project.id, oneTap: null, why: 'test', rank: WHO_RANK.test, what: 'Run the test for ' + dataName(docs, c.dataId) }));
+      (Array.isArray(project.uatScripts) ? project.uatScripts : []).filter(sc => sc && sc.assignee === person && outc[sc.id] !== 'pass').forEach(sc =>
+        add({ kind: 'test', projectId: project.id, id: sc.id, title: 'Business check: ' + (sc.title || 'untitled'), due: null, late: false,
+          href: '/testing/' + project.id, oneTap: null, why: 'test', rank: WHO_RANK.test, what: 'Run the business check ' + q(sc.title) }));
+      t.who.filter(x => x.person === person).forEach(x => {
+        const id = x.ref ? x.ref.slice(x.ref.indexOf(':') + 1) : x.what;
+        const kind = x.why === 'approval' ? 'approval' : x.why === 'test' ? 'test' : x.why === 'blocker' || x.why === 'info' ? 'information' : x.why === 'problem' ? 'problem' : x.ref && x.ref.startsWith('work:') ? 'work' : 'action';
+        if (x.ref && x.ref.startsWith('work:') && seen.has(['work', 'fix', 'problem', 'practice'].map(k => k + ':' + project.id + ':' + id).find(k => seen.has(k)))) return;
+        if (kind === 'approval' && seen.has('approval:' + project.id + ':' + id)) return;
+        const w = x.ref && x.ref.startsWith('work:') ? get(docs, 'workItem', id) : null;
+        if (kind === 'information') {
+          // the fix task is already listed: it carries this rank (one item, never two)
+          const b = t.blockers.find(bb => bb.dataId === id), fx = b && b.resolver && out.find(o => o.id === b.resolver);
+          if (fx) { if (x.rank < fx.rank) { fx.rank = x.rank; fx.why = x.why; } return; }
+        }
+        add({ kind, projectId: project.id, id, title: x.what, due: w ? w.due || null : null, late: !!(w && fc[w.id] && fc[w.id].late), href: x.href, oneTap: null, why: x.why, rank: x.rank, what: x.what });
+      });
+    });
+    // confirmations: information waiting for this owner's one-tap confirmation
+    awaitingConfirmation(docs, person).forEach(did => {
+      const pr = projects.find(p => linkedProcesses(docs, p).some(pp => flatSteps(pp.tobe).some(st => stepData(st).includes(did))));
+      add({ kind: 'confirm', projectId: pr ? pr.id : null, id: did, title: 'Confirm ' + dataName(docs, did) + ' is available', due: null, late: false, href: '/data/' + did,
+        oneTap: { action: 'confirm', label: 'Confirm' }, why: 'info', rank: WHO_RANK.info, what: 'Confirm ' + dataName(docs, did) + ' is available' });
+    });
+    return out.sort((a, b) => a.rank - b.rank || (b.late - a.late) || String(a.due || '9999').localeCompare(String(b.due || '9999')) || String(a.title).localeCompare(String(b.title)));
+  }
+
+  // R9 §13 real dependencies only: the open tasks a task actually waits on (its dependency edges and the open fix
+  // task for information its step needs). Never tasks that merely run in parallel. [{id, title, owner, kind}]
+  function waitingOn(docs, workId) {
+    const w = get(docs, 'workItem', workId);
+    if (!w || w.status === 'done') return [];
+    const idx = byId(list(docs, 'workItem'));
+    const out = [];
+    depIds(w).forEach(id => { const d = idx[id]; if (d && d.status !== 'done') out.push({ id, title: d.title || 'untitled task', owner: d.owner || null, kind: 'dependency' }); });
+    const st = findStep(docs, w.pid, w.step), ctx = availCtx(docs), work = list(docs, 'workItem');
+    (st ? stepData(st) : []).forEach(did => {
+      const state = availOf(get(docs, 'dataElement', did), work, docs, ctx);
+      if (state !== 'missing' && state !== 'example') return;
+      const r = work.find(x => x.resolves === did && x.status !== 'done' && x.id !== w.id);
+      if (r && !out.some(o => o.id === r.id)) out.push({ id: r.id, title: r.title || 'untitled task', owner: r.owner || null, kind: 'information', dataId: did });
+    });
+    return out;
+  }
+  // R9 §13 history values: person ids read as names, empty as "Nobody", information ids as names; else unchanged.
+  function displayValue(docs, value) {
+    if (value == null || value === '' || value === '(none)') return 'Nobody';
+    if (Array.isArray(value)) return value.length ? value.map(v => displayValue(docs, v)).join(', ') : 'Nobody';
+    const s0 = String(value), people = personMap(docs);
+    if (people[s0]) return people[s0].name || 'someone';
+    const d = get(docs, 'dataElement', s0);
+    return d ? d.name || 'some information' : s0;
+  }
+  // R9 §3 calendar helpers: business-day checks and "Mon Nov 16".
+  function isBusinessDay(d) { return isDate(d) && weekday(toMs(d)) !== 0 && weekday(toMs(d)) !== 6; }
+  function toBusinessDay(d) { return isDate(d) ? addBusinessDays(String(d).slice(0, 10), 0) : d; }
+  function fmtDayLong(d) { const ms = toMs(d); return isNaN(ms) ? String(d || '') : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekday(ms)] + ' ' + fmtDay(d); }
+
   return {
+    // R9
+    personQueue, planFit, planToWork, waitingOn, displayValue, namesFor, dataOwner, defaultDataOwner,
+    isBusinessDay, toBusinessDay, fmtDay, fmtDayLong,
     // R8
     projectTruth, awaitingConfirmation, burndownStatus, changedInformation, generateProjectTests,
     buReady, approvalNoteFacts, stepConflict, projectConflicts, profileLines,

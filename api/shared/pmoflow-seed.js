@@ -19,6 +19,12 @@ function addDays(day, n) {
 const clone = o => JSON.parse(JSON.stringify(o));
 /* the same day, or the Monday after it when it falls on a weekend */
 const weekday = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 ? addDays(d, 2) : w === 0 ? addDays(d, 1) : d; };
+/* the same day, or the Friday before it when it falls on a weekend */
+const weekdayBack = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 ? addDays(d, -1) : w === 0 ? addDays(d, -2) : d; };
+/* R9 §3: no seeded date lands on a Saturday or Sunday. A past offset rolls back to Friday and today or a future offset
+   rolls forward to Monday, so the mapping is monotonic: an item that is late stays late, a future item stays ahead of
+   today, and start <= due and done <= due keep holding. */
+const bizDay = (day, n) => (n < 0 ? weekdayBack : weekday)(addDays(day, n));
 
 /* ---------- people ---------- */
 const PEOPLE = [
@@ -28,6 +34,9 @@ const PEOPLE = [
   { id: 'lp', name: 'Leo Park', role: 'Treasury SME', color: '#ea580c', bu: 'Treasury' },
   { id: 'ar', name: 'Ana Ruiz', role: 'AP Lead', color: '#16a34a', bu: 'Accounts Payable' },
   { id: 'dk', name: 'Dev Kumar', role: 'Integration Eng.', color: '#2563eb', bu: 'IT' },
+  /* R9 §7: a department head who approves Compliance's part of Vendor Onboarding Modernization. He recorded none of
+     its tests (Priya did), so the separation-of-duties rule is satisfied and the part is genuinely ready to approve. */
+  { id: 'do', name: 'Dave Ortiz', role: 'Head of Compliance', color: '#4f46e5', bu: 'Compliance' },
 ];
 
 /* ---------- synthetic CSV extracts (fake values, deterministic) ---------- */
@@ -109,8 +118,8 @@ function dataElements() {
         F('Payment terms', 'list', 'Required', { type: 'list', values: ['Net 15', 'Net 30', 'Net 45', 'Net 60'], required: true }),
         F('Remit-to', 'ref → D2', 'Required', { type: 'text', required: true })],
       samples: ['erp_vendor_schema.json'], discovered: [] },
-    { id: 'D5', name: 'Sanctions screening result', owner: 'ps', source: 'Screening service API', avail: 'missing',
-      note: 'New: the screening service contract is not signed yet.',
+    { id: 'D5', name: 'Sanctions screening result', owner: 'ps', source: 'Screening service API', avail: 'live',
+      note: 'New: the screening service contract is signed and connected; results are written to the vendor file.',
       fields: [F('Match status', 'clear / review / hit', 'Required', { type: 'list', values: ['clear', 'review', 'hit'], required: true }),
         F('Screened at', 'timestamp', 'Required', { type: 'date', required: true }),
         F('Lists checked', 'list', 'Required', { type: 'list', values: ['US sanctions', 'EU sanctions', 'UN sanctions'], required: true })],
@@ -242,10 +251,11 @@ function processes() {
 /* ---------- work items: [id, project, pid, step, title, owner, status, startOff, dueOff, deps, resolves, kind] ---------- */
 const WORK = [
   ['W1', 'vendor-modernization', 'vendor-onboarding', 's1', 'Open W-9 and insurance uploads in the vendor portal', 'mc', 'done', -27, -15, [], null, 'build'],
-  ['W2', 'vendor-modernization', 'vendor-onboarding', 's2', 'Sign the screening service contract', 'ps', 'prog', -7, 6, [], 'D5', 'other'],
-  ['W3', 'vendor-modernization', 'vendor-onboarding', 's2', 'Connect the screening service', 'dk', 'idle', 7, 13, ['W2'], null, 'build'],
-  ['W4', 'vendor-modernization', 'vendor-onboarding', 's2', 'Write down the risk tier rules', 'ps', 'prog', -5, 2, [], null, 'other'],
-  ['W5', 'vendor-modernization', 'vendor-onboarding', 's2a', 'Make the extra-checks list and sign-off form', 'ps', 'idle', 3, 8, ['W4'], null, 'build'],
+  /* R9 §7: Compliance's part (screening, risk tier, extra checks) is finished, so it is ready for its approver */
+  ['W2', 'vendor-modernization', 'vendor-onboarding', 's2', 'Sign the screening service contract', 'ps', 'done', -21, -12, [], 'D5', 'other'],
+  ['W3', 'vendor-modernization', 'vendor-onboarding', 's2', 'Connect the screening service', 'dk', 'done', -11, -6, ['W2'], null, 'build'],
+  ['W4', 'vendor-modernization', 'vendor-onboarding', 's2', 'Write down the risk tier rules', 'ps', 'done', -19, -10, [], null, 'other'],
+  ['W5', 'vendor-modernization', 'vendor-onboarding', 's2a', 'Make the extra-checks list and sign-off form', 'ps', 'done', -9, -4, ['W4'], null, 'build'],
   ['W6', 'vendor-modernization', 'vendor-onboarding', 's3', 'Set up the bank details form', 'lp', 'idle', -8, -1, [], 'D2', 'build'],
   ['W7', 'vendor-modernization', 'vendor-onboarding', 's3', 'Check bank accounts with a small test deposit', 'dk', 'idle', 0, 6, ['W6'], null, 'build'],
   ['W8', 'vendor-modernization', 'vendor-onboarding', 's4', 'Save new vendors in the ERP automatically', 'dk', 'prog', -2, 10, ['W6'], null, 'build'],
@@ -263,11 +273,11 @@ const WORK = [
   ['E2', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Try a vendor record in the upgraded ERP', 'dk', 'idle', 14, 18, ['E1'], null, 'test'],
 ];
 /* kickoff-plan dues that differ from today's plan (so baseline variance shows) */
-const BASELINE_DUE = { W2: 2, W6: -5, W7: 2, W8: 6, W10: 12, W3: 9, A3: -2, A4: 8 };
+const BASELINE_DUE = { W2: -13, W6: -5, W7: 2, W8: 6, W10: 12, W3: -7, A3: -2, A4: 8 };
 
 function seed(createdAtISODate) {
   const day = dayOf(createdAtISODate);
-  const at = (n, hh) => addDays(day, n) + 'T' + String(hh == null ? 15 : hh).padStart(2, '0') + ':00:00.000Z';
+  const at = (n, hh) => bizDay(day, n) + 'T' + String(hh == null ? 15 : hh).padStart(2, '0') + ':00:00.000Z';
   const docs = {}; DOC_TYPES.forEach(t => { docs[t] = []; });
   const add = (type, data) => docs[type].push({ id: data.id, data });
 
@@ -276,45 +286,45 @@ function seed(createdAtISODate) {
   processes().forEach(p => add('process', p));
 
   const work = WORK.map(([id, projectId, pid, step, title, owner, status, s, d, deps, resolves, kind]) => {
-    const w = { id, projectId, pid, step, title, owner, status, start: addDays(day, s), due: addDays(day, d), deps, kind };
+    const w = { id, projectId, pid, step, title, owner, status, start: bizDay(day, s), due: bizDay(day, d), deps, kind };
     if (resolves) w.resolves = resolves;
     return w;
   });
   const baseline = (projectId, label, off) => ({ id: 'bl-kickoff', at: at(off, 16), label,
     items: Object.fromEntries(WORK.filter(w => w[1] === projectId).map(w => [w[0], {
-      start: addDays(day, w[7]), due: addDays(day, BASELINE_DUE[w[0]] != null ? BASELINE_DUE[w[0]] : w[8]) }])) });
+      start: bizDay(day, w[7]), due: bizDay(day, BASELINE_DUE[w[0]] != null ? BASELINE_DUE[w[0]] : w[8]) }])) });
 
   add('project', { id: 'vendor-modernization', name: 'Vendor Onboarding Modernization',
     desc: 'Move vendor onboarding from email and PDFs to captured data, and unblock downstream invoice approval.',
-    owner: 'ta', resources: ['ta', 'mc', 'ps', 'lp', 'ar', 'dk'], target: addDays(day, 41),
+    owner: 'ta', resources: ['ta', 'mc', 'ps', 'lp', 'ar', 'dk'], target: bizDay(day, 41),
     processes: ['vendor-onboarding', 'invoice-approval'], status: 'active',
     /* R7 §9: a PMO section's only member is the PM, so the process owner approves it (never a deadlock) */
-    approvers: { PMO: 'mc' },
+    approvers: { PMO: 'mc', Compliance: 'do' },
     baselines: [baseline('vendor-modernization', 'Kickoff plan', -30)] });
   add('project', { id: 'access-review-automation', name: 'Quarterly Access Review Automation',
     desc: 'Replace spreadsheet-driven quarterly access certification with an automated campaign and auto-removal.',
-    owner: 'ta', resources: ['ta', 'dk', 'ps'], target: addDays(day, 18),
+    owner: 'ta', resources: ['ta', 'dk', 'ps'], target: bizDay(day, 18),
     processes: ['access-review'], status: 'active',
     baselines: [baseline('access-review-automation', 'Kickoff plan', -25)] });
   add('project', { id: 'erp-upgrade-readiness', name: 'ERP Upgrade Readiness',
     desc: 'Get the vendor record ready for the ERP upgrade: new fields on the vendor record, tried in the upgraded ERP.',
-    owner: 'ta', resources: ['ta', 'ar', 'dk'], target: weekday(addDays(day, 57)),
+    owner: 'ta', resources: ['ta', 'ar', 'dk'], target: bizDay(day, 57),
     processes: ['vendor-onboarding'], status: 'active',
     baselines: [baseline('erp-upgrade-readiness', 'Kickoff plan', -3)] });
   work.forEach(w => add('workItem', w));
 
   add('grant', { id: 'G1', projectId: 'vendor-modernization', dataId: 'D4', env: 'dev', access: 'read',
     reason: 'Build and test the ERP vendor write integration', requestedBy: 'dk', status: 'active', approvedBy: 'ar', approvedAt: at(-3, 17),
-    expires: addDays(day, 20), log: [{ at: at(-3, 14), by: 'dk', action: 'requested' }, { at: at(-3, 17), by: 'ar', action: 'approved' }, { at: at(-2, 9), by: 'dk', action: 'activated' }] });
+    expires: bizDay(day, 20), log: [{ at: at(-3, 14), by: 'dk', action: 'requested' }, { at: at(-3, 17), by: 'ar', action: 'approved' }, { at: at(-2, 9), by: 'dk', action: 'activated' }] });
   add('grant', { id: 'G2', projectId: 'vendor-modernization', dataId: 'D2', env: 'uat', access: 'read',
-    reason: 'UAT of bank capture and micro-deposit verification', requestedBy: 'dk', status: 'requested',
+    reason: 'Business check of bank capture and micro-deposit verification', requestedBy: 'dk', status: 'requested',
     log: [{ at: at(-1, 21), by: 'dk', action: 'requested' }] });
   add('grant', { id: 'G3', projectId: 'vendor-modernization', dataId: 'D1', env: 'dev', access: 'read',
     reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ps', approvedAt: at(-27, 9),
-    expires: addDays(day, -3), log: [{ at: at(-28, 11), by: 'mc', action: 'requested' }, { at: at(-27, 9), by: 'ps', action: 'approved' }, { at: at(-3, 0), by: 'system', action: 'expired' }] });
+    expires: bizDay(day, -3), log: [{ at: at(-28, 11), by: 'mc', action: 'requested' }, { at: at(-27, 9), by: 'ps', action: 'approved' }, { at: at(-3, 0), by: 'system', action: 'expired' }] });
   add('grant', { id: 'G4', projectId: 'access-review-automation', dataId: 'D7', env: 'dev', access: 'read',
     reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ps', approvedAt: at(-15, 13),
-    expires: addDays(day, 14), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ps', action: 'approved' }] });
+    expires: bizDay(day, 14), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ps', action: 'approved' }] });
 
   add('approval', { id: 'AP1', projectId: 'vendor-modernization', bu: 'Procurement', approver: 'mc', decision: 'approved',
     at: at(-2, 16), stepUp: true, note: 'Procurement steps (intake, contract activation) reviewed and approved.' });
@@ -322,7 +332,7 @@ function seed(createdAtISODate) {
     at: at(-1, 14), stepUp: true, note: 'Entitlement pull and auto-removal steps approved.' });
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract is held up in legal review', impact: 'high', likelihood: 'med', owner: 'ps',
-    mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'open' });
+    mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'closed' });
   add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank details form not started; holds up the test deposit and saving vendors in the ERP', impact: 'high', likelihood: 'high', owner: 'lp',
     mitigation: 'Daily check-in with Treasury; pull Integration Eng. in to pair.', status: 'open' });
   add('risk', { id: 'R3', projectId: 'vendor-modernization', title: 'Business testing overlaps the quarter-end close', impact: 'med', likelihood: 'med', owner: 'ta',
@@ -345,6 +355,11 @@ function seed(createdAtISODate) {
   tc('TC8', 'D7', 'Cost center', 'invalid', '1042', 'reject', 'Missing CC prefix');
   tc('TC9', 'D7', 'Approver', 'invalid', '', 'reject', 'Required value is blank');
   tc('TC10', 'D7', 'Limit', 'boundary', '1000000', 'accept', 'Upper bound is allowed');
+  /* R9 §7: Compliance's new information (the screening result) has its own tests, run and passed by Priya */
+  tc('TC11', 'D5', 'Match status', 'valid', 'clear', 'accept', 'One of clear / review / hit');
+  tc('TC12', 'D5', 'Match status', 'invalid', 'maybe', 'reject', 'Not one of clear / review / hit');
+  tc('TC13', 'D5', 'Screened at', 'invalid', '', 'reject', 'Required value is blank');
+  tc('TC14', 'D5', 'Lists checked', 'valid', 'US sanctions', 'accept', 'One of the lists checked');
 
   add('testRun', { id: 'TR1', projectId: 'vendor-modernization', env: 'dev', at: at(-1, 18), by: 'dk', results: [
     { caseId: 'TC1', outcome: 'pass', note: '' }, { caseId: 'TC2', outcome: 'pass', note: '' },
@@ -353,13 +368,13 @@ function seed(createdAtISODate) {
 
   add('comment', { id: 'C1', ref: 'workItem:W6', author: 'mc', at: at(-1, 20), mentions: ['ta'],
     text: '@Tom Alvarez The bank details form was due yesterday and has not started; the test deposit, saving vendors in the ERP and the payment account check all wait on it. Can we escalate with Treasury?' });
-  add('comment', { id: 'C2', ref: 'process:vendor-onboarding', author: 'ps', at: at(-1, 15), mentions: [],
-    text: 'Risk-tier thresholds are drafted. I need sign-off on them before the EDD checklist can start.' });
+  add('comment', { id: 'C2', ref: 'process:vendor-onboarding', author: 'ps', at: at(-1, 15), mentions: ['do'],
+    text: '@Dave Ortiz Screening, the risk tier rules and the extra-checks form are done and their tests passed. Our part is ready for your approval.' });
 
   add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on "Set up the bank details form"', ref: 'workItem:W6', at: at(-1, 20), read: false });
   add('notification', { id: 'N2', to: 'lp', text: 'Dev Kumar requested UAT read access to Bank remittance details', ref: 'grant:G2', at: at(-1, 21), read: false });
 
-  const md = n => new Date(addDays(day, n) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const md = n => new Date(bizDay(day, n) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const ev = (n, hh, actor, action, ref, summary) => ({ at: at(n, hh), actor, action, ref, summary, seeded: true });
   const events = [
     ev(-30, 15, 'ta', 'create', 'project:vendor-modernization', 'Created project Vendor Onboarding Modernization'),
@@ -367,14 +382,16 @@ function seed(createdAtISODate) {
     ev(-3, 15, 'ta', 'create', 'project:erp-upgrade-readiness', 'Created project ERP Upgrade Readiness'),
     ev(-28, 11, 'mc', 'request', 'grant:G3', 'Requested Dev read access to Vendor legal name & Tax ID'),
     ev(-15, 17, 'mc', 'update', 'workItem:W1', 'Work item "Open W-9 and insurance uploads in the vendor portal" marked done'),
-    ev(-7, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign the screening service contract" started'),
+    ev(-13, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign the screening service contract" marked done'),
+    ev(-4, 16, 'ps', 'update', 'workItem:W5', 'Work item "Make the extra-checks list and sign-off form" marked done'),
+    ev(-2, 15, 'ps', 'create', 'testRun:TR5', 'Business check of the Compliance steps: 9 pass'),
     ev(-5, 16, 'dk', 'update', 'workItem:W9', 'Work item "Send the \"vendor is ready\" messages automatically" marked done'),
     ev(-3, 17, 'ar', 'approve', 'grant:G1', 'Approved Dev read access to Vendor master record'),
     ev(-3, 0, 'system', 'expire', 'grant:G3', 'Dev read access to Vendor legal name & Tax ID expired'),
     ev(-2, 16, 'mc', 'approve', 'approval:AP1', 'Procurement sign-off (step-up verified)'),
     ev(-1, 15, 'ps', 'comment', 'process:vendor-onboarding', 'Commented on Vendor Onboarding'),
     ev(-1, 14, 'dk', 'approve', 'approval:AP2', 'IT sign-off on access review (step-up verified)'),
-    ev(-1, 18, 'dk', 'create', 'testRun:TR1', `Dev run, ${md(-1)}: 5 pass, 1 fail`),
+    ev(-1, 18, 'dk', 'create', 'testRun:TR1', `Test run, ${md(-1)}: 5 pass, 1 fail`),
     ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on work item "Set up the bank details form" and mentioned Tom Alvarez'),
     ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to Bank remittance details'),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -386,7 +403,7 @@ function seed(createdAtISODate) {
 /* ---------- Round 2 fields (contract R2) ---------- */
 const CAPACITY = { mc: 3, ta: 2, ps: 4, lp: 3, ar: 4, dk: 4 };           /* days per week */
 const EFFORT = { E1: 4, E2: 2, W1: 6, W2: 3, W3: 4, W4: 3, W5: 3, W6: 5, W7: 4, W8: 7, W9: 4, W10: 3, W11: 5, W12: 1, W13: 1, A1: 5, A2: 6, A3: 3, A4: 2 };
-const DONE_AT = { W1: -16, W9: -5, W13: -18, A1: -14, A2: -3, A3: -1 };            /* actual finish offsets */
+const DONE_AT = { W1: -16, W2: -13, W3: -6, W4: -11, W5: -4, W9: -5, W13: -18, A1: -14, A2: -3, A3: -1 };            /* actual finish offsets */
 const SENSITIVITY = { D1: 'confidential', D2: 'pii', D3: 'internal', D4: 'confidential', D5: 'confidential', D6: 'internal', D7: 'internal', D8: 'internal' };
 const STEP_META = {                                                       /* pid/step -> {sla, system, durationHrs} */
   'vendor-onboarding/s1': { sla: '5 business days', system: 'Vendor portal', durationHrs: 1 },
@@ -414,10 +431,10 @@ function enrichR2(docs, day, at) {
   docs.workItem.forEach(d => {
     const w = d.data;
     w.effortDays = EFFORT[w.id] || 1;
-    if (w.status === 'done' && DONE_AT[w.id] != null) w.doneAt = addDays(day, DONE_AT[w.id]);
+    if (w.status === 'done' && DONE_AT[w.id] != null) w.doneAt = bizDay(day, DONE_AT[w.id]);
   });
   /* W1 was edited after Procurement signed off, so the gate shows a re-approval exception */
-  byId('workItem').W1.updatedAt = at(-1, 11);
+  byId('workItem').W1.updatedAt = at(-1, 17);   /* after AP1 (at(-2, 16)) even when both roll back to the same Friday */
   docs.dataElement.forEach(d => { d.data.sensitivity = SENSITIVITY[d.id] || 'internal'; });
   /* R4: live elements carry the data owner's confirmation and the confirmed source */
   docs.dataElement.filter(d => d.data.avail === 'live').forEach(d => {
@@ -432,7 +449,7 @@ function enrichR2(docs, day, at) {
   /* R5: an HR approver exists only if some step or trigger touches HR */
   const touchesHR = docs.process.some(p => JSON.stringify([p.data.tobe, p.data.asis]).match(/"touches":\[[^\]]*"HR"/));
   if (touchesHR) docs.person.push({ id: 'hr', data: { id: 'hr', name: 'Grace Lin', role: 'HR Business Partner', color: '#0d9488', bu: 'HR', capacity: 3, dayRate: 850 } });
-  byId('dataElement').D2.discovered = [{ text: 'Account holder must be required: the capture form accepted a blank value (dev run, case "Account holder blank").',
+  byId('dataElement').D2.discovered = [{ text: 'Account holder must be required: the capture form accepted a blank value (test run, case "Account holder blank").',
     fromRun: 'TR1', at: at(-1, 18) }];
   const walk = (pid, nodes) => (nodes || []).forEach(n => {
     Object.assign(n, STEP_META[pid + '/' + n.id] || {});
@@ -448,7 +465,7 @@ function enrichR2(docs, day, at) {
   const sprint0 = addDays(day, -28 - ((dow + 6) % 7));                     /* Monday on or before seed-28 */
   vm.sprints = [0, 1, 2, 3, 4, 5].map(i => ({ id: 'sp' + (i + 1), name: 'Sprint ' + (i + 1), start: addDays(sprint0, i * 14), end: addDays(sprint0, i * 14 + 11) }));
   const ar = byId('project')['access-review-automation'];
-  ar.cutover = { window: addDays(day, 10) + ' 08:00–10:00 (after quarter close)', rollbackOwner: 'dk',
+  ar.cutover = { window: bizDay(day, 10) + ' 08:00–10:00 (after quarter close)', rollbackOwner: 'dk',
     rollbackPlan: 'Disable the auto-removal job and fall back to the spreadsheet campaign for this quarter.',
     hypercareDays: 10, hypercareOwner: 'ps', comms: 'Manager email and Teams post two days before; reminder on day 5.' };
   ar.uatScripts = [
@@ -465,6 +482,16 @@ function enrichR2(docs, day, at) {
     results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '' })).concat(d7Cases) } });
   docs.testRun.push({ id: 'TR3', data: { id: 'TR3', projectId: 'access-review-automation', env: 'uat', at: at(-2, 15), by: 'ps',
     results: ar.uatScripts.map(x => ({ scriptId: x.id, outcome: 'pass', note: '', evidence: 'Screenshot pack in UAT folder' })).concat(d7Cases) } });
+  /* R9 §7: Compliance's part of vendor-modernization is ready to approve. Priya recorded its tests (a try-out run of
+     the screening-result cases, then a business check of the Compliance steps with evidence); Dave Ortiz approves. */
+  const d5 = byId('dataElement').D5;
+  Object.assign(d5, { liveConfirmedAt: at(-6, 10), check: Object.assign({}, d5.check, { at: at(-6, 9) }), liveEvidence: Object.assign({}, d5.liveEvidence, { at: at(-6, 9) }) });
+  const d5Cases = ['TC11', 'TC12', 'TC13', 'TC14'].map(caseId => ({ caseId, outcome: 'pass', note: '' }));
+  docs.testRun.push({ id: 'TR4', data: { id: 'TR4', projectId: 'vendor-modernization', env: 'dev', at: at(-3, 11), by: 'ps', results: d5Cases.slice() } });
+  const complianceScripts = ['uat-vendor-onboarding-s1', 'uat-vendor-onboarding-s2', 'uat-vendor-onboarding-s2a', 'uat-vendor-onboarding-d1-high', 'uat-vendor-onboarding-d1-standard'];
+  docs.testRun.push({ id: 'TR5', data: { id: 'TR5', projectId: 'vendor-modernization', env: 'uat', at: at(-2, 15), by: 'ps',
+    results: complianceScripts.map(scriptId => ({ scriptId, outcome: 'pass', note: '', evidence: 'Screenshots in the Compliance business check folder' })).concat(d5Cases) } });
+  docs.notification.push({ id: 'N3', data: { id: 'N3', to: 'do', text: 'Priya Shah mentioned you on Vendor Onboarding: the Compliance part is ready for your approval', ref: 'process:vendor-onboarding', at: at(-1, 15), read: false } });
   enrichR6(docs, day, at);
 }
 
@@ -503,10 +530,10 @@ function enrichR6(docs, day, at) {
   const vm = projects['vendor-modernization'];
   vm.fields = [{ key: 'riskArea', label: 'Risk area', type: 'select', options: RISK_AREAS.slice() }];
   /* runbook (R6 shape): owner, plannedStart, durationMins, done, gonogo. Rollback plan still open, so the gate keeps it as an item. */
-  const cut = vm.target ? addDays(vm.target, -1) : addDays(day, 40);
-  vm.cutover = { tasks: [
+  const cut = weekdayBack(vm.target ? addDays(vm.target, -1) : addDays(day, 40));
+  vm.cutover = { window: cut + ' 07:30–10:00', tasks: [
     { id: 'VT1', order: 1, task: 'Freeze manual vendor changes in the ERP', owner: 'ar', plannedStart: cut + 'T07:30', planned: cut + 'T07:30', durationMins: 30, gonogo: false, done: false },
-    { id: 'VT2', order: 2, task: 'Final yes/no call with Treasury and Compliance', owner: 'ta', plannedStart: cut + 'T08:00', planned: cut + 'T08:00', durationMins: 15, gonogo: true, done: false },
+    { id: 'VT2', order: 2, task: 'Final check with Treasury and Compliance', owner: 'ta', plannedStart: cut + 'T08:00', planned: cut + 'T08:00', durationMins: 15, gonogo: true, done: false },
     { id: 'VT3', order: 3, task: 'Switch vendor intake to the portal', owner: 'mc', plannedStart: cut + 'T08:15', planned: cut + 'T08:15', durationMins: 45, gonogo: false, done: false },
     { id: 'VT4', order: 4, task: 'Try-out test: set up one test vendor from start to finish', owner: 'ar', plannedStart: cut + 'T09:00', planned: cut + 'T09:00', durationMins: 60, gonogo: true, done: false },
   ] };
@@ -517,7 +544,7 @@ function enrichR6(docs, day, at) {
     /* time logged on done and in-progress items: actual cost = hours x dayRate / 8 */
     if (w.status !== 'done' && w.status !== 'prog') return;
     const effort = w.effortDays || 1;
-    const until = w.status === 'done' ? (w.doneAt || w.due) : addDays(day, -1);
+    const until = w.status === 'done' ? (w.doneAt || w.due) : bizDay(day, -1);
     const n = w.status === 'done' ? Math.min(effort, 7) : Math.max(1, Math.min(Math.ceil(effort / 2), 4));
     const dates = businessDaysFrom(w.start, n).filter(x => x <= until);
     if (!dates.length) dates.push(until < w.start ? w.start : until);

@@ -1,7 +1,7 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
 import { E, esc, fmt, fmtTime, link, av, personChip, pname, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT } from './process.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName } from './process.js';
 
 const clone = o => JSON.parse(JSON.stringify(o));
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
@@ -12,19 +12,22 @@ export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badg
 /* only http(s) links are rendered as links */
 const safeUrl = u => /^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '#';
 const canEdit = x => !!x && store.state.me === x.owner;
-const onlyMsg = x => `Only ${pname(x.owner)} (the owner) can change this`;
+const onlyMsg = x => `Only ${dataOwnerName(x)} (the owner) can change this`;
 /* disabled-state attributes for owner-only controls */
 const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(onlyMsg(x))}"`;
-function ruleText(f) {
+export function ruleText(f) {
   const r = [];
   if (f.required) r.push('Required');
   if (f.unique) r.push('Unique');
   if ((f.values || []).length) r.push('one of ' + f.values.join(' / '));
   if (f.matches) r.push('Must match ' + f.matches);
-  if (f.rule) String(f.rule).split(/\s*[·;]\s*/).forEach(x => x && r.push(x));
-  /* de-duplicate case-insensitively: a rule of "Required" plus required:true reads once */
+  /* R9 §8 (B12): a free-text rule is split on "·", ";" and "," so "Required, unique per vendor" reads as its parts */
+  if (f.rule) String(f.rule).split(/\s*[·;,]\s*/).forEach(x => x && r.push(x.charAt(0).toUpperCase() + x.slice(1)));
+  const keyOf = x => String(x).trim().toLowerCase().replace(/[.\s]+$/, '');
+  /* a narrower rule replaces the plain one: "Unique per vendor" covers "Unique" */
+  const narrower = k => r.some(y => { const o = keyOf(y); return o !== k && o.startsWith(k + ' '); });
   const seen = new Set();
-  return r.filter(x => { const k = String(x).trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).join(' · ') || '—';
+  return r.filter(x => { const k = keyOf(x); if (!k || seen.has(k) || (/^(required|unique)$/.test(k) && narrower(k))) return false; seen.add(k); return true; }).join(' · ') || 'No rule yet';
 }
 /* plain-English headline for each spec-drift issue key */
 const DRIFT = { duplicate: 'has duplicate values; it must be unique', duplicates: 'has duplicate values; it must be unique', 'duplicate-values': 'has duplicate values; it must be unique', 'not-unique': 'has duplicate values; it must be unique', 'missing-column': 'not found in the extract', 'required-nulls': 'required but sometimes empty', 'length-mismatch': 'length differs from the spec', 'non-digit': 'has characters that are not digits',
@@ -69,7 +72,7 @@ export function awaitingMine() {
 }
 function whyAwaiting(d) {
   const fix = store.list('workItem', w => w.resolves === d.id && w.status === 'done')[0];
-  return fix ? `Fixed by ${pname(fix.owner)}: “${fix.title}”` : 'Added by a project';
+  return fix ? `Fixed by ${personName(fix.owner)}: “${fix.title}”` : 'Added by a project';
 }
 /* the plain owner confirmation (Simple, and "Confirm all"): who, when, and the note; the finished fix is the reference */
 function ownerConfirm(d, note) {
@@ -80,6 +83,14 @@ function ownerConfirm(d, note) {
     liveEvidence: { type: 'attested', ref: fix ? 'workItem:' + fix.id : 'owner:' + by, note: text, at, by } });
 }
 
+/* R9 §8: the owner is the element's own owner (a person, or a role), else whoever does the first step that uses it;
+   never "—" and never an id */
+function ownerHTML(x, users) {
+  if (x.ownerRole) return `<span class="person d-role" data-who data-role data-data-owner>${esc(x.ownerRole)}</span>`;
+  if (x.owner && store.person(x.owner)) return `<span data-data-owner>${personChip(x.owner)}</span>`;
+  const s = users.map(u => u.s).find(y => y.owner || y.ownerRole);
+  return s ? `<span class="person d-role" data-who data-data-owner>${esc(whoOf(s))}</span><span class="hint">does the step that uses it</span>` : '<span class="hint" data-data-owner>Nobody yet</span>';
+}
 export function render(params) {
   const did = params.did;
   const x = store.get('dataElement', did);
@@ -106,7 +117,7 @@ export function render(params) {
 
   const amber = eff === 'example' || eff === 'pending';
   const resolution = (eff !== 'live' || resolver) ? `<div class="card d-resolve ${ready ? '' : amber ? 'd-resolve-amber' : 'd-resolve-open'}" style="margin-top:16px" data-resolution="${eff}"><h3>${LOCK} Fix ${ready ? '<span class="badge b-done">Done</span>' : eff === 'pending' ? `<span class="badge d-b-amber">${esc(awaitingText(did))}</span>` : eff === 'example' ? `<span class="badge d-b-amber">${esc(needsLive())}</span>` : ''}</h3>
-    ${resolver ? `<a class="wi" href="${link('/project/' + resolver.projectId + '?mode=work')}" data-link>${av(resolver.owner)}<div style="flex:1;min-width:0"><div class="t" style="font-weight:600">${esc(resolver.title)}</div><div class="dep">${esc(pname(resolver.owner))} · planned ${esc(fmt(resolver.start))} → ${esc(fmt(resolver.due))}${fc[resolver.id] && fc[resolver.id].forecast ? ' · expected ' + esc(fmt(fc[resolver.id].forecast)) : ''}</div></div>${workBadge(resolver, fc[resolver.id])}</a>
+    ${resolver ? `<a class="wi" href="${link('/project/' + resolver.projectId + '?mode=work')}" data-link>${av(resolver.owner)}<div style="flex:1;min-width:0"><div class="t" style="font-weight:600">${esc(resolver.title)}</div><div class="dep">${esc(personName(resolver.owner))} · planned ${esc(fmt(resolver.start))} → ${esc(fmt(resolver.due))}${fc[resolver.id] && fc[resolver.id].forecast ? ' · expected ' + esc(fmt(fc[resolver.id].forecast)) : ''}</div></div>${workBadge(resolver, fc[resolver.id])}</a>
       ${downstream.length ? `<div class="hint" style="margin:10px 0 4px">These work items move with it:</div>${downstream.map(w => `<div class="row click" data-go="/process/${esc(w.pid)}/step/${esc(w.step)}"><div><div class="t">${esc(w.title)}</div><div class="s">${esc((store.get('process', w.pid) || {}).name || w.pid)} · ${esc(pname(w.owner))}</div></div><div class="r">${workBadge(w, fc[w.id])}</div></div>`).join('')}` : '<div class="hint" style="margin-top:8px">No other work items wait for it.</div>'}`
       : eff === 'example' ? `<div class="s d-noplan d-noplan-amber" data-noplan>${adv ? 'No fix planned. Only a sample exists, so the launch check fails until someone connects it.' : 'No fix planned. We do not have it yet, so the launch check waits for it.'} Add a work item for it on the project page.</div>`
       : '<div class="s d-noplan" data-noplan>No fix planned. Nobody is working on getting this yet, so the steps that need it have no real date. Add a work item for it on the project page.</div>'}</div>` : '';
@@ -118,13 +129,13 @@ export function render(params) {
   const confirm = eff === 'live'
     ? ''
     : adv ? `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Confirm it’s connected</h3>
-      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${esc(pname(x.owner))}, as the owner, confirms where it now comes from before launch counts it.` : `When it is connected, the owner confirms it here. Until then the launch check fails.`} You need proof: a clean sample data check, a passing connection check, or a link and a note (weaker).</p>
+      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${esc(dataOwnerName(x))}, as the owner, confirms where it now comes from before launch counts it.` : `When it is connected, the owner confirms it here. Until then the launch check fails.`} You need proof: a clean sample data check, a passing connection check, or a link and a note (weaker).</p>
       ${x.check ? `<div class="d-checkres ${x.check.ok ? 'pass' : 'fail'}" data-last-check>Last connection check ${esc(fmtTime(x.check.at))}: ${x.check.ok ? 'passed' : 'failed'}. ${esc(x.check.detail || '')}</div>` : ''}
-      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live>Confirm it’s connected…</button>` : `<span class="d-only">${LOCK} Only ${esc(pname(x.owner))} (the owner) can confirm</span>`}</div></div>`
+      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live>Confirm it’s connected…</button>` : `<span class="d-only">${LOCK} Only ${esc(dataOwnerName(x))} (the owner) can confirm</span>`}</div></div>`
     /* R8 §1 Simple: one question, one tap for the owner */
     : `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Do we have it now?</h3>
-      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${owner ? 'You own this information, so' : esc(pname(x.owner)) + ' owns it and'} one tap confirms we have it.` : `When we have it, ${owner ? 'you' : esc(pname(x.owner)) + ' (the owner)'} confirm${owner ? '' : 's'} it here. Until then the launch check waits for it.`}</p>
-      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live>Confirm we have it</button>` : `<span class="d-only">${LOCK} Only ${esc(pname(x.owner))} (the owner) can confirm</span>`}</div></div>`;
+      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${owner ? 'You own this information, so' : esc(dataOwnerName(x)) + ' owns it and'} one tap confirms we have it.` : `When we have it, ${owner ? 'you' : esc(dataOwnerName(x)) + ' (the owner)'} confirm${owner ? '' : 's'} it here. Until then the launch check waits for it.`}</p>
+      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live>Confirm we have it</button>` : `<span class="d-only">${LOCK} Only ${esc(dataOwnerName(x))} (the owner) can confirm</span>`}</div></div>`;
   /* R8 §1: everything waiting for this person's OK, confirmed together with one note */
   const mine = awaitingMine();
   const confirmAll = mine.length >= 2 ? `<div class="card d-confirmall" data-confirm-all="${mine.length}" style="margin-top:16px"><h3>${mine.length} pieces of information wait for your OK</h3>
@@ -137,12 +148,14 @@ export function render(params) {
     ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Name</th><th>Looks like</th><th>Rules</th>${owner ? '<th><span class="d-sr">Actions</span></th>' : ''}</tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td data-fsum>${esc(specSummary(f))}</td><td class="d-rule">${esc(ruleText(f))}</td>
       ${owner ? `<td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit rule ${esc(f.name)}">Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete rule ${esc(f.name)}">Delete</button></td>` : ''}</tr>`).join('')}</table></div>`
       : suggested.length ? `<div class="d-suggest" data-suggest-rules="${suggested.length}"><div class="s">The sample data check found <b>${suggested.length} column${suggested.length === 1 ? '' : 's'}</b>: ${esc(suggested.map(f => f.name).join(', '))}.</div>
-        ${owner ? `<button class="btn primary" data-use-columns>Use these columns as the rules to test</button><div class="hint">The smallest and largest values seen become tests at the edges. You can change any rule after.</div>` : `<div class="d-only">${LOCK} ${esc(pname(x.owner))} (the owner) can turn them into rules</div>`}</div>`
+        ${owner ? `<button class="btn primary" data-use-columns>Use these columns as the rules to test</button><div class="hint">The smallest and largest values seen become tests at the edges. You can change any rule after.</div>` : `<div class="d-only">${LOCK} ${esc(dataOwnerName(x))} (the owner) can turn them into rules</div>`}</div>`
       : `<div class="s">No rules yet. Describe what each piece should look like so tests can be made${testPrj ? ', or check a sample of the real data first' : ''}.</div>`}
     ${owner ? `<div class="d-ownerrow"><button class="btn sm" data-fadd>+ Add a rule</button></div>` : fields.length ? '' : `<div class="d-only" style="margin-top:8px">${LOCK} ${esc(onlyMsg(x))}</div>`}</div>`;
 
-  const examples = `<div class="card"><h3>Samples on file <span class="n">${(x.samples || []).length}</span></h3>${(x.samples || []).length ? x.samples.map(f => `<div class="row"><span>📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample file (demo, not downloadable)</div></div></div>`).join('') : '<div class="s">None. Nobody has shared a real example yet.</div>'}
-    ${x.sampleCsv ? '<div class="hint" style="margin-top:8px">A made-up sample extract is on file for checking.</div>' : ''}</div>`;
+  /* R9 §8 (B12): the count equals the rows shown; a made-up extract is a sample too, labelled "Practice sample" */
+  const sampleRows = (x.samples || []).map(f => `<div class="row" data-sample-row="file"><span aria-hidden="true">📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample file (demo, not downloadable)</div></div></div>`)
+    .concat(x.sampleCsv ? [`<div class="row" data-sample-row="practice"><span aria-hidden="true">🧪</span><div><div class="t">Practice sample <span class="d-practice">made up</span></div><div class="s">Made-up rows, used to try the sample data check. Not real data.</div></div></div>`] : []);
+  const examples = `<div class="card" data-samples="${sampleRows.length}"><h3>Samples on file <span class="n">${sampleRows.length}</span></h3>${sampleRows.length ? sampleRows.join('') : '<div class="s">None. Nobody has shared an example yet.</div>'}</div>`;
 
   const allUsers = [...users, ...asisUsers];
   const impact = `<div class="card" style="margin-top:16px" data-impact><h3>Steps that use it <span class="n" data-usage-total="${users.length}/${asisUsers.length}">${users.length} Future · ${asisUsers.length} Today</span></h3>${allUsers.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Map</th><th>Process</th><th>Who</th><th>Project</th></tr>
@@ -171,7 +184,7 @@ export function render(params) {
       ${d.resolved || !owner ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}">Mark fixed</button></div>`}</div>`).join('') + (open && !owner ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing yet. Anything testing finds that the rules missed lands here.</div>'}</div>`;
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a> › Information</div><h1>${esc(x.name)}</h1>${x.note ? `<p class="d-desc">${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${x.ownerRole ? `<span class="person d-role" data-who data-role>${esc(x.ownerRole)}</span>` : ''}${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
+    <div class="res"><span class="lbl">Owner</span>${ownerHTML(x, users.concat(asisUsers))}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
     <div class="hdr-side">${owner ? '<div class="d-ownerrow d-right"><button class="btn" data-dedit>Edit</button></div>' : `<div class="d-ownerrow d-right"><span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span></div>`}<div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>Today steps</span></div>${adv ? `<div class="kpi"><b>${procCount}</b><span>Processes</span></div>` : ''}<div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work waiting for it</span></div></div></div></section>
   ${confirmAll}
   ${confirm}
@@ -349,7 +362,7 @@ async function fieldModal(f, siblings, st, err) {
 const confirmOpened = new Set();
 /* R8 §1 Simple: the owner confirms with one tap and an optional note */
 async function confirmSimple(did, cur, save) {
-  const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (the owner) can confirm`); return; }
+  const x = cur(); if (!canEdit(x)) { toast(`Only ${dataOwnerName(x)} (the owner) can confirm`); return; }
   const r = await modal({
     title: `Confirm we have '${x.name}'`,
     body: `<p style="margin:0">${esc(whyAwaitingText(x))} You own it, so your OK lets the project count on it.</p>
@@ -360,14 +373,14 @@ async function confirmSimple(did, cur, save) {
   const note = (r.form.note || '').trim();
   await save(ownerConfirm(cur(), note), `Confirmed we have '${x.name}'${note ? ': ' + note.slice(0, 60) : ''}`);
 }
-const whyAwaitingText = d => { const fix = store.list('workItem', w => w.resolves === d.id && w.status === 'done')[0]; return fix ? `${pname(fix.owner)} finished “${fix.title}”.` : effAvail(d.id) === 'pending' ? 'A project added or changed this information.' : `We do not have ${d.name} yet.`; };
+const whyAwaitingText = d => { const fix = store.list('workItem', w => w.resolves === d.id && w.status === 'done')[0]; return fix ? `${personName(fix.owner)} finished “${fix.title}”.` : effAvail(d.id) === 'pending' ? 'A project added or changed this information.' : `We do not have ${d.name} yet.`; };
 
 /* R5: confirm live with evidence that cannot be faked:
    (a) the latest profile with zero blocking drift, (b) a passing connection check, or (c) a link plus a note ("attested", weaker). */
 async function confirmLive(did, cur, save) {
   let err = '', vals = {}, check = null;
   for (;;) {
-    const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (the owner) can confirm`); return; }
+    const x = cur(); if (!canEdit(x)) { toast(`Only ${dataOwnerName(x)} (the owner) can confirm`); return; }
     const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
     const drift = prof ? eng('specDrift', [x, prof], []) : [];
     const blk = blockingDrift(drift);
@@ -482,7 +495,7 @@ export function bind(root, params) {
     const lbl = k => isAdv() ? avOf(k).label : k === 'missing' || k === 'example' ? NOTYET : HAVE;
     if (before !== d.avail && lbl(before) !== lbl(d.avail)) parts.push(`status ${lbl(before)} → ${lbl(d.avail)}`);
     if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
-    if (x.owner !== d.owner) parts.push(`owner → ${pname(d.owner)}`);
+    if (x.owner !== d.owner) parts.push(`owner → ${personName(d.owner)}`);
     await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited information '${d.name}'`);
     return;
     }
@@ -522,7 +535,7 @@ export function bind(root, params) {
     history.replaceState(history.state, '', location.pathname);
     const x = cur();
     if (effAvail(did) === 'live') toast(`We already have '${x.name}'`);
-    else if (!canEdit(x)) toast(`Only ${pname(x.owner)} (the owner) can confirm '${x.name}'`);
+    else if (!canEdit(x)) toast(`Only ${dataOwnerName(x)} (the owner) can confirm '${x.name}'`);
     else setTimeout(openConfirm, 50);
   }
   root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {

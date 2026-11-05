@@ -110,7 +110,7 @@ function normNode(n) {
   if (!n || n.type === 'trigger' || n.type === 'end') return null;
   const k = kindOf(n.type); if (k) return normKind(n, k);
   if (isGate(n)) {
-    const branches = (n.branches || []).map(b => { const br = { label: cleanTitle((b && b.label) || '') || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : kindOf(x && x.type) ? normKind(x, kindOf(x.type)) : normStep(x)).filter(Boolean) };
+    const branches = (n.branches || []).map(b => { const br = { label: cleanTitle((b && b.label) || '') || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : x && x.type === 'end' ? endNode(x.title) : kindOf(x && x.type) ? normKind(x, kindOf(x.type)) : normStep(x)).filter(Boolean) };
       if (b && b.goto != null && b.goto !== '') br.goto = String(b.goto); return br; });
     while (branches.length < 2) branches.push({ label: branches.length ? 'No' : 'Yes', nodes: [] });
     return { type: n.type === 'parallel' ? 'parallel' : 'decision', title: cleanTitle(n.title || n.text || 'Decision') || 'Decision', src: srcId(n), branches };
@@ -121,6 +121,7 @@ function normalize(res) {
   const raw = (res && (res.nodes || res.steps || res.draft || (res.process && (res.process.nodes || res.process.steps || res.process.asis)))) || [];
   const nodes = raw.map(normNode).filter(Boolean);
   resolveGotos(nodes);
+  repairDraft(nodes, ui.text);
   const existing = new Set(store.list('dataElement').map(d => strip(d.name)));
   const seen = new Set();
   let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x)
@@ -131,6 +132,9 @@ function normalize(res) {
   newData = newData.filter(x => isDataNoun(x.name)).map(x => Object.assign(x, { create: !x.exists }));
   let notes = res && (res.notes || res.note || res.warnings);
   notes = Array.isArray(notes) ? notes.map(String) : notes ? [String(notes)] : [];
+  /* R9 §9: the step count is stated once, by this page, from the steps actually in the draft (the reader's own
+     "Found N steps" sentence counted steps the repair below merges or removes) */
+  notes = notes.map(t => t.replace(/^Found \d+ steps?[^.]*\.\s*/i, '').trim()).filter(Boolean);
   if (skipped.length) notes.push(`Not proposed as data (they name a person or an action, not a document, record or field): ${skipped.join(', ')}.`);
   const src = res && res.source === 'rules' ? 'Rules' : 'AI';
   const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
@@ -173,6 +177,107 @@ function resolveGotos(nodes) {
     if (!t) t = all.find(n => strip(n.title) === strip(v));
     if (t) b.goto = t.src; else delete b.goto;
   }));
+}
+
+/* ---------- R9 §9: repairs applied to whatever the reader returned, using the pasted text ----------
+   The reader runs on the server; these keep each clause on the step it is written in, end a rejected "If OK" path,
+   read "Role (Name)" owners and move system names to the step's system. Each repair is a no-op when the text has
+   nothing of the kind, so a draft that is already right is left alone. */
+const endNode = t => ({ type: 'end', title: cleanTitle(t) || 'Stop', src: srcId({}) });
+const words = s => strip(s).split(' ').filter(w => w.length > 2 && !/^(the|and|for|with|from|into|then|this|that|its|their)$/.test(w));
+const covers = (hay, needle) => { const h = new Set(words(hay)); const n = words(needle); return n.length > 0 && n.every(w => h.has(w) || h.has(w.replace(/s$/, '')) || h.has(w + 's')); };
+const overlap = (a, b) => { const h = new Set(words(a)); return words(b).filter(w => h.has(w)).length; };
+/* the numbered lines of the pasted text: [{num, body}] */
+function numberedLines(text) {
+  return String(text || '').split(/\r?\n/).map(l => /^\s*(?:step\s+)?(\d+)[.):]\s+(.+)$/i.exec(l)).filter(m => m && !/^\d+\.\d/.test(m[0].trim())).map(m => ({ num: +m[1], body: m[2].trim() }));
+}
+/* "updates" -> "update", "verifies" -> "verify", "reaches" -> "reach" */
+const verbBase = v => { const w = String(v || ''); if (/ies$/i.test(w)) return w.slice(0, -3) + 'y'; if (/(ch|sh|ss|x|z)es$/i.test(w)) return w.slice(0, -2); if (/[^s]s$/i.test(w)) return w.slice(0, -1); return w; };
+const SYSTEM_NOUNS = ['ServiceNow', 'HRIS', 'ERP', 'CRM', 'Workday', 'SAP', 'Oracle', 'NetSuite', 'Concur', 'Salesforce', 'SharePoint', 'DocuSign', 'Jira', 'Coupa', 'Ariba', 'QuickBooks', 'Xero', 'Okta', 'Active Directory', 'Zendesk', 'HubSpot', 'Dynamics'];
+const sysRe = new RegExp('\\b(' + SYSTEM_NOUNS.map(x => x.replace(/\s+/g, '\\s+')).join('|') + ')\\b');
+const reEsc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function fixStep(n) {
+  if (!n || n.type !== 'step') return;
+  /* "HR Manager (Maya Chen) updates the employee record" -> owner Maya Chen (or the role, with the name in the note) */
+  const rn = /^(?:the\s+)?([A-Z][\w&/-]*(?:\s+[A-Za-z&/-]+){0,3}?)\s*\(([^)]{2,40})\)\s+([a-z]+)\b\s*(.*)$/.exec(n.title);
+  const roleTxt = !rn && /^(.+?)\s*\(([^)]{2,40})\)$/.exec(n.ownerRole || '');
+  if (rn || roleTxt) {
+    const role = cleanTitle(rn ? rn[1] : roleTxt[1]), name = cleanTitle(rn ? rn[2] : roleTxt[2]);
+    if (rn) n.title = capRole(cleanTitle(verbBase(rn[3]) + ' ' + rn[4]).replace(/[.;]$/, ''));
+    const hit = store.state.people.find(p => strip(p.name) === strip(name));
+    if (hit) { n.owner = hit.id; n.ownerRole = ''; }
+    else { n.owner = ''; n.ownerRole = capRole(role); n.note = `Named in the procedure: ${name}`; }
+  }
+  /* system nouns become the step's system, never information or a team */
+  const m = sysRe.exec(n.title);
+  if (m) {
+    if (!n.system) n.system = m[1].replace(/\s+/g, ' ');
+    if (n.system === m[1].replace(/\s+/g, ' ')) n.title = capRole(cleanTitle(n.title.replace(new RegExp('\\s+(?:in|into|on|using|via|through|from|to|with)\\s+(?:the\\s+)?' + reEsc(m[1]) + '(?:\\s+(?:system|app|tool))?\\b', 'i'), ' ')));
+  }
+}
+function repairDraft(nodes, text) {
+  if (!Array.isArray(nodes)) return nodes;
+  targets(nodes).forEach(fixStep);
+  const lines = numberedLines(text);
+  const tops = () => nodes.filter(n => n.type === 'step');
+  const bestStep = body => { let best = null, sc = 0; tops().forEach(s => { const k = overlap(body, s.title); if (k > sc) { sc = k; best = s; } }); return best; };
+  /* B1: "5. Facilities collects laptop; if not returned within 5 days, notify Legal" belongs to step 5. The reader hangs
+     "if not …" on the last choice it saw, even one from another line; move it back to its own step. */
+  lines.forEach(({ body }) => {
+    const m = /^(.*?)[;,.]\s*if not\s+([^,]+?),\s*(?:then\s+)?(.+?)[.;]?$/i.exec(body);
+    if (!m || /\b(if|unless|when)\b/i.test(m[1])) return;
+    const cond = m[2].trim(), act = m[3].trim();
+    let moved = null;
+    nodes.forEach(g => (g.branches || []).forEach(b => {
+      if (moved) return;
+      const k = b.nodes.findIndex(x => x.type === 'step' && covers(m[2] + ' ' + m[3], x.title));
+      if (k < 0 || covers(body, g.title.replace(/\?$/, ''))) return;   /* the choice really is on this line: keep it */
+      moved = b.nodes.splice(k, 1)[0];
+    }));
+    const already = nodes.some(g => g.type === 'decision' && covers(cond, g.title.replace(/\?$/, '')));
+    if (!moved && already) return;
+    const host = bestStep(m[1]); if (!host) return;
+    const i = nodes.indexOf(host);
+    const doer = host.owner ? { owner: host.owner, ownerRole: '' } : { owner: '', ownerRole: host.ownerRole || '' };
+    const step = Object.assign({ type: 'step', title: capRole(cleanTitle(act)), src: srcId({}), data: [], touches: [], system: '', sla: '', subs: [], newData: [] }, doer);
+    fixStep(step);
+    nodes.splice(i + 1, 0, { type: 'decision', title: capRole(cleanTitle(cond)) + '?', src: srcId({}), branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [step] }] });
+  });
+  /* "If OK, forwards to IT": Yes goes on to IT's step; No ends the process unless the text says what happens */
+  lines.forEach(({ body }) => {
+    const m = /\bif\s+(ok|okay|approved|correct|complete|fine|valid|satisfactory|acceptable|accepted)\b,?\s*(?:then\s+)?(?:(?:he|she|they|it)\s+)?(?:forward|send|pass|route|hand|refer|escalate|submit)\w*\s+(?:it\s+|this\s+|the request\s+)?(?:on\s+)?to\s+(?:the\s+)?([A-Z][\w&-]*(?:\s+[A-Z][\w&-]*)*)/i.exec(body);
+    if (!m) return;
+    const word = m[1].toLowerCase(), x = m[2];
+    const g = nodes.find(n => n.type === 'decision' && (strip(n.title) === strip(word) || (n.branches[0] && n.branches[0].nodes.some(s => /^(forward|send|pass|route|hand|refer|escalate|submit)/i.test(s.title) && strip(s.title).includes(strip(x))))));
+    if (!g) return;
+    if (/^(ok|okay)\??$/i.test(g.title.trim())) g.title = 'Request OK?';
+    const yes = g.branches[0], no = g.branches[1];
+    yes.nodes = yes.nodes.filter(s => !(/^(forward|send|pass|route|hand|refer|escalate|submit)/i.test(s.title) && strip(s.title).includes(strip(x))));
+    const after = nodes.slice(nodes.indexOf(g) + 1);
+    const isX = s => s && s.type === 'step' && (strip(s.ownerRole) === strip(x) || (s.owner && store.state.people.some(p => p.id === s.owner && (strip(p.bu) === strip(x) || strip(p.name) === strip(x)))));
+    const tgt = after.find(isX);
+    if (!yes.nodes.length && tgt && tgt !== after[0]) yes.goto = tgt.src;
+    else if (!yes.nodes.length && !tgt) yes.nodes.push({ type: 'step', title: 'Send to ' + x, src: srcId({}), owner: '', ownerRole: '', data: [], touches: [], system: '', sla: '', subs: [], newData: [] });
+    const says = /\b(otherwise|if not|else|rejected|returns?|sends? (it )?back)\b/i.test(body.slice(m.index + m[0].length));
+    if (no && !no.nodes.length && !no.goto && !says) no.nodes.push(endNode('Stop: request rejected'));
+  });
+  return nodes;
+}
+/* R9 §9 (B2): the process name comes from the title line or "Procedure: X", never from step 1 */
+export function deriveName(text) {
+  const ls = String(text || '').split(/\r?\n/).map(x => x.replace(/^#+\s*/, '').trim()).filter(Boolean);
+  const tidyName = t => {
+    let x = String(t).replace(/^Northwind Traders\s*[—–-]\s*/i, '').replace(/\s*\((?:v|rev|version)\s*[\d.]+\)\s*$/i, '')
+      .replace(/\s*[—–-]?\s*\b(standard operating procedure|sop|procedure|process|policy|work instruction|checklist)\b\s*$/i, '').replace(/[.:;,\s]+$/, '').trim();
+    if (!x || x.split(/\s+/).length > 8) return '';
+    /* sentence case, keeping acronyms ("IT access request") */
+    return x.split(/\s+/).map((w, i) => /^[A-Z0-9&-]{2,}$/.test(w) ? w : i ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+  };
+  for (const l of ls) { const m = /^(?:procedure|process|title|sop|name)\s*[:\-–—]\s*(.+)$/i.exec(l); if (m && tidyName(m[1])) return tidyName(m[1]); }
+  const first = ls[0] || '';
+  if (!first || /^(?:step\s+)?\d+[.):]\s/i.test(first) || /^[-*•]\s/.test(first) || /[.!?]$/.test(first) && first.split(/\s+/).length > 6) return '';
+  if (/^(purpose|owner|scope|revision|trigger)\s*:/i.test(first)) return '';
+  return tidyName(first);
 }
 
 /* Path helpers. Paths: "3" top-level node, "3.b1.0" step 0 of branch 1, "3.s2" sub-step 2 of top-level step 3. */
@@ -231,13 +336,14 @@ const factChips = s => {
   else if (s.owner) out.push(`<span class="chip is-role" data-owner-person="${esc(s.owner)}">Who: ${esc(pname(s.owner))}</span>`);
   if (s.sla) out.push(`<span class="chip is-fact" data-sla="${esc(s.sla)}">Time limit: ${esc(s.sla)}</span>`);
   if (s.system && !adv()) out.push(`<span class="chip is-fact" data-system="${esc(s.system)}">System: ${esc(s.system)}</span>`);
+  if (s.note) out.push(`<span class="chip is-fact" data-step-note>${esc(s.note)}</span>`);
   return out.length ? `<div class="is-facts">${out.join('')}</div>` : '';
 };
 function stepBody(s, path, label) {
   return `<div class="is-body" data-path="${esc(path)}"><textarea class="is-title" data-f="title" rows="2" aria-label="${esc(label)} title">${esc(s.title)}</textarea>
     <div class="is-row">${adv() ? ownerSel(s) : whoInput(s)}${dataPicker(s, path)}${adv() ? `<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System">` : ''}</div>${factChips(s)}${dataChips(s)}
-    ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><textarea data-f="title" rows="${Math.min(4, Math.max(1, Math.ceil(sb.title.length / 60)))}" class="is-subt" aria-label="Sub-step ${k + 1}">${esc(sb.title)}</textarea><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
-    <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
+    ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><textarea data-f="title" rows="${Math.min(4, Math.max(1, Math.ceil(sb.title.length / 60)))}" class="is-subt" aria-label="Detail step ${k + 1}">${esc(sb.title)}</textarea><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove detail step">✕</button></li>`).join('')}</ol>` : ''}
+    <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Detail step</button></div></div>`;
 }
 /* R6: wait / message / sub-process nodes */
 function kindBody(s, path) {
@@ -251,21 +357,36 @@ function kindBody(s, path) {
     <div class="is-row">${extra}${s.type === 'message' ? ownerSel(s) : ''}</div>${dataChips(s)}</div>`;
 }
 /* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
+/* R9 §9: steps are numbered 1..N in order; choices are not steps and take no number */
+const stepNo = n => { const tops = ui.draft.nodes.filter(x => x.type === 'step'); const k = tops.indexOf(n); return k >= 0 ? k + 1 : 0; };
 function gotoRow(g, b, bpath) {
-  const all = targets(ui.draft.nodes).filter(n => n !== g && !b.nodes.includes(n));
+  const all = targets(ui.draft.nodes).filter(n => n !== g && n.type !== 'end' && !b.nodes.includes(n));
   const t = b.goto && all.find(n => n.src === b.goto);
-  const num = n => { const i = ui.draft.nodes.indexOf(n); return i >= 0 ? `Step ${i + 1}` : 'Branch step'; };
+  const ends = b.nodes.some(n => n.type === 'end');
+  const num = n => stepNo(n) ? `Step ${stepNo(n)}` : ui.draft.nodes.includes(n) ? (KINDS[n.type] ? KINDS[n.type].label : 'Choice') : 'Branch step';
   /* "otherwise skip to step 4" jumps forward; "return to step 1" goes back */
   const fwd = t && ui.draft.nodes.indexOf(t) > ui.draft.nodes.indexOf(g);
+  /* R9 §11: plain choices for where the path goes next: carry on, end here, or jump to a step */
   return `<div class="is-goto ${t ? 'on' : ''}" ${t ? `data-loopback="${esc(t.title)}"` : ''}>${t ? `<span class="is-ret" aria-hidden="true">${fwd ? '↷' : '↩'}</span><span>${fwd ? 'Skips to' : 'Goes back to'} <b>${esc(num(t))}: ${esc(t.title.slice(0, 60))}</b></span>` : ''}
-    <select data-goto="${esc(bpath)}" aria-label="Go back to an earlier step"><option value="">${t ? 'Don’t go back' : 'Doesn’t go back'}</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>↩ ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
+    <select data-goto="${esc(bpath)}" aria-label="Then"><option value="" ${!t && !ends ? 'selected' : ''}>Then: carry on to the next step</option><option value="__end" ${ends && !t ? 'selected' : ''}>Then: ends here</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>Then: ${ui.draft.nodes.indexOf(n) > ui.draft.nodes.indexOf(g) ? 'skip to' : 'go back to'} ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
+}
+/* a path that stops the process: "Ends here: Stop: request rejected" */
+const endBody = (s, path) => `<div class="is-end" data-end-node data-path-end="${esc(path)}"><span class="is-endic" aria-hidden="true">■</span><span><b>Ends here</b>${s.title && !/^stop$/i.test(s.title) ? ` · ${esc(s.title.replace(/^Stop:\s*/i, ''))}` : ''}</span></div>`;
+function branchHint(g, b) {
+  const n = b.nodes.filter(x => x.type !== 'end').length, ends = b.nodes.some(x => x.type === 'end');
+  const bits = [];
+  if (n) bits.push(`${n} step${n === 1 ? '' : 's'}`);
+  if (ends) bits.push('then ends here');
+  else if (b.goto) bits.push(targets(ui.draft.nodes).findIndex(x => x.src === b.goto) > ui.draft.nodes.indexOf(g) ? 'then skips ahead' : 'then goes back');
+  else if (!n) bits.push(g.type === 'parallel' ? 'no steps yet' : 'carries on to the next step');
+  return esc(bits.join(', '));
 }
 function gateBody(g, path) {
   return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'At the same time: every path runs' : 'Choice'}</span></div>
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Things done at the same time' : 'Choice question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
-      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Path label"><span class="hint" data-branch-hint>${/^(no|otherwise|else)$/i.test(b.label) && b.nodes.length ? 'Otherwise · ' : ''}${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? (targets(ui.draft.nodes).findIndex(n => n.src === b.goto) > ui.draft.nodes.indexOf(g) ? 'skips ahead' : 'loops back') : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
-      ${b.nodes.map((s, k) => `<div class="is-bstep">${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
+      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Path label"><span class="hint" data-branch-hint>${branchHint(g, b)}</span></div>
+      ${b.nodes.map((s, k) => s.type === 'end' ? endBody(s, `${path}.b${j}.${k}`) : `<div class="is-bstep">${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
 }
@@ -277,7 +398,9 @@ export function render() {
   const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
   if (d) newData.forEach(x => { if (!x.target || !targets(d.nodes).some(n => n.src === x.target)) x.target = targetOf(d.nodes, x); });
-  const tgtTxt = src => { if (!d) return ''; const all = targets(d.nodes); const t = all.find(n => n.src === src); if (!t) return ''; const i = d.nodes.indexOf(t); return `${i >= 0 ? 'Step ' + (i + 1) : 'Branch step'}: ${t.title.slice(0, 60)}`; };
+  const tgtTxt = src => { if (!d) return ''; const all = targets(d.nodes); const t = all.find(n => n.src === src); if (!t) return ''; return `${stepNo(t) ? 'Step ' + stepNo(t) : 'Branch step'}: ${t.title.slice(0, 60)}`; };
+  /* R9 §8: new information is owned by whoever does its step (a person or a role), shown before saving */
+  const ownTxt = src => { const t = d && targets(d.nodes).find(n => n.src === src); return t && t.owner ? pname(t.owner) : t && t.ownerRole ? t.ownerRole : 'whoever does the step'; };
   const kinds = d ? targets(d.nodes).filter(x => KINDS[x.type]).length : 0;
   const noOwner = d ? allSteps(d.nodes, []).filter(x => !x.owner && !x.ownerRole).length : 0;
   const loops = d ? d.nodes.reduce((n, g) => n + (g.branches || []).filter(b => b.goto).length, 0) : 0;
@@ -285,7 +408,7 @@ export function render() {
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>New information this procedure needs</h4>
       <p class="hint">We found information the procedure needs that isn't in your workspace yet. Each ticked one is added to the step shown, and whoever does that step looks after it.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
-        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
+        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small><small class="is-ndown" data-nd-owner="${esc(ownTxt(x.target))}">Owner: ${esc(ownTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
 
   const draftHtml = d ? `<div class="card is-draft"><h3>Your process, ready to check${adv() ? `<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span>` : ''}<span class="n">${n} steps${gates ? ` · ${gates} choice${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} at the same time` : ''}${kinds ? ` · ${kinds} wait/message` : ''}</span></h3>
     ${found}
@@ -294,8 +417,8 @@ export function render() {
     ${loops ? `<div class="hint" data-loops>${loops} path${loops === 1 ? '' : 's'} that jump${loops === 1 ? 's' : ''} to another step (“return to step N”, “skip to step N”). They're drawn as arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">What starts it</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
-      <span class="is-n">${s.type === 'step' ? i + 1 : KINDS[s.type] ? KINDS[s.type].icon : '◆'}</span>
-      ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + (i + 1)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
+      <span class="is-n" ${s.type === 'step' ? '' : 'aria-hidden="true"'}>${s.type === 'step' ? stepNo(s) : KINDS[s.type] ? KINDS[s.type].icon : ''}</span>
+      ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + stepNo(s)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
     <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add choice</button>${adv() ? '<button class="btn sm" data-add-par>+ Add “at the same time”</button>' : ''}<button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Save as how it works today</button></div></div>` : '';
@@ -364,21 +487,24 @@ export function bind(root) {
     li.querySelectorAll(':scope > .is-ctl [data-mv]').forEach(b => b.onclick = () => { readDraft(root); const j = i + +b.dataset.mv; const a = ui.draft.nodes; [a[i], a[j]] = [a[j], a[i]]; store.emit(); });
     li.querySelector(':scope > .is-ctl [data-rm]').onclick = () => { readDraft(root); ui.draft.nodes.splice(i, 1); store.emit(); };
   });
-  root.querySelectorAll('[data-goto]').forEach(el => el.onchange = () => { readDraft(root); const [p, j] = el.dataset.goto.split(/\.b(?=\d+$)/); const br = at(p).branches[+j]; if (el.value) br.goto = el.value; else delete br.goto; store.emit(); });
+  root.querySelectorAll('[data-goto]').forEach(el => el.onchange = () => { readDraft(root); const [p, j] = el.dataset.goto.split(/\.b(?=\d+$)/); const br = at(p).branches[+j];
+    const keepEnd = br.nodes.find(n => n.type === 'end');
+    br.nodes = br.nodes.filter(n => n.type !== 'end'); delete br.goto;
+    if (el.value === '__end') br.nodes.push(keepEnd || endNode('Stop'));
+    else if (el.value) br.goto = el.value;
+    store.emit(); });
   root.querySelectorAll('[data-f=owner],[data-f=who],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; rerender(); });
   root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-f=direction],[data-f=calls]').forEach(el => el.onchange = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
   root.querySelectorAll('[data-rm-path]').forEach(b => b.onclick = () => { readDraft(root); removeAt(b.dataset.rmPath); store.emit(); });
-  root.querySelectorAll('[data-add-sub]').forEach(b => b.onclick = () => { readDraft(root); const s = at(b.dataset.addSub); (s.subs = s.subs || []).push({ title: 'New sub-step', data: [] }); store.emit(); });
+  root.querySelectorAll('[data-add-sub]').forEach(b => b.onclick = () => { readDraft(root); const s = at(b.dataset.addSub); (s.subs = s.subs || []).push({ title: 'New detail step', data: [] }); store.emit(); });
   root.querySelectorAll('[data-add-bstep]').forEach(b => b.onclick = () => { readDraft(root); const [p, j] = b.dataset.addBstep.split(/\.b(?=\d+$)/); at(p).branches[+j].nodes.push({ type: 'step', src: srcId({}), title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); });
   const add = root.querySelector('[data-add-step]'); if (add) add.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'step', src: srcId({}), title: 'New step', owner: '', data: [], touches: [], subs: [], newData: [] }); store.emit(); };
   const ag = root.querySelector('[data-add-gate]'); if (ag) ag.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'decision', src: srcId({}), title: 'Condition met?', branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] }); store.emit(); };
   const ap = root.querySelector('[data-add-par]'); if (ap) ap.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'parallel', src: srcId({}), title: 'Do these at the same time', branches: [{ label: 'Branch A', nodes: [] }, { label: 'Branch B', nodes: [] }] }); store.emit(); };
   const cr = root.querySelector('[data-create]'); if (cr) cr.onclick = () => { readDraft(root); createProcess(); };
 }
-
-const firstLine = t => (String(t).split('\n').map(x => x.replace(/^#+\s*/, '').trim()).find(Boolean) || '').replace(/\s*[—-]\s*SOP.*$/i, '').replace(/\bSOP\b.*$/i, '').trim();
 
 function allSteps(nodes, out) { (nodes || []).forEach(n => { if (n.type === 'step') out.push(n); else (n.branches || []).forEach(b => allSteps(b.nodes, out)); }); return out; }
 
@@ -399,20 +525,32 @@ async function createProcess() {
     seen.add(k);
   }
 
-  const guess = cleanTitle(d.name || firstLine(ui.text).replace(/^Northwind Traders\s*[—-]\s*/i, '')) || 'Imported process';
+  /* R9 §9 (B2): a name the reader gave is used only if it is not a step; otherwise it is derived from the title line.
+     If nothing can be derived the name is left empty, focused, and required. */
   const steps = allSteps(nodes, []);
-  const r = await modal({
-    title: 'Save as how it works today',
-    body: `<div class="field"><label>Name</label><input name="name" value="${esc(guess.slice(0, 80))}"></div>
-      <div class="field"><label>Description</label><textarea name="desc">${esc('From a pasted procedure. ' + steps.length + ' steps.')}</textarea></div>
-      <div class="field"><label>What starts it</label><input name="trigger" value="${esc(d.trigger || '')}" placeholder="e.g. An employee submits a claim"></div>
+  const given = cleanTitle(d.name || '');
+  const isStepText = t => !t || /^(?:step\s+)?\d+[.):]\s/i.test(t) || steps.some(x => strip(x.title) === strip(t)) || numberedLines(ui.text).some(l => strip(l.body).startsWith(strip(t)));
+  let nameVal = !isStepText(given) ? given : deriveName(ui.text), err = '', descVal = 'From a pasted procedure. ' + steps.length + ' step' + (steps.length === 1 ? '' : 's') + '.', trigVal = d.trigger || '';
+  let r;
+  for (;;) {
+    const pr = modal({
+      title: 'Save as how it works today',
+      body: `${err ? `<div class="banner d-err" role="alert" data-name-err>${esc(err)}</div>` : ''}<div class="field"><label for="is-pname">Name</label><input id="is-pname" name="name" value="${esc(nameVal.slice(0, 80))}" placeholder="Name this process, e.g. Employee offboarding" data-pname></div>
+      <div class="field"><label>Description</label><textarea name="desc">${esc(descVal)}</textarea></div>
+      <div class="field"><label>What starts it</label><input name="trigger" value="${esc(trigVal)}" placeholder="e.g. An employee submits a claim"></div>
       ${steps.some(x => !x.owner && !x.ownerRole) ? `<div class="is-ownerprompt" data-create-noowner>${steps.filter(x => !x.owner && !x.ownerRole).length} step${steps.filter(x => !x.owner && !x.ownerRole).length === 1 ? ' has' : 's have'} nobody doing it yet. You can save now and add who does it later; before launch every step needs someone.</div>` : ''}
       ${picks.length ? `<div class="hint" data-create-data="${picks.length}">Also creates ${picks.length} piece${picks.length === 1 ? '' : 's'} of information and adds each to its step: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
       <div class="hint">This opens on <b>Today</b>. When you open <b>Future</b>, it starts as a copy you can change.</div>`,
-    actions: [{ id: 'create', label: 'Save as how it works today', primary: true }],
-  });
-  if (r.action !== 'create') return;
-  const name = cleanTitle(r.form.name) || 'Imported process';
+      actions: [{ id: 'create', label: 'Save as how it works today', primary: true }],
+    });
+    const mm = [...document.querySelectorAll('.overlay .modal')].pop();
+    const ni = mm && mm.querySelector('[data-pname]'); if (ni && !ni.value) setTimeout(() => ni.focus(), 0);
+    r = await pr;
+    if (r.action !== 'create') return;
+    if (cleanTitle(r.form.name)) break;
+    nameVal = ''; descVal = r.form.desc || ''; trigVal = r.form.trigger || ''; err = 'Give the process a name.';
+  }
+  const name = cleanTitle(r.form.name);
 
   /* 1. create the ticked data elements, remembering name -> id for linking */
   const made = new Map();
@@ -440,6 +578,7 @@ async function createProcess() {
   const nid = () => store.newId('n');
   const idOf = new Map();
   const mkStep = s => {
+    if (s.type === 'end') return { id: nid(), type: 'end', title: cleanTitle(s.title) || 'Stop' };
     const extra = (s.newData || []).map(n => made.get(strip(n))).filter(Boolean);
     const node = { id: nid(), type: KINDS[s.type] ? s.type : 'step', title: cleanTitle(s.title), data: [...new Set((s.data || []).concat(extra))], touches: (s.touches || []).slice() };
     if (s.type === 'wait' && s.wait) node.wait = s.wait;
@@ -450,12 +589,13 @@ async function createProcess() {
     else if (s.ownerRole) node.ownerRole = s.ownerRole;
     if (s.system) node.system = s.system;
     if (s.sla) node.sla = s.sla;
+    if (s.note) node.note = s.note;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
   };
   const mk = n => { if (n.type === 'step' || KINDS[n.type]) return mkStep(n);
-    const g = { id: nid(), type: n.type, title: cleanTitle(n.title) || 'Decision', branches: n.branches.map(b => { const br = { label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) }; if (b.goto) br._goto = b.goto; return br; }) };
+    const g = { id: nid(), type: n.type, title: cleanTitle(n.title) || 'Decision', branches: n.branches.map(b => { const br = { label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => s.type === 'end' || String(s.title || '').trim()).map(mkStep) }; if (b.goto) br._goto = b.goto; return br; }) };
     if (n.src) idOf.set(n.src, g.id); return g; };
   const asis = [{ id: nid(), type: 'trigger', title: ((r.form.trigger || '').trim() || 'Process starts'), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
   /* loop-backs: point each branch at the new id of its target; drop targets that were removed from the draft */

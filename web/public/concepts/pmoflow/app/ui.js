@@ -50,9 +50,10 @@ export function modal({ title, body, actions }) {
     const acts = actions || [{ id: 'ok', label: 'OK', primary: true }];
     ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h2>${esc(title)}</h2><div class="mb">${body || ''}</div>
       <div class="mf"><button class="btn" data-act="cancel">Cancel</button>${acts.map(a => `<button class="btn ${a.primary ? 'primary' : ''} ${a.danger ? 'danger' : ''}" data-act="${esc(a.id)}">${esc(a.label)}</button>`).join('')}</div></div>`;
-    const close = (action) => { const root = ov.querySelector('.mb'); const form = formValues(root); ov.remove(); resolve({ action, form, root }); };
+    const opener = document.activeElement; /* R9 §10: focus returns to the trigger */
+    const close = (action) => { const root = ov.querySelector('.mb'); const form = formValues(root); ov.remove(); resolve({ action, form, root }); if (opener && opener.isConnected && opener.focus) try { opener.focus(); } catch (_) {} };
+    ov._close = close;
     ov.addEventListener('click', e => { if (e.target === ov) close('cancel'); const b = e.target.closest('[data-act]'); if (b) close(b.dataset.act); });
-    ov.addEventListener('keydown', e => { if (e.key === 'Escape') close('cancel'); });
     document.body.appendChild(ov);
     const first = ov.querySelector('input,select,textarea'); if (first) first.focus();
   });
@@ -63,8 +64,8 @@ export async function stepUp(actionLabel, attempt) {
   attempt = attempt || 1;
   const r = await modal({
     title: 'Extra sign-in check',
-    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, enter the 6-digit code from your sign-in app.</p>
-      <div class="field"><label>6-digit code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits" maxlength="6" /></div>
+    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, we need one quick check.</p>
+      <div class="field"><label>Enter the 6-digit code from your phone</label><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits" maxlength="6" /></div>
       <span class="sim">Demo only: any 6 digits work. In a real company this is your normal Microsoft sign-in check.</span>`,
     actions: [{ id: 'verify', label: 'Verify', primary: true }],
   });
@@ -77,7 +78,9 @@ export function drawer(title, html, bind) {
   document.querySelectorAll('.drawer').forEach(d => d.remove());
   const d = document.createElement('aside'); d.className = 'drawer';
   d.innerHTML = `<div class="dh"><b>${esc(title)}</b><button class="btn sm" data-close>Close</button></div><div class="db">${html}</div>`;
-  d.querySelector('[data-close]').onclick = () => d.remove();
+  const opener = document.activeElement;
+  d._close = () => { d.remove(); if (opener && opener.isConnected && opener.focus) try { opener.focus(); } catch (_) {} };
+  d.querySelector('[data-close]').onclick = d._close;
   document.body.appendChild(d);
   if (bind) bind(d.querySelector('.db'));
   return d;
@@ -120,3 +123,14 @@ export function activityCard(ref) {
   return `<div class="card"><h3>Comments</h3>${commentsPanel(ref)}</div><div class="card"><h3>History</h3>${historyPanel(ref)}</div>`;
 }
 export function bindActivity(root) { bindComments(root); bindHistory(root); }
+
+/* R9 §10: Escape closes the top-most modal, else the drawer, else the header menus — wherever focus is. */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
+  if (ov) { e.preventDefault(); if (ov._close) ov._close('cancel'); else { const c = ov.querySelector('[data-act="cancel"],[data-close]'); if (c) c.click(); else ov.remove(); } return; }
+  const dr = document.querySelector('.drawer');
+  if (dr) { e.preventDefault(); if (dr._close) dr._close(); else dr.remove(); return; }
+  const top = document.querySelector('header.top.open'); if (top) { top.classList.remove('open'); const b = document.getElementById('menuBtn'); if (b) { b.setAttribute('aria-expanded', 'false'); b.focus(); } return; }
+  const vm = document.querySelector('#viewmenu[open]'); if (vm) vm.open = false;
+});

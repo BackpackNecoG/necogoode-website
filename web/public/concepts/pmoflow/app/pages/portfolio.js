@@ -2,13 +2,15 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
 const st = { blPrj: null, blId: null, repPrj: null, riskFilter: 'open', burnPrj: null };
 const reports = {}; /* projectId -> {loading, data, error} */
-const dayDiff = (a, b) => Math.round((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 86400000);
+/* R9 §3: every "moved by" is in business days (signed). */
+const bizDiff = (to, from) => { if (!to || !from) return 0; const n = Number(eng('businessDaysBetween', 0, from, to)); return isFinite(n) ? n : 0; };
+const bd = n => `${n > 0 ? '+' : ''}${n} business day${Math.abs(n) === 1 ? '' : 's'}`;
 
 /* ---------------------------------------------------------------- projects */
 const NO_PROGRAM = 'No program';
@@ -19,19 +21,19 @@ export function byProgram(projects) {
   return Object.keys(g).sort((a, b) => (a === NO_PROGRAM) - (b === NO_PROGRAM) || a.localeCompare(b)).map(k => ({ program: k, projects: g[k] }));
 }
 function projectRow(j) {
-  const t = truthOf(j), s = projectStats(j.id), gi = gateInfo(j, s), c = financials(j);
+  const t = truthOf(j), s = projectStats(j.id), gi = gateInfo(j, s), c = financials(j), nb = blockerWho(t).length, first = whoActs(j, 1)[0];
   const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">finished <span data-t="forecast">${esc(fmt(t.forecast))}</span></div>`
     : !s.total ? `<b class="pmo-muted" data-t="forecast">Not planned</b><div class="hint">deadline ${esc(fmt(j.target))}</div>`
     : `<b data-t="forecast" class="${t.buffer != null && t.buffer < 0 ? 'fail' : ''}">${esc(fmt(t.forecast))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${gi.k === 'awaiting' ? `<a href="${link('/release/' + encodeURIComponent(j.id))}" data-link>${esc(gi.label)} ›</a>` : esc(bufferText(t)) || '—'}</div>`;
   const rel = store.list('release', x => x.projectId === j.id && x.kind !== 'rollback' && x.status !== 'failed').sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
   const rm = relMgr(j);
   return `<tr class="click" data-go="/project/${esc(j.id)}" data-prow="${esc(j.id)}">
-    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · launch owner ${esc(pname(rm))}` : ''}</div></td>
+    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · launch owner ${esc(pname(rm))}` : ''}</div>${first ? `<div class="hint pmo-first">Next to act: <b data-t="who">${esc(whoName(first))}</b></div>` : ''}</td>
     <td>${summaryPill(summaryOf(j))}</td>
     <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
     <td class="pmo-nowrap" data-when>${when}</td>
-    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span> · <span class="${t.running ? 'warn' : ''}"><b data-t="running">${t.running}</b> running late</span><div class="hint"><span class="${t.blockers.length ? 'fail' : ''}"><b data-t="blockers">${t.blockers.length}</b> blocking</span></div></td>
-    <td class="pmo-nowrap pmo-num"><span data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</span><div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div></td>
+    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}"><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && t.stepsLeft != null ? ` · <b data-t="steps">${t.stepsLeft}</b> launch step${t.stepsLeft === 1 ? '' : 's'} left` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
+    <td class="pmo-nowrap pmo-num">${t.cost.show ? `<span data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</span><div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div>` : '<span class="hint">No budget or rates</span>'}</td>
     <td>${j.status === 'live' ? `<span class="badge b-done">Launched</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not launched ›</a>`}</td></tr>`;
 }
 function projectsHTML(projects) {
@@ -41,11 +43,11 @@ function projectsHTML(projects) {
     const fin = g.projects.map(financials);
     const planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
     const rc = {}; g.projects.forEach(p => { const k = truthOf(p).k; rc[k] = (rc[k] || 0) + 1; });
-    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · forecast cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} at risk</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} running late</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
+    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · expected cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} will miss the deadline</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} with late tasks</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
   }).join('');
   return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><span class="pmo-h3acts"><button class="btn sm" data-export-pf title="Download every project's status, schedule, cost and earned value as CSV">Export CSV</button><button class="btn sm primary" data-new-project>+ New project</button></span></h3>
-    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Expected / deadline</th><th>Schedule</th><th class="pmo-num">Forecast cost</th><th>Launch</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="pmo-rule"><span class="rag rag-red"><i></i>At risk</span><span class="rag rag-amber"><i></i>Running late</span><span class="rag rag-green"><i></i>On track</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
+    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Expected / deadline</th><th>Schedule</th><th class="pmo-num">Expected cost</th><th>Launch</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="pmo-rule"><span class="rag rag-red"><i></i>${esc(RAG_LBL.red)}</span><span class="rag rag-amber"><i></i>${esc(RAG_LBL.amber)}</span><span class="rag rag-green"><i></i>${esc(RAG_LBL.green)}</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
 }
 
 /* ---------------------------------------------------------------- financials (R5) */
@@ -58,7 +60,7 @@ function financialsHTML(projects) {
   const row = j => {
     const f = financials(j), over = f.planned && f.forecast > f.planned, v = f.planned ? f.forecast - f.planned : null;
     return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>
-        <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, forecast ${money(f.forecast)}, actual ${money(f.actual)}`)}">
+        <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, expected ${money(f.forecast)}, actual ${money(f.actual)}`)}">
           ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span><span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
       <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
       <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${esc(money(f.forecast))}</td>
@@ -68,25 +70,27 @@ function financialsHTML(projects) {
   };
   const body = groups.map(g => {
     const f = g.projects.map(financials), sum = k => f.reduce((a, x) => a + (x[k] || 0), 0);
-    return `<tr class="pmo-prog-h"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">planned ${esc(money(sum('planned')))} · forecast ${esc(money(sum('forecast')))} · actual ${esc(money(sum('actual')))}</span></td></tr>${g.projects.map(row).join('')}`;
+    return `<tr class="pmo-prog-h"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">planned ${esc(money(sum('planned')))} · expected ${esc(money(sum('forecast')))} · actual ${esc(money(sum('actual')))}</span></td></tr>${g.projects.map(row).join('')}`;
   }).join('');
   const tot = k => all.reduce((a, x) => a + (x[k] || 0), 0);
-  return `<div class="card" data-financials><h3>Financials <span class="n">${esc(money(tot('forecast')))} forecast</span></h3>
-    <div class="hint" style="margin:-4px 0 10px">Planned budget, the one forecast cost (the expected total at completion), and actual cost (logged hours × the person’s day rate, default ${esc(money(DEFAULT_RATE))}/day; edit rates in Workload). SPI and CPI below 1.00 mean behind schedule or over cost.</div>
-    <div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned</th><th class="pmo-num">Forecast</th><th class="pmo-num">Actual</th><th class="pmo-num">Forecast vs plan</th><th class="pmo-num" title="Schedule performance index: earned value ÷ planned value">SPI</th><th class="pmo-num" title="Cost performance index: earned value ÷ actual cost (logged hours × day rate ÷ 8)">CPI</th></tr></thead><tbody>${body}
+  return `<div class="card" data-financials><h3>Financials <span class="n">${esc(money(tot('forecast')))} expected</span></h3>
+    <div class="hint" style="margin:-4px 0 10px">Planned budget, the one expected cost (the expected total at completion), and actual cost (logged hours × the person’s day rate, default ${esc(money(DEFAULT_RATE))}/day; edit rates in Workload). SPI and CPI below 1.00 mean behind schedule or over cost.</div>
+    <div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned</th><th class="pmo-num">Expected</th><th class="pmo-num">Actual</th><th class="pmo-num">Expected vs plan</th><th class="pmo-num" title="Schedule performance index: earned value ÷ planned value">SPI</th><th class="pmo-num" title="Cost performance index: earned value ÷ actual cost (logged hours × day rate ÷ 8)">CPI</th></tr></thead><tbody>${body}
       <tr class="pmo-fin-tot"><td><b>Portfolio</b></td><td class="pmo-num"><b>${esc(money(tot('planned')))}</b></td><td class="pmo-num"><b>${esc(money(tot('forecast')))}</b></td><td class="pmo-num"><b>${esc(money(tot('actual')))}</b></td><td></td><td></td><td></td></tr></tbody></table></div>
-    <div class="pmo-wl-key"><span><i class="plan"></i>Planned budget</span><span><i class="fc"></i>Forecast cost</span><span><i class="act"></i>Actual cost</span><span><i class="over"></i>Forecast over budget</span></div></div>`;
+    <div class="pmo-wl-key"><span><i class="plan"></i>Planned budget</span><span><i class="fc"></i>Expected cost</span><span><i class="act"></i>Actual cost</span><span><i class="over"></i>Expected over budget</span></div></div>`;
 }
 
 const evCells = ev => ev ? `<td class="pmo-num" data-ev-spi><b class="${idxCls(ev.spi)}">${fmtIdx(ev.spi)}</b></td><td class="pmo-num" data-ev-cpi><b class="${idxCls(ev.cpi)}">${fmtIdx(ev.cpi)}</b></td>` : '<td class="pmo-num hint">—</td><td class="pmo-num hint">—</td>';
 
 /* ---------------------------------------------------------------- R6: portfolio CSV */
 export function portfolioCSVRows(projects) {
-  const head = ['Program', 'Project', 'Project manager', 'Launch owner', 'Status', 'Status sentence', 'Progress %', 'Work done', 'Work total', 'Late', 'Running late', 'Blocking', 'Expected finish', 'Deadline', 'Buffer (business days)', 'Planned budget', 'Actual cost', 'Forecast cost', 'PV', 'EV', 'SPI', 'CPI'];
+  /* R9: every value from projectTruth; one late count (with its Advanced breakdown), business days, Expected cost */
+  const head = ['Program', 'Project', 'Project manager', 'Launch owner', 'Status', 'Status sentence', 'Progress %', 'Work done', 'Work total', 'Late', 'Past due', 'Will finish after due date', 'Blocking', 'First to act', 'Launch steps left', 'Expected finish', 'Deadline', 'Buffer (business days)', 'Planned budget', 'Actual cost', 'Expected cost', 'PV', 'EV', 'SPI', 'CPI'];
   const rows = byProgram(projects).flatMap(g => g.projects.map(j => {
     const t = truthOf(j), ev = t.ev || {};
     const n = v => v == null ? '' : Math.round(v * 100) / 100;
-    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.running, t.blockers.length, t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', Math.round(t.cost.actual), Math.round(t.cost.forecast), n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
+    const first = whoActs(j, 1)[0];
+    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, blockerWho(t).length, first ? whoName(first) : '', j.status === 'live' ? 0 : (t.stepsLeft == null ? '' : t.stepsLeft), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
   }));
   return [head, ...rows];
 }
@@ -293,18 +297,22 @@ function varianceHTML(projects) {
   if (typeof projSlip !== 'number') {
     const blMax = Object.values(bl.items || {}).map(x => x && x.due).filter(Boolean).sort().slice(-1)[0];
     const fi = finishInfo(j, projectStats(j.id));
-    projSlip = blMax && fi.date ? dayDiff(fi.date, blMax) : 0;
+    projSlip = blMax && fi.date ? bizDiff(fi.date, blMax) : 0;
+  } else {
+    const blMax = Object.values(bl.items || {}).map(x => x && x.due).filter(Boolean).sort().slice(-1)[0];
+    projSlip = raw.plannedFinish && raw.finish ? bizDiff(raw.finish, raw.plannedFinish) : blMax ? bizDiff(finishInfo(j).date, blMax) : projSlip;
   }
+  rows.forEach(r => { if (r.plannedDue && r.forecast) r.varianceDays = bizDiff(r.forecast, r.plannedDue); });
   const wt = id => (store.get('workItem', id) || {}).title || 'Deleted work item';
   const worstItem = rows.reduce((a, r) => Math.max(a, r.varianceDays || 0), 0);
   const worst = rows.slice().sort((a, b) => (b.varianceDays || 0) - (a.varianceDays || 0));
   return `<div class="card"><h3>Changes since the saved plan</h3>
     <div class="pmo-tlbar"><select class="pmo-sel" data-bl-prj aria-label="Project">${withBl.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
       <select class="pmo-sel" data-bl-id aria-label="Saved plan">${bls.map(b => `<option value="${esc(b.id)}" ${b.id === bl.id ? 'selected' : ''}>${esc(b.label || 'Saved plan')} · ${esc(fmt(b.at))}</option>`).join('')}</select></div>
-    <div class="pmo-var-kpis"><div class="kpi" data-proj-slip><b class="${projSlip > 0 ? 'fail' : projSlip < 0 ? 'pass' : ''}">${projSlip > 0 ? '+' : ''}${projSlip}d</b><span>Finish moved (vs saved plan)</span></div><div class="kpi"><b>${rows.filter(r => r.varianceDays > 0).length}/${rows.length}</b><span>Items later than plan</span></div><div class="kpi"><b>${worstItem ? '+' + worstItem + 'd' : '0d'}</b><span>Worst single item</span></div></div>
+    <div class="pmo-var-kpis"><div class="kpi" data-proj-slip><b class="${projSlip > 0 ? 'fail' : projSlip < 0 ? 'pass' : ''}">${esc(bd(projSlip))}</b><span>Finish moved (vs saved plan)</span></div><div class="kpi"><b>${rows.filter(r => r.varianceDays > 0).length}/${rows.length}</b><span>Items later than plan</span></div><div class="kpi"><b>${worstItem ? esc(bd(worstItem)) : '0d'}</b><span>Worst single item</span></div></div>
     <div class="hint" style="margin:-4px 0 8px">Item slips overlap through dependencies, so they are not added up. The headline is how far the project’s finish has moved.</div>
     ${rows.length ? `<div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Task</th><th>Planned due</th><th>Expected</th><th>Moved</th></tr></thead><tbody>
-      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap">${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap">${esc(fmt(r.forecast))}</td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${r.varianceDays > 0 ? '+' : ''}${r.varianceDays || 0}d</span>` : '<span class="pmo-var">added after the plan was saved</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This saved plan has no tasks that still exist.</div>'}</div>`;
+      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap">${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap">${esc(fmt(r.forecast))}</td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${esc(bd(r.varianceDays || 0))}</span>` : '<span class="pmo-var">added after the plan was saved</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This saved plan has no tasks that still exist.</div>'}</div>`;
 }
 
 /* ---------------------------------------------------------------- status report */
@@ -320,7 +328,7 @@ function reportHTML(projects) {
     const d = rep.data, ai = String(d.source || '').toLowerCase() === 'ai';
     const list = (h, arr, cls) => (arr && arr.length) ? `<div class="pmo-rep-sec ${cls}"><h4>${h}</h4><ul>${arr.map(x => `<li>${esc(txt(x))}</li>`).join('')}</ul></div>` : '';
     out = `<div class="pmo-rep">
-      <div class="pmo-rep-top"><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ Generated by AI' : 'Rules-based'}</span><span class="hint">${ai ? 'Written from project facts only. Check before sending.' : 'Built from project facts by deterministic rules.'}</span><span class="pmo-rep-btns"><button class="btn sm" data-copy-rep>Copy</button><button class="btn sm" data-print-pf-rep>Print / PDF</button></span></div>
+      <div class="pmo-rep-top"><span class="pmo-src ${ai ? 'ai' : ''}" data-rep-src>${esc(d.sourceLabel ? String(d.sourceLabel) : ai ? '✦ Written by AI' : 'Written from the project’s facts')}</span><span class="hint">${ai ? 'From the project’s facts only. Check before sending.' : 'Check before sending.'}</span><span class="pmo-rep-btns"><button class="btn sm" data-copy-rep>Copy</button><button class="btn sm" data-print-pf-rep>Print / PDF</button></span></div>
       <div class="pmo-rep-print-h">${ragBadge(rag(j))} <b>${esc(j.name)}</b> · status report · ${esc(fmt(today()))}</div>
       <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
@@ -329,7 +337,7 @@ function reportHTML(projects) {
   }
   return `<div class="card" data-pf-rep><h3>Status report</h3>
     <div class="pmo-tlbar"><select class="pmo-sel" data-rep-prj aria-label="Project for status report">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-      <button class="btn sm primary" data-gen-rep ${rep && rep.loading ? 'disabled' : ''}>${rep && rep.data ? 'Regenerate' : '✦ Generate report'}</button></div>${out}</div>`;
+      <button class="btn sm primary" data-gen-rep ${rep && rep.loading ? 'disabled' : ''}>${rep && rep.data ? 'Refresh' : '✦ Write the report'}</button></div>${out}</div>`;
 }
 async function generate(prj) {
   reports[prj] = { loading: true }; rerender();
@@ -353,12 +361,12 @@ async function copyText(text) {
 /* R7 Simple: each project's one sentence and label, plus who needs to act. Money, earned value, workload detail,
    burndown, saved-plan changes and the CSV export are Advanced. */
 function simpleCard(j) {
-  const s = projectStats(j.id), sm = summaryOf(j), who = j.status === 'live' ? [] : whoActs(j, 3);
+  const s = projectStats(j.id), sm = summaryOf(j), who = whoLineHTML(j, 3, 'Who needs to act');
   return `<a class="card pmo-pcard" href="${link('/project/' + encodeURIComponent(j.id))}" data-link data-pcard="${esc(j.id)}">
     <h4>${esc(j.name)}</h4>${summaryHTML(sm)}
     ${s.total ? `<div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done · deadline ${esc(fmt(j.target))}</span></div>` : ''}
     <div class="pmo-sline" data-pcard-facts>${factsHTML(j)}</div>
-    ${who.length ? `<div class="pmo-who" data-who><span class="lbl">Who needs to act</span>${who.map(x => `<span class="pmo-who-r">${av(x.person)}<span><b>${esc(pname(x.person))}</b>${x.action ? ': ' + esc(x.action) : ''}</span></span>`).join('')}</div>` : j.status === 'live' ? '' : '<div class="pmo-who" data-who><span class="hint">Nobody is blocked right now.</span></div>'}</a>`;
+    ${who || (j.status === 'live' ? '' : '<div class="pmo-who" data-who><span class="hint">Nobody needs to act right now.</span></div>')}</a>`;
 }
 function simpleRender(projects) {
   const k = { red: 0, amber: 0, green: 0, none: 0, live: 0 };
@@ -368,7 +376,7 @@ function simpleRender(projects) {
   const over = workloadRows().filter(r => r.overloaded);
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Portfolio</div><h1>Portfolio</h1>
       <p>How every project is doing, and who needs to act.</p></div>
-    <div class="hdr-side"><div class="kpis" data-kpi-rag><div class="kpi"><b class="fail">${k.red}</b><span>At risk</span></div><div class="kpi"><b class="warn">${k.amber}</b><span>Running late</span></div><div class="kpi"><b class="pass">${k.green}</b><span>On track</span></div>${k.none ? `<div class="kpi"><b>${k.none}</b><span>Not planned</span></div>` : ''}${k.live ? `<div class="kpi"><b>${k.live}</b><span>Launched</span></div>` : ''}</div>
+    <div class="hdr-side"><div class="kpis" data-kpi-rag><div class="kpi"><b class="fail">${k.red}</b><span>${esc(RAG_LBL.red)}</span></div><div class="kpi"><b class="warn">${k.amber}</b><span>${esc(RAG_LBL.amber)}</span></div><div class="kpi"><b class="pass">${k.green}</b><span>On track</span></div>${k.none ? `<div class="kpi"><b>${k.none}</b><span>Not planned</span></div>` : ''}${k.live ? `<div class="kpi"><b>${k.live}</b><span>Launched</span></div>` : ''}</div>
       <button class="btn primary" data-new-project>+ New project</button></div></section>
     ${projects.length ? `<div class="pmo-pcards">${sorted.map(simpleCard).join('')}</div>` : '<div class="card" style="margin-top:14px"><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>'}
     ${over.length ? `<div class="card pmo-stack" data-overloaded><h3>Too much work</h3><div class="s pmo-inl">${over.map(r => `${av(r.pid)} <b>${esc(pname(r.pid))}</b>`).join(', ')} ${over.length === 1 ? 'has' : 'have'} more work in the next two weeks than time to do it.</div></div>` : ''}
@@ -385,7 +393,7 @@ export function render() {
   const openRisks = store.list('risk', r => r.status !== 'closed').length;
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Portfolio</div><h1>Portfolio</h1>
       <p>Every project’s health in one place, grouped by program: progress, expected finish against the deadline, cost against budget, burndown, who is overloaded, what could go wrong, and how far the plan has moved since it was saved.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>At risk · running late · on track${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>${esc(RAG_LBL.red)} · ${esc(RAG_LBL.amber.toLowerCase())} · ${esc(RAG_LBL.green.toLowerCase())}${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
     <div class="pmo-stack">${projectsHTML(projects)}</div>
     <div class="two pmo-top">${financialsHTML(projects)}${burnHTML(projects)}</div>
     <div class="two pmo-top">${workloadHTML()}${reportHTML(projects)}</div>

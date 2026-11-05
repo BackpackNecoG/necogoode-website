@@ -46,6 +46,8 @@ function parseBody(req) {
 const actorOf = b => (typeof b.actor === 'string' && ID_RE.test(b.actor) ? b.actor : 'anonymous');
 const summaryOf = (b, dflt) => (typeof b.summary === 'string' && b.summary.trim() ? b.summary.trim().slice(0, 300) : dflt);
 const isPlainObject = v => v && typeof v === 'object' && !Array.isArray(v);
+/* a plain YYYY-MM-DD calendar day (a real date: 2026-02-30 is rejected) */
+const isDay = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(v + 'T12:00:00Z').toISOString().slice(0, 10) === v;
 
 /* minimal local profiler, used only if the engine is unavailable */
 function localProfile(csv) {
@@ -536,6 +538,15 @@ module.exports = async function (context, req) {
           (!data.cutoverUpdatedAt || (prev && prev.data.cutoverUpdatedAt === data.cutoverUpdatedAt))) data.cutoverUpdatedAt = new Date().toISOString();
         /* R8 §2: an approval decision is dated with the approver's own today (the timestamp stays ISO) */
         if (type === 'approval' && data.decision && (!data.date || !(prev && prev.data.decision === data.decision))) data.date = today;
+        /* R9 §3 (bug B8): a done date is the client's local today, never the server's UTC date. A missing or timestamp
+           doneAt becomes today (or keeps the earlier done date); a date after the client's today (a UTC slice taken in
+           the evening) is clamped to today. */
+        if (type === 'workItem' && data.status === 'done') {
+          const wasDone = !!(prev && prev.data.status === 'done');
+          const prevDay = wasDone && isDay(prev.data.doneAt) ? prev.data.doneAt : null;
+          if (!isDay(data.doneAt)) data.doneAt = prevDay || today;
+          else if (data.doneAt > today && data.doneAt !== prevDay) data.doneAt = today;
+        }
         /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);

@@ -233,3 +233,31 @@
 
 .top .advtog{display:flex;align-items:center;gap:4px;font-size:12px;color:#c7c9e0;cursor:pointer;white-space:nowrap}
 @media (max-width:640px){.top .advtog span{display:none}}
+
+/* R9 §10 header: desktop = one row (nav · Viewing as · ⚙ View · bell); phone = brand · Menu · bell, 56px max */
+.top .topmenu{display:contents}
+.top .menubtn{display:none}
+.top .bell{margin-left:2px}
+.top .viewmenu{position:relative}
+.top .viewmenu summary{list-style:none;cursor:pointer;font-size:12px;color:#c7c9e0;padding:4px 8px;border:1px solid #33355e;border-radius:8px;white-space:nowrap}
+.top .viewmenu summary::-webkit-details-marker{display:none}
+.top .viewmenu[open] summary{background:#25264a;color:#fff}
+.top .viewmenu .vm-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:60;background:#fff;color:var(--ink,#1d1f3a);border:1px solid #d9dbeb;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:10px 12px;width:240px}
+.top .viewmenu .advtog{color:inherit;font-size:13px}
+.top .viewmenu .advtog span{display:inline!important}
+.top .viewmenu .hint{margin-top:6px;font-size:12px;white-space:normal}
+@media (max-width:640px){
+  .top{flex-wrap:nowrap!important;gap:8px;min-height:0;max-height:none;padding-top:8px;padding-bottom:8px}
+  .top::after{display:none!important}
+  .top .menubtn{display:inline-flex;align-items:center;gap:6px;margin-left:auto;background:#25264a;color:#fff;border:1px solid #33355e;border-radius:8px;padding:6px 12px;font-size:14px;min-height:40px}
+  .top .bell{min-height:40px;min-width:40px}
+  .top .topmenu{display:none}
+  .top.open .topmenu{display:flex;flex-direction:column;gap:12px;position:absolute;left:0;right:0;top:100%;z-index:70;background:#1b1c3a;padding:12px 14px 16px;box-shadow:0 10px 24px rgba(0,0,0,.3)}
+  .top.open .topmenu nav{display:flex;flex-direction:column;gap:2px;width:100%;margin:0;overflow:visible;-webkit-mask-image:none;mask-image:none;padding:0}
+  .top.open .topmenu nav a{padding:12px 10px;font-size:15px;white-space:normal}
+  .top.open .topmenu .who{display:flex;flex-wrap:wrap;gap:8px;margin:0;font-size:14px}
+  .top.open .topmenu .who span{display:inline}
+  .top.open .topmenu .who select{max-width:none;width:100%;font-size:15px;padding:8px}
+  .top .viewmenu .vm-pop{position:static;width:auto;margin-top:8px}
+}
+@media (max-width:640px){.top.open .topmenu .who>span{flex:1 1 100%}.top.open .topmenu .who select{flex:1 1 100%}.top.open .topmenu .who .viewmenu{flex:1 1 100%}.top.open .topmenu .who .viewmenu summary{display:inline-block;padding:8px 12px;font-size:14px}}

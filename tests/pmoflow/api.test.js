@@ -58,7 +58,7 @@ test('POST /workspaces creates a workspace; state has every doc type and people'
   assert.equal(s.status, 200);
   assert.equal(s.headers['cache-control'], 'no-store');
   for (const t of DOC_TYPES) assert.ok(Array.isArray(s.body.docs[t]), 'missing type ' + t);
-  assert.equal(s.body.people.length, 6);
+  assert.equal(s.body.people.length, 7);   /* R9 §7: + Dave Ortiz, Head of Compliance */
   assert.ok(s.body.people.every(p => p.bu));
   assert.equal(s.body.today, new Date().toISOString().slice(0, 10));
   assert.equal(s.body.docs.dataElement.length, 8);
@@ -400,7 +400,8 @@ test('status report never prints internal ids (rules path, incl. client-made ids
   const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
   assert.equal(r.status, 200);
   assert.equal(r.body.source, 'rules');
-  assert.ok(r.body.asks.some(a => a.includes('Payment run calendar')));
+  /* R9: the asks are the who list; the blocker shows as its resolver task (or by name when no task covers it) */
+  assert.ok(r.body.asks.some(a => a.includes('Payment run calendar') || a.includes('“Publish payment calendar”')), JSON.stringify(r.body.asks));
   assert.ok(r.body.risks.some(a => a.includes('Publish payment calendar')));
   assertNoIds({ headline: r.body.headline, summary: r.body.summary, highlights: r.body.highlights, risks: r.body.risks, asks: r.body.asks }, st.docs, 'report');
   assertNoIds(r.body.facts, st.docs, 'facts');
@@ -535,13 +536,15 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
 test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', async () => {
   const ws = await newWs();
   let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
-  /* R8: a late item whose finish still meets the deadline (and no unplanned blocker) is "On track, some tasks running late" */
+  /* R9 §1: a late item whose finish still meets the deadline (and no unplanned blocker) is amber; the label is the engine's */
   assert.ok(r.body.facts.atRisk.some(x => x.daysPastDue > 0), 'seed has a late item');
   assert.ok(r.body.facts.stats.finish <= r.body.facts.project.target, 'finish meets target');
   assert.equal(r.body.rag, 'amber');
   assert.equal(r.body.facts.rag.status, 'amber');
-  assert.equal(r.body.label, 'On track, some tasks running late');
-  assert.match(r.body.headline, /^On track, some tasks running late: /);
+  const amberLabel = engine && engine.projectTruth ? engine.projectTruth((await state(ws)).docs, 'vendor-modernization', (await state(ws)).today).label : r.body.label;
+  assert.equal(r.body.label, amberLabel);
+  assert.ok(!/^On track/.test(r.body.label) || /late/.test(r.body.label), 'never a bare "On track" while a task is late');
+  assert.ok(r.body.headline.startsWith(amberLabel + ': '));
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'green');
   assert.match(r.body.headline, /^On track: /);
@@ -553,16 +556,15 @@ test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', a
   await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target: before }) });
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'red');
-  assert.match(r.body.headline, /^At risk: /);
-  /* risk reconciliation: R1 links W2+W3; finish both */
-  for (const id of ['W2', 'W3']) {
-    const w = find(st, 'workItem', id).data;
-    await call('PUT', `ws/${ws}/doc/workItem/${id}`, { actor: 'ps', data: Object.assign({}, w, { status: 'done', doneAt: st.today }) });
-  }
-  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
-  const rk = r.body.facts.risks.find(x => x.title.startsWith('Screening vendor contract'));
+  assert.match(r.body.headline, /^(At risk|Will miss the deadline): /);
+  /* risk reconciliation: R6 links A1 (done in the seed): an open risk whose linked work is all done is "likely resolved" */
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
+  const rk = r.body.facts.risks.find(x => x.title.startsWith('The identity platform'));
   assert.equal(rk.likelyMitigated, true);
-  assert.ok(r.body.risks.some(x => x.startsWith('Likely resolved: Screening vendor contract') && /close it\?$/.test(x)));
+  assert.ok(r.body.risks.some(x => x.startsWith('Likely resolved: The identity platform') && /close it\?$/.test(x)));
+  /* R9 §7: the screening risk was closed when Compliance finished its part, so it is not reported */
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  assert.ok(!r.body.facts.risks.some(x => x.title.startsWith('Screening vendor contract')));
 });
 
 test('R3 AI path: a headline that contradicts the RAG is corrected (mocked Azure OpenAI)', async () => {
@@ -658,22 +660,29 @@ test('R3 SOP rules parser: reviewer repro, else->No, parallel, role aliases, sys
 });
 
 /* ------------------------------ Round 4 ------------------------------ */
-test('R4 report wording: late-by is days past due, slip separate, correct plurals', async () => {
+test('R4/R9 report wording: late-by is business days past due, one word "late", quoted titles, correct plurals', async () => {
   const ws = await newWs();
   const st = await state(ws);
   const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
   const all = [r.body.headline, r.body.summary, ...r.body.highlights, ...r.body.risks, ...r.body.asks].join('\n');
   assert.ok(!/\(s\)/.test(all), 'no "(s)" placeholders');
-  assert.ok(!/\b1 days\b|\b1 items\b|\b1 work items\b|\b(?:[02-9]|\d{2,}) day\b/.test(all), 'plurals agree with counts');
-  const w6 = r.body.risks.find(x => x.startsWith('"Set up the bank details form"'));
+  assert.ok(!/\b1 days\b|\b1 items\b|\b1 work items\b|\b1 business days\b|\b(?:[02-9]|\d{2,}) (business )?day\b/.test(all), 'plurals agree with counts');
+  assert.ok(!/past due|running late|behind plan/i.test(all), 'R9 §1: Simple says "late", nothing else');
+  assert.ok(!/\b\d+ days?\b/.test(all.replace(/\b\d+ business days?\b/g, '').replace(/Support after launch:[^\n]*/g, '')), 'R9 §3: lateness is in business days');
+  const w6 = r.body.risks.find(x => x.startsWith('“Set up the bank details form”'));
+  assert.ok(w6, 'task titles are quoted “X”');
   const w6due = find(st, 'workItem', 'W6').data.due;
-  const pastDue = Math.round((Date.parse(st.today + 'T12:00:00Z') - Date.parse(w6due + 'T12:00:00Z')) / 86400000);
-  assert.ok(w6.includes(`late by ${pastDue} day${pastDue === 1 ? '' : 's'}`), w6);
-  const fcW6 = r.body.facts.atRisk.find(x => x.title === 'Set up the bank details form');
-  if (fcW6.slipDays && fcW6.slipDays !== pastDue) assert.ok(w6.includes(`${fcW6.slipDays} days behind plan`), 'slip reported separately');
-  const running = r.body.risks.filter(x => / is running late/.test(x));
-  assert.ok(running.length >= 1 && running.every(x => !/late by/.test(x)));
-  assert.match(r.body.summary, /\b1 task is past due\b/);
+  const pastDue = engine ? engine.businessDaysBetween(w6due, st.today) : null;
+  if (pastDue != null) assert.ok(w6.includes(`late by ${pastDue} business day${pastDue === 1 ? '' : 's'}`), w6);
+  /* R9 §13: "waiting on" only along a real dependency edge */
+  const docs = st.docs, wt = id => find(st, 'workItem', id).data;
+  r.body.risks.filter(x => /waiting on/.test(x)).forEach(x => {
+    const m = /^“([^”]+)”.*waiting on “([^”]+)”/.exec(x);
+    assert.ok(m, x);
+    const w = docs.workItem.map(d => d.data).find(y => y.title === m[1]), dep = docs.workItem.map(d => d.data).find(y => y.title === m[2]);
+    assert.ok((w.deps || []).map(d => (typeof d === 'string' ? d : d.id)).includes(dep.id), 'a real dependency: ' + x);
+  });
+  assert.ok(wt('W11').deps.length === 0 && !r.body.risks.some(x => x.startsWith('“Send each invoice to the right approver by amount”') && /waiting on/.test(x)), 'a parallel task is never "waiting on"');
 });
 
 test('R4 SOP parser: otherwise/else -> No, resubmit and return-to-step -> goto, no truncation, no default owner', () => {
@@ -863,9 +872,9 @@ test('R5 status report: not-yet-live count and email recipients', async () => {
       .flatMap(p => engine.flatSteps(p.data.tobe)).flatMap(n => (n.data || []).concat((n.subs || []).flatMap(x => x.data || []))));
     assert.equal(notLive, [...used].filter(id => engine.effectiveAvail(st.docs, id) !== 'live').length);
   }
-  /* R8: only the genuinely missing information (bank details, sanctions result) is Not available yet */
-  assert.deepEqual(r.body.facts.notLive.map(x => x.name).sort(), ['Bank remittance details', 'Sanctions screening result']);
-  assert.ok(r.body.summary.includes(`${notLive} pieces of information are not available yet`));
+  /* R8/R9: only the genuinely missing information (bank details) is Not available yet; Compliance's screening result is live */
+  assert.deepEqual(r.body.facts.notLive.map(x => x.name).sort(), ['Bank remittance details']);
+  assert.ok(r.body.summary.includes(`${notLive} ${notLive === 1 ? 'piece of information is' : 'pieces of information are'} not available yet`));
   assert.ok(!/connected|sample only|waiting for confirmation/i.test(r.body.summary + r.body.asks.join(' ')), 'Simple words only');
   assert.deepEqual(r.body.recipients.map(x => x.email), ['tom.alvarez@northwind.example', 'maya.chen@northwind.example', 'priya.shah@northwind.example',
     'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example']);
@@ -1226,7 +1235,8 @@ test('R7 status report: leads with projectSummary sentence + label, plain words 
       assert.equal(r.body.sentence, s.sentence);
       assert.equal(r.body.facts.summary.source, 'projectTruth');
     }
-    assert.ok(['On track', 'On track, some tasks running late', 'At risk', 'Not planned'].includes(r.body.label));
+    assert.ok(['On track', 'Some tasks late', 'Will miss the deadline', 'On track, some tasks running late', 'At risk', 'Not planned'].includes(r.body.label), r.body.label);
+    assert.ok(!/Rules-based|deterministic/i.test(r.body.sourceLabel) && r.body.sourceLabel === 'Written from the project\'s facts', 'R9 §11: Simple label');
     assert.ok(r.body.headline.startsWith(r.body.label + ': '), r.body.headline);
     assert.ok(r.body.summary.startsWith(r.body.sentence), 'summary leads with the one sentence');
     assert.ok(!R7_JARGON.test(reportText(r.body)), 'no jargon in the default report: ' + (reportText(r.body).match(R7_JARGON) || [])[0]);
@@ -1271,8 +1281,16 @@ test('R7 AI status report: plain-language prompt; jargon from the model is trans
     assert.equal(r.body.headline, `${r.body.label}: Bank capture is late`);
     assert.ok(r.body.summary.startsWith(r.body.sentence));
     assert.match(r.body.summary, /business testing starts next week/);
-    assert.deepEqual(r.body.highlights, ['3 tasks done'], 'an SPI/CPI line is dropped');
-    assert.deepEqual(r.body.risks, ['Bank capture is running late']);
+    /* R9: the counts, launch steps, testing and cost lines are the truth's, word for word; the model's are not used */
+    const rules = ai.statusRules(ai.statusFacts(st.docs, 'vendor-modernization', st.today, engine));
+    assert.deepEqual(r.body.highlights, rules.highlights, 'highlights come from the truth (an SPI/CPI line is dropped)');
+    assert.deepEqual(r.body.asks, rules.asks, 'asks are the ranked who list');
+    assert.deepEqual(r.body.risks, ['Bank capture is late'], 'R9 §1: one word, late');
+    assert.equal(r.body.sourceLabel, 'Generated by AI');
+    assert.match(sys, /waiting on/);
+    assert.match(sys, /stepsLeft/);
+    assert.match(sys, /testing\.next/);
+    assert.ok(Array.isArray(facts.summary.who) && facts.stepsLeft != null && facts.testing.next, 'the model gets who, stepsLeft and testing.next');
     assert.ok(!R7_JARGON.test(reportText(r.body)));
     assert.equal(r.body.date, st.today);
     r = await ai.run('status-report', { projectId: 'vendor-modernization', advanced: true }, st.docs, st.today);
@@ -1513,17 +1531,22 @@ test('R8 status report: one truth with the engine (sentence, label, numbers, blo
     assert.equal(f.truth.bufferUnit, 'business days');
     assert.deepEqual(f.truth.cost, t.cost);
     assert.equal(f.earnedValue.eac, Math.round(t.cost.forecast), 'EAC is the one cost forecast');
-    assert.equal(f.atRisk.filter(x => x.sched === 'late').length, t.lateCount);
-    assert.equal(f.atRisk.length, new Set(t.late.concat(t.runningLate)).size);
-    assert.ok(b.highlights.includes(t.testing.count), 'the one testing number');
+    /* R9 §1: one late list (past due, or will finish after its due date) */
+    assert.equal(f.atRisk.length, new Set(t.late.concat(t.runningLate || [])).size);
+    if (t.pastDueCount != null) assert.equal(f.atRisk.filter(x => x.daysPastDue > 0).length, t.pastDueCount);
+    assert.ok(b.highlights.includes(`Testing: ${t.testing.next || t.testing.sentence}`), 'the one testing sentence (R9 §6 testing.next)');
+    const left = t.stepsLeft != null ? t.stepsLeft : t.launchSteps.filter(x => !x.done).length;
+    assert.ok(b.highlights.includes(left ? `Not ready to launch: ${left} step${left === 1 ? '' : 's'} left` : 'Ready to launch'), 'R9 §1 stepsLeft');
+    /* R9 §1: the asks are the ranked who list, in order */
+    (t.who || []).slice(0, 8).forEach((w, i) => assert.ok(b.asks[i].startsWith((w.name || '') + ': '), `ask ${i} is who[${i}]: ${b.asks[i]}`));
     assert.ok(b.highlights.some(x => x.startsWith(`${t.tasks.done} of `)));
     if (t.blockers.length) assert.ok(b.summary.includes(`${t.blockers.length} ${t.blockers.length === 1 ? 'piece of information is' : 'pieces of information are'} not available yet`));
     assert.ok(!/connected|sample only|waiting for confirmation/i.test(reportText(b)), 'Simple words only');
   }
-  /* finish every vendor-modernization task, but the contract task no longer gets the Sanctions screening result (still Not available yet) */
+  /* finish every vendor-modernization task, but the bank form task no longer gets the Bank remittance details (still Not available yet) */
   for (const w of st.docs.workItem.map(x => x.data).filter(x => x.projectId === 'vendor-modernization' && x.status !== 'done')) {
     const data = Object.assign({}, w, { status: 'done', doneAt: st.today });
-    if (w.id === 'W2') delete data.resolves;
+    if (w.id === 'W6') delete data.resolves;
     await call('PUT', `ws/${ws}/doc/workItem/${w.id}`, { actor: w.owner, data });
   }
   st = await state(ws);
@@ -1533,7 +1556,7 @@ test('R8 status report: one truth with the engine (sentence, label, numbers, blo
   const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', today: st.today });
   assert.ok(!/all work is done|nothing needs attention/i.test(reportText(r.body)), reportText(r.body));
   assert.deepEqual(r.body.facts.blockers.map(x => x.name), t.blockers.map(x => x.name));
-  assert.ok(r.body.asks.some(x => /Sanctions screening result/.test(x)), 'the blocker is an ask');
+  assert.ok(r.body.asks.some(x => /Bank remittance details/.test(x)), 'the blocker is an ask');
   /* risks whose linked work is all done read "Likely resolved" */
   assert.ok(r.body.risks.some(x => /^Likely resolved: /.test(x) && /close it\?$/.test(x)));
 });
@@ -1547,11 +1570,11 @@ test('R8 seed: plain task titles, no "To-be", only missing information is Not av
   const W = id => docs.workItem.find(w => w.id === id).data.title;
   assert.equal(W('W6'), 'Set up the bank details form');
   const vt = docs.project.find(p => p.id === 'vendor-modernization').data.cutover.tasks;
-  assert.deepEqual(vt.filter(x => x.gonogo).map(x => x.task), ['Final yes/no call with Treasury and Compliance', 'Try-out test: set up one test vendor from start to finish']);
+  assert.deepEqual(vt.filter(x => x.gonogo).map(x => x.task), ['Final check with Treasury and Compliance', 'Try-out test: set up one test vendor from start to finish']);
   assert.ok(!all.includes('Stand up structured bank capture'), 'old titles gone from comments, notifications and events');
-  /* information that exists today is "We have it"; only bank details and the sanctions result are Not available yet */
-  assert.deepEqual(docs.dataElement.filter(d => d.data.avail !== 'live').map(d => d.id).sort(), ['D2', 'D5']);
-  if (engine && engine.effectiveAvail) assert.deepEqual(docs.dataElement.filter(d => engine.effectiveAvail(docs, d.id) !== 'live').map(d => d.id).sort(), ['D2', 'D5']);
+  /* information that exists today is "We have it"; only bank details are Not available yet (R9: Compliance finished the screening result) */
+  assert.deepEqual(docs.dataElement.filter(d => d.data.avail !== 'live').map(d => d.id).sort(), ['D2']);
+  if (engine && engine.effectiveAvail) assert.deepEqual(docs.dataElement.filter(d => engine.effectiveAvail(docs, d.id) !== 'live').map(d => d.id).sort(), ['D2']);
   for (const d of docs.dataElement.map(x => x.data).filter(x => x.avail === 'live')) assert.ok(d.liveConfirmedBy === d.owner && d.check && d.check.ok, d.name);
   /* a second active project with open work on a Vendor Onboarding step that vendor-modernization is also changing */
   const erp = docs.project.find(p => p.id === 'erp-upgrade-readiness').data;
@@ -1572,4 +1595,108 @@ test('R8 seed: plain task titles, no "To-be", only missing information is Not av
     assert.equal(t.lateCount, 0);
   }
   assert.ok(!all.match(/Witherite|Filevine|Acumatica/i));
+});
+
+/* ================================ Round 9: ONE TRUTH, ENFORCED ================================ */
+const dow = d => new Date(String(d).slice(0, 10) + 'T12:00:00Z').getUTCDay();
+
+test('R9 §3 seed: no seeded date lands on a Saturday or Sunday, whatever day the sandbox is made', () => {
+  for (let i = 0; i < 14; i++) {
+    const day = shiftDay('2026-11-01', i);
+    const s = seed(day);
+    const bad = [];
+    const walk = (o, path) => {
+      if (typeof o === 'string') { const m = /^(\d{4}-\d{2}-\d{2})(?:$|T|\s)/.exec(o); if (m && [0, 6].includes(dow(m[1]))) bad.push(path + '=' + o); }
+      else if (o && typeof o === 'object') for (const k of Object.keys(o)) walk(o[k], path + '.' + k);
+    };
+    walk(s.docs, 'docs'); walk(s.events, 'events');
+    assert.deepEqual(bad, [], 'weekend dates in the seed made on ' + day);
+    /* the story holds on every day: the bank form is late, future work is ahead of today, done work is done by its due date */
+    const w = id => s.docs.workItem.find(x => x.id === id).data;
+    assert.ok(w('W6').due < day && w('W6').status === 'idle', 'the bank details form is late on ' + day);
+    s.docs.workItem.map(x => x.data).forEach(x => {
+      assert.ok(x.start <= x.due, x.id + ' starts by its due date');
+      if (x.doneAt) assert.ok(x.doneAt < day && x.doneAt >= x.start, x.id + ' done in the past, after it started');
+    });
+  }
+});
+
+test('R9 §7 seed: Compliance is ready to approve on Vendor Onboarding Modernization; its approver is Dave Ortiz, not the tester', { skip: !(engine && engine.buReady) && 'engine without buReady' }, () => {
+  for (const day of ['2026-11-04', '2026-11-07', '2026-11-09']) {
+    const docs = seed(day).docs;
+    const dave = docs.person.find(p => p.id === 'do');
+    assert.deepEqual([dave.data.name, dave.data.role, dave.data.bu], ['Dave Ortiz', 'Head of Compliance', 'Compliance'], 'a selectable department head');
+    const vm = docs.project.find(p => p.id === 'vendor-modernization').data;
+    assert.equal(vm.approvers.Compliance, 'do');
+    const r = engine.buReady(docs, 'vendor-modernization', 'Compliance');
+    assert.ok(r.ready, 'Compliance is ready on ' + day + ': ' + r.sentence);
+    assert.ok(r.tests.total > 0 && r.tests.passed === r.tests.total, 'its tests exist and passed');
+    /* every test of its part was recorded by someone other than its approver */
+    const scope = new Set(['TC11', 'TC12', 'TC13', 'uat-vendor-onboarding-s2', 'uat-vendor-onboarding-s2a']);
+    const recorders = new Set(docs.testRun.map(x => x.data).filter(x => x.projectId === 'vendor-modernization' && (x.results || []).some(y => scope.has(y.caseId || y.scriptId))).map(x => x.by));
+    assert.ok(recorders.size && !recorders.has('do'), 'tests recorded by ' + [...recorders].join(', '));
+    /* no open item on its part */
+    const open = docs.workItem.map(x => x.data).filter(x => x.projectId === 'vendor-modernization' && x.pid === 'vendor-onboarding' && ['s2', 's2a'].includes(x.step) && x.status !== 'done');
+    assert.deepEqual(open, []);
+    if (engine.effectiveAvail) assert.equal(engine.effectiveAvail(docs, 'D5'), 'live');
+    /* the other parts stay not ready */
+    const gate = engine.readiness(docs, 'vendor-modernization', day).checks.find(c => c.id === 'bu-signoff');
+    gate.sections.filter(b => b !== 'Compliance').forEach(b => assert.equal(engine.buReady(docs, 'vendor-modernization', b).ready, false, b + ' stays not ready'));
+    assert.ok(gate.eligible.Compliance.includes('do'), 'Dave may approve the Compliance part');
+    /* the cross-project conflict stays */
+    if (engine.stepConflict) assert.ok(engine.stepConflict(docs, 'vendor-modernization', 'vendor-onboarding', 's4').conflict);
+    /* projectTruth gives every project a sensible status */
+    if (engine.projectTruth) docs.project.forEach(p => {
+      const t = engine.projectTruth(docs, p.id, day);
+      assert.ok(t && t.label && t.label !== 'Not planned' && t.sentence, p.id + ': ' + (t && t.label));
+      if (t.lateCount > 0) assert.ok(!/^On track$/.test(t.label), p.id + ': never "On track" with late tasks');
+    });
+  }
+});
+
+test('R9 §3 (bug B8): a done date is the client\'s today, never the server\'s UTC date', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const yday = shiftDay(st.today, -1);   /* a client still on the previous local day (evening in the Americas) */
+  const put = (id, patch) => call('PUT', `ws/${ws}/doc/workItem/${id}`, { actor: 'dk', today: yday, data: Object.assign({}, find(st, 'workItem', id).data, patch) });
+  let r = await put('W7', { status: 'done', doneAt: undefined });
+  assert.equal(r.body.doc.data.doneAt, yday, 'missing doneAt -> the client today');
+  r = await put('W11', { status: 'done', doneAt: new Date().toISOString() });
+  assert.equal(r.body.doc.data.doneAt, yday, 'a UTC timestamp -> the client today');
+  r = await put('W3', { status: 'prog', doneAt: undefined });
+  r = await put('W8', { status: 'done', doneAt: st.today });
+  assert.equal(r.body.doc.data.doneAt, yday, 'a UTC date ahead of the client is clamped to the client today');
+  const earlier = shiftDay(yday, -3);
+  r = await put('W10', { status: 'done', doneAt: earlier });
+  assert.equal(r.body.doc.data.doneAt, earlier, 'a real earlier finish date is kept');
+  st = await state(ws);
+  r = await call('PUT', `ws/${ws}/doc/workItem/W7`, { actor: 'dk', today: st.today, data: Object.assign({}, find(st, 'workItem', 'W7').data, { doneAt: undefined, note: 'edited' }) });
+  assert.equal(r.body.doc.data.doneAt, yday, 're-saving a done task keeps its done date');
+  r = await call('PUT', `ws/${ws}/doc/workItem/W7`, { actor: 'dk', today: yday, data: Object.assign({}, find(st, 'workItem', 'W7').data, { status: 'idle' }) });
+  assert.equal(r.body.doc.data.status, 'idle');
+});
+
+test('R9 §1/§13 report: cost line only with a budget or rates; Simple label; quoted titles in the fallback sentence', async () => {
+  const base = seed('2026-11-04').docs;
+  const clone = () => JSON.parse(JSON.stringify(base));
+  const costy = b => b.highlights.filter(x => /\$|cost|budget/i.test(x));
+  let docs = clone();
+  let r = await ai.run('status-report', { projectId: 'vendor-modernization' }, docs, '2026-11-04');
+  assert.equal(costy(r.body).length, 1, 'budget -> one cost line');
+  assert.equal(r.body.sourceLabel, 'Written from the project\'s facts');
+  r = await ai.run('status-report', { projectId: 'vendor-modernization', advanced: true }, docs, '2026-11-04');
+  assert.equal(r.body.sourceLabel, 'Rules-based', 'Advanced may keep the technical label');
+  docs = clone(); docs.project.forEach(p => { delete p.data.budget; });
+  r = await ai.run('status-report', { projectId: 'vendor-modernization' }, docs, '2026-11-04');
+  assert.deepEqual(costy(r.body).map(x => x.replace(/\$[\d,]+/, '$N')), ['Expected cost $N'], 'rates only -> "Expected cost"');
+  docs.person.forEach(p => { delete p.data.dayRate; });
+  r = await ai.run('status-report', { projectId: 'vendor-modernization' }, docs, '2026-11-04');
+  assert.deepEqual(costy(r.body), [], 'no budget and no rates -> no cost line');
+  /* without an engine sentence, the rules sentence names the late count and quotes the first task */
+  const facts = { project: { name: 'P', target: '2026-12-15', status: 'active' }, today: '2026-11-04', rag: { status: 'amber' }, stats: { total: 2, done: 0, finish: '2026-11-25' },
+    atRisk: [{ title: 'Set up the bank details form', owner: 'Leo Park', due: '2026-11-03', daysPastDue: 1 }] };
+  facts.summary = { sentence: 'Expected Nov 25, 2026. 1 task is late; first: “Set up the bank details form” (Leo Park).', label: 'Some tasks late', rag: 'amber', source: 'rules' };
+  const out = ai.statusRules(facts);
+  assert.ok(out.risks[0].startsWith('“Set up the bank details form” (Leo Park) is late by 1 business day'), out.risks[0]);
+  assert.ok(!/Rules-based/.test(JSON.stringify(out)));
 });

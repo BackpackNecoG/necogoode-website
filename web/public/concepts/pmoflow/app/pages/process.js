@@ -44,18 +44,26 @@ export function calledOf(n) {
   const p = n.calls ? store.get('process', n.calls) : null;
   return p ? { p, steps: flat(p.tobe).length } : { p: null, steps: 0, name: n.callsName || '' };
 }
+/* R9 §11: "Wait up to 2 business days" (a duration) or "Wait for the supplier's quote" (an event); never "WAIT · 2" */
+export function waitText(n) {
+  const w = String((n && n.wait) || '').trim().replace(/^(wait\s+)?(up to|for|until)\s+/i, '');
+  if (!w) return 'Wait for a set time';
+  return /^(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(w) ? 'Wait up to ' + w : 'Wait for ' + w;
+}
+/* the kicker under a typed node's title: what kind it is, in words, with no bare number */
+const kickerOf = n => n.type === 'wait' ? 'Wait' : n.type === 'message' ? msgText(n) : NT[n.type] ? NT[n.type].label : 'Step';
 export const msgText = n => `${n.direction === 'receive' ? 'Receives from' : 'Sends to'} ${n.party || 'an external party'}`;
 /* one-line description of a typed node (cards, ghosts, lanes, step page) */
 export function typeDetail(n) {
   if (!isSpecial(n)) return '';
-  if (n.type === 'wait') return `Waits ${n.wait || 'for a set time'}`;
+  if (n.type === 'wait') return waitText(n);
   if (n.type === 'message') return msgText(n);
   const c = calledOf(n);
   return c && c.p ? `Calls ${c.p.name} · ${c.steps} step${c.steps === 1 ? '' : 's'}` : `Calls ${c && c.name ? c.name + ' (not in this workspace)' : 'no process yet'}`;
 }
 /* the card body line for a typed node; the subprocess line carries its "Open" drill-in */
 function typeBody(n, ctx) {
-  if (n.type === 'wait') return `<div class="d-ntline" data-wait><span>Waits <b>${esc(n.wait || 'for a set time')}</b></span></div>`;
+  if (n.type === 'wait') return `<div class="d-ntline" data-wait><span>${esc(waitText(n))}</span></div>`;
   if (n.type === 'message') return `<div class="d-ntline" data-msg="${n.direction === 'receive' ? 'receive' : 'send'}"><span class="d-dir">${n.direction === 'receive' ? '⇠ Receives from' : 'Sends to ⇢'}</span><span class="chip d-party">${esc(n.party || 'External party')}</span></div>`;
   const c = calledOf(n);
   if (c && c.p) return `<div class="d-ntline" data-calls="${esc(c.p.id)}"><span>Calls <b>${esc(c.p.name)}</b></span><span class="d-subn" data-sub-steps="${c.steps}">${c.steps} step${c.steps === 1 ? '' : 's'}</span>${ctx && ctx.edit ? '' : `<a class="btn sm d-open" href="${link('/process/' + c.p.id)}" data-link data-open-sub aria-label="Open ${esc(c.p.name)}">Open ›</a>`}</div>`;
@@ -72,7 +80,7 @@ export const dataName = id => (dataEl(id) || {}).name || id;
    'live' if avail is live or its resolver work item is done; otherwise 'example' or 'missing'. */
 export function effAvail(id) {
   const r = eng('effectiveAvail', [docs(), id], null);
-  if (r === 'live' || r === 'example' || r === 'missing' || r === 'pending') return r;
+  if (r === 'live' || r === 'example' || r === 'missing' || r === 'pending' || r === 'problem') return r;
   const d = dataEl(id); if (!d) return 'missing';
   if (d.avail === 'live' || (d.liveConfirmedBy && d.liveConfirmedBy === d.owner && d.liveSource)) return 'live';
   if (store.list('workItem', w => w.resolves === id && w.status === 'done').length) return 'pending';
@@ -86,14 +94,16 @@ export const AV = {
   example: { label: 'Sample only', short: 'Sample only', color: 'var(--example)' },
   missing: { label: 'Not available yet', short: 'Not available yet', color: 'var(--missing)' },
   pending: { label: 'Waiting for confirmation', short: 'Waiting for confirmation', color: 'var(--soon)' },
+  /* R9 §6: information with an open problem is never "We have it" */
+  problem: { label: 'Has a problem', short: 'Has a problem', color: 'var(--soon)' },
 };
 export const avOf = k => AV[k] || AV.missing;
-const LBL_KEY = { connected: 'live', 'we have it': 'live', 'sample only': 'example', 'not available yet': 'missing', 'waiting for confirmation': 'pending' };
+const LBL_KEY = { connected: 'live', 'we have it': 'live', 'sample only': 'example', 'not available yet': 'missing', 'waiting for confirmation': 'pending', 'has a problem': 'problem' };
 /* R7: Simple is the default; Advanced shows the power tools */
 export const isAdv = () => !!store.advanced;
 /* R8 §1: Simple has two states only. "We have it" (effectively live) and "Not available yet" (everything else).
    The words connected / waiting for confirmation / sample only are Advanced-only detail. */
-export const HAVE = 'We have it', NOTYET = 'Not available yet';
+export const HAVE = 'We have it', NOTYET = 'Not available yet', PROBLEM = 'Has a problem';
 export const SIMPLE_AV = { live: { label: HAVE, color: 'var(--live)' }, notyet: { label: NOTYET, color: 'var(--missing)' } };
 /* {key, label, tone, simple} for a data element. key is the detailed state (live/example/missing/pending);
    label is the plain label for the current mode. The engine's availLabel decides when it gives a usable answer. */
@@ -105,7 +115,7 @@ export function availInfo(id) {
     key = AV[r.state] ? r.state : AV[r.key] ? r.key : LBL_KEY[String(r.label || '').toLowerCase()] || k0;
     label = r.label || avOf(key).label; tone = r.tone || '';
   }
-  const simple = key === 'live' ? HAVE : NOTYET;
+  const simple = key === 'live' ? HAVE : key === 'problem' ? PROBLEM : NOTYET;
   return { key, label: isAdv() ? label : simple, tone, simple, have: key === 'live' };
 }
 export const avText = id => availInfo(id).label;
@@ -113,13 +123,17 @@ export const avText = id => availInfo(id).label;
 export const awaitingText = id => { const d = dataEl(id); const who = d && d.owner ? pname(d.owner) : 'the owner';
   return isAdv() ? `Waiting for ${who} to confirm it's connected` : `Fixed. ${who} needs to confirm we have it`; };
 /* dot coloured by the plain state (two colours in Simple) */
-export function effDot(id) { const i = availInfo(id), a = isAdv() ? avOf(i.key) : SIMPLE_AV[i.have ? 'live' : 'notyet']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
+export function effDot(id) { const i = availInfo(id), a = isAdv() || i.key === 'problem' ? avOf(i.key) : SIMPLE_AV[i.have ? 'live' : 'notyet']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
 export const NEEDS_LIVE_ADV = 'Needs to be connected before launch';
 /* kept as a constant for the pages that import it; reads plainly in Simple */
 export const NEEDS_LIVE = NEEDS_LIVE_ADV;
 export const needsLive = () => isAdv() ? NEEDS_LIVE_ADV : 'Needed before launch';
 /* R7 §4: who does a step — a person, or a free-text role stored as ownerRole */
-export const whoOf = n => (n && n.ownerRole) ? n.ownerRole : pname(n && n.owner);
+/* R9 §13: never a raw id or a dash: an unknown or missing person reads "Nobody yet" */
+export const personName = id => { const p = id && store.person(id); return p ? p.name : 'Nobody yet'; };
+/* R9 §8: who owns a piece of information, in words: its role, its person, or "Nobody yet" (never "—") */
+export const dataOwnerName = x => { const r = x && x.id ? eng('dataOwner', [docs(), x.id], null) : null; const n = r && (r.role || (r.person ? r.name : '')); return n ? n : (x && x.ownerRole) || personName(x && x.owner); };
+export const whoOf = n => (n && n.ownerRole) ? n.ownerRole : personName(n && n.owner);
 export const whoAv = n => (n && n.ownerRole) ? '' : av(n && n.owner);
 /* R8 §8: the same words for "who does it" wherever a step shows (a role reads exactly as typed on the map) */
 export const whoChip = n => n && n.ownerRole ? `<span class="person d-role" data-who data-role>${esc(n.ownerRole)}</span>` : n && n.owner ? `<span class="person" data-who>${av(n.owner)}${esc(pname(n.owner))}</span>` : '';
@@ -218,29 +232,41 @@ export function diffCounts(p) {
   const d = eng('diffProcess', [p], { nodes: {}, removed: [] }); const v = Object.values(d.nodes || {});
   return { new: v.filter(x => x === 'new').length, changed: v.filter(x => x === 'changed').length, same: v.filter(x => x === 'same').length, removed: (d.removed || []).length };
 }
+/* R9 §13: headline counts that add up: Future steps, and how many of those steps are new or changed (gateways,
+   the trigger and the end are not steps), plus steps removed from Today. Read from the engine's diffProcess. */
+export function stepChangeCounts(p) {
+  const d = eng('diffProcess', [p], { nodes: {}, removed: [] });
+  const steps = flat(p && p.tobe);
+  const st = id => (d.nodes || {})[id];
+  return { steps: steps.length, new: steps.filter(s => st(s.id) === 'new').length, changed: steps.filter(s => st(s.id) === 'changed').length,
+    removed: (d.removed || []).filter(g => g && isStep(g)).length };
+}
+export const changeText = c => [c.new ? `${c.new} new` : '', c.changed ? `${c.changed} changed` : '', c.removed ? `${c.removed} removed` : ''].filter(Boolean).join(' · ');
 /* plain-language profile pattern (R3): '9{8}' -> '8 digits' */
 export function humanPat(pt) { const r = eng('humanPattern', [pt], null); return typeof r === 'string' && r ? r : String(pt || ''); }
 export const projectsFor = pid => store.list('project', j => (j.processes || []).includes(pid));
 export const STATUS_LBL = { done: 'Done', prog: 'In progress', idle: 'Not started', none: 'No change' };
-/* R6 §2: one schedule badge per item, by priority late > causing slip > slipping > due soon > on track.
-   E().scheduleBadge decides when the engine has it (string key or {key|kind, label|text}); the local rule is the fallback. */
-const SB_CLS = { late: 'b-late', causing: 'b-late', 'causing-slip': 'b-late', causingSlip: 'b-late', slip: 'b-slip', slipping: 'b-slip', soon: 'b-soon', 'due-soon': 'b-soon', ok: 'b-ok', 'on-track': 'b-ok', done: 'b-done' };
-function schedKey(w, f) {
-  const r = eng('scheduleBadge', [docs(), w.id, today()], null);
-  const k = r == null ? null : typeof r === 'string' ? r : (r.key || r.kind || r.id || r.badge || null);
-  if (k && SB_CLS[k]) return { key: k, label: r && typeof r === 'object' ? (r.label || r.text || '') : '' };
-  if (f.sched === 'late') return { key: 'late' };
-  if (f.causesSlip === true) return { key: 'causing' };
-  return { key: f.sched || 'ok' };
-}
+/* R9 §1: one schedule badge per item, read from the engine's scheduleBadge (the single late definition).
+   Simple says "Late" for anything past due or finishing after its due date; Advanced may name which. */
+const BADGE_CLS = { done: 'b-done', late: 'b-late', slipping: 'b-late', causing: 'b-slip', soon: 'b-soon', ontrack: 'b-ok' };
 export function workBadge(w, f) {
   f = f || {};
-  if (w.status === 'done') return badge('Done ' + fmt(w.due), 'b-done');
-  const dd = daysTo(w.due); const s0 = schedKey(w, f), k = s0.key, cls = SB_CLS[k] || 'b-ok';
-  if (s0.label) return `<span class="badge ${cls}" data-sched="${esc(k)}">${esc(s0.label)}</span>`;
-  const txt = cls === 'b-late' && /caus/i.test(k) ? 'Delaying others' : cls === 'b-late' ? (dd < 0 ? -dd + 'd late' : 'Late') + (f.forecast && f.forecast > w.due ? ' · now ' + fmt(f.forecast) : '')
-    : cls === 'b-slip' ? 'Running late → ' + fmt(f.forecast) : cls === 'b-soon' ? 'Due in ' + Math.max(0, dd) + 'd' : 'Due ' + fmt(w.due);
-  return `<span class="badge ${cls}" data-sched="${esc(k)}">${esc(txt)}</span>`;
+  if (w.status === 'done') return badge('Done ' + fmt(w.doneAt || w.due), 'b-done');
+  const r = eng('scheduleBadge', [docs(), w.id, today()], null) || {};
+  const key = BADGE_CLS[r.key] ? r.key : 'ontrack';
+  const late = !!r.late || key === 'late' || key === 'slipping';
+  const when = f.forecast && w.due && f.forecast > w.due ? ' · expected ' + fmt(f.forecast) : '';
+  const txt = late ? (isAdv() ? (r.advancedLabel || 'Late') : 'Late') + when
+    : key === 'causing' ? (r.label || 'Holding up other work') : key === 'soon' ? 'Due ' + fmt(w.due) : 'Due ' + fmt(w.due);
+  return `<span class="badge ${late ? 'b-late' : BADGE_CLS[key]}" data-sched="${esc(late ? 'late' : key)}">${esc(txt)}</span>`;
+}
+/* is any open work item of a step late (engine forecast's single `late` flag)? */
+export function stepLate(st) {
+  if (!st || !Array.isArray(st.items)) return false;
+  if (typeof st.late === 'boolean') return st.late;
+  if (typeof st.late === 'number') return st.late > 0;
+  const fc = eng('forecastAll', [docs(), today()], {});
+  return st.items.some(w => w.status !== 'done' && fc[w.id] && fc[w.id].late === true);
 }
 /* R6 §2: one status that combines work and data. Work done but data not effectively live is
    "Built · awaiting live data" (amber), never green Done. Pass the step node (or its data ids). */
@@ -258,18 +284,19 @@ export function stepBadge(st, node) {
   if (cs === 'none') return badge('No change', 'b-none');
   if (cs === 'done') return badge('Done', 'b-done');
   if (cs === 'built') return `<span class="badge d-b-amber" data-built title="The work is done; the information this step needs is not available yet">${esc(builtLbl())}</span>`;
-  const sch = st.sched === 'late' ? badge('Late' + (st.forecast && st.forecast > st.due ? ' · now ' + fmt(st.forecast) : ''), 'b-late')
-    : st.sched === 'slip' ? badge('Running late → ' + fmt(st.forecast), 'b-slip')
-    : st.sched === 'soon' ? badge('Next due in ' + Math.max(0, daysTo(st.next || st.due)) + 'd', 'b-soon') : badge('Due ' + fmt(st.due), 'b-ok');
+  const sch = stepLate(st) ? `<span class="badge b-late" data-sched="late">Late${st.forecast && st.due && st.forecast > st.due ? ' · expected ' + esc(fmt(st.forecast)) : ''}</span>`
+    : st.next || st.due ? badge('Next due ' + fmt(st.next || st.due), 'b-ok') : '';
   return badge(STATUS_LBL[st.status] || st.status, 'b-' + st.status) + ' ' + sch;
 }
-function daysTo(s) { if (!s) return 0; return Math.round((new Date(s + 'T12:00:00') - new Date(today() + 'T12:00:00')) / 86400000); }
 export const notFound = what => `<div class="card"><h3>Not found</h3><p class="hint" style="margin:0 0 8px">${esc(what || 'This item')} does not exist in your sandbox. It may have been deleted, or the demo data was reset.</p><a href="${link('/')}" data-link style="color:var(--accent)">Back to Home</a></div>`;
 /* the trigger prompt is a placeholder, never a value (older sandboxes stored it literally) */
 const TRIG_PH = 'What starts this process?';
 const TRIG_PHS = [TRIG_PH, 'What starts it?', 'What starts it'];
 const trigTitle = n => (n && n.title && !TRIG_PHS.includes(n.title.trim())) ? n.title : '';
-const touchChip = t =>`<span class="chip touch" title="Team involved"># ${esc(t)}</span>`;
+/* R9 §13: system names are not teams */
+const SYSTEM_WORDS = /^(servicenow|hris|erp|crm|workday|sap|oracle|netsuite|concur|salesforce|sharepoint|docusign|jira|coupa|ariba|quickbooks|xero|okta|active directory|zendesk|hubspot|dynamics|outlook|teams|excel|finance system|.* system|.* portal)$/i;
+export const isSystemName = t => SYSTEM_WORDS.test(String(t || '').trim());
+const touchChip = t => isSystemName(t) ? `<span class="chip d-syschip" title="System">${esc(t)}</span>` : `<span class="chip touch" title="Team involved">Team: ${esc(t)}</span>`;
 const clone = o => JSON.parse(JSON.stringify(o));
 
 /* ---------- tree helpers ---------- */
@@ -324,14 +351,14 @@ function nodeHTML(n, ctx, idx) {
     const infoStats = isAdv()
       ? `${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}`
       : `${rd.total ? `<span data-info-n="${rd.total}">Information <b>${rd.total}</b></span>` : ''}${notYet ? `<span class="d-miss" data-notyet="${notYet}" title="Information that is not available yet">${LOCK} ${notYet} not available yet</span>` : ''}`;
-    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${infoStats}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>`) + opsLine(n);
+    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${infoStats}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} detail step${n.subs.length === 1 ? '' : 's'}</span>` : ''}</div>`) + opsLine(n);
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
   const who = esc(whoOf(n));
   return `<div class="node ${trig ? 'trigger' : ''} ${sp ? sp.cls : ''} ${ctx.edit ? 'd-editing' : ''}" data-node="${esc(n.id)}" ${trig ? '' : `data-step="${esc(n.id)}"`} data-ntype="${esc(n.type || 'step')}" data-data="${esc((n.data || []).join(','))}" ${goAttr}>
     <div class="nh"><span class="ic" ${sp ? `title="${esc(sp.label)}" data-idx="${idx}"` : ''}>${trig ? '⚡' : sp ? sp.icon : idx}</span>
-      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts it?</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'What starts it' : sp ? `<span class="d-ntk">${esc(sp.label)} · ${esc(idx)}</span> · <span data-who>${who}</span>` : `<span data-who${n.ownerRole ? ' data-role' : ''}>${who}</span>`}</div></div>
+      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts it? e.g. A vendor sends a request</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'What starts it' : sp ? `<span class="d-ntk" data-ntk>${esc(kickerOf(n))}</span> · <span data-who>${who}</span>` : `<span data-who${n.ownerRole ? ' data-role' : ''}>${who}</span>`}</div></div>
       <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diffChip}${trig ? '' : whoAv(n)}</div></div>
     ${body ? `<div class="nb">${body}</div>` : ''}${ctx.edit ? `<div class="d-tools">${toolbar(n, ctx)}</div>` : ''}</div>`;
 }
@@ -342,7 +369,7 @@ function changeNote(n, ctx) {
   if (a) {
     /* readable version of the engine's change list: names instead of ids */
     if ((a.title || '') !== (n.title || '')) lines.push('was: ' + a.title);
-    if (whoOf(a) !== whoOf(n)) lines.push('who: ' + whoOf(a) + ' → ' + whoOf(n));
+    if (whoOf(a) !== whoOf(n)) lines.push('who: ' + whoOf(a).replace('Nobody yet', 'Nobody') + ' → ' + whoOf(n).replace('Nobody yet', 'Nobody'));
     const ad = new Set(a.data || []), nd = new Set(n.data || []);
     const added = [...nd].filter(d => !ad.has(d)), removed = [...ad].filter(d => !nd.has(d));
     if (added.length) lines.push('+ information: ' + added.map(dataName).join(', '));
@@ -352,7 +379,7 @@ function changeNote(n, ctx) {
     if ((a.type || 'step') !== (n.type || 'step')) lines.push('type: ' + typeLabel(a) + ' → ' + typeLabel(n));
     else if (isSpecial(n) && typeDetail(a) !== typeDetail(n)) lines.push(typeDetail(a) + ' → ' + typeDetail(n));
     const st = x => (x.subs || []).map(y => y.title).join('|');
-    if (st(a) !== st(n)) lines.push('sub-steps: ' + (a.subs || []).length + ' → ' + (n.subs || []).length + ((a.subs || []).length === (n.subs || []).length ? ' (reworded)' : ''));
+    if (st(a) !== st(n)) lines.push('detail steps: ' + (a.subs || []).length + ' → ' + (n.subs || []).length + ((a.subs || []).length === (n.subs || []).length ? ' (reworded)' : ''));
   }
   if (!lines.length) lines.push('same step, new way of working or information');
   return `<div class="was d-was">${lines.map(l => `<div>${esc(l)}</div>`).join('')}</div>`;
@@ -367,7 +394,7 @@ function toolbar(n, ctx) {
 }
 const insBtn = (key, pos) => `<div class="conn d-conn"><button class="d-ins" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a step or a choice here" title="Add a step or a choice here">+</button></div>`;
 /* R7 §4: the big "Add a step" button at the end of the main list goes straight to the step dialog */
-const addStepBtn = (key, pos) => `<div class="d-addwrap"><button class="btn primary d-addstep" data-addstep data-pos="${pos}">+ Add a step</button><button class="btn sm ghost d-addother" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a choice or something else here">or a choice…</button></div>`;
+const addStepBtn = (key, pos) => `<div class="d-addwrap"><button class="btn primary d-addstep" data-addstep data-pos="${pos}">+ Add a step</button><button class="btn sm d-addother" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a choice or something else here">or a choice…</button></div>`;
 function canInsert(nodes, k) { if (k === 0 && nodes[0] && nodes[0].type === 'trigger') return false; if (k === nodes.length && nodes.length && nodes[nodes.length - 1].type === 'end') return false; return true; }
 
 function flowHTML(nodes, ctx, key, counter) {
@@ -382,10 +409,10 @@ function flowHTML(nodes, ctx, key, counter) {
       const st = ctx.mode === 'diff' && ctx.diff ? (ctx.diff.nodes || {})[n.id] : null;
       const dchip = st === 'new' || st === 'changed' ? ` <span class="chip diff-${st}">${st === 'new' ? 'NEW' : 'CHANGED'}</span>` : '';
       const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; return `<div class="d-goto" data-goto="${esc(b.goto)}">↩ Go back to ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
-      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(n.title)}${par ? '<small class="d-parlbl">At the same time</small>' : ''}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
+      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(n.title)}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
         <div class="branches" style="--bl:${100 / (Math.max(bs.length, 1) * 2)}%;--br:${100 / (Math.max(bs.length, 1) * 2)}%">${bs.map((b, bi) => `<div class="branch"><span class="blabel">${esc(b.label)}</span>
           ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, ctx, n.id + '#' + bi, counter)}${gotoLbl(b)}</div>`
-            : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra on this path' : 'Continue → next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
+            : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra on this path' : 'Carries on to the next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
     } else {
       const idx = isStep(n) ? ++counter.n : '';
       parts.push(nodeHTML(n, ctx, idx));
@@ -397,7 +424,7 @@ function flowHTML(nodes, ctx, key, counter) {
 function removedHTML(diff, n, from) {
   const gone = ((diff && diff.removed) || []).filter(g => g && g.type !== 'trigger' && g.type !== 'end');
   const count = n != null ? n : gone.length;
-  return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from ${esc(from || 'Today')} <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}" data-ntype="${esc(g.type || 'step')}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> ` : isSpecial(g) ? `<span class="d-ghost-ic" title="${esc(NT[g.type].label)}">${NT[g.type].icon}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
+  return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from ${esc(from || 'Today')} <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}" data-ntype="${esc(g.type || 'step')}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> <span class="d-gwkind">${g.type === 'parallel' ? 'At the same time:' : 'Choice:'}</span> ` : isSpecial(g) ? `<span class="d-ghost-ic" title="${esc(NT[g.type].label)}">${NT[g.type].icon}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
 }
 function lanesHTML(nodes, ctx) {
   /* rows in document order: each step sits in its owner's lane; each gateway gets its own full-width row */
@@ -420,7 +447,7 @@ function lanesHTML(nodes, ctx) {
     if (r.gw) {
       const par = r.gw.type === 'parallel';
       const where = (r.gw.branches || []).map(b => { const first = (b.nodes || [])[0]; const tgt = b.goto && ctx.byId[b.goto]; return `<span class="blabel">${esc(b.label)}</span> ${first ? esc(first.title) : tgt ? '↩ ' + esc(tgt.title) : (par ? 'nothing extra' : 'continue')}`; }).join('<span class="d-sep">·</span>');
-      h += `<div class="d-lane-gw" style="grid-column:1/-1" data-node="${esc(r.gw.id)}" data-gw="${esc(r.gw.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(r.gw.title)}${par ? '<small class="d-parlbl">At the same time</small>' : ''}</span></div><div class="d-lane-br">${where}</div></div>`;
+      h += `<div class="d-lane-gw" style="grid-column:1/-1" data-node="${esc(r.gw.id)}" data-gw="${esc(r.gw.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(r.gw.title)}</span></div><div class="d-lane-br">${where}</div></div>`;
     } else {
       i++; owners.forEach(o => { h += `<div class="lane-c">${laneKey(r.s) === o ? nodeHTML(r.s, ctx, i) : ''}</div>`; });
       if (ext) h += `<div class="lane-c d-lane-extc">${r.s.type === 'message' ? `<div class="d-extmsg" data-ext-msg="${esc(r.s.id)}"><b>${esc(r.s.party || 'External party')}</b><span class="d-dir">${r.s.direction === 'receive' ? 'sends: ' : 'receives: '}${esc(r.s.title)}</span></div>` : ''}</div>`;
@@ -785,8 +812,8 @@ export function cmpDiff(A, B) {
   /* a to-be compared with the as-is it was forked from links by `from`, not by id: the process diff covers that pair */
   const aIds = new Set(allNodes(A.nodes).map(n => n.id)), bAll = allNodes(B.nodes);
   const byFrom = bAll.filter(n => n.from && aIds.has(n.from)).length, byId = bAll.filter(n => isStep(n) && aIds.has(n.id)).length;
-  if (byFrom > byId) { const d = eng('diffProcess', [{ asis: A.nodes, tobe: B.nodes }], null); if (d && d.nodes) return d; }
-  const d = eng('diffVersions', [A.nodes, B.nodes], null);
+  if (byFrom > byId) { const d = eng('diffProcess', [{ asis: A.nodes, tobe: B.nodes }, docs()], null); if (d && d.nodes) return d; }
+  const d = eng('diffVersions', [A.nodes, B.nodes, docs()], null);
   return d && d.nodes ? d : { nodes: {}, removed: [], changes: {} };
 }
 
@@ -845,15 +872,17 @@ export function render(params) {
       ${editor && !rel ? menuItem('data-save-version', 'Save version', `Keep a named copy of Today and Future (${(p.drafts || []).length}/${MAX_DRAFTS})`) : ''}
       ${editor && !rel && undo ? menuItem('data-undo', 'Undo last change', 'Undo: ' + undo.summary) : ''}
       ${adv ? '' : menuItem(`data-mode="lanes"`, 'By person', 'The Future steps grouped by who does them') + menuItem(`data-mode="impact"`, 'Who’s affected', 'Other steps and projects each Future step affects')}
-      ${menuItem('data-bpmn', 'Download diagram file', 'Download this map as a diagram file other tools can open (BPMN 2.0)')}
-      ${rel || !editor ? '' : importBtn('Import diagram file', 'Import a diagram file (BPMN 2.0) as a new version of this process', 'd-mi')}
+      ${adv ? menuItem('data-bpmn', 'Download diagram file (BPMN)', 'Download this map as a diagram file other tools can open (BPMN 2.0)') : ''}
+      ${!adv || rel || !editor ? '' : importBtn('Import diagram file (BPMN)', 'Import a diagram file (BPMN 2.0) as a new version of this process', 'd-mi')}
     </div></details>`;
   const editBtn = rel || !editor ? '' : editing ? `<button class="btn sm primary" data-edit-done>✓ Done</button>` : `<button class="btn sm d-editbtn" data-mode="edit" aria-label="Edit steps">✎ Edit<span class="d-long"> steps</span></button>`;
-  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${sum.new}+${sum.changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information connected</span></div></div>` : '';
+  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed steps</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information connected</span></div></div>` : '';
   /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
   const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : 'Who’s affected';
   const vcount = flat(view.nodes).length;
-  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span><b>${esc(vlabel)}</b> · ${vcount} step${vcount === 1 ? '' : 's'}${sum.new + sum.changed ? ` · ${sum.new + sum.changed} changed` : ''}</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
+  /* R9 §13: "10 steps · 4 new · 2 changed" (step counts only, so the parts never exceed the whole) */
+  const sc = stepChangeCounts(p), scText = view.key === 'tobe' || mode === 'diff' ? changeText(sc) : '';
+  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span data-headline="${vcount}/${sc.new}/${sc.changed}/${sc.removed}"><b>${esc(vlabel)}</b> · ${vcount} step${vcount === 1 ? '' : 's'}${scText ? ` · ${esc(scText)}` : ''}</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
   const side = `<div class="d-tabrow"><div class="seg d-modes" role="tablist" aria-label="Which map">${modes.map(([k, l]) => `<button role="tab" aria-selected="${tabOn(k)}" data-mode="${k}" class="${tabOn(k) ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>${editBtn}${more}</div>
     ${sumrow}<div class="d-collapse" id="d-hdrmore">${editor ? '' : `<span class="d-only d-ro" data-readonly>View only · ${esc(askAccess(p))}</span>`}${kpis}</div>`;
 
@@ -911,11 +940,14 @@ export function render(params) {
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const u = usage(d, pid);
     return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
-      <div><div class="t">${esc(x.name || d)}</div><div class="s">${adv ? esc(x.source || 'Source not set') + ' · ' : ''}${esc(pname(x.owner))}</div></div>
+      <div><div class="t">${esc(x.name || d)}</div><div class="s" data-side-owner>${adv ? esc(x.source || 'Source not set') + ' · ' : ''}${esc(dataOwnerName(x))}</div></div>
       <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(availInfo(d).key)}">${esc(avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
   }).join('');
   /* teams involved: the "what starts it" tags count too */
-  const touches = {}; [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => touches[t] = (touches[t] || 0) + 1));
+  /* R9 §13: "Teams involved" lists teams only; a system named as a team moves to "Systems touched" */
+  const systems = {}; vsteps.forEach(s => { if (s.system) systems[s.system] = (systems[s.system] || 0) + 1; });
+  const isSys = t => isSystemName(t) || Object.keys(systems).some(x => x.toLowerCase() === String(t).toLowerCase());
+  const touches = {}; [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => { if (isSys(t)) systems[t] = (systems[t] || 0) + 1; else touches[t] = (touches[t] || 0) + 1; }));
   const linked = projectsFor(pid);
   const drafts = (p.drafts || []).slice().reverse();
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
@@ -927,15 +959,23 @@ export function render(params) {
   const sideHTML = `${blockCard}
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
-    ${Object.keys(touches).length || adv ? `<div class="card" data-touches><h3>Teams involved</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}"># ${esc(t)} · ${c}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
+    ${Object.keys(touches).length || adv ? `<div class="card" data-touches><h3>Teams involved</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}" title="${c} step${c === 1 ? '' : 's'}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
+    ${Object.keys(systems).length ? `<div class="card" data-systems><h3>Systems touched</h3><div class="chips">${Object.entries(systems).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip d-syschip" data-system="${esc(t)}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('')}</div></div>` : ''}
     ${versionsCard}
     <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · launched' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not in a project yet.</div>'}
-      ${rel ? '' : `<div class="d-startprj">${steps.length ? `<button class="btn sm primary" data-start-project>Start a project from the Future version</button><span class="hint">Plans the work to get from Today to Future.</span>` : '<span class="hint">Add the Future steps, then start a project from them.</span>'}</div>`}</div>
+      ${rel ? '' : startPrjHTML(p, steps)}</div>
     ${activityCard('process:' + pid)}`;
 
   return `<section class="hdr d-hdr ${hdrOpen ? 'd-hdr-open' : ''} ${adv ? 'd-adv' : 'd-simple'}"><div>${headLeft}</div><div class="hdr-side">${side}</div></section>
     <div class="grid"><section class="canvas ${editing ? 'd-edit' : ''}" id="canvas" aria-label="Process map">${roBanner}${modeNote ? `<div class="hint d-modenote" data-modenote style="text-align:center;margin:-8px 0 14px">${esc(modeNote)}</div>` : ''}${canvas}</section>
     <aside class="side d-sidefold" aria-label="About this map">${sideHTML}</aside></div>`;
+}
+
+/* R9 §4: a project plans the change from Today to Future, so it can only start once the Future differs from Today */
+function startPrjHTML(p, steps) {
+  const c = stepChangeCounts(p), any = c.new + c.changed + c.removed > 0 || diffCounts(p).new + diffCounts(p).changed + diffCounts(p).removed > 0;
+  if (!steps.length) return '<div class="d-startprj"><span class="hint">Add the Future steps, then start a project from them.</span></div>';
+  return `<div class="d-startprj" data-start-gate="${any ? 'on' : 'off'}"><button class="btn sm primary" data-start-project ${any ? '' : 'disabled aria-disabled="true" aria-describedby="d-startprj-h"'}>Start a project from this Future</button><span class="hint" id="d-startprj-h" data-start-hint>${any ? 'Plans the work to get from Today to Future.' : 'Change a Future step first'}</span></div>`;
 }
 
 /* ---------- persistence ---------- */
@@ -960,22 +1000,22 @@ async function saveProc(p, summary, opts) {
 
 /* ---------- modals ---------- */
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
-/* R8 §1: Simple asks one thing, a "Not available yet" tick box (unticked = we have it). Advanced keeps the detailed choice. */
+/* R9 §13: Simple asks one positive thing, a "We have it" switch (on = we have it). Advanced keeps the detailed choice. */
 export const AVAIL_OPT = { live: 'We have it (connected)', example: 'Sample only', missing: 'Not available yet' };
 export const availOpts = sel => Object.entries(AVAIL_OPT).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
 /* the availability control for a form: a select named `avail` (Advanced) or a tick box named `notyet` (Simple) */
 export const availField = (sel, attrs) => isAdv()
   ? `<div class="field"><label>Do we have it?</label><select name="avail" ${attrs || ''}>${availOpts(sel)}</select></div>`
-  : `<div class="field d-nyfield"><label class="d-check d-nycheck"><input type="checkbox" name="notyet" value="yes" ${sel === 'live' ? '' : 'checked'} ${attrs || ''} /> ${NOTYET}</label><span class="hint">Leave it unticked if we have this today.</span></div>`;
-/* reads availField back: Simple tick = missing, no tick = live; Advanced keeps a sample-only choice */
-export const availFrom = form => form.avail != null && form.avail !== '' && !Array.isArray(form.avail) ? form.avail : (form.notyet || []).length ? 'missing' : 'live';
+  : `<div class="field d-nyfield"><label class="d-check d-switch d-havecheck"><input type="checkbox" role="switch" name="have" value="yes" ${sel === 'live' ? 'checked' : ''} ${attrs || ''} /> <span>${HAVE}</span></label><span class="hint">Switch it off if we don’t have this yet.</span></div>`;
+/* reads availField back: Simple switch on = live, off = missing; Advanced keeps a sample-only choice */
+export const availFrom = form => form.avail != null && form.avail !== '' && !Array.isArray(form.avail) ? form.avail : [].concat(form.have || []).filter(Boolean).length ? 'live' : 'missing';
 const allData = () => store.list('dataElement').slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
 const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${avOf(a).color}" title="${esc(avOf(a).label)}"></span>`;
 const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : effDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
 function subRow(s, k) {
   const sel = new Set((s && s.data) || []);
   return `<div class="d-subrow" data-subrow>
-    <div class="d-subhead"><input name="sub_title" aria-label="Sub-step ${k + 1} title" placeholder="Sub-step title" value="${esc((s && s.title) || '')}" /><button type="button" class="btn sm danger" data-subdel aria-label="Remove sub-step">Remove</button></div>
+    <div class="d-subhead"><input name="sub_title" aria-label="Detail step ${k + 1} title" placeholder="Detail step title" value="${esc((s && s.title) || '')}" /><button type="button" class="btn sm danger" data-subdel aria-label="Remove detail step">Remove</button></div>
     <div class="d-picks d-picks-sm" data-subpicks>${allData().map(d => dataCheck('sub_data', d, sel.has(d.id))).join('')}</div></div>`;
 }
 /* default state for information first added on a map: Today = we have it; Future = not available yet */
@@ -1017,7 +1057,7 @@ export function parseWho(text, p) {
 const peopleList = () => `<datalist id="d-people">${store.state.people.map(x => `<option value="${esc(x.name)}">${esc(x.role || '')}</option>`).join('')}</datalist>`;
 const infoList = () => `<datalist id="d-infos">${allData().map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist>`;
 /* an information chip; new information (no id yet) carries its own "not available yet" tick box (R8 §1) */
-const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" data-iname="${esc(c.name)}">${c.id ? effDot(c.id) : availDot(c.avail === 'live' ? 'live' : 'missing')}<span>${esc(c.name)}</span>${c.id || c.fixed ? '' : `<label class="d-ny" title="Tick if we do not have ${esc(c.name)} yet"><input type="checkbox" data-ny aria-label="${esc(c.name)}: ${NOTYET.toLowerCase()}" ${c.avail === 'live' ? '' : 'checked'} />not available yet</label>`}<button type="button" class="d-x" data-ichip-del aria-label="Remove ${esc(c.name)}">×</button></span>`;
+const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" data-iname="${esc(c.name)}">${c.id ? effDot(c.id) : availDot(c.avail === 'live' ? 'live' : 'missing')}<span>${esc(c.name)}</span>${c.id || c.fixed ? '' : `<label class="d-ny d-have" title="Switch off if we do not have ${esc(c.name)} yet"><input type="checkbox" role="switch" data-have aria-label="${esc(c.name)}: ${HAVE.toLowerCase()}" ${c.avail === 'live' ? 'checked' : ''} />${HAVE.toLowerCase()}</label>`}<button type="button" class="d-x" data-ichip-del aria-label="Remove ${esc(c.name)}">×</button></span>`;
 
 /* R6: the step dialog also edits the typed nodes. Subprocess picks the process it calls; wait sets how long;
    message sets the direction and the external party. Waits carry no information or sub-steps.
@@ -1048,7 +1088,7 @@ async function stepModal(p, ver, node, opts) {
       <div class="field"><label for="d-f-title">Step name</label><input id="d-f-title" name="title" value="${esc(node.title || '')}" placeholder="${esc(PH[kind])}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" />${kind !== 'step' ? '<span class="hint">Leave blank for a name made from the fields above.</span>' : ''}</div>
       <div class="field"><label for="d-f-who">Who does it</label><input id="d-f-who" name="who" list="d-people" value="${esc(whoVal)}" placeholder="A person, or a role such as Manager" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" data-who-input />${peopleList()}</div>
       ${hasData ? `<div class="field"><label for="d-f-info">What information it needs</label><div class="d-chipbox" data-chipbox>${chips.map(chipHTML).join('')}<input id="d-f-info" list="d-infos" data-info-input placeholder="${chips.length ? 'Add more…' : 'e.g. Invoice number, Due date'}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" aria-describedby="d-f-info-h" /></div>${infoList()}
-        <span class="hint" id="d-f-info-h">Separate several with commas. ${ver === 'asis' ? `New information counts as “${HAVE}”. Tick “not available yet” on any we don’t have.` : `New information counts as “${NOTYET}”. Untick it if we already have it.`}</span></div>` : ''}
+        <span class="hint" id="d-f-info-h" data-avail-help>Separate several with commas. Each new piece of information has a “${HAVE}” switch. Here it starts ${ver === 'asis' ? 'on' : 'off'}.</span></div>` : ''}
       ${isNew && opts.quick ? `<div class="hint d-quickhint">${phoneQuick ? 'Tap “Add step” to save it and start the next one. Tap “Done adding” when you have finished.' : 'Press Enter to add this step and start the next one.'}</div>` : ''}
       <details class="d-moreopts" data-more-options${moreOpen ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b">
       ${ver === 'tobe' ? `<div class="field"><label>Replaces this step from Today</label><select name="from"><option value="">None: new in Future</option>${asisSteps.map(a => `<option value="${esc(a.id)}" ${a.id === node.from ? 'selected' : ''}>${esc(a.title)}</option>`).join('')}</select></div>` : ''}
@@ -1062,7 +1102,7 @@ async function stepModal(p, ver, node, opts) {
           <input data-nd-source placeholder="Where it comes from, e.g. Finance system" aria-label="Where the new information comes from" />
           <button type="button" class="btn sm" data-nd-create>Create and add</button></div>
         <div class="hint" data-nd-msg aria-live="polite"></div></div>` : ''}
-      ${kind === 'step' ? `<div class="field"><label>Sub-steps: how this step is done</label><div data-subs>${(node.subs || []).map(subRow).join('')}</div><div><button type="button" class="btn sm" data-subadd>+ Add sub-step</button></div></div>` : ''}
+      ${kind === 'step' ? `<div class="field"><label>Detail steps: how this step is done</label><div data-subs>${(node.subs || []).map(subRow).join('')}</div><div><button type="button" class="btn sm" data-subadd>+ Add detail step</button></div></div>` : ''}
       </div></details>`,
     actions: [{ id: 'save', label: isNew ? (kind === 'step' ? 'Add step' : 'Add') : 'Save', primary: true }].concat(phoneQuick ? [{ id: 'done', label: 'Done adding' }] : []),
   });
@@ -1098,7 +1138,7 @@ async function stepModal(p, ver, node, opts) {
     infoEl.addEventListener('blur', flushInfo);
     infoEl.addEventListener('keydown', e => { if (e.key === 'Backspace' && !infoEl.value) { const last = infoEl.previousElementSibling; if (last && last.matches('[data-ichip]')) last.remove(); } });
     box.addEventListener('click', e => { const b = e.target.closest('[data-ichip-del]'); if (b) { b.closest('[data-ichip]').remove(); infoEl.focus(); } else if (e.target === box) infoEl.focus(); });
-    box.addEventListener('change', e => { const t = e.target.closest('[data-ny]'); if (!t) return; const dot = t.closest('[data-ichip]').querySelector('.dot'); if (dot) dot.outerHTML = availDot(t.checked ? 'missing' : 'live'); });
+    box.addEventListener('change', e => { const t = e.target.closest('[data-have]'); if (!t) return; const dot = t.closest('[data-ichip]').querySelector('.dot'); if (dot) dot.outerHTML = availDot(t.checked ? 'live' : 'missing'); });
   }
   /* Enter in the three main fields: add the step (and start the next one when quick-adding) */
   m.querySelectorAll('#d-f-title, #d-f-who, #d-f-info').forEach(el => el.addEventListener('keydown', e => {
@@ -1143,8 +1183,8 @@ async function stepModal(p, ver, node, opts) {
     if (c.dataset.ichip) return c.dataset.ichip;
     if (c.dataset.pendingId) { const d = pending.find(x => x.id === c.dataset.pendingId); if (d) { created.push(d); return d.id; } }
     const hit = dupDataName(c.dataset.iname); if (hit) return hit.id;
-    const ny = c.querySelector('[data-ny]');
-    const d = { id: store.newId('de'), name: c.dataset.iname, avail: ny ? (ny.checked ? 'missing' : 'live') : defaultAvail(ver), owner: '', source: '' };
+    const hv = c.querySelector('[data-have]');
+    const d = { id: store.newId('de'), name: c.dataset.iname, avail: hv ? (hv.checked ? 'live' : 'missing') : defaultAvail(ver), owner: '', source: '' };
     created.push(d); return d.id;
   });
   const out = Object.assign({}, node, {
@@ -1310,7 +1350,7 @@ async function importVersion(pid, r, fileName) {
   const room = (p0.drafts || []).length < MAX_DRAFTS;
   const res = await modal({
     title: 'Import as a new version of this process',
-    body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps that were in this map before keep their work, information, sub-steps and owners, even if they were renamed.</p>
+    body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps that were in this map before keep their work, information, detail steps and owners, even if they were renamed.</p>
       <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span data-imp-renamed="${m.renamed.length}"><b>${m.renamed.length}</b> renamed</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> choice${r.gateways === 1 ? '' : 's'}</span></div>
       ${m.renamed.length ? `<ul class="d-renamed" data-renamed-list>${m.renamed.slice(0, 12).map(x => { const wn = store.list('workItem', w => w.pid === pid && w.step === x.id).length; return `<li data-renamed="${esc(x.id)}">Renamed: “${esc(x.from)}” → “<b>${esc(x.to)}</b>”${wn ? ` <span class="hint">keeps ${plural(wn, 'work item')}</span>` : ''}</li>`; }).join('')}${m.renamed.length > 12 ? `<li class="hint">and ${m.renamed.length - 12} more</li>` : ''}</ul>` : ''}
       ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
@@ -1500,7 +1540,7 @@ export function bind(root, params) {
     const msgs = flat(view.nodes).filter(n => n.type === 'message').length;
     const r = await modal({ title: 'Download diagram file', body: `<p style="margin:0">Downloads the <b>${esc(view.label)}</b> map of <b>${esc(p.name)}</b> as a diagram file that other process tools can open (BPMN 2.0).</p>
       <label class="d-check"><input type="checkbox" name="pool" value="yes" ${msgs ? 'checked' : 'disabled'} /> Show people outside the organisation as their own group${msgs ? ` (${msgs} message step${msgs === 1 ? '' : 's'})` : ' (no message steps in this map)'}</label>
-      <div class="hint">Information, time limits, systems, teams and sub-steps are kept in the file, so importing it back loses nothing.</div>`, actions: [{ id: 'download', label: 'Download', primary: true }] });
+      <div class="hint">Information, time limits, systems, teams and detail steps are kept in the file, so importing it back loses nothing.</div>`, actions: [{ id: 'download', label: 'Download', primary: true }] });
     if (r.action !== 'download') return;
     const xml = bpmnXml(p, view.nodes, view.label, { pool: (r.form.pool || []).length > 0 });
     const slug = String(p.name || 'process').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -1600,7 +1640,7 @@ export function bind(root, params) {
   /* keyboard open for clickable step cards */
   root.querySelectorAll('#canvas [data-go]').forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === el) go(el.dataset.go); }));
   const nd = root.querySelector('[data-newdata]'); if (nd) nd.onclick = () => newDataModal();
-  const sp = root.querySelector('[data-start-project]'); if (sp) sp.onclick = () => startProject(cur());
+  const sp = root.querySelector('[data-start-project]'); if (sp && !sp.disabled) sp.onclick = () => startProject(cur());
 
   if (!inEdit) return;
   /* header meta */

@@ -78,14 +78,14 @@ function statusFacts(docs, projectId, today, engine) {
     const fc = engine.forecastAll(docs, today);
     facts.atRisk = work.filter(w => fc[w.id] && ['late', 'slip'].includes(fc[w.id].sched))
       .map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, forecast: fc[w.id].forecast, sched: fc[w.id].sched, slipDays: fc[w.id].slipDays,
-        daysPastDue: w.status !== 'done' && w.due < today ? dayDiff(w.due, today) : 0, cause: fc[w.id].cause ? L.label(fc[w.id].cause) : null }));
+        daysPastDue: w.status !== 'done' && w.due < today ? businessDaysBetween(w.due, today) : 0, waitingOn: waitingOnOf(w, fc[w.id], Object.fromEntries(work.map(x => [x.id, x]))) }));
     const r = engine.readiness(docs, projectId, today);
     facts.readiness = { pass: r.pass, failing: r.checks.filter(c => !c.pass && !c.warning).map(c => ({ label: c.label, detail: L.scrub(c.detail) })) };
   } else {
     const done = work.filter(w => w.status === 'done').length;
     facts.stats = { total: work.length, done, pct: work.length ? Math.round(100 * done / work.length) : 0, target: project.target,
       late: work.filter(w => w.status !== 'done' && w.due < today).length };
-    facts.atRisk = work.filter(w => w.status !== 'done' && w.due < today).map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, sched: 'late', daysPastDue: dayDiff(w.due, today) }));
+    facts.atRisk = work.filter(w => w.status !== 'done' && w.due < today).map(w => ({ title: w.title, owner: L.person(w.owner), due: w.due, sched: 'late', daysPastDue: businessDaysBetween(w.due, today) }));
   }
   const procIds = new Set(project.processes || []);
   const usedData = new Set();
@@ -117,6 +117,9 @@ function statusFacts(docs, projectId, today, engine) {
   facts.summary = summaryOf(docs, projectId, today, engine, facts, L);
   facts.earnedValue = evOf(docs, projectId, today, engine, project);
   facts.hypercare = hypercareOf(project, today, L);
+  /* R9 §13: a cost line needs a budget or day rates for the people doing the work */
+  const rated = new Set(list(docs, 'person').filter(p => Number(p.dayRate) > 0).map(p => p.id));
+  facts.hasRates = work.some(w => rated.has(w.owner));
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
     .map(g => ({ data: L.label(g.dataId), env: g.env, access: g.access, requestedBy: L.person(g.requestedBy) }));
   /* R8 ONE TRUTH: every number, date, label and blocker comes from engine.projectTruth, never recomputed here */
@@ -136,27 +139,41 @@ function applyTruth(facts, t, docs, today, engine, L) {
     late: t.lateCount, slip: t.runningLateCount, runningLate: t.runningLateCount, finish: t.forecastFinish, target: t.target, actualFinish: t.actualFinish });
   /* the late and running-late tasks are exactly projectTruth's lists, in that order */
   const fc = engine.forecastAll ? engine.forecastAll(docs, today) : {};
-  const row = (id, sched) => { const w = wById[id] || {}; const f = fc[id] || {};
-    return { title: w.title, owner: L.person(w.owner), due: w.due, forecast: f.forecast, sched, slipDays: f.slipDays,
-      daysPastDue: sched === 'late' && w.due && w.due < today ? dayDiff(w.due, today) : 0, cause: f.cause ? L.label(f.cause) : null }; };
-  facts.atRisk = [...lateIds].map(id => row(id, 'late')).concat([...runIds].filter(id => !lateIds.has(id)).map(id => row(id, 'slip')));
+  /* R9 §1: one list of late tasks (past due, or will finish after its due date); days are business days */
+  const row = id => { const w = wById[id] || {}; const f = fc[id] || {};
+    const pastDue = w.status !== 'done' && w.due && String(w.due).slice(0, 10) < today;
+    return { title: w.title, owner: L.person(w.owner), due: w.due, forecast: f.forecast, sched: pastDue ? 'late' : 'slip', slipDays: f.slipDays,
+      daysPastDue: pastDue ? (f.pastDueDays != null ? f.pastDueDays : businessDaysBetween(String(w.due).slice(0, 10), today)) : 0, waitingOn: waitingOnOf(w, f, wById) }; };
+  const lateList = (t.late || []).concat((t.runningLate || []).filter(id => !lateIds.has(id)));
+  facts.atRisk = [...new Set(lateList)].map(row);
   facts.blockers = (t.blockers || []).map(b => ({ name: b.name, owner: L.person(b.owner), state: b.state, planned: !!b.planned,
     resolver: b.resolver && wById[b.resolver] ? wById[b.resolver].title : null, text: b.text }));
   facts.notLive = facts.blockers;
   facts.rag = { status: t.rag, reasons: (t.reasons || []).slice(), bufferDays: t.bufferDays, bufferUnit: t.bufferUnit || 'business days', source: 'projectTruth' };
+  /* R9 §1: the one ranked "who needs to act" list ({person, what, why, href}; R8 engines used {name, action}) */
   facts.summary = { sentence: L.scrub(t.sentence), label: t.label, rag: t.rag,
-    who: (t.who || []).map(w => ({ person: w.name || L.person(w.person), action: L.scrub(String(w.action || '')) })), source: 'projectTruth' };
+    who: (t.who || []).map(w => ({ person: w.name || L.person(w.person), what: L.scrub(String(w.what || w.action || '')), why: w.why || null })).filter(w => w.what), source: 'projectTruth' };
   const ev = t.ev || {};
   const num = (v, d) => (v == null || !isFinite(Number(v)) ? null : Math.round(Number(v) * (d ? 100 : 1)) / (d ? 100 : 1));
   /* EAC is the one cost forecast (= cost.forecast) */
   facts.earnedValue = { pv: num(ev.PV), ev: num(ev.EV), ac: num(ev.AC), spi: num(ev.SPI, 1), cpi: num(ev.CPI, 1), eac: num(t.cost && t.cost.forecast != null ? t.cost.forecast : ev.EAC), bac: num(ev.BAC) };
   facts.cost = t.cost ? Object.assign({}, t.cost) : null;
-  facts.testing = t.testing ? { count: t.testing.count || '', sentence: t.testing.sentence || '', done: !!t.testing.done, passed: t.testing.passed, total: t.testing.total } : null;
+  /* R9 §6: testing.next is the one "what's next" sentence every screen shows */
+  facts.testing = t.testing ? { next: L.scrub(String(t.testing.next || t.testing.sentence || '')), stage: t.testing.stage || null, done: t.testing.stage === 'done' || !!t.testing.done,
+    passed: t.testing.passed, failed: t.testing.failed, notRun: t.testing.notRun, total: t.testing.total } : null;
   facts.launchSteps = (t.launchSteps || []).map(x => ({ key: x.key, label: x.label, done: !!x.done, action: L.scrub(String(x.action || '')) }));
+  /* R9 §1: stepsLeft is one number, equal to the Launch page's undone count */
+  facts.stepsLeft = t.stepsLeft != null && isFinite(+t.stepsLeft) ? +t.stepsLeft : (t.launchSteps || []).filter(x => !x.done).length;
   facts.burndown = t.burndown || null;
   facts.truth = { forecastFinish: t.forecastFinish, actualFinish: t.actualFinish, target: t.target, bufferDays: t.bufferDays, bufferUnit: t.bufferUnit || 'business days',
-    lateCount: t.lateCount, runningLateCount: t.runningLateCount, blockers: facts.blockers.map(b => b.name), label: t.label, rag: t.rag, sentence: facts.summary.sentence,
-    tasks: Object.assign({}, t.tasks), cost: facts.cost, testing: facts.testing ? facts.testing.count : null };
+    lateCount: t.lateCount, blockers: facts.blockers.map(b => b.name), label: t.label, rag: t.rag, sentence: facts.summary.sentence,
+    tasks: Object.assign({}, t.tasks), cost: facts.cost, testing: facts.testing ? facts.testing.next : null, stepsLeft: facts.stepsLeft };
+}
+/* R9 §13: "waiting on" only along a real dependency edge: the task the forecast waits for must be one of this task's own deps */
+function waitingOnOf(w, f, wById) {
+  const deps = (Array.isArray(w && w.deps) ? w.deps : []).map(d => (typeof d === 'string' ? d : d && d.id)).filter(Boolean);
+  const via = f && f.basis && f.basis.kind === 'dep' ? f.basis.ref : null;
+  return via && deps.includes(via) && wById[via] && wById[via].status !== 'done' ? wById[via].title || null : null;
 }
 
 /* R6: RAG from engine.projectHealth(docs, prj, today) -> {rag, reasons[]}; rules fallback applies the same R6 rule. */
@@ -173,17 +190,20 @@ function healthOf(docs, projectId, today, engine, facts) {
 }
 /* R7: {sentence, label, rag, who} from engine.projectSummary; the fallback keeps the same rule and plain words. */
 /* R8 labels (engine RAG_LABEL): "At risk" only when the forecast misses the deadline or a blocker has no plan */
-const LABELS = { red: 'At risk', amber: 'On track, some tasks running late', green: 'On track', grey: 'Not planned' };
+/* R9 §1 labels: "Some tasks late" (amber) and "Will miss the deadline" (red); the engine's label always wins when present */
+const LABELS = { red: 'Will miss the deadline', amber: 'Some tasks late', green: 'On track', grey: 'Not planned' };
+const OLD_LABELS = { 'at risk': 'red', 'on track, some tasks running late': 'amber' };
 function normRag(v) { return ({ red: 'red', amber: 'amber', green: 'green', grey: 'grey', gray: 'grey', r: 'red', a: 'amber', g: 'green' })[String(v || '').toLowerCase()] || null; }
 function summaryOf(docs, projectId, today, engine, facts, L) {
   if (engine && typeof engine.projectSummary === 'function') {
     try {
       const s = engine.projectSummary(docs, projectId, today) || {};
-      const byLabel = Object.keys(LABELS).find(k => LABELS[k].toLowerCase() === String(s.label || '').toLowerCase());
+      const lbl = String(s.label || '').toLowerCase();
+      const byLabel = Object.keys(LABELS).find(k => LABELS[k].toLowerCase() === lbl) || OLD_LABELS[lbl];
       const rag = normRag(s.rag) || byLabel || facts.rag.status;
       if (typeof s.sentence === 'string' && s.sentence.trim()) {
-        return { sentence: L.scrub(s.sentence.trim()), label: LABELS[byLabel || rag] || LABELS[rag], rag: byLabel || rag,
-          who: (Array.isArray(s.who) ? s.who : []).map(w => ({ person: L.person(w && w.person) === 'unassigned' ? String((w && w.person) || '') : L.person(w.person), action: L.scrub(String((w && w.action) || '')) })),
+        return { sentence: L.scrub(s.sentence.trim()), label: s.label || LABELS[byLabel || rag], rag: byLabel || rag,
+          who: (Array.isArray(s.who) ? s.who : []).map(w => ({ person: L.person(w && w.person) === 'unassigned' ? String((w && w.person) || '') : L.person(w.person), what: L.scrub(String((w && (w.what || w.action)) || '')) })).filter(w => w.what),
           source: 'projectSummary' };
       }
     } catch (e) { /* fall through to the rules sentence */ }
@@ -194,12 +214,13 @@ function summaryOf(docs, projectId, today, engine, facts, L) {
   const when = gap == null ? (target ? `The deadline is ${fd(target)}, but there is no expected finish yet.` : 'There is no deadline yet.')
     : gap >= 0 ? `Expected ${fd(fin)}, ${gap === 0 ? 'right on' : `${plural(gap, 'day')} before`} the ${fd(target)} deadline.`
       : `Expected ${fd(fin)}, ${plural(-gap, 'day')} after the ${fd(target)} deadline.`;
-  const late = (facts.atRisk || []).filter(w => w.daysPastDue > 0);
+  /* R9 §1 sentence: forecast and deadline, then the late count and the first name to act */
+  const late = facts.atRisk || [];
   const why = rag === 'grey' ? 'No tasks are planned yet.'
-    : late.length ? `${late.length === 1 ? `"${late[0].title}" is late` : `${plural(late.length, 'task')} are late`}${late[0].owner && late.length === 1 ? ` (${late[0].owner})` : ''}.`
+    : late.length ? `${plural(late.length, 'task')} ${late.length === 1 ? 'is' : 'are'} late; first: ${q(late[0].title)}${late[0].owner ? ` (${late[0].owner})` : ''}.`
       : rag === 'amber' ? 'There is little spare time before the deadline.' : '';
   return { sentence: [rag === 'grey' ? '' : when, why].filter(Boolean).join(' '), label: LABELS[rag], rag,
-    who: late.map(w => ({ person: w.owner, action: `finish "${w.title}"` })), source: 'rules' };
+    who: late.map(w => ({ person: w.owner, what: `Finish ${q(w.title)}` })), source: 'rules' };
 }
 
 /* R6: earned value from engine.earnedValue(docs, prj, today); keys normalised to lower case. */
@@ -275,21 +296,22 @@ const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green', grey: 'Not planne
 
 const money = n => '$' + Math.round(Number(n) || 0).toLocaleString('en-US');
 function fd(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : d; }
-/* R4/R7: "late by N days" = days past due; days behind plan are reported separately, in plain words */
+/* R9 §11: task titles inside sentences are always quoted “X” */
+const q = t => `“${String(t || 'Untitled task').replace(/^[“"]+|[”"]+$/g, '')}”`;
+/* R9 §1/§3: one word, "late"; "late by N" is business days past due; a task that will finish after its due date says so.
+   "waiting on" appears only for a real dependency edge (w.waitingOn). */
 function atRiskLine(w) {
-  const exp = w.forecast ? `expected ${fd(w.forecast)}` : '';
-  const behind = w.slipDays ? `${plural(w.slipDays, 'day')} behind plan` : '';
-  const why = w.cause ? `waiting on ${w.cause}` : '';
+  const wait = w.waitingOn ? `waiting on ${q(w.waitingOn)}` : '';
   if (w.daysPastDue > 0) {
-    return `"${w.title}" (${w.owner}) is late by ${plural(w.daysPastDue, 'day')} (was due ${fd(w.due)})` + [exp && behind ? `${exp}, ${behind}` : exp || behind, why].filter(Boolean).map(x => `; ${x}`).join('');
+    const exp = w.forecast ? `expected ${fd(w.forecast)}` : '';
+    return `${q(w.title)} (${w.owner}) is late by ${plural(w.daysPastDue, 'business day')} (was due ${fd(w.due)})` + [exp, wait].filter(Boolean).map(x => `; ${x}`).join('');
   }
-  return `"${w.title}" (${w.owner}) is running late${behind ? `, ${behind}` : ''}` + [exp, why].filter(Boolean).map(x => `; ${x}`).join('');
+  const exp = w.forecast ? `expected ${fd(w.forecast)}, after its ${fd(w.due)} due date` : `will finish after its ${fd(w.due)} due date`;
+  return `${q(w.title)} (${w.owner}) is late: ${exp}` + (wait ? `; ${wait}` : '');
 }
 function lateLine(f) {
-  const late = (f.atRisk || []).filter(w => w.daysPastDue > 0).length, behind = (f.atRisk || []).length - late;
-  const verb = n => (n === 1 ? 'is' : 'are');
-  if (!late && !behind) return 'Nothing is late.';
-  return [late ? `${plural(late, 'task')} ${verb(late)} past due` : '', behind ? `${plural(behind, late ? 'more task' : 'task', late ? 'more tasks' : 'tasks')} ${verb(behind)} running late` : ''].filter(Boolean).join(' and ') + '.';
+  const n = (f.atRisk || []).length;
+  return n ? `${plural(n, 'task')} ${n === 1 ? 'is' : 'are'} late.` : 'Nothing is late.';
 }
 const notLiveN = f => (f.notLive || f.blockers || []).length;
 /* R5: email-draft recipients = project resources as first.last@northwind.example (fictional domain) */
@@ -307,48 +329,75 @@ function appendixOf(f) {
   if (f.rag && f.rag.reasons) out.push(`Health (${RAG_WORD[f.rag.status]}): ${f.rag.reasons.join('; ')}.`);
   ((f.readiness && f.readiness.failing) || []).forEach(c => out.push(`${c.label}: ${c.detail}`));
   const behind = (f.atRisk || []).filter(w => w.slipDays);
-  if (behind.length) out.push(`Schedule slip: ${behind.map(w => `"${w.title}" ${plural(w.slipDays, 'day')}`).join(', ')}.`);
+  if (behind.length) out.push(`Schedule slip (business days): ${behind.map(w => `${q(w.title)} ${plural(w.slipDays, 'business day')}`).join(', ')}.`);
   return out;
 }
-/* R7: every late task, then at most 3 that are running late (most days behind first); the rest as one line */
+/* R7/R9: every past-due task, then at most 3 that will finish after their due date (latest first); the rest as one line */
 function lateFirst(items) {
   const late = items.filter(w => w.daysPastDue > 0), behind = items.filter(w => !(w.daysPastDue > 0)).sort((a, b) => (b.slipDays || 0) - (a.slipDays || 0));
   const more = behind.length - 3;
-  return late.concat(behind.slice(0, 3)).map(atRiskLine).concat(more > 0 ? [`${plural(more, 'more task')} ${more === 1 ? 'is' : 'are'} running late`] : []);
+  return late.concat(behind.slice(0, 3)).map(atRiskLine).concat(more > 0 ? [`${plural(more, 'more task')} ${more === 1 ? 'is' : 'are'} late`] : []);
 }
 const pendingWord = n => (n === 1 ? 'piece of information is' : 'pieces of information are');
+/* R9 §13: the cost line only when a budget or day rates exist; "Expected cost" is the Simple-mode word */
+function costLineOf(f) {
+  const c = f.cost;
+  if (!c) return null;
+  const hasBudget = c.planned != null && isFinite(+c.planned) && +c.planned > 0;
+  if (hasBudget && c.actual != null) return `${money(c.actual)} spent of the ${money(c.planned)} budget` + (c.forecast != null ? `; expected cost ${money(c.forecast)}` : '');
+  if (f.hasRates && c.forecast != null && +c.forecast > 0) return `Expected cost ${money(c.forecast)}`;
+  return null;
+}
+/* R9 §1: the asks are the one ranked "who needs to act" list (top 8), then decisions the list does not carry */
+function asksOf(f) {
+  const sum = f.summary || {};
+  const hc = f.hypercare;
+  const grants = (f.pendingGrants || []).map(g => `Decide on temporary ${g.access} access to ${g.data} for ${ENV_PLAIN[String(g.env).toLowerCase()] || 'testing'}, requested by ${g.requestedBy}`);
+  const roll = hc && hc.considerRollback ? [`${hc.owner || 'The support lead'}: a serious problem is open; decide whether to roll back`] : [];
+  if (sum.source === 'projectTruth' && Array.isArray(sum.who)) {
+    const whoLines = sum.who.slice(0, 8).map(w => `${w.person}: ${w.what}`);
+    const said = whoLines.join('\n');
+    /* a blocker whose name the list does not mention yet (e.g. a planned blocker) is still asked for, once */
+    const extra = (f.blockers || []).filter(b => !said.includes(b.name) && !(b.resolver && said.includes(b.resolver)))
+      .map(b => b.state === 'pending' ? `${b.owner}: confirm ${b.name} is ready (the fix is done)` : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing ${q(b.resolver)}` : ''}`);
+    return whoLines.concat(extra, grants, roll);
+  }
+  return (f.blockers || []).map(b => b.state === 'pending'
+      ? `${b.owner}: confirm ${b.name} is ready (the fix is done)`
+      : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing ${q(b.resolver)}` : ''}`)
+    .concat((f.notLive || []).filter(b => b.state === 'example' && !(f.blockers || []).includes(b)).map(b => `${b.owner}: get ${b.name} ready to use`))
+    /* R9 §6 (bug B13): a defect is "Fix the problem", never "Settle the open question" */
+    .concat((f.openDiscovered || []).map(x => `Fix the problem: ${x.requirement.replace(/[.\s]+$/, '')} (${x.data})`))
+    .concat(grants, roll);
+}
 function statusRules(f, opts) {
   const s = f.stats || {};
   const sum = f.summary || { sentence: '', label: LABELS[(f.rag || {}).status] || 'Not planned', rag: (f.rag || {}).status || 'grey' };
+  const truth = sum.source === 'projectTruth';
   const hc = f.hypercare;
   const nl = notLiveN(f);
   const hcLine = hc ? `Support after launch: ${hc.daysRemaining != null ? `${plural(hc.daysRemaining, 'day')} left` : 'in progress'}${hc.owner ? `, led by ${hc.owner}` : ''}; ${plural(hc.open.length, 'open problem')}` : null;
-  /* R8: launch readiness counts projectTruth's launch steps (the same list the Launch page shows) */
-  const steps = Array.isArray(f.launchSteps) ? f.launchSteps.filter(x => x.key !== 'launch') : null;
-  const left = steps ? steps.filter(x => !x.done).length : f.readiness ? f.readiness.failing.length : null;
-  const c = f.cost;
-  const costLine = c && c.planned != null && c.actual != null ? `${money(c.actual)} spent of the ${money(c.planned)} budget` + (c.forecast != null ? `; expected ${money(c.forecast)} in total` : '') : null;
+  /* R9 §1: stepsLeft is the one launch count (the Launch page's undone steps) */
+  const steps = Array.isArray(f.launchSteps) ? f.launchSteps : null;
+  const left = f.stepsLeft != null ? f.stepsLeft : steps ? steps.filter(x => !x.done).length : f.readiness ? f.readiness.failing.length : null;
+  const costLine = costLineOf(f);
+  const testNext = f.testing && f.testing.next ? `Testing: ${f.testing.next}` : null;
+  const live = f.project.status === 'live';
   const out = {
     rag: sum.rag, label: sum.label, sentence: sum.sentence, date: f.today,
     headline: `${sum.label}: ${f.project.name}`,
-    summary: [sum.sentence, `${s.done || 0} of ${plural(s.total || 0, 'task')} ${s.total === 1 ? 'is' : 'are'} done.`, lateLine(f),
+    summary: [sum.sentence, `${s.done || 0} of ${plural(s.total || 0, 'task')} ${s.total === 1 ? 'is' : 'are'} done.`, truth ? '' : lateLine(f),
       nl ? `${nl} ${pendingWord(nl)} not available yet.` : '', hcLine ? hcLine + '.' : ''].filter(Boolean).join(' '),
     highlights: [`${s.done || 0} of ${plural(s.total || 0, 'task')} done`]
-      .concat(f.testing && f.testing.count ? [f.testing.count] : [])
-      .concat(left == null ? [] : [left ? `Not ready to launch: ${plural(left, steps ? 'step' : 'thing')} left` : 'Ready to launch'])
+      .concat(testNext && !live ? [testNext] : [])
+      .concat(left == null || live ? [] : [left ? `Not ready to launch: ${plural(left, 'step')} left` : 'Ready to launch'])
       .concat(costLine ? [costLine] : [])
       .concat(hcLine ? [hcLine] : []),
     risks: (hc ? hc.open.map(i => `${i.severity === 1 ? 'Serious problem' : 'Problem'} "${i.title}" is still open${i.severity === 1 ? ': consider rolling back the launch' : ''}`) : [])
       .concat(lateFirst(f.atRisk || []))
       .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (high impact; ${r.owner} is watching it)`))
       .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `Likely resolved: ${r.title}. All its linked work is done; ${r.owner}, close it?`)),
-    asks: (f.blockers || []).map(b => b.state === 'pending'
-        ? `${b.owner}: confirm ${b.name} is ready (the fix is done)`
-        : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
-      .concat((f.notLive || []).filter(b => b.state === 'example' && !(f.blockers || []).includes(b)).map(b => `${b.owner}: get ${b.name} ready to use`))
-      .concat((f.openDiscovered || []).map(x => `Settle the open question on ${x.data}: ${x.requirement}`))
-      .concat((f.pendingGrants || []).map(g => `Decide on temporary ${g.access} access to ${g.data} for ${ENV_PLAIN[String(g.env).toLowerCase()] || 'testing'}, requested by ${g.requestedBy}`))
-      .concat(hc && hc.considerRollback ? [`${hc.owner || 'The support lead'}: a serious problem is open; decide whether to roll back`] : []),
+    asks: asksOf(f),
   };
   if (opts && opts.advanced) out.appendix = appendixOf(f);
   return out;
@@ -357,8 +406,10 @@ function statusRules(f, opts) {
 const JARGON = /\b(SPI|CPI|EAC|earned value|slip\w*|amber|UAT|SIT|go\/no-go|hypercare|RAG)\b/i;
 function plainWords(t) {
   return String(t).replace(/\bUAT\b/g, 'business testing').replace(/\bSIT\b/g, 'system testing').replace(/\bhypercare\b/gi, 'support after launch')
-    .replace(/\bgo\/no-go\b/gi, 'final yes/no check').replace(/\bamber\b/gi, 'at risk').replace(/\bis slipping\b/gi, 'is running late')
-    .replace(/\bslipping\b/gi, 'running late').replace(/\bslipped\b/gi, 'ran late').replace(/\bslip(s)?\b/gi, 'delay$1');
+    .replace(/\bgo\/no-go\b/gi, 'final yes/no check').replace(/\bamber\b/gi, 'at risk').replace(/\bis slipping\b/gi, 'is late')
+    .replace(/\bslipping\b/gi, 'late').replace(/\bslipped\b/gi, 'ran late').replace(/\bslip(s)?\b/gi, 'delay$1')
+    /* R9 §1: Simple has one word for it, "late" */
+    .replace(/\bpast due\b/gi, 'late').replace(/\b(is|are) running late\b/gi, '$1 late').replace(/\brunning late\b/gi, 'late');
 }
 const plainOk = t => !JARGON.test(t);
 
@@ -932,15 +983,21 @@ async function run(kind, body, docs, today) {
     const facts = statusFacts(docs, projectId, today, engine);
     const L = labeler(docs);
     const recipients = recipientsOf(docs, list(docs, 'project').find(p => p.id === projectId));
+    /* R9 §11: Simple mode never says "Rules-based"; pages show sourceLabel as given */
+    const rulesLabel = { source: 'rules', sourceLabel: advanced ? 'Rules-based' : 'Written from the project\'s facts' };
     const fallback = Object.assign(L.scrub(statusRules(facts, { advanced })), { recipients });
-    if (!configured()) return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) };
+    if (!configured()) return { status: 200, body: Object.assign(fallback, rulesLabel, { facts }) };
     try {
       /* the model gets plain facts only: no earned value, "behind" instead of "slip" (unless the reader asked for advanced) */
       const sent = JSON.parse(JSON.stringify(facts));
+      /* R9 §13: no budget and no rates -> no cost facts at all, so the model cannot write a cost line */
+      if (!costLineOf(facts)) { delete sent.cost; delete sent.earnedValue; if (sent.truth) delete sent.truth.cost; }
       if (!advanced) {
         delete sent.earnedValue; delete sent.rag;
-        (sent.atRisk || []).forEach(w => { w.sched = w.sched === 'late' ? 'late' : 'running late'; w.daysBehindPlan = w.slipDays; delete w.slipDays; });
-        if (sent.stats) { sent.stats.runningLate = sent.stats.slip; delete sent.stats.slip; }
+        /* R9 §1: one word, "late"; days are business days */
+        (sent.atRisk || []).forEach(w => { w.late = w.daysPastDue > 0 ? 'past its due date' : 'will finish after its due date'; delete w.sched;
+          w.businessDaysLate = w.daysPastDue; delete w.daysPastDue; delete w.slipDays; });
+        if (sent.stats) { delete sent.stats.slip; delete sent.stats.runningLate; }
         if (sent.readiness) sent.readiness.failing = sent.readiness.failing.map(c => ({ label: plainWords(c.label), detail: plainWords(c.detail) }));
       }
       const sum = facts.summary;
@@ -950,6 +1007,12 @@ async function run(kind, body, docs, today) {
         'Refer to work, information and people only by the names and titles given; never output identifiers. ' +
         `The headline MUST start with "${sum.label}:" and must not contradict it. The summary MUST start with this exact sentence: "${sum.sentence}" ` +
         'Each ask names the person who needs to act and what to do. Risks marked likelyMitigated go in risks as "Likely resolved: <title>. … close it?". ' +
+        'The asks are summary.who, in that order, each as "<person>: <what>"; add no other ask except pendingGrants. ' +
+        'A task is "late" (never "past due", "running late" or "behind"); give amounts of lateness in business days. ' +
+        'Say a task is "waiting on" another task only when its waitingOn is supplied, and name exactly that task; never because tasks run in parallel. ' +
+        'Put every task title inside a sentence in curly quotes, like “Set up the bank details form”. ' +
+        'Launch readiness is exactly stepsLeft: "Not ready to launch: N steps left", or "Ready to launch" when it is 0. ' +
+        'For testing, use testing.next word for word. Mention cost only when cost is supplied. ' +
         'Use the numbers, dates, counts and blockers exactly as given (truth); never say all work is done or nothing needs attention while blockers exist. ' +
         'When hypercare (support after launch) is supplied, report days left and open problems; an open severity 1 problem means "consider rolling back".' +
         (advanced ? ' The reader asked for advanced detail: you may add earned value (SPI, CPI) in one highlight.' : ''),
@@ -959,22 +1022,33 @@ async function run(kind, body, docs, today) {
       /* the label is ours; the model's text after it may not name any other status */
       let headline = plainWords(out.headline.trim());
       const rest = headline.toLowerCase().startsWith(sum.label.toLowerCase()) ? headline.slice(sum.label.length).replace(/^[\s:,-]+/, '') : headline;
-      if (!rest || /\b(on track|at risk|off track|red|amber|green|running late)\b/i.test(rest) || !plainOk(rest)) headline = fallback.headline;
+      /* the text after the label may not name any other status (R9 §1: "On track" never sits beside a late task) */
+      const otherStatus = /\b(on track|at risk|off track|red|amber|green|running late|will miss|some tasks late)\b/i;
+      if (!rest || otherStatus.test(rest) || (sum.rag === 'green' && /\blate\b/i.test(rest)) || !plainOk(rest)) headline = fallback.headline;
       else headline = `${sum.label}: ${rest}`;
       let summary = plainWords(out.summary.trim());
       if (!advanced && !plainOk(summary)) summary = fallback.summary;
       else if (!summary.startsWith(sum.sentence)) summary = `${sum.sentence} ${summary.replace(sum.sentence, '').trim()}`.trim();
       const arr = a => strArr(a).map(plainWords).filter(x => advanced || plainOk(x));
-      const res = L.scrub({ headline: headline.slice(0, 200), summary: summary.slice(0, 1200), highlights: arr(out.highlights), risks: arr(out.risks), asks: arr(out.asks) });
-      Object.assign(res, { rag: sum.rag, label: sum.label, sentence: sum.sentence, date: today, recipients, source: 'ai', facts });
+      /* R9 §13: "waiting on" only along a real dependency edge the facts name */
+      const waits = (facts.atRisk || []).map(w => w.waitingOn).filter(Boolean);
+      const realWait = x => !/\bwaiting (on|for)\b/i.test(x) || waits.some(t => x.includes(t));
+      /* R9 §1: the counts, the launch steps, testing's next step, cost and the asks are the truth's, word for word;
+         the model writes the headline, the summary and the risks */
+      /* advanced readers may also get the model's earned-value line */
+      const evLines = advanced ? arr(out.highlights).filter(x => /\b(SPI|CPI|earned value)\b/i.test(x)) : [];
+      const res = L.scrub({ headline: headline.slice(0, 200), summary: summary.slice(0, 1200), highlights: fallback.highlights.concat(evLines),
+        risks: arr(out.risks).filter(realWait), asks: fallback.asks.slice() });
+      if (!res.risks.length) res.risks = fallback.risks.slice();
+      Object.assign(res, { rag: sum.rag, label: sum.label, sentence: sum.sentence, date: today, recipients, source: 'ai', sourceLabel: 'Generated by AI', facts });
       if (advanced) res.appendix = fallback.appendix;
       return { status: 200, body: res };
-    } catch (e) { return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) }; }
+    } catch (e) { return { status: 200, body: Object.assign(fallback, rulesLabel, { facts }) }; }
   }
 
   if (kind === 'suggest-work') {
     if (!engine || typeof engine.suggestWorkFromDiff !== 'function') return { status: 503, body: { error: 'engine unavailable' } };
-    const items = engine.suggestWorkFromDiff(docs, projectId) || [];
+    const items = engine.suggestWorkFromDiff(docs, projectId, today) || [];
     if (!configured() || !items.length) return { status: 200, body: { items, source: 'rules' } };
     try {
       const out = await chat(RULES + ' Improve only the wording of each work item title: short, specific, imperative, max 70 characters. ' +

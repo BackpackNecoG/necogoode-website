@@ -518,3 +518,39 @@ a.d-wi:hover .t{color:var(--accent)}
   .d-hdr + .grid{margin-top:10px}
   .d-hdr + .grid > .canvas{padding-top:12px}
 }
+
+/* == round 9: one truth, enforced == */
+/* "or a choice…" reads as a link, never struck through (it used to borrow the removed-step .ghost style) */
+.d-addother{text-decoration:none;color:var(--accent);border-color:var(--line);font-weight:600}
+.d-addother:hover{text-decoration:underline}
+/* "We have it" switch: the tick box drawn as a switch */
+.d-switch,.d-have{cursor:pointer}
+.d-switch input[type=checkbox],.d-have input[type=checkbox]{appearance:none;-webkit-appearance:none;width:30px;height:18px;border-radius:999px;background:#cbd5e1;position:relative;flex:0 0 auto;margin:0;cursor:pointer;transition:background .15s}
+.d-have input[type=checkbox]{width:24px;height:14px}
+.d-switch input[type=checkbox]::after,.d-have input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:left .15s}
+.d-have input[type=checkbox]::after{width:10px;height:10px}
+.d-switch input[type=checkbox]:checked,.d-have input[type=checkbox]:checked{background:var(--live,#16a34a)}
+.d-switch input[type=checkbox]:checked::after{left:14px}
+.d-have input[type=checkbox]:checked::after{left:12px}
+.d-switch input[type=checkbox]:focus-visible,.d-have input[type=checkbox]:focus-visible{outline:3px solid #a5b4fc;outline-offset:2px}
+.d-switch{display:inline-flex;align-items:center;gap:8px;font-weight:600;text-transform:none;letter-spacing:0;color:var(--ink)}
+/* choice / at-the-same-time label above the gateway question */
+.d-gwkind{display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3);margin:0 0 1px}
+.ghost .d-gwkind{display:inline;text-transform:none;letter-spacing:0;font-size:inherit}
+/* systems touched (side card), separate from teams */
+.d-syschip{background:#f1f5f9;border-color:#cbd5e1;color:#334155}
+/* Start a project, gated on a change */
+.d-startprj [data-start-project][disabled]{opacity:.55;cursor:not-allowed}
+.d-startprj [data-start-hint]{display:block;margin-top:4px}
+/* data page: practice sample row */
+.d-practice{display:inline-block;font-size:11px;font-weight:600;border:1px solid #fcd34d;background:#fffbeb;color:#92400e;border-radius:999px;padding:0 7px;margin-left:6px}
+/* SOP import: a path that ends the process, and the owner of proposed information */
+.is-end{display:flex;align-items:center;gap:8px;border:1px dashed #94a3b8;border-radius:10px;padding:7px 10px;font-size:13px;color:var(--ink2);background:#f8fafc;margin:6px 0}
+.is-endic{font-size:10px;color:#475569}
+.is-ndown{display:block;color:var(--ink3)}
+.d-ny.d-have:has(input:checked){color:#166534;border-color:#bbf7d0;background:#f0fdf4}
+.d-ny.d-have:not(:has(input:checked)){color:var(--ink2);border-color:var(--line);background:#fff}
+.is-step.gate .is-n:empty{visibility:hidden}
+.modal .field .d-have input[type=checkbox],.d-ichip .d-have input[type=checkbox]{min-height:0!important;height:14px!important;width:24px!important;padding:0;border:0;flex:0 0 24px}
+.modal .field .d-switch input[type=checkbox]{min-height:0!important;height:18px!important;width:30px!important;padding:0;border:0;flex:0 0 30px}
+.d-have,.d-switch span{text-transform:none!important;letter-spacing:0!important}

@@ -104,6 +104,12 @@ document.addEventListener('click', async e => {
     if (r.action === 'reset') { await store.reset(); toast('Demo data reset'); }
   }
 });
+/* R9 §10: phone menu */
+const menuBtn = document.getElementById('menuBtn');
+const setMenu = open => { const t = document.querySelector('header.top'); t.classList.toggle('open', open); menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false'); };
+menuBtn.addEventListener('click', () => setMenu(!document.querySelector('header.top').classList.contains('open')));
+document.getElementById('nav').addEventListener('click', e => { if (e.target.closest('a')) setMenu(false); });
+document.addEventListener('click', e => { const vm = document.getElementById('viewmenu'); if (vm && vm.open && !e.target.closest('#viewmenu')) vm.open = false; });
 document.getElementById('adv').addEventListener('change', e => { store.setAdvanced(e.target.checked); toast(e.target.checked ? 'Advanced tools shown' : 'Simple view'); });
 document.getElementById('persona').addEventListener('change', e => { store.setMe(e.target.value); toast('Now viewing as ' + e.target.selectedOptions[0].text.split(' — ')[0]); });
 window.addEventListener('popstate', render);

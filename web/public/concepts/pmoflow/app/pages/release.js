@@ -41,7 +41,7 @@ const plainOf = c => (PLAIN[c.id] || [c.label, ''])[0] || c.label;
 const tipOf = c => (PLAIN[c.id] || [])[1] || '';
 /* A jargon term with its plain meaning as a tooltip. */
 export const term = (word, tip) => `<abbr class="rl-term" title="${esc(tip)}" tabindex="0">${esc(word)}</abbr>`;
-const GNG = () => term('Final yes/no check', 'Go/no-go: a checkpoint where the named owner confirms it is safe to continue the launch.');
+const GNG = () => term('Final check', 'Go/no-go: a checkpoint where the named owner confirms it is safe to continue the launch.');
 
 /* Audit lines use names, never ids: swap any known doc id in an event summary for its name. */
 function idNames() {
@@ -181,7 +181,7 @@ function buReadyOf(prj, bu) {
   const waiting = [];
   if (work.length) waiting.push(`${work.length} task${work.length === 1 ? '' : 's'} to finish (${work.slice(0, 2).map(w => w.title).join(', ')}${work.length > 2 ? '…' : ''})`);
   if (notLive.length) waiting.push(`${notLive.slice(0, 3).join(', ')} to be available`);
-  if (notPassed) waiting.push(`${notPassed} business test${notPassed === 1 ? '' : 's'} to pass`);
+  if (notPassed) waiting.push(`${notPassed} business check${notPassed === 1 ? '' : 's'} to pass`);
   return { ready: !waiting.length, waiting };
 }
 const stepDataIds = st => { const out = new Set(st.data || []); (st.subs || []).forEach(sb => (sb.data || []).forEach(d => out.add(d))); return [...out]; };
@@ -299,7 +299,7 @@ function itemView(item, checkId, prjId, chk) {
     const dm = /^(.+)#(\d+)$/.exec(s);
     if (dm && store.get('dataElement', dm[1])) { const de = store.get('dataElement', dm[1]); const d = (de.discovered || [])[+dm[2]] || {}; return { text: d.text || de.name, extra: `${de.name} · owner ${pname(de.owner)}`, href: `/testing/${prjId}?de=${dm[1]}` }; }
     if (checkId === 'process-valid') { const pm = /^([^:]+):(.+)$/.exec(s); const pr = (((chk && chk.problems) || []).find(x => x.pid + ':' + x.node === s) || {}); const proc = pm && store.get('process', pm[1]); return { text: pr.problem || s, extra: proc ? proc.name : '', href: pm ? `/process/${pm[1]}?mode=edit` : null }; }
-    if (checkId === 'tests-passed' && !store.get('workItem', s) && !store.get('testCase', s)) { const prj = store.get('project', prjId) || {}; const e = E(); let sc = (prj.uatScripts || []).find(x => x.id === s); if (!sc && e && e.generateUatScripts) { try { sc = e.generateUatScripts(store.state.docs, prjId).find(x => x.id === s); } catch (err) { sc = null; } } if (sc) return { text: sc.title, extra: 'Business test', href: `/testing/${prjId}` }; }
+    if (checkId === 'tests-passed' && !store.get('workItem', s) && !store.get('testCase', s)) { const prj = store.get('project', prjId) || {}; const e = E(); let sc = (prj.uatScripts || []).find(x => x.id === s); if (!sc && e && e.generateUatScripts) { try { sc = e.generateUatScripts(store.state.docs, prjId).find(x => x.id === s); } catch (err) { sc = null; } } if (sc) return { text: sc.title, extra: 'Business check', href: `/testing/${prjId}` }; }
     if (store.get('dataElement', s)) return { text: store.get('dataElement', s).name, href: checkId === 'discovered-resolved' ? `/testing/${prjId}?de=${s}` : '/data/' + s };
     if (store.get('process', s)) return { text: store.get('process', s).name, href: `/process/${s}?mode=edit` };
     if (store.get('workItem', s)) { const w = store.get('workItem', s); return { text: w.title, extra: `${w.kind === 'defect' ? 'open defect · ' : ''}${pname(w.owner)} · ${w.status === 'prog' ? 'in progress' : w.status === 'done' ? 'done' : 'not started'}`, href: w.kind === 'defect' ? `/testing/${prjId}` : `/project/${prjId}?mode=work` }; }
@@ -379,7 +379,8 @@ export function render(params) {
 
   const relFailed = !!failedRel;
   const gateCls = live ? 'live' : rd.pass ? 'pass' : 'blocked';
-  const gateTitle = live ? 'Launched' : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready: ${failing} thing${failing === 1 ? '' : 's'} left`;
+  const sLeft = stepsLeftOf(prj, truthSteps(prj));
+  const gateTitle = live ? 'Launched' : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready to launch: ${sLeft} step${sLeft === 1 ? '' : 's'} left`;
   const gateSub = live ? `Live since ${fmt(lastGo && lastGo.at)}. Temporary data access closed at launch.`
     : rd.unavailable ? 'Readiness engine is still loading.'
     : rd.pass ? (warns ? `Everything required is done. ${warns} warning to review.` : 'Everything required is done. The launch owner can launch.')
@@ -432,9 +433,9 @@ export function render(params) {
     ${releaseCards(prj, releases)}
     <div class="card rl-explain"><h3>How temporary data access works</h3>
       <p><b>Access covers one piece of information, closes at launch, and every action is logged.</b></p>
-      <ul><li>The information's owner approves each request with an extra sign-in check. Nobody approves their own request; if the owner asked, the project manager decides.</li><li>Access is for build testing or business testing only and lasts 30 days at most, counted from approval.</li><li>Customer data and keys stay in the customer's own systems.</li></ul></div>
+      <ul><li>The information's owner approves each request with an extra sign-in check. Nobody approves their own request; if the owner asked, the project manager decides.</li><li>Access is for build testing or business testing only, for the number of days asked for (30 at most), counted from approval.</li><li>Customer data and keys stay in the customer's own systems.</li></ul></div>
     <div class="card"><h3>Comments</h3>${commentsPanel('project:' + prjId)}</div>
-    <div class="card"><h3>Audit log</h3><div data-rl-history><div class="hint">Loading history…</div></div></div>
+    <div class="card"><h3>History</h3><div data-rl-history><div class="hint">Loading history…</div></div></div>
   </aside></div>`;
 }
 
@@ -453,9 +454,15 @@ function signoffWhy(prj, bu, open) {
   return '';
 }
 
+/* R9: only teams that need to approve (projectTruth.approvals) are sections; never a gate condition otherwise. */
+function neededSections(prj) {
+  const secs = buSections(prj); const appr = approvalsTruth(prj);
+  if (!appr) return secs;
+  return appr.filter(a => a.needed !== false).map(a => secs.find(s => s.bu.toLowerCase() === String(a.bu).toLowerCase()) || { bu: a.bu, steps: [], changed: [], tasks: false, fromTags: false });
+}
 function signoffCard(prj, rd) {
   const meId = store.state.me;
-  const sections = buSections(prj);
+  const sections = prj.status === 'live' ? buSections(prj) : neededSections(prj);
   const live = prj.status === 'live';
   const isOwner = meId === prj.owner;
   const rm = rmOf(prj); const isRm = meId === rm;
@@ -487,6 +494,8 @@ function signoffCard(prj, rd) {
     } else if (!live && mine && !isOwner && !isRm) {
       act = `<div class="rl-bu-act"><button class="btn sm danger" data-signoff="rejected" data-bu="${esc(s.bu)}">Withdraw and ask for changes</button></div>`;
     }
+    const apT = !live && (approvalsTruth(prj) || []).find(x => String(x.bu).toLowerCase() === s.bu.toLowerCase());
+    if (apT && apT.blockedBy && apT.blockedBy.rule !== 'no-approver' && state !== 'approved') act = sodBlock(prj, { bu: s.bu, blockedBy: apT.blockedBy });
     const chosen = (prj.approvers || {})[s.bu];
     const viaTxt = x => x.via === 'trigger' ? 'what starts it involves' : 'teams involved';
     return `<div class="rl-bu ${state}" data-bu="${esc(s.bu)}" ${s.fromTags ? 'data-from-tags' : ''}>
@@ -523,13 +532,20 @@ function suggestApprover(prj, bu) {
   return procOwner || (store.state.people.find(p => !ex.has(p.id)) || {}).id || '';
 }
 const canChoose = prj => store.state.me === prj.owner || store.state.me === rmOf(prj);
-function choosePicker(prj, bu) {
-  const ex = new Set([prj.owner, rmOf(prj)].filter(Boolean));
+function choosePicker(prj, bu, opts) {
+  opts = opts || {};
+  const ex = new Set([prj.owner, rmOf(prj)].concat(opts.exclude || []).filter(Boolean));
   if (!canChoose(prj)) return `<div class="hint" data-choose-who>${esc(pname(prj.owner))} (project manager) chooses who approves this part.</div>`;
-  const sug = suggestApprover(prj, bu);
-  return `<div class="rs-choose" data-choose="${esc(bu)}"><label for="rs-ch-${esc(bu)}">Choose who approves this part</label>
+  const sug = ex.has(suggestApprover(prj, bu)) ? (store.state.people.find(p => !ex.has(p.id) && p.bu === bu) || store.state.people.find(p => !ex.has(p.id)) || {}).id : suggestApprover(prj, bu);
+  return `<div class="rs-choose" data-choose="${esc(bu)}"><label for="rs-ch-${esc(bu)}">${esc(opts.label || 'Choose who approves this part')}</label>
     <div class="rs-choose-r"><select id="rs-ch-${esc(bu)}" data-choose-sel="${esc(bu)}">${store.state.people.filter(p => !ex.has(p.id)).map(p => `<option value="${esc(p.id)}" ${p.id === sug ? 'selected' : ''}>${esc(p.name)} · ${esc(p.role)}</option>`).join('')}</select>
     <button class="btn primary" data-choose-save="${esc(bu)}">Choose</button></div></div>`;
+}
+/* R9 §13: a separation-of-duties block is never a silent dead end: say it plainly, with a person picker. */
+function sodBlock(prj, p) {
+  const b = p.blockedBy; if (!b) return '';
+  const who = typeof b === 'object' ? (b.person || b.by || b.recordedBy) : null;
+  return `<div class="rs-sod" data-sod-block="${esc(p.bu)}" role="note"><b>${esc(blockText(b, p.bu))}</b>${choosePicker(prj, p.bu, { exclude: [who], label: 'Choose who:' })}</div>`;
 }
 async function chooseApprover(prj, bu, pid) {
   const cur = store.get('project', prj.id) || prj;
@@ -577,7 +593,7 @@ function runbookTable(prj, opts) {
         <label class="rl-rbchk"><input type="checkbox" data-rb-done="${esc(t.id)}" ${t.done ? 'checked' : ''} ${tick ? '' : 'disabled'} aria-label="Done: ${esc(t.task)}"></label>
         <div class="rl-rbt"><div><b data-user-text>${esc(t.task)}</b>${t.gonogo ? ` <span class="rl-gng">${GNG()}</span>` : ''}${od ? ' <span class="badge b-late">Overdue</span>' : ''}</div>
           <small><span class="rl-rbown" data-rb-owner="${esc(t.owner || '')}">${t.owner ? `${av(t.owner)} ${esc(pname(t.owner))}` : '<b class="rl-noown">No owner</b>'}</span> · ${esc(fmtPlanned(startOf(t)))}${t.durationMins ? ` · ${esc(fmtDur(t.durationMins))}` : ''}${t.done && t.doneBy ? ` · ${t.gonogo ? 'confirmed' : 'done'} by ${esc(pname(t.doneBy))} ${esc(fmtTime(t.doneAt))}` : ''}</small>
-          ${t.gonogo && !t.done && !opts.readonly ? `<small class="rl-gngwho" data-gng-who>${t.owner ? `Only ${esc(pname(t.owner))} can confirm this final yes/no check.` : 'Needs an owner before launch.'}</small>` : ''}</div></li>`;
+          ${t.gonogo && !t.done && !opts.readonly ? `<small class="rl-gngwho" data-gng-who>${t.owner ? `Only ${esc(pname(t.owner))} can confirm this final check.` : 'Needs an owner before launch.'}</small>` : ''}</div></li>`;
     }).join('')}</ol>`;
 }
 function cutoverCard(prj) {
@@ -592,20 +608,20 @@ function cutoverCard(prj) {
     ${!prj.cutover ? '<div class="empty rl-co-empty">No launch-day plan yet. List the launch-day steps in order, name who undoes the launch if needed, write the undo plan and name who handles support after launch.</div>' : `
       ${runbookTable(prj, { checklist: live })}
       <div class="rl-co">
-      ${row('Launch window', esc(c.window || ''), 'window')}
+      ${row('Launch window', esc(fmtWindow(c)), 'window')}
       ${row('Who undoes it if needed', c.rollbackOwner ? `${av(c.rollbackOwner)} ${esc(pname(c.rollbackOwner))}` : '', 'rollbackOwner')}
       ${row('Undo plan', c.rollbackPlan ? `<span class="rl-pre-line">${esc(c.rollbackPlan)}</span>` : '', 'rollbackPlan')}
       ${row('Support after launch', c.hypercareOwner || c.hypercareDays ? `${c.hypercareDays ? esc(c.hypercareDays) + ' days' : ''}${c.hypercareOwner ? ` · ${av(c.hypercareOwner)} ${esc(pname(c.hypercareOwner))}` : ''}` : '', 'hypercare')}
       ${row('Who is told what', c.comms ? `<span class="rl-pre-line">${esc(c.comms)}</span>` : '', 'comms')}
     </div>`}
     <div class="rl-bu-act">${canEdit ? `<button class="btn sm primary" data-cutover-edit>${prj.cutover ? 'Edit launch-day plan' : 'Add launch-day plan'}</button>`
-      : `<span class="hint" data-why>Only the project manager (${esc(pname(prj.owner))}) can edit the launch-day plan. People tick their own steps; final yes/no checks are confirmed by their owner only.</span>`}</div></div>`;
+      : `<span class="hint" data-why>Only the project manager (${esc(pname(prj.owner))}) can edit the launch-day plan. People tick their own steps; final checks are confirmed by their owner only.</span>`}</div></div>`;
 }
 
 async function tickTask(prj, tid, done) {
   const cur = store.get('project', prj.id) || prj;
   const tasks = tasksOf(cur.cutover); const t = tasks.find(x => x.id === tid); if (!t) return;
-  if (!canTick(cur, t)) { toast(t.gonogo ? `Only ${pname(t.owner)} can confirm this final yes/no check.` : `Only ${pname(t.owner)} or the project manager can tick this step.`); store.emit(); return; }
+  if (!canTick(cur, t)) { toast(t.gonogo ? `Only ${pname(t.owner)} can confirm this final check.` : `Only ${pname(t.owner)} or the project manager can tick this step.`); store.emit(); return; }
   const next = tasks.map(x => x.id === tid ? Object.assign({}, x, done ? { done: true, doneAt: new Date().toISOString(), doneBy: store.state.me } : { done: false, doneAt: undefined, doneBy: undefined }) : x);
   await store.save('project', prj.id, Object.assign({}, cur, { cutover: Object.assign({}, cur.cutover, { tasks: next }) }), `${done ? 'Completed' : 'Reopened'} launch-day step “${t.task}”`);
   toast(done ? 'Step done' : 'Step reopened');
@@ -621,20 +637,26 @@ async function editCutover(prj) {
     <select data-to aria-label="Who does it"><option value="">Who does it</option>${ppl.map(p => `<option value="${esc(p.id)}" ${p.id === t.owner ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <input type="datetime-local" data-tp value="${esc(startOf(t))}" aria-label="Planned start">
     <input type="number" data-td min="0" max="1440" step="5" value="${esc(t.durationMins == null ? '' : t.durationMins)}" placeholder="Mins" aria-label="Duration in minutes">
-    <label class="rl-tg" title="Go/no-go: a checkpoint where the owner confirms it is safe to continue"><input type="checkbox" data-tg ${t.gonogo ? 'checked' : ''}> Final yes/no</label>
+    <label class="rl-tg" title="Go/no-go: a checkpoint where the owner confirms it is safe to continue"><input type="checkbox" data-tg ${t.gonogo ? 'checked' : ''}> Final check</label>
     <span class="rl-tctl"><button type="button" class="btn sm" data-tup aria-label="Move step up">↑</button><button type="button" class="btn sm" data-tdn aria-label="Move step down">↓</button><button type="button" class="btn sm danger" data-trm aria-label="Remove step">✕</button></span></div>`;
   const tasks = tasksOf(c);
+  /* R9: the launch window is a business day with a start and end time; the default runbook step is prefilled */
+  const pw = parseWindow(c) || {};
+  const wDate = pw.date || (E() && E().addBusinessDays ? E().addBusinessDays(store.state.today, 5) : '');
+  const wFrom = pw.from || '08:00', wTo = pw.to || '10:00';
+  const dflt = { task: 'Switch on the new way of working and check the first request goes through', owner: rmOf(prj) || prj.owner || '', plannedStart: wDate ? `${wDate}T${wFrom.padStart(5, '0')}` : '', durationMins: 30 };
   const p = modal({
     title: 'Launch-day plan',
-    body: `<div class="field"><label>Launch-day steps, in order: start time, minutes, who does it, and any ${GNG()}</label><div class="rl-trows" data-trows>${(tasks.length ? tasks : [{}]).map(trow).join('')}</div>
+    body: `<div class="field"><label>Launch window</label><div class="rl-wrow" data-window-row><input type="date" name="windowDate" value="${esc(wDate)}" aria-label="Launch day"><input type="time" name="windowStart" value="${esc(wFrom)}" aria-label="Starts at"><span aria-hidden="true">to</span><input type="time" name="windowEnd" value="${esc(wTo)}" aria-label="Ends at"></div>
+        <input name="windowNote" value="${esc(pw.note || '')}" placeholder="Note, e.g. after quarter close" aria-label="Launch window note" class="rl-wnote"></div>
+      <div class="field"><label>Launch-day steps, in order: who does it, start time, minutes, and any ${GNG()}</label><div class="rl-trows" data-trows>${(tasks.length ? tasks : [dflt]).map(trow).join('')}</div>
         <div><button type="button" class="btn sm" data-tadd>+ Add step</button></div></div>
-      <div class="field"><label>Launch window</label><input name="window" value="${esc(c.window || '')}" placeholder="e.g. Sat 06:00–10:00 CT, payment run paused"></div>
-      <div class="field"><label>Who undoes the launch if needed</label>${sel('rollbackOwner', c.rollbackOwner)}</div>
+      <div class="field"><label>Who undoes the launch if needed</label>${sel('rollbackOwner', c.rollbackOwner || prj.owner)}</div>
       <div class="field"><label>Undo plan</label><textarea name="rollbackPlan" placeholder="When to undo, the steps, and who decides">${esc(c.rollbackPlan || '')}</textarea></div>
       <div class="frow"><div class="field"><label>Days of support after launch</label><input type="number" min="0" max="90" name="hypercareDays" value="${esc(c.hypercareDays == null ? 10 : c.hypercareDays)}"></div>
         <div class="field"><label>Who handles support after launch</label>${sel('hypercareOwner', c.hypercareOwner)}</div></div>
       <div class="field"><label>Who is told what</label><textarea name="comms" placeholder="Who is told what, and when">${esc(c.comms || '')}</textarea></div>
-      <div class="hint">Before launch the plan needs at least one step, someone who can undo the launch and an undo plan, and someone for support after launch. Every final yes/no check needs an owner, who confirms it before launch. Changing the plan after approval sends the affected parts back for approval.</div>`,
+      <div class="hint">Before launch the plan needs at least one step, someone who can undo the launch and an undo plan, and someone for support after launch. Every final check needs an owner, who confirms it before launch. Changing the plan after approval sends the affected parts back for approval.</div>`,
     actions: [{ id: 'save', label: 'Save plan', primary: true }],
   });
   const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
@@ -659,7 +681,9 @@ async function editCutover(prj) {
     if (badD) { badD.querySelector('[data-td]').setAttribute('aria-invalid', 'true'); return 'Minutes must be a whole number.'; }
     if (bad) return 'A step has a person or a time but no description. Describe it or remove the row.';
     const gng = rows.find(r => r.querySelector('[data-tt]').value.trim() && r.querySelector('[data-tg]').checked && !r.querySelector('[data-to]').value);
-    if (gng) { gng.querySelector('[data-to]').setAttribute('aria-invalid', 'true'); return `“${gng.querySelector('[data-tt]').value.trim()}” is a final yes/no check, so it needs an owner: only that owner can confirm it before launch.`; }
+    if (gng) { gng.querySelector('[data-to]').setAttribute('aria-invalid', 'true'); return `“${gng.querySelector('[data-tt]').value.trim()}” is a final check, so it needs an owner: only that owner can confirm it before launch.`; }
+    if (f.windowDate) { const wd = new Date(f.windowDate + 'T12:00:00Z').getUTCDay(); if (wd === 0 || wd === 6) return { msg: 'Pick a business day (Monday to Friday) for the launch window.', field: 'windowDate' }; }
+    if (f.windowStart && f.windowEnd && f.windowEnd <= f.windowStart) return { msg: 'The launch window must end after it starts.', field: 'windowEnd' };
     const hd = String(f.hypercareDays || '').trim();
     if (hd && (!/^\d+$/.test(hd) || +hd > 90)) return { msg: 'Days of support must be a whole number from 0 to 90.', field: 'hypercareDays' };
     return null;
@@ -676,7 +700,9 @@ async function editCutover(prj) {
     return t;
   });
   const days = Math.max(0, Math.min(90, parseInt(f.hypercareDays, 10) || 0));
-  const cutover = { window: (f.window || '').trim(), rollbackOwner: f.rollbackOwner || '', rollbackPlan: (f.rollbackPlan || '').trim(), hypercareDays: days, hypercareOwner: f.hypercareOwner || '', comms: (f.comms || '').trim(), tasks: newTasks };
+  const wNote = (f.windowNote || '').trim();
+  const window = f.windowDate ? `${f.windowDate}${f.windowStart ? ' ' + f.windowStart + (f.windowEnd ? '–' + f.windowEnd : '') : ''}${wNote ? ' (' + wNote + ')' : ''}` : '';
+  const cutover = { window, windowDate: f.windowDate || '', windowStart: f.windowStart || '', windowEnd: f.windowEnd || '', windowNote: wNote, rollbackOwner: f.rollbackOwner || '', rollbackPlan: (f.rollbackPlan || '').trim(), hypercareDays: days, hypercareOwner: f.hypercareOwner || '', comms: (f.comms || '').trim(), tasks: newTasks };
   const cur = store.get('project', prj.id) || prj;
   /* R5: a cutover edit after sign-off makes every approval stale (project.cutoverUpdatedAt) */
   await store.save('project', prj.id, Object.assign({}, cur, { cutover, cutoverUpdatedAt: new Date().toISOString() }), `Updated the launch-day plan for ${prj.name} (${newTasks.length} step${newTasks.length === 1 ? '' : 's'})`);
@@ -693,6 +719,8 @@ function grantApprover(g, de, prj) {
 
 /* R6: the time box starts at approval. Requested grants carry a duration; approval sets the expiry. */
 const grantDays = g => Math.max(1, Math.min(30, Number(g.durationDays) || 30));
+/* R9: the card shows the duration that was asked for ("7 days"), never a maximum. */
+const askedDays = g => { const n = Number(g.durationDays) || (g.expires && g.approvedAt ? Math.round((new Date(g.expires) - new Date(String(g.approvedAt).slice(0, 10))) / 864e5) : 0); return n > 0 ? `${n} day${n === 1 ? '' : 's'}` : ''; };
 function grantsCard(prj) {
   const me = store.state.me;
   const grants = store.list('grant', g => g.projectId === prj.id).sort((a, b) => String((b.log && b.log[0] && b.log[0].at) || '').localeCompare(String((a.log && a.log[0] && a.log[0].at) || '')));
@@ -704,7 +732,7 @@ function grantsCard(prj) {
     let acts = '';
     if (st === 'requested') acts = isApprover ? `<button class="btn sm primary" data-gact="approve" data-gid="${esc(g.id)}">Approve</button><button class="btn sm danger" data-gact="deny" data-gid="${esc(g.id)}">Deny</button>`
       : `<span class="hint" data-awaiting>${approver ? `Waiting for ${esc(pname(approver))}${approver !== de.owner ? ' (project manager: the owner asked for it)' : ''}` : 'Nobody else can approve: ask someone else to request it'}</span>`;
-    if (canRevoke && st !== 'requested') acts += `<button class="btn sm danger" data-gact="revoke" data-gid="${esc(g.id)}">Revoke</button>`;
+    if (canRevoke && st !== 'requested') acts += `<button class="btn sm danger" data-gact="revoke" data-gid="${esc(g.id)}">Remove access</button>`;
     if (canRevoke && st === 'requested' && !isApprover) acts += `<button class="btn sm" data-gact="revoke" data-gid="${esc(g.id)}">Withdraw</button>`;
     const left = g.expires ? days(g.expires) : null;
     const logOpen = ui.open.has('log:' + g.id);
@@ -712,7 +740,7 @@ function grantsCard(prj) {
       <td><span class="chip" title="${esc(String(g.env || '').toUpperCase())}">${esc(envPlain(g.env))}</span></td><td>${esc(g.access)}</td>
       <td>${av(g.requestedBy)} <span class="rl-nm">${esc(pname(g.requestedBy))}</span>${g.reason ? `<div class="hint rl-reason" data-user-text>${esc(g.reason)}</div>` : ''}</td>
       <td>${badge(GRANT_TXT[st] || st, GRANT_CLS[st] || 'b-idle')}</td>
-      <td data-expiry>${st === 'requested' ? `<span data-from-approval>${esc(grantDays(g))} days from approval</span>` : st === 'denied' ? '—' : `${esc(fmt(g.expires))}${left != null && (st === 'active' || st === 'approved') ? `<div class="hint">${left >= 0 ? left + ' days left' : 'past'}</div>` : ''}`}</td>
+      <td data-expiry>${st === 'requested' ? `<span data-from-approval data-asked="${esc(askedDays(g))}">${esc(askedDays(g) || grantDays(g) + ' days')} from approval</span>` : st === 'denied' ? '—' : `${esc(fmt(g.expires))}${askedDays(g) ? ` <small data-asked="${esc(askedDays(g))}">· ${esc(askedDays(g))}</small>` : ''}${left != null && (st === 'active' || st === 'approved') ? `<div class="hint">${left >= 0 ? left + ' days left' : 'past'}</div>` : ''}`}</td>
       <td class="rl-acts">${acts}<button class="btn sm rl-linkbtn" data-glog="${esc(g.id)}">${logOpen ? 'Hide history' : 'History'} (${(g.log || []).length})</button></td></tr>
       ${logOpen ? `<tr class="rl-logrow"><td colspan="7">${(g.log || []).map(l => `<div class="ev"><time>${esc(fmtTime(l.at))}</time><span>${av(l.by)} <b>${esc(store.person(l.by) ? pname(l.by) : l.by)}</b> ${esc(l.action)}</span></div>`).join('') || '<div class="hint">No entries.</div>'}</td></tr>` : ''}`;
   }).join('');
@@ -728,17 +756,22 @@ function goLiveCard(prj, rd, live) {
   const procs = projectProcesses(prj);
   const rm = rmOf(prj); const isRm = store.state.me === rm;
   const open = gngOpen(prj);
-  const ready = rd.pass && !live && !open.length;
+  const guard = launchGuard(prj);
+  const gateOk = rd.pass && !live && !open.length;
+  const ready = gateOk && guard.ok;
   let why = '';
   if (!live && !isRm) why = `<div class="hint rl-why" data-why="rm">Only the launch owner (${esc(pname(rm))}) can launch. To try it, switch “Viewing as” to ${esc(pname(rm))}.</div>`;
-  else if (!live && open.length) why = `<div class="hint rl-why" data-why="gonogo">Final yes/no checks not confirmed: ${open.map(t => `${esc(t.task)} (${t.owner ? esc(pname(t.owner)) + ' confirms' : 'needs an owner'})`).join(' · ')}.</div>`;
+  else if (!live && open.length) why = `<div class="hint rl-why" data-why="gonogo">Final checks not confirmed: ${open.map(t => `${esc(t.task)} (${t.owner ? esc(pname(t.owner)) + ' confirms' : 'needs an owner'})`).join(' · ')}.</div>`;
   return `<div class="card rl-golive ${ready ? 'ready' : ''}"><h3>Launch</h3>
     ${live ? `<p class="rl-p">This project is live. The future versions are now how the processes work today.</p>`
       : `<p class="rl-p">${rd.pass ? 'Everything is done. Launching runs the delivery pipeline first; only if it succeeds do the future versions become today’s, the procedure get published and temporary data access close.' : 'Locked until everything above is done.'}</p>`}
     <div class="rl-procs">${procs.map(p => `<div><a href="${link('/process/' + p.id)}" data-link>${esc(p.name)}</a><span class="chip">v${esc(p.version || 1)}${live ? '' : ` → v${esc((p.version || 1) + 1)}`}</span></div>`).join('')}</div>
-    ${!live && gngOf(prj).length ? `<div class="rl-gngsum ${open.length ? 'fail' : 'pass'}" data-gng-summary><span class="rl-ic ${open.length ? 'fail' : 'pass'}">${open.length ? ICON.fail : ICON.pass}</span> Final yes/no checks: ${gngOf(prj).length - open.length} of ${gngOf(prj).length} confirmed by their owners</div>` : ''}
-    <button class="btn primary rl-gobtn" data-golive ${rd.pass && !live && isRm && !open.length ? '' : 'disabled'}>${live ? 'Launched' : 'Launch'}</button>
+    ${!live && gngOf(prj).length ? `<div class="rl-gngsum ${open.length ? 'fail' : 'pass'}" data-gng-summary><span class="rl-ic ${open.length ? 'fail' : 'pass'}">${open.length ? ICON.fail : ICON.pass}</span> Final checks: ${gngOf(prj).length - open.length} of ${gngOf(prj).length} confirmed by their owners</div>` : ''}
+    ${!live && fmtWindow(prj.cutover) ? `<div class="rl-window" data-launch-window><span class="lbl">Launch window</span> <b>${esc(fmtWindow(prj.cutover))}</b></div>` : ''}
+    <button class="btn primary rl-gobtn" data-golive ${ready && isRm ? '' : 'disabled'}>${live ? 'Launched' : 'Launch now'}</button>
     ${why}
+    ${!live && gateOk && !guard.ok ? `<div class="hint rl-why" data-why="guard">Launch now is locked: ${esc(joinAnd(guard.why))}.</div>
+      ${isRm ? '<button class="btn sm danger" data-override>Override with reason…</button>' : ''}` : ''}
     ${!rd.pass && !live ? `<div class="hint" style="margin-top:6px">${rd.checks.filter(c => checkState(c) === 'fail').map(c => esc(plainOf(c))).join(' · ')}</div>` : ''}
     ${live ? '<div class="hint" style="margin-top:6px">To undo the launch, use the launch summary.</div>' : ''}</div>`;
 }
@@ -899,7 +932,7 @@ function buView(prj, buRaw, rd) {
   const state = !a ? 'Awaiting sign-off' : signed ? 'Signed off' : a.decision === 'rejected' ? 'Rejected' : stale.length ? 'Re-approval needed' : 'Needs an independent approver';
   const keys = new Set(s.steps.map(x => x.pid + '|' + x.step.id));
   const e = E();
-  const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const p = store.get('process', pid); try { diffs[pid] = p && e && e.diffProcess ? e.diffProcess(p) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
+  const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const p = store.get('process', pid); try { diffs[pid] = p && e && e.diffProcess ? e.diffProcess(p, store.state.docs) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
   const work = store.list('workItem', w => w.projectId === prj.id && w.kind !== 'defect' && keys.has(w.pid + '|' + w.step));
   const DIFF_B = { new: 'b-prog', changed: 'b-soon', same: 'b-idle' };
   const nm = idNames();
@@ -909,7 +942,7 @@ function buView(prj, buRaw, rd) {
     return `<li data-bu-step="${esc(x.step.id)}"><div class="rl-bv-t"><a href="${link(`/process/${x.pid}/step/${x.step.id}`)}" data-link>${x.via === 'trigger' ? 'Trigger: ' : ''}${esc(x.step.title)}</a>
         ${badge(st === 'same' ? 'unchanged' : st, DIFF_B[st] || 'b-idle')}${ws.length ? badge(`${done}/${ws.length} work done`, done === ws.length ? 'b-done' : 'b-prog') : ''}</div>
       <small>${esc(x.pname)}${x.step.owner ? ' · ' + esc(pname(x.step.owner)) : ''}${x.via !== 'owner' ? ` · in this section by its touches tag “${esc(x.tag)}”` : ''}</small>
-      ${ch.length && st !== 'same' ? `<ul class="rl-bv-diff" data-bu-diff>${ch.slice(0, 6).map(c => `<li>${esc(humanizeSummary(c, nm))}</li>`).join('')}</ul>` : ''}</li>`;
+      ${ch.length && st !== 'same' ? `<ul class="rl-bv-diff" data-bu-diff>${ch.slice(0, 6).map(c => `<li>${esc(namesIn(humanizeSummary(c, nm)))}</li>`).join('')}</ul>` : ''}</li>`;
   }).join('');
   /* data used by these steps (and their sub-steps) with its evidence */
   const dataIds = new Set(); s.steps.forEach(x => { (x.step.data || []).forEach(d => dataIds.add(d)); (x.step.subs || []).forEach(sb => (sb.data || []).forEach(d => dataIds.add(d))); });
@@ -1016,6 +1049,128 @@ function bindBuView(root, prj, bu) {
    actions, and the rest folded away. Advanced mode keeps the full page above.
    ====================================================================================================== */
 function eng(name, ...args) { const e = E(); if (!e || typeof e[name] !== 'function') return undefined; try { return e[name](store.state.docs, ...args); } catch (err) { return undefined; } }
+
+/* ---------- R9 ONE TRUTH: every count on this page comes from projectTruth (testing, approvals, stepsLeft, launchSteps) ---------- */
+function truthOf(prj) { return eng('projectTruth', prj.id, store.state.today) || null; }
+/* projectTruth.testing: {needTests, haveTests, total, passed, failed, notRun, stage, next, perBU} */
+function testingTruth(prj, t) { t = t || truthOf(prj); return (t && t.testing) || null; }
+const nextOfTesting = tt => tt ? String(tt.next || (tt.nextAction && tt.nextAction.label) || tt.sentence || '') : '';
+/* projectTruth.approvals = [{bu, needed, ready, approved, approver, blockedBy}] (the launch gate reads the same list) */
+function approvalsTruth(prj, t) {
+  t = t || truthOf(prj);
+  const raw = t && (t.approvals || (t.status && t.status.approvals));
+  const arr = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.keys(raw).map(bu => Object.assign({ bu }, raw[bu])) : null;
+  return arr ? arr.filter(a => a && a.bu) : null;
+}
+/* One count per part: perBU[bu] from projectTruth.testing. */
+function perBuOf(prj, bu, t) {
+  const tt = testingTruth(prj, t); const m = tt && tt.perBU; if (!m) return null;
+  const k = Object.keys(m).find(x => x.toLowerCase() === String(bu).toLowerCase());
+  const v = k ? m[k] : null;
+  return v ? { total: +v.total || 0, passed: +v.passed || 0, failed: +v.failed || 0, notRun: +v.notRun || 0 } : { total: 0, passed: 0, failed: 0, notRun: 0 };
+}
+/* "Not ready to launch: N steps left" = projectTruth.stepsLeft (the checklist's undone count). */
+function stepsLeftOf(prj, steps, t) {
+  t = t || truthOf(prj);
+  if (t && typeof t.stepsLeft === 'number') return t.stepsLeft;
+  return Array.isArray(steps) ? steps.filter(s => !s.done).length : 0;
+}
+/* Plain text for a separation-of-duties (or other) block on a part. */
+function blockText(b, bu) {
+  if (!b) return '';
+  if (typeof b === 'string') return b;
+  const t = b.text || b.sentence || b.message || b.reason || b.label;
+  if (t) return String(t);
+  const who = b.person || b.by || b.recordedBy;
+  if (who) return `${firstName(who)} recorded these tests, so someone else in ${bu} must approve.`;
+  return '';
+}
+
+/* Launch window: "YYYY-MM-DD HH:MM–HH:MM (note)" (or {start, end}) shown as "Mon Nov 16, 8:00–10:00 AM", never ISO. */
+const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export function parseWindow(c) {
+  c = c || {};
+  let date = c.windowDate || '', from = c.windowStart || '', to = c.windowEnd || '', note = c.windowNote || '';
+  const w = c.window;
+  if (w && typeof w === 'object') { const s = String(w.start || ''), e = String(w.end || ''); date = date || s.slice(0, 10); from = from || s.slice(11, 16); to = to || e.slice(11, 16); note = note || w.note || ''; }
+  else if (typeof w === 'string' && w.trim()) {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?(?:\s*[–-]\s*(\d{1,2}:\d{2}))?\s*(.*)$/.exec(w.trim());
+    if (m) { date = date || m[1]; from = from || m[2] || ''; to = to || m[3] || ''; note = note || m[4].replace(/^\(|\)$/g, '').trim(); }
+    else return { raw: w.trim() };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  return { date, from, to, note };
+}
+const hm = s => { const m = /^(\d{1,2}):(\d{2})$/.exec(s || ''); return m ? { h: +m[1], m: +m[2] } : null; };
+const ampm = t => `${t.h % 12 || 12}:${String(t.m).padStart(2, '0')}`;
+export function fmtWindow(c) {
+  const p = parseWindow(c); if (!p) return ''; if (p.raw) return p.raw;
+  const d = new Date(p.date + 'T12:00:00Z');
+  let s = `${WD[d.getUTCDay()]} ${MO[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  const a = hm(p.from), b = hm(p.to);
+  if (a && b) { const pa = a.h < 12 ? 'AM' : 'PM', pb = b.h < 12 ? 'AM' : 'PM'; s += `, ${ampm(a)}${pa === pb ? '' : ' ' + pa}–${ampm(b)} ${pb}`; }
+  else if (a) s += `, ${ampm(a)} ${a.h < 12 ? 'AM' : 'PM'}`;
+  return s + (p.note ? ` (${p.note})` : '');
+}
+/* Has the launch window opened (local time)? No window set = no time guard. */
+function windowOpen(prj) {
+  const p = parseWindow(prj.cutover); if (!p || p.raw) return { open: true, text: '' };
+  const t = hm(p.from) || { h: 0, m: 0 };
+  const start = new Date(+p.date.slice(0, 4), +p.date.slice(5, 7) - 1, +p.date.slice(8, 10), t.h, t.m);
+  return { open: Date.now() >= start.getTime(), text: fmtWindow(prj.cutover) };
+}
+/* Launch guard: before the window or with launch-day steps not done, "Launch now" is disabled. */
+function launchGuard(prj) {
+  const w = windowOpen(prj);
+  const left = tasksOf(prj.cutover).filter(t => !t.done);
+  const why = [];
+  if (!w.open) why.push(`the launch window opens ${w.text}`);
+  if (left.length) why.push(`${left.length} launch-day step${left.length === 1 ? ' is' : 's are'} not done yet: ${left.slice(0, 3).map(t => `“${t.task}”`).join(', ')}${left.length > 3 ? '…' : ''}`);
+  return { ok: !why.length, why, windowOpen: w.open, stepsLeft: left.length };
+}
+/* R9: "Teams involved" lists teams only; systems get their own "Systems touched" line. */
+function teamsSystems(sec) {
+  const bus = new Set(store.state.people.map(p => String(p.bu || '').toLowerCase()).filter(Boolean));
+  const teams = new Set(), systems = new Set();
+  (sec.steps || []).forEach(x => {
+    (x.step.touches || []).forEach(t => { const v = String(t || '').trim(); if (!v) return; (bus.has(v.toLowerCase()) ? teams : systems).add(v); });
+    if (x.step.system) String(x.step.system).split(/\s*[,/]\s*/).filter(Boolean).forEach(v => systems.add(v));
+  });
+  return (teams.size ? `<div class="rs-part-s" data-teams-involved><span class="rs-lbl">Teams involved:</span> ${esc([...teams].join(', '))}</div>` : '')
+    + (systems.size ? `<div class="rs-part-s" data-systems-touched><span class="rs-lbl">Systems touched:</span> ${esc([...systems].join(', '))}</div>` : '');
+}
+function windowLine(prj) {
+  const w = fmtWindow(prj.cutover);
+  return w ? `<div class="rs-window" data-launch-window><span class="rs-lbl">Launch window</span> <b>${esc(w)}</b></div>` : '';
+}
+/* R9 §13: after launch, every team that approved (approvals current at launch; nothing dropped). */
+function approvedAtLaunch(prj, lastGo) {
+  if (!lastGo) return [];
+  const at = String(lastGo.at || '');
+  const prevGo = store.list('release', r => r.projectId === prj.id && r.id !== lastGo.id && !isRollback(r) && !failedAny(r) && String(r.at) < at).map(r => String(r.at)).sort().pop() || '';
+  const by = {};
+  store.list('approval', a => a.projectId === prj.id && String(a.at) <= at && String(a.at) > prevGo).sort((a, b) => String(a.at).localeCompare(String(b.at))).forEach(a => { by[a.bu] = a; });
+  const out = Object.values(by).filter(a => counts(prj, a));
+  const appr = approvalsTruth(prj) || [];
+  appr.filter(x => x.approved && x.approver && !out.some(a => a.bu === x.bu)).forEach(x => out.push({ bu: x.bu, approver: x.approver, at: x.at || x.approvedAt || '' }));
+  return out.sort((a, b) => String(a.bu).localeCompare(String(b.bu)));
+}
+function approvedTeams(prj, lastGo) {
+  const list = approvedAtLaunch(prj, lastGo);
+  if (!list.length) return '';
+  return `<div class="rs-approved" data-approved-teams="${list.length}"><span class="rs-lbl">Approved by ${list.length === 1 ? 'the team' : `all ${list.length} teams`}</span><ul>${list.map(a => `<li data-approved-team="${esc(a.bu)}"><b>${esc(a.bu)}</b> ${av(a.approver)} ${esc(pname(a.approver))}${a.at ? `, ${esc(fmt(a.at))}` : ''}</li>`).join('')}</ul></div>`;
+}
+/* Raw person ids in diff lines ("Owner dk → ps") become names; "(none)" becomes "Nobody". */
+function namesIn(t) {
+  return String(t).replace(/^Owner (\S+) → (\S+)$/, (all, a, b) => `Owner ${a === '(none)' ? 'Nobody' : pname(a)} → ${b === '(none)' ? 'Nobody' : pname(b)}`).replace(/\(none\)/g, 'Nobody');
+}
+/* Information with an open problem shows "Has a problem" (amber) and counts as not ready. */
+function hasOpenProblem(prj, dataId) {
+  const l = eng('availLabel', dataId);
+  if (l && l.state) return l.state === 'problem';
+  return store.list('workItem', w => w.projectId === prj.id && w.kind === 'defect' && w.status !== 'done' && w.defectStatus !== 'closed'
+    && (w.dataId === dataId || w.resolves === dataId || (w.testRef && w.testRef.caseId && (store.get('testCase', w.testRef.caseId) || {}).dataId === dataId))).length > 0;
+}
 const TONE = { green: 'ok', amber: 'warn', red: 'bad' };
 /* Connected / Sample only / Not available yet / Waiting for confirmation, from the engine (one label set everywhere). */
 export function availOf(dataId) {
@@ -1029,9 +1184,18 @@ const whoList = ids => (ids || []).filter(id => store.person(id)).map(id => `<sp
 const glossTip = { launchOwner: 'Release manager: the one person who can launch or undo the launch.' };
 
 /* Each team's part, with who can approve it and where it stands. */
-function partsOf(prj, rd) {
+function partsOf(prj, rd, t) {
   const live = prj.status === 'live';
-  return buSections(prj).map(s => {
+  t = t || truthOf(prj);
+  /* R9: the parts are projectTruth.approvals (the gate's own list). A team that doesn't need to approve is never a part. */
+  const appr = approvalsTruth(prj, t);
+  let secs = buSections(prj);
+  if (appr) {
+    const need = appr.filter(a => a.needed !== false);
+    secs = need.map(a => secs.find(s => s.bu.toLowerCase() === String(a.bu).toLowerCase()) || { bu: a.bu, steps: [], changed: [], tasks: false, fromTags: false });
+  }
+  return secs.map(s => {
+    const ap = appr ? appr.find(a => String(a.bu).toLowerCase() === s.bu.toLowerCase()) || null : null;
     const a = latestApproval(prj.id, s.bu);
     const stale = live ? [] : staleChanges(prj, s, a, rd);
     const eligible = eligibleFor(prj, s.bu);
@@ -1039,13 +1203,22 @@ function partsOf(prj, rd) {
     const rdy = live ? { ready: true, waiting: [] } : buReadyOf(prj, s.bu);
     const state = ok && !stale.length ? 'approved' : ok && stale.length ? 'stale' : a && a.decision === 'rejected' && eligible.includes(a.approver) ? 'rejected' : !eligible.length ? 'nobody' : rdy.ready ? 'waiting' : 'notready';
     /* R8: a changed (stale) part is looked at again only once its own evidence is complete too */
-    const state2 = (state === 'stale' || state === 'rejected') && !rdy.ready ? 'notready' : state;
-    return { bu: s.bu, s, a, stale, eligible, state: state2, ready: rdy.ready, waiting: rdy.waiting };
+    let state2 = (state === 'stale' || state === 'rejected') && !rdy.ready ? 'notready' : state;
+    if (ap && ap.approved === true && state2 !== 'approved' && ok) state2 = 'approved';
+    const blockedBy = !live && ap && ap.blockedBy && ap.blockedBy.rule !== 'no-approver' && state2 !== 'approved' ? ap.blockedBy : null;
+    if (blockedBy && (state2 === 'waiting' || state2 === 'nobody')) state2 = 'blocked';
+    /* one count per part: perBU.notRun + perBU.failed + open items (buReady's non-test items) */
+    const pb = perBuOf(prj, s.bu, t);
+    const br = live ? null : eng('buReady', prj.id, s.bu, store.state.today);
+    const openItems = br && Array.isArray(br.waiting) ? br.waiting.filter(w => w && w.kind !== 'tests').reduce((n, w) => n + (+w.count || (w.items || []).length || 1), 0) : 0;
+    const waitN = ap && typeof ap.waitingOn === 'number' ? ap.waitingOn : pb ? pb.notRun + pb.failed + openItems : null;
+    return { bu: s.bu, s, a, stale, eligible, state: state2, ready: rdy.ready, waiting: rdy.waiting, sentence: br && br.sentence, blockedBy, perBU: pb, waitN, truth: ap };
   });
 }
-const PART_TXT = { approved: 'Approved', stale: 'Changed: approve again', rejected: 'Changes asked for', nobody: 'Needs someone to approve', waiting: 'Ready for approval', notready: 'Not ready yet' };
-const PART_CLS = { approved: 'b-done', stale: 'b-late', rejected: 'b-late', nobody: 'b-soon', waiting: 'b-soon', notready: 'b-idle' };
-const waitingTxt = p => `Not ready for your approval yet: waiting on ${joinAnd(p.waiting.length ? p.waiting : ['the rest of this part'])}.`;
+const PART_TXT = { approved: 'Approved', stale: 'Changed: approve again', rejected: 'Changes asked for', nobody: 'Needs someone to approve', waiting: 'Ready for approval', notready: 'Not ready yet', blocked: 'Choose another approver' };
+const PART_CLS = { approved: 'b-done', stale: 'b-late', rejected: 'b-late', nobody: 'b-soon', waiting: 'b-soon', notready: 'b-idle', blocked: 'b-late' };
+/* R9: the sentence is buReady's own ("Not ready for your approval yet: waiting on …"). */
+const waitingTxt = p => p.sentence && /^Not ready/.test(p.sentence) ? p.sentence : `Not ready for your approval yet: waiting on ${joinAnd(p.waiting.length ? p.waiting : ['the rest of this part'])}.`;
 
 /* "The launch still needs": the open launch steps in plain words (engine launchSteps), else the failing checks. */
 /* R8 ONE TRUTH: launch steps (and their numbers and labels) come from E().projectTruth, the single source every page reads. */
@@ -1096,42 +1269,54 @@ function simpleRender(prj, rd, params) {
   const releases = store.list('release', r => r.projectId === prjId).sort((a, b) => String(b.at).localeCompare(String(a.at)));
   const lastGo = releases.find(r => !isRollback(r) && !isFailedRel(r));
   const failedRel = !live && releases[0] && !isRollback(releases[0]) && pipePhase(releases[0]) === 'failed' ? releases[0] : null;
-  const parts = partsOf(prj, rd);
+  const t = truthOf(prj);
+  const parts = partsOf(prj, rd, t);
   const stepsRaw = truthSteps(prj);
   const steps = Array.isArray(stepsRaw) ? stepsRaw : (rd.checks || []).map(c => ({ key: c.id, label: plainOf(c), done: checkState(c) !== 'fail', who: [], action: c.detail || '' }));
   const ckFail = id => { const c = (rd.checks || []).find(x => x.id === id); return !!c && checkState(c) === 'fail'; };
-  const open = steps.filter(s => !s.done && s.key !== 'launch');
   const gOpen = gngOpen(prj);
-  let left = open.length + (ckFail('grants-closed') ? 1 : 0);
-  if (!rd.pass && !left) left = Math.max(1, (rd.checks || []).filter(c => checkState(c) === 'fail').length);
-  const ready = !live && rd.pass && !gOpen.length;
-  if (rd.pass && gOpen.length && !left) left = 1;
+  /* R9: one number, projectTruth.stepsLeft (equals the checklist's undone count below) */
+  const left = stepsLeftOf(prj, steps, t);
+  const guard = launchGuard(prj);
+  const gateOk = !live && rd.pass && !gOpen.length;
+  const ready = gateOk && guard.ok;
+  const testNext = nextOfTesting(testingTruth(prj, t));
   const running = ui.pipe && ui.pipe.phase !== 'failed' && ui.pipe.phase !== 'succeeded' && store.get('release', ui.pipe.id) && store.get('release', ui.pipe.id).projectId === prjId;
   const status = live ? { cls: 'live', icon: '✓', title: `Launched on ${fmt(lastGo && lastGo.at)}`, sub: `${prj.name} is live. The new way of working is now how it works today.` }
     : running ? { cls: 'busy', icon: '…', title: 'Launching now', sub: 'The delivery step is running. This takes a few seconds.' }
     : ready ? { cls: 'ready', icon: '✓', title: 'Ready to launch', sub: failedRel ? 'The last launch did not go through. Nothing changed, so it is safe to try again.' : rm === me ? 'Everything is done. You can launch now.' : `Everything is done. ${pname(rm)} (launch owner) can launch.` }
-    : { cls: 'notready', icon: String(left), title: `Not ready: ${left} thing${left === 1 ? '' : 's'} left`, sub: 'Here is what is left and who does it.' };
+    : left ? { cls: 'notready', icon: String(left), title: `Not ready to launch: ${left} step${left === 1 ? '' : 's'} left`, sub: 'Here is what is left and who does it.' }
+    : { cls: 'notready', icon: '…', title: 'Not ready to launch yet', sub: `Launch is possible once ${joinAnd(guard.why.concat(gOpen.length ? ['the final checks are confirmed'] : []))}.` };
   const myPart = !live && parts.find(p => p.state !== 'approved' && p.state !== 'notready' && p.eligible.includes(me));
   const myWait = !live && !myPart && parts.find(p => p.state === 'notready' && p.eligible.includes(me));
   const myDone = parts.find(p => p.state === 'approved' && p.a && p.a.approver === me);
 
   const stepRows = steps.filter(s => s.key !== 'launch' || !s.done).map(s => {
     const act = s.done ? '' : stepAction(prj, s, parts, me);
+    /* R9 §6: the Tests step reads the one testing "next" sentence, never "Create the tests" */
+    const action = s.key === 'tests' && !s.done && testNext ? testNext : s.action;
     return `<li class="rs-step ${s.done ? 'done' : ''} ${s.next ? 'next' : ''}" data-launch-step="${esc(s.key)}" data-done="${s.done ? '1' : '0'}">
       <span class="rs-tick" aria-hidden="true">${s.done ? '✓' : ''}</span>
-      <div class="rs-step-b"><b>${esc(s.label)}</b>${!s.done && s.action && s.action !== 'Done' ? `<span class="rs-act-t">${esc(s.action)}</span>` : ''}
+      <div class="rs-step-b"><b>${esc(s.label)}</b>${!s.done && action && action !== 'Done' ? `<span class="rs-act-t" ${s.key === 'tests' ? 'data-tests-next' : ''}>${esc(action)}</span>` : ''}
         ${!s.done && (s.who || []).length ? `<div class="rs-whos"><span class="rs-lbl">Who:</span>${whoList(s.who)}</div>` : ''}</div>
       ${act ? `<div class="rs-step-a">${act}</div>` : ''}</li>`;
   }).join('');
 
   const partRows = parts.map(p => {
     const mine = p.eligible.includes(me);
+    const href = link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`);
     const by = p.a && (p.state === 'approved' || p.state === 'stale' || p.state === 'rejected') ? `${av(p.a.approver)} ${esc(pname(p.a.approver))}, ${esc(fmt(p.a.at))}` : p.eligible.length ? `Who can approve: ${p.eligible.map(id => esc(pname(id))).join(', ')}` : '';
-    const act = live ? '' : p.state === 'nobody' ? choosePicker(prj, p.bu)
-      : mine && p.state !== 'approved' && p.state !== 'notready' ? `<a class="btn primary" href="${link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`)}" data-link data-part-approve="${esc(p.bu)}">${p.state === 'stale' ? 'Look again and approve' : 'Approve your part'}</a>`
-      : `<a class="rl-go" href="${link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`)}" data-link data-bu-review="${esc(p.bu)}">See this part ›</a>`;
-    return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><b>${esc(p.bu)}</b>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
-      ${by ? `<div class="rs-part-s">${by}</div>` : ''}${p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting>Waiting on ${esc(joinAnd(p.waiting))}</div>` : ''}${act}</div>`;
+    /* R9 §7: one count per part, from perBU; the card opens the part page */
+    const waitLine = p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting="${p.waitN == null ? '' : p.waitN}">${p.waitN != null ? `Waiting on ${p.waitN}: ` : 'Waiting on '}${esc(joinAnd(p.waiting))}</div>` : '';
+    const testLine = p.perBU && p.perBU.total ? `<div class="rs-part-s" data-part-tests="${p.perBU.passed}/${p.perBU.total}">Tests for this part: ${p.perBU.passed} of ${p.perBU.total} passed${p.perBU.failed ? `, ${p.perBU.failed} failed` : ''}${p.perBU.notRun ? `, ${p.perBU.notRun} not run` : ''}</div>` : '';
+    if (!live && (p.state === 'nobody' || p.state === 'blocked')) {
+      return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><a href="${href}" data-link data-part-open="${esc(p.bu)}"><b>${esc(p.bu)}</b></a>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
+        ${p.state === 'blocked' ? sodBlock(prj, p) : choosePicker(prj, p.bu)}${testLine}</div>`;
+    }
+    const act = !live && mine && p.state !== 'approved' && p.state !== 'notready' ? `<span class="btn primary" data-part-approve="${esc(p.bu)}">${p.state === 'stale' ? 'Look again and approve' : 'Approve your part'}</span>`
+      : `<span class="rl-go" data-bu-review="${esc(p.bu)}">See this part ›</span>`;
+    return `<a class="rs-part rs-part-link ${p.state}" href="${href}" data-link data-part="${esc(p.bu)}" data-part-open="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><b>${esc(p.bu)}</b>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
+      ${by ? `<div class="rs-part-s">${by}</div>` : ''}${waitLine}${testLine}${act}</a>`;
   }).join('');
 
   const grantsOpen = store.list('grant', g => g.projectId === prjId && ['active', 'approved', 'requested'].includes(grantStatus(g))).length;
@@ -1146,23 +1331,24 @@ function simpleRender(prj, rd, params) {
     <div class="rs-wrap" data-simple-launch>
     <div class="rs-status ${status.cls}" data-launch-status="${status.cls}" role="status"><span class="rs-status-ic" aria-hidden="true">${esc(status.icon)}</span><div><b data-launch-sentence>${esc(status.title)}</b><span>${esc(status.sub)}</span></div></div>
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>The launch was refused.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || ''))}</li>`).join('')}</ul></div>` : ''}
-    ${failedRel && !running ? `<div class="rs-fail" data-pipeline-failed><b>The last launch did not go through.</b> Nothing was changed: the processes, the procedure and temporary data access are exactly as they were.${rm === me ? ` <button class="btn primary" data-retry ${rd.pass && !gOpen.length ? '' : 'disabled'}>Try the launch again</button>` : ''}</div>` : ''}
+    ${failedRel && !running ? `<div class="rs-fail" data-pipeline-failed><b>The last launch did not go through.</b> Nothing was changed: the processes, the procedure and temporary data access are exactly as they were.${rm === me ? ` <button class="btn primary" data-retry ${rd.pass && !gOpen.length && guard.ok ? '' : 'disabled'}>Try the launch again</button>` : ''}</div>` : ''}
     ${running ? `<div class="rs-run" data-pipe-phase="${esc(ui.pipe.phase)}" data-pipe-kind="${ui.pipe.kind === 'rollback' ? 'rollback' : 'golive'}"><span class="rs-spin" aria-hidden="true"></span>${ui.pipe.kind === 'rollback' ? 'Undoing the launch…' : 'Launching…'} <small>${ui.pipe.phase === 'queued' ? 'Starting' : 'Running'} (simulated)</small></div>` : ''}
     ${myPart ? `<a class="rs-mine" href="${link(`/release/${prjId}?bu=${encodeURIComponent(myPart.bu)}`)}" data-link data-review-mine="${esc(myPart.bu)}"><b>${myPart.state === 'stale' ? `The ${esc(myPart.bu)} part changed: please look again` : `Approve the ${esc(myPart.bu)} part`}</b><span>You can approve it now, even while other things are still open. It takes about a minute.</span><span class="rs-mine-go" aria-hidden="true">›</span></a>`
       : myWait ? `<div class="rs-mine wait" data-my-notready="${esc(myWait.bu)}"><b>The ${esc(myWait.bu)} part isn’t ready for your approval yet.</b><span>${esc(waitingTxt(myWait).replace(/^Not ready for your approval yet: /, ''))} You’ll be told when it’s ready.</span></div>`
       : myDone && !live ? `<div class="rs-mine done" data-my-approved><b>Your part (${esc(myDone.bu)}) is approved.</b><span>Thank you. Nothing else is needed from you for it.</span></div>` : ''}
     ${!live ? `<div class="card rs-card"><h3>What is left before launch</h3><ol class="rs-steps" data-launch-steps>${stepRows}</ol></div>` : ''}
-    ${!live && (ready || rm === me) ? `<div class="card rs-card rs-go"><h3>Launch</h3>${rm === me
-        ? `<button class="btn primary rs-big" data-golive ${ready ? '' : 'disabled'}>Launch ${esc(prj.name)}</button>${ready ? '' : `<div class="hint" data-why="notready">You can launch when everything above is done${gOpen.length ? ` and the final yes/no checks are confirmed (${gOpen.map(t => esc(t.owner ? pname(t.owner) : 'needs an owner')).join(', ')})` : ''}.</div>`}`
+    ${!live && (ready || rm === me) ? `<div class="card rs-card rs-go"><h3>Launch</h3>${windowLine(prj)}${rm === me
+        ? `<button class="btn primary rs-big" data-golive ${ready ? '' : 'disabled'}>Launch now</button>${ready ? '' : `<div class="hint" data-why="notready">${!gateOk ? `You can launch when everything above is done${gOpen.length ? ` and the final checks are confirmed (${gOpen.map(t => esc(t.owner ? pname(t.owner) : 'needs an owner')).join(', ')})` : ''}.` : `Not yet: ${esc(joinAnd(guard.why))}.`}</div>`}`
         : `<div class="hint" data-why="rm">Only the <span title="${esc(glossTip.launchOwner)}">launch owner</span>, ${esc(pname(rm))}, can launch.</div>`}</div>` : ''}
     ${live ? `<div class="card rs-card" data-live-card><h3>Launched</h3><p class="rs-p">${esc(prj.name)} went live on ${esc(fmt(lastGo && lastGo.at))}${lastGo && lastGo.by ? `, launched by ${esc(pname(lastGo.by))}` : ''}. Temporary data access closed at launch.</p>
+      ${approvedTeams(prj, lastGo)}
       ${canRollback(prj) ? `<button class="btn danger" data-rollback>Undo the launch</button>` : `<div class="hint" data-why="rm">If something goes badly wrong, ${esc(pname(rm))} (launch owner) can undo the launch.</div>`}
       ${releases[0] && isFailedRb(releases[0]) ? `<div class="rs-fail" data-rollback-failed><b>The undo did not go through.</b> Nothing was restored; the launch is still live.</div>` : ''}</div>` : ''}
-    ${parts.length ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && canChoose(prj) && parts.some(p => p.state === 'nobody')) : ''}
-    ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final yes/no check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
+    ${parts.length && !live ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && (canChoose(prj) && parts.some(p => p.state === 'nobody' || p.state === 'blocked'))) : ''}
+    ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
     ${sec('access', 'Temporary data access', grantsOpen ? `${grantsOpen} open` : 'None open', grantsCard(prj), !live && ckFail('grants-closed'))}
     ${live ? sec('support', 'Support after launch', hc.length ? `${hc.length} open problem${hc.length === 1 ? '' : 's'}` : 'No open problems', hypercareCard(prj, lastGo), hc.some(x => +x.severity === 1)) : ''}
-    ${sec('audit', 'Audit log', 'Every launch event, oldest first', '<div data-rl-history><div class="hint">Loading history…</div></div>', false)}
+    ${sec('audit', 'History', 'Every launch event, oldest first', '<div data-rl-history><div class="hint">Loading history…</div></div>', false)}
     ${sec('comments', 'Comments', `${store.list('comment', c => c.ref === 'project:' + prjId).length}`, commentsPanel('project:' + prjId), false)}
     <div class="rs-adv"><button class="btn rs-link" data-show-adv>Show advanced tools</button></div>
     </div>`;
@@ -1170,7 +1356,7 @@ function simpleRender(prj, rd, params) {
 
 /* Plain words for one changed step: "New step", "Changed: …". */
 function plainChanges(list, nm) {
-  return (list || []).slice(0, 4).map(c => humanizeSummary(c, nm)).map(t => t.replace(/\bdata element(s?)\b/gi, 'information').replace(/\bto-be\b/gi, 'future').replace(/\bas-is\b/gi, 'today').replace(/\btouches\b/gi, 'teams involved').replace(/\bSLA\b/g, 'time limit'));
+  return (list || []).slice(0, 4).map(c => namesIn(humanizeSummary(c, nm))).map(t => t.replace(/\bdata element(s?)\b/gi, 'information').replace(/\bto-be\b/gi, 'future').replace(/\bas-is\b/gi, 'today').replace(/\btouches\b/gi, 'teams involved').replace(/\bSLA\b/g, 'time limit'));
 }
 
 /* Business-test evidence an approver can trust: "33 business tests passed by Priya on Nov 4: “note”…", with "passed together". */
@@ -1184,7 +1370,7 @@ function evidenceLine(prj, s) {
   const pick = env => { const by = {}; runs.filter(r => r.env === env).forEach(r => (r.results || []).forEach(x => { const k = x.caseId || x.scriptId; if (k && ids.has(k) && x.outcome !== 'not-run' && x.outcome !== 'skipped') by[k] = Object.assign({ run: r }, x); })); return by; };
   let env = 'uat', by = pick('uat');
   if (!Object.keys(by).length) { env = 'sit'; by = pick('sit'); }
-  const kind = env === 'uat' ? 'business test' : 'system test';
+  const kind = env === 'uat' ? 'business check' : 'try-it-out test';
   const all = Object.values(by);
   if (!all.length) return { text: `${ids.size} test${ids.size === 1 ? '' : 's'} for this part, none run yet.`, tone: 'warn', n: 0 };
   const pass = all.filter(x => x.outcome === 'pass'), fail = all.filter(x => x.outcome === 'fail'), blk = all.filter(x => x.outcome === 'blocked');
@@ -1195,7 +1381,7 @@ function evidenceLine(prj, s) {
   const byNote = {}; pass.forEach(x => { const k = x.run.id + '|' + String(x.evidence || x.note || '').trim(); byNote[k] = (byNote[k] || 0) + 1; });
   /* the note most passes share (a bulk pass shows its one note), else the first note */
   const topK = Object.entries(byNote).filter(([k]) => !/\|$/.test(k)).sort((a, b) => b[1] - a[1])[0];
-  const note = topK ? topK[0].slice(topK[0].indexOf('|') + 1) : '';
+  const note = (topK ? topK[0].slice(topK[0].indexOf('|') + 1) : '').replace(/\bUAT folder\b/g, 'Business check scripts').replace(/\bdev run\b/g, 'test run').replace(/\bUAT\b/g, 'business check');
   const together = Object.entries(byNote).some(([k, n]) => n >= 3 && !/\|$/.test(k));
   const parts = [];
   if (pass.length) parts.push(`${pass.length} ${kind}${pass.length === 1 ? '' : 's'} passed by ${firstName(who)} on ${fmt(last)}${note ? `: “${note.length > 70 ? note.slice(0, 70) + '…' : note}”` : ''}`);
@@ -1212,7 +1398,7 @@ function simpleBuView(prj, buRaw, rd) {
   if (!p) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/release/' + prj.id)}" data-link>Launch</a></div><h1>${esc(buRaw)}</h1><p data-no-section>Nothing ${esc(buRaw)} does changes in ${esc(prj.name)}, so ${esc(buRaw)} doesn’t need to approve anything.</p>${back}</div></section>`;
   const s = p.s; const me = store.state.me; const live = prj.status === 'live';
   const e = E(); const nm = idNames();
-  const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const pr = store.get('process', pid); try { diffs[pid] = pr && e && e.diffProcess ? e.diffProcess(pr) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
+  const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const pr = store.get('process', pid); try { diffs[pid] = pr && e && e.diffProcess ? e.diffProcess(pr, store.state.docs) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
   const stOf = x => (diffs[x.pid] || { nodes: {} }).nodes[x.step.id] || 'same';
   const changed = s.steps.filter(x => stOf(x) !== 'same');
   const same = s.steps.filter(x => stOf(x) === 'same');
@@ -1221,8 +1407,10 @@ function simpleBuView(prj, buRaw, rd) {
     + (same.length ? `<li class="rs-same" data-bu-same>${same.length} other step${same.length === 1 ? '' : 's'} in your part ${same.length === 1 ? 'has' : 'have'} not changed: ${same.map(x => esc(x.step.title)).join(', ')}.</li>` : '');
   const dataIds = new Set(); s.steps.forEach(x => { (x.step.data || []).forEach(d => dataIds.add(d)); (x.step.subs || []).forEach(sb => (sb.data || []).forEach(d => dataIds.add(d))); });
   const des = [...dataIds].map(id => store.get('dataElement', id)).filter(Boolean);
-  const info = des.map(de => { const l = availOf(de.id); return `<li data-bu-data="${esc(de.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(de.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span></li>`; }).join('');
-  const ev = evidenceLine(prj, s);
+  const info = des.map(de => { const l0 = availOf(de.id); const l = hasOpenProblem(prj, de.id) ? { label: 'Has a problem', tone: 'warn' } : l0; return `<li data-bu-data="${esc(de.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(de.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span></li>`; }).join('');
+  /* R9 §7: "Tests for this part" uses the same perBU numbers as the part card */
+  const pb = p.perBU;
+  const ev = pb ? { text: pb.total ? `${pb.passed} of ${pb.total} test${pb.total === 1 ? '' : 's'} passed${pb.failed ? ` · ${pb.failed} failed` : ''}${pb.notRun ? ` · ${pb.notRun} not run yet` : ''}` : 'No tests cover this part yet.', tone: pb.failed ? 'bad' : pb.notRun || !pb.total ? 'warn' : 'ok', together: evidenceLine(prj, s).together } : evidenceLine(prj, s);
   const titles = (changed.length ? changed : s.steps).slice(0, 3).map(x => x.step.title);
   const key = prj.id + '|' + p.bu;
   const dflt = noteFactsOf(prj, p.bu, s) || `I reviewed the changes to ${titles.join(', ')}.`;
@@ -1232,14 +1420,15 @@ function simpleBuView(prj, buRaw, rd) {
   const statusLine = p.state === 'approved' ? `Approved by ${esc(pname(a.approver))} on ${esc(fmt(a.at))}.`
     : p.state === 'stale' ? `${esc(pname(a.approver))} approved on ${esc(fmt(a.at))}, but this part has changed since: ${esc(p.stale.map(v => v.text).join(', '))}. Please look again.`
     : p.state === 'rejected' ? `${esc(pname(a.approver))} asked for changes on ${esc(fmt(a.at))}${a.attestation ? `: “${esc(a.attestation)}”` : ''}.`
-    : p.state === 'nobody' ? 'Nobody can approve this part yet.' : p.state === 'notready' ? 'Not ready for approval yet.' : 'Ready for your approval.';
+    : p.state === 'nobody' ? 'Nobody can approve this part yet.' : p.state === 'blocked' ? esc(blockText(p.blockedBy, p.bu)) : p.state === 'notready' ? 'Not ready for approval yet.' : 'Ready for your approval.';
   const needs = stillNeeds(prj, rd, null);
   const doneMsg = p.state === 'approved' && (a.approver === me || ui.justApproved === key)
     ? `<div class="rs-done" data-part-approved><b>Your part is approved.</b>${needs.length ? `<span>The launch still needs:</span><ul data-still-needs>${needs.map(x => `<li>${esc(x.label)}${x.action && x.action !== 'Done' ? ` <small>${esc(x.action)}</small>` : ''}</li>`).join('')}</ul>` : '<span>Nothing else is needed: the launch owner can launch.</span>'}</div>` : '';
   let actHtml = '';
   if (live) actHtml = '<div class="hint">This project is live. Approvals are closed.</div>';
   else if (p.state === 'nobody') actHtml = `<div class="rs-nobody" data-no-approver="${esc(p.bu)}"><b>Nobody can approve the ${esc(p.bu)} part yet.</b>${choosePicker(prj, p.bu)}</div>`;
-  else if (canAct && p.state === 'notready') actHtml = `<div class="rs-notready" data-bu-notready role="status"><b>${esc(waitingTxt(p))}</b><span>Your part is ready to approve once that is done. You’ll be told, so there’s nothing to do now.</span></div>`;
+  else if (p.state === 'blocked') actHtml = sodBlock(prj, p);
+  else if (p.state === 'notready') actHtml = `<div class="rs-notready" data-bu-notready role="status"><b data-bu-waiting="${p.waitN == null ? '' : p.waitN}">${esc(waitingTxt(p))}</b><span>${canAct ? 'Your part is ready to approve once that is done. You’ll be told, so there’s nothing to do now.' : `${p.eligible.length ? esc(p.eligible.map(pname).join(' or ')) + ' approves it then.' : ''}`}</span></div>`;
   else if (canAct && p.state !== 'approved') actHtml = `<div class="rs-form" data-bu-form>
       <label for="rl-attest" class="rs-lbl2" title="Attestation note">What you checked</label>
       <textarea id="rl-attest" data-attest rows="3">${esc(val)}</textarea>
@@ -1251,9 +1440,9 @@ function simpleBuView(prj, buRaw, rd) {
       <h1>Approve the ${esc(p.bu)} part</h1><p class="rs-sub">${esc(prj.name)} · ${statusLine}</p></div></section>
     <div class="rs-wrap rs-bv" data-bu-view="${esc(p.bu)}" data-simple-approver>
       ${doneMsg}
-      <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li>No steps.</li>'}</ul></div>
+      <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li>No steps.</li>'}</ul>${teamsSystems(s)}</div>
       <div class="card rs-card"><h3>Information your part uses</h3>${info ? `<ul class="rs-list rs-info">${info}</ul>` : '<div class="hint">Your part uses no information.</div>'}</div>
-      <div class="card rs-card"><h3>Tests</h3><div class="rs-ev ${ev.tone}" data-evidence-line>${esc(ev.text)}${ev.together ? ' <span class="rs-together" data-passed-together title="Many tests were marked passed at once with one shared note">passed together</span>' : ''}</div>
+      <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.total}"` : ''}>${esc(ev.text)}${ev.together ? ' <span class="rs-together" data-passed-together title="Many tests were marked passed at once with one shared note">passed together</span>' : ''}</div>
         <a class="rl-go" href="${link('/testing/' + prj.id)}" data-link>See the tests ›</a></div>
       ${actHtml ? `<div class="card rs-card rs-sign">${actHtml}</div>` : ''}
       ${back}
@@ -1301,6 +1490,7 @@ export function bind(root, params) {
   /* Go-live */
   const gl = root.querySelector('[data-golive]');
   if (gl) gl.onclick = () => goLive(prj);
+  const ovb = root.querySelector('[data-override]'); if (ovb) ovb.onclick = () => overrideLaunch(prj);
   root.querySelectorAll('[data-rollback],[data-rollback-hc]').forEach(b => b.onclick = () => rollBack(prj));
   const ia = root.querySelector('[data-inc-add]'); if (ia) ia.onclick = () => addIncident(prj, root);
   const it = root.querySelector('[data-inc-title]'); if (it) it.oninput = () => { ui.incident[prj.id] = Object.assign({}, ui.incident[prj.id], { title: it.value }); };
@@ -1341,7 +1531,7 @@ async function requestAccess(prj) {
       <div class="frow"><div class="field"><label>For</label><select name="env"><option value="dev">Build testing</option><option value="uat">Business testing</option></select></div>
       <div class="field"><label>Access</label><select name="access"><option value="read">Read</option><option value="write">Write</option></select></div></div>
       <div class="field"><label>Why</label><textarea name="reason" placeholder="What the work needs this information for"></textarea></div>
-      <div class="field"><label>Duration (days, max 30)</label><input type="number" name="days" value="30" min="1" max="30" inputmode="numeric"></div>
+      <div class="field"><label>How many days</label><input type="number" name="days" value="7" min="1" max="30" inputmode="numeric"></div>
       <div class="hint">The days start when the owner approves, not when you ask: a request waiting a week still gets its full time. Only information used by this project's processes can be requested. The owner approves with an extra sign-in check.</div>`,
     actions: [{ id: 'send', label: 'Send request', primary: true }],
   });
@@ -1376,8 +1566,8 @@ async function grantAction(prj, gid, act) {
     status = 'active'; verb = `approved (extra sign-in check); access open until ${fmt(expires)}`;
   } else if (act === 'deny') { status = 'denied'; verb = 'denied'; }
   else {
-    const r = await modal({ title: 'Revoke access?', body: `<p style="margin:0">${esc(de.name)} · ${esc(envPlain(g.env))} · ${esc(g.access)}. Access ends immediately.</p>`, actions: [{ id: 'revoke', label: 'Revoke', danger: true }] });
-    if (r.action !== 'revoke') return; status = 'revoked'; verb = 'revoked';
+    const r = await modal({ title: 'Remove access?', body: `<p style="margin:0">${esc(de.name)} · ${esc(envPlain(g.env))} · ${esc(g.access)}. Access ends immediately.</p>`, actions: [{ id: 'revoke', label: 'Remove access', danger: true }] });
+    if (r.action !== 'revoke') return; status = 'revoked'; verb = 'removed access';
   }
   const next = Object.assign({}, g, { status, log: [...(g.log || []), { at: new Date().toISOString(), by: me, action: verb }] });
   if (act === 'approve') { next.approvedBy = me; next.approvedAt = new Date().toISOString(); next.expires = expires; }
@@ -1472,7 +1662,7 @@ function failBanner(prj, rel) {
   return `<div class="rl-failbn" data-pipeline-failed><div><b>The launch did not go through: the delivery pipeline failed.</b><span class="sim">Simulated pipeline</span>
       <div class="rl-noeffect-b" data-no-side-effects><b>Nothing was promoted or published.</b> The process versions, the procedure and temporary data access are exactly as they were, and only the launch owner was told.</div>
       <div class="hint">${esc(err)}</div></div>
-    ${store.state.me === rm ? `<button class="btn primary" data-retry ${readiness(prj.id).pass && !gngOpen(prj).length ? '' : 'disabled'}>Try the launch again</button>` : `<span class="hint" data-why="rm">Only the launch owner (${esc(pname(rm))}) can try again.</span>`}</div>`;
+    ${store.state.me === rm ? `<button class="btn primary" data-retry ${readiness(prj.id).pass && !gngOpen(prj).length && launchGuard(prj).ok ? '' : 'disabled'}>Try the launch again</button>` : `<span class="hint" data-why="rm">Only the launch owner (${esc(pname(rm))}) can try again.</span>`}</div>`;
 }
 
 /* Simulated pipeline animation: queued -> running -> the server's outcome (succeeded | failed). The server already decided
@@ -1499,11 +1689,31 @@ function newestRelease(prj, res) {
 }
 const SIMFAIL = (what, after) => `<label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated delivery step fails. The failed ${what} is recorded${after ? `, and ${after}` : ''}. Nothing else changes.</small></span></label>`;
 
-async function goLive(prj, retry) {
+/* R9 §13: Advanced keeps "Override with reason": the reason is required and logged in History before launching. */
+async function overrideLaunch(prj) {
+  const rm = rmOf(prj);
+  if (store.state.me !== rm) { toast(`Only the launch owner (${pname(rm)}) can override.`); return; }
+  const g = launchGuard(prj);
+  const p = modal({ title: 'Override the launch guard', body: `<p style="margin:0 0 8px">Launch now is locked: ${esc(joinAnd(g.why))}.</p>
+      <div class="field"><label>Why launch anyway? <span class="rl-req">required</span></label><textarea name="reason" data-override-reason placeholder="e.g. The window was moved up by the steering group on Nov 3"></textarea></div>
+      <div class="hint">Your reason is saved in the project's History with your name and the time.</div>`,
+    actions: [{ id: 'go', label: 'Override and continue', danger: true }] });
+  guardModal(f => !String(f.reason || '').trim() ? { msg: 'Say why you are overriding: it is logged.', field: 'reason' } : null);
+  const r = await p; if (r.action !== 'go') return;
+  const reason = String(r.form.reason || '').trim();
+  const cur = store.get('project', prj.id) || prj;
+  const ov = { by: store.state.me, at: new Date().toISOString(), reason, guard: g.why };
+  await store.save('project', prj.id, Object.assign({}, cur, { launchOverride: ov, launchOverrides: (cur.launchOverrides || []).concat([ov]) }), `Overrode the launch guard (${g.why.join('; ')}): “${reason}”`);
+  await goLive(store.get('project', prj.id) || cur, false, ov);
+}
+
+async function goLive(prj, retry, override) {
   const rm = rmOf(prj);
   if (store.state.me !== rm) { toast(`Only the launch owner (${pname(rm)}) can launch.`); return; }
   const rd = readiness(prj.id);
   if (!rd.pass) { toast('Not ready to launch yet.'); return; }
+  const lg = launchGuard(prj);
+  if (!lg.ok && !override) { toast(`Not yet: ${joinAnd(lg.why)}.`); return; }
   const procs = projectProcesses(prj);
   const sections = buSections(prj);
   const approvers = [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a)).map(a => a.approver))];
@@ -1533,18 +1743,18 @@ async function goLive(prj, retry) {
       <div><span class="lbl">What happens</span><div>Run the delivery pipeline, then update the processes, publish the new procedure, close temporary data access and tell everyone involved</div></div></div>
       <div class="rl-gl-rb" data-golive-runbook>${tasks.length ? `<div class="rl-rb-h"><b>Launch-day steps</b><span class="hint">${gngOf(prj).length - gOpen.length}/${gngOf(prj).length} ${GNG()} confirmed</span></div>
         <div class="tbl-wrap"><table class="rl-gltbl"><thead><tr><th>#</th><th>Step</th><th>Who</th><th>Status</th></tr></thead><tbody>${rbRows}</tbody></table></div>` : '<div class="hint">No launch-day steps.</div>'}
-        ${gOpen.length ? `<div class="rl-err" data-gng-block>Launch is blocked until every final yes/no check has an owner who has confirmed it.</div>` : ''}</div>
+        ${gOpen.length ? `<div class="rl-err" data-gng-block>Launch is blocked until every final check has an owner who has confirmed it.</div>` : ''}</div>
       ${SIMFAIL('launch', 'nothing is promoted or published; temporary data access stays as it is')}
       <span class="sim">Simulated: in this showroom the pipeline request is recorded, not sent, and its run is animated.</span>`;
   const r = modal({ title: `${retry ? 'Try again: launch' : 'Launch'} ${prj.name}`, body, actions: [{ id: 'go', label: simple ? 'Launch' : 'Continue to verify', primary: true }] });
-  guardModal(() => gngOpen(store.get('project', prj.id) || prj).length ? 'Every final yes/no check must be confirmed by its owner before launch.' : null);
+  guardModal(() => gngOpen(store.get('project', prj.id) || prj).length ? 'Every final check must be confirmed by its owner before launch.' : null);
   const res0 = await r;
   if (res0.action !== 'go') return;
   const fail = (res0.form.simfail || []).includes('1');
   if (!(await signIn('launch ' + prj.name))) { toast('Extra sign-in check not completed. Nothing was launched.'); return; }
   ui.pipeStart = prj.id;
   try {
-    const res = await store.api('/golive/' + prj.id, { simulateFailure: fail, stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+    const res = await store.api('/golive/' + prj.id, Object.assign({ simulateFailure: fail, stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }, override ? { override } : {}));
     ui.reasons = null;
     await store.load();
     const rel = newestRelease(prj, res);
@@ -1601,8 +1811,9 @@ export async function signIn(actionLabel, attempt) {
   attempt = attempt || 1;
   const r = await modal({
     title: 'Extra sign-in check',
-    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, enter the 6-digit code from your sign-in app.</p>
-      <div class="field"><label for="rs-code">6-digit code</label><input id="rs-code" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits in this demo" maxlength="6" /></div>
+    /* R9 §7: Simple shows one field, "Enter the 6-digit code from your phone"; Advanced also names the action */
+    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}${store.advanced ? `<p style="margin:0">To <b>${esc(actionLabel)}</b>, confirm it’s you.</p>` : ''}
+      <div class="field"><label for="rs-code">Enter the 6-digit code from your phone</label><input id="rs-code" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits in this demo" maxlength="6" /></div>
       <span class="sim">Demo: any 6 digits work. In the product this is your organisation's own sign-in check.</span>`,
     actions: [{ id: 'verify', label: 'Verify', primary: true }],
   });

@@ -29,7 +29,7 @@ In Advanced, the breakdown may say "past due" or "will finish after its due date
 | Label | Colour | When |
 |---|---|---|
 | **On track** | green | nothing is late, there are no unplanned blockers, and the forecast is on or before the deadline |
-| **Some tasks late** | amber | there are late tasks or a planned blocker, but the forecast is still on or before the deadline |
+| **Some tasks late** | amber | there are late tasks, but the forecast is still on or before the deadline. (Lead ruling: a *planned* blocker alone stays **On track**, and the sentence names it: "X is not available yet; work is planned to get it".) |
 | **Will miss the deadline** | red | the forecast is after the deadline, or there is an unplanned blocker. Advanced may keep the label "At risk". |
 
 The words "On track" never appear when anything is late.
@@ -291,3 +291,62 @@ It asserts that these are equal:
 **Access card (R):** the duration on the card shows what was asked for ("7 days"). It must not show a maximum such as "up to 30 days".
 
 **"10 steps · 11 changing" (D):** use "10 steps · 6 changed · 5 information changes", or another phrasing where the counts make sense.
+
+## Lead changes landed (§10): read this before your phone e2e
+
+**Header markup:**
+- `index.html` header is: `#brand`, `#menuBtn` (☰ Menu, phone only), `#topmenu` (contains `#nav`, `.who` with `#persona` and `#viewmenu` details → `#adv`), `#bell`.
+- **Desktop (>640px):** looks as before. `#adv` now sits inside the closed `<details id="viewmenu">` ("⚙ View"). `isChecked('#adv')` still works. To click it, open `#viewmenu summary` first, or use `store.setAdvanced`.
+
+**Phone (≤640px):**
+- The header is 56px: brand, Menu, bell.
+- `#nav`, `#persona` and `#viewmenu` are hidden until `#menuBtn` is clicked (`header.top.open`).
+- Phone e2e that select a persona or read nav links must click `#menuBtn` first.
+- Clicking a nav link closes the menu.
+
+**Escape:**
+- Escape is now global (in `ui.js`). It closes the top-most `.overlay` modal, else the `.drawer`, else the open menu.
+- Focus returns to the trigger.
+
+**Extra sign-in check:** the field label is "Enter the 6-digit code from your phone".
+
+## Appendix: R9 engine API (stream E)
+
+`PMOEngine` / `require('api/shared/pmoflow-engine.js')`. Paths in `href` are app paths: wrap them with `link()`.
+
+**`projectTruth(docs, prj, today)`** is the one source. New and changed fields:
+
+| Field | What it holds |
+|---|---|
+| `late`, `lateCount` | §1 one late list: open tasks past due **or** forecast after due |
+| `pastDue`, `pastDueCount`, `finishAfterDue`, `finishAfterDueCount` | Advanced breakdown (`runningLate*` = deprecated alias of `finishAfterDue*`) |
+| `label` | `On track` \| `Some tasks late` \| `Will miss the deadline` \| `Not planned`; `labelAdvanced` uses `At risk` for red |
+| `sentence` | "Expected Nov 25, 14 business days before the Dec 15 deadline. 5 tasks are late; first: “Set up the bank details form” (Leo Park)." |
+| `who` | ranked `[{person, name, what, why, href, ref, rank, action}]`; `why` ∈ `plan, blocker, past-due, deadline, delaying, late, info, problem, approval, test` (rank in that order). `action` = `what` (R8 alias). "What's blocking" = `who.filter(x => x.why === 'blocker')` |
+| `stepsLeft` | `launchSteps.filter(s => !s.done).length` |
+| `testing` | `{needTests, haveTests, total, passed, failed, notRun, stage, next, perBU: {bu: {total, passed, failed, notRun}}, problems, done, count, sentence, stages, nextAction: {key, label: next}}`. `stage` ∈ `create, tryout, business, done`; `next` is the one sentence (also the Launch "Tests passed" action) |
+| `approvals` | `[{bu, needed, ready, approved, stale, approver, approverName, eligible, suggestion, blockedBy, waiting, waitingOn, sentence}]`; `blockedBy` = `null` or `{rule: 'separation-of-duties' \| 'no-approver', person, text, fix, suggestion}`. After launch: every team that approved |
+| `advancedNote` | "Behind plan on effort (SPI 0.87)" or `null` (Advanced only) |
+| `cost.show` | `false` when there is no budget and no person rates (omit "Expected cost" in Simple) |
+| `ev.SPI` | `null` until PV > 0 and a task has started (done, logged progress or logged hours); EV counts only done work and logged progress |
+
+**New functions:**
+- `personQueue(docs, person, today)` → `[{kind, projectId, projectName, id, title, due, late, href, oneTap, why, rank, what}]`, sorted by `who` rank. `kind` ∈ `work, fix, problem, practice, approval, test, information, confirm, action`. `oneTap` = `{action: 'done'|'confirm', label}` or `null`. Home badge and bell = `list.length`.
+- `suggestWorkFromDiff(docs, projectId, today)`: tasks carry `owner` (the step owner), or `owner: null` + `ownerRole` (show the role); the PM only when the step has neither. Levelled per person; each `due` ≥ its forecast once accepted.
+- `planToWork(projectId, suggestions)` → the exact work items Accept must store.
+- `planFit(docs, projectId, today, suggestions?)` → `{forecastFinish, deadline, fits, lateCount, message}`. `forecastFinish` equals `projectTruth.forecastFinish` after accepting `planToWork(...)`. Message: "Done by about Dec 1, 10 business days before your Dec 15 deadline." or "This plan needs until Dec 20, past your Dec 15 deadline."
+- `waitingOn(docs, workId)` → `[{id, title, owner, kind: 'dependency'|'information', dataId?}]`: real edges only (report "waiting on X").
+- `dataOwner(docs, dataId)` → `{person, role, name}`; `defaultDataOwner(step)` → `{owner}` or `{ownerRole}` for new information on a step.
+- `displayValue(docs, value)`: a person or information id becomes a name; empty or `(none)` becomes "Nobody". `namesFor(docs)` → `{person(id), data(id)}`.
+- `diffProcess(process, docs)` and `diffVersions(a, b, docs)`: with `docs`, change text uses names ("Owner Maya Chen → Nobody", "Information added: …").
+- Calendar: `isBusinessDay(d)`, `toBusinessDay(d)` (weekend → Monday), `fmtDay(d)` ("Nov 16"), `fmtDayLong(d)` ("Mon Nov 16").
+
+**Changed behaviour:**
+- `forecastAll` results add `late` (boolean) and `pastDueDays`; `slipDays` is now business days; weekend due dates count as the next Monday; no forecast lands on a weekend.
+- `scheduleBadge` → `{key, label, advancedLabel, late, holdsUp}`. `label` is `Late` for both past due (`key: 'late'`) and finishing after due (`key: 'slipping'`). Count the "Late" badges and you get `lateCount`.
+- `projectStats.late` = `lateCount`; `.slip` = finishing after due; `.pastDue` added.
+- `availLabel` / `effectiveAvail`: information with an open problem (defect with `dataId`, or from its test case, or the only information on its step) is `state: 'problem'` → "Has a problem" (amber), never "We have it". Readiness `data-live` lists it under `problems`.
+- `buReady(docs, prj, bu)` adds `needed` and `waitingOn` (= tests not passed + open tasks + information). A team that doesn't need to approve returns `needed: false`.
+- Readiness gate: no changed teams → no approvals needed; with one changed team, its single approval passes the two-person rule. A person who recorded every test result of a part can't approve it (`sectionStatus[].sodBlockedBy`), and that part then needs an approver chosen.
+- `profileCsv(csv, {dataElement | fields})` checks real values against the rules: `col.check = {rejected, firstRow, blank, wrongLength, badChars, pattern}`, `patterns[].row` / `.valid`, `col.nullRow`. `profileLines` adds "1 doesn't match the pattern". Generated profile tests carry `sampleRow` ("from sample row 2"). Person fields (employee, manager, …) never get vendor names.
+- `projectSummary`, `testingSummary` and `launchSteps` return the matching parts of `projectTruth`.
