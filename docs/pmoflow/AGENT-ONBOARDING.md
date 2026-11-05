@@ -6,7 +6,7 @@
   3. `CONTRACTS.md`
   4. `CONTRACTS-R2.md`
   5. `CONTRACTS-R3.md`
-  6. `CONTRACTS-R4.md`, `CONTRACTS-R5.md`, `CONTRACTS-R6.md` , `CONTRACTS-R7.md` (R7 is the current round: SIMPLICITY — Rule #1)
+  6. `CONTRACTS-R4.md`, `CONTRACTS-R5.md`, `CONTRACTS-R6.md` , `CONTRACTS-R7.md`, `CONTRACTS-R8.md` (R8 is the current round: ONE TRUTH, NO MAKE-WORK; Rule #1 still governs)
 
   Later deltas win over earlier ones.
 - **Shared client code (lead-owned):** `web/public/concepts/pmoflow/app/{store.js, ui.js, main.js, styles.css}`. Read them; don't edit them. If you need a change, put it in your report.
