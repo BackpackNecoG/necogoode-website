@@ -109,33 +109,100 @@ function statusFacts(docs, projectId, today, engine) {
       return { title: r.title, impact: r.impact, likelihood: r.likelihood, owner: L.person(r.owner), mitigation: r.mitigation,
         workItems: linked.map(w => w.title), likelyMitigated: linked.length > 0 && linked.every(w => w.status === 'done') };
     });
-  facts.rag = ragOf(facts);
+  /* R6: one RAG truth — the engine's projectHealth (Red only when the finish date is at risk) */
+  facts.rag = healthOf(docs, projectId, today, engine, facts);
+  facts.earnedValue = evOf(docs, projectId, today, engine, project);
+  facts.hypercare = hypercareOf(project, today, L);
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
     .map(g => ({ data: L.label(g.dataId), env: g.env, access: g.access, requestedBy: L.person(g.requestedBy) }));
   return L.scrub(facts);
 }
 
+/* R6: RAG from engine.projectHealth(docs, prj, today) -> {rag, reasons[]}; rules fallback applies the same R6 rule. */
+function healthOf(docs, projectId, today, engine, facts) {
+  const fin = (facts.stats || {}).actualFinish || (facts.stats || {}).finish, target = facts.project.target;
+  const bufferDays = fin && target ? dayDiff(String(fin).slice(0, 10), target) : null;
+  if (engine && typeof engine.projectHealth === 'function') {
+    const h = engine.projectHealth(docs, projectId, today) || {};
+    const status = ({ red: 'red', amber: 'amber', green: 'green', r: 'red', a: 'amber', g: 'green' })[String(h.rag || h.status || '').toLowerCase()] || 'grey';
+    const reasons = (Array.isArray(h.reasons) ? h.reasons : []).map(x => (typeof x === 'string' ? x : (x && (x.text || x.label)) || '')).filter(Boolean);
+    return { status, reasons: reasons.length ? reasons : [status === 'grey' ? 'no work is planned yet' : 'nothing threatens the target date'], bufferDays, source: 'projectHealth' };
+  }
+  return ragOf(facts);
+}
+/* R6: earned value from engine.earnedValue(docs, prj, today); keys normalised to lower case. */
+function evOf(docs, projectId, today, engine, project) {
+  let raw = null;
+  if (engine && typeof engine.earnedValue === 'function') { try { raw = engine.earnedValue(docs, projectId, today); } catch (e) { raw = null; } }
+  if (!raw || typeof raw !== 'object') raw = localEarnedValue(docs, projectId, today, project);
+  if (!raw) return null;
+  const pick = k => { const hit = Object.keys(raw).find(x => x.toLowerCase() === k); const v = hit != null ? Number(raw[hit]) : NaN; return isFinite(v) ? v : null; };
+  const r2 = v => (v == null ? null : Math.round(v * 100) / 100), r0 = v => (v == null ? null : Math.round(v));
+  const out = { pv: r0(pick('pv')), ev: r0(pick('ev')), ac: r0(pick('ac')), spi: r2(pick('spi')), cpi: r2(pick('cpi')), eac: r0(pick('eac')), bac: r0(pick('bac')) };
+  if (out.bac == null && project.budget && Number(project.budget.planned) > 0) out.bac = Math.round(Number(project.budget.planned));
+  return out;
+}
+/* Used only when the engine has no earnedValue: BAC = planned budget (else planned cost); PV/EV by effort; AC = logged hours x dayRate / 8. */
+function localEarnedValue(docs, projectId, today, project) {
+  const work = list(docs, 'workItem').filter(w => w.projectId === projectId);
+  if (!work.length) return null;
+  const rate = Object.fromEntries(list(docs, 'person').map(p => [p.id, Number(p.dayRate) > 0 ? Number(p.dayRate) : 800]));
+  const eff = w => (Number(w.effortDays) > 0 ? Number(w.effortDays) : 1);
+  const cost = w => eff(w) * (rate[w.owner] || 800);
+  const total = work.reduce((a, w) => a + cost(w), 0);
+  const bac = project.budget && Number(project.budget.planned) > 0 ? Number(project.budget.planned) : total;
+  const share = w => (total ? cost(w) / total : 0);
+  const pv = bac * work.filter(w => w.due && w.due <= today).reduce((a, w) => a + share(w), 0);
+  const ev = bac * work.filter(w => w.status === 'done').reduce((a, w) => a + share(w), 0);
+  const ac = work.reduce((a, w) => a + (Array.isArray(w.time) ? w.time : []).reduce((b, t) => b + (Number(t.hours) || 0) * (rate[t.by || w.owner] || 800) / 8, 0), 0);
+  const cpi = ac ? ev / ac : null;
+  return { pv, ev, ac, spi: pv ? ev / pv : null, cpi, eac: cpi ? bac / cpi : null, bac };
+}
+/* R6: hypercare (live projects only): days remaining, owner, open incidents; an open sev-1 suggests rollback. */
+function hypercareOf(project, today, L) {
+  if (project.status !== 'live') return null;
+  const c = project.cutover || {};
+  const days = Number(c.hypercareDays) > 0 ? Number(c.hypercareDays) : null;
+  const start = String(project.liveAt || today).slice(0, 10);
+  const remaining = days != null ? Math.max(0, days - dayDiff(start, today)) : null;
+  const open = (Array.isArray(project.incidents) ? project.incidents : []).filter(i => i && !['closed', 'resolved'].includes(String(i.status || 'open').toLowerCase()))
+    .map(i => ({ title: String(i.title || 'Untitled incident'), severity: Number(i.severity) || 3, at: i.at || null, by: i.by ? L.person(i.by) : null }))
+    .sort((a, b) => a.severity - b.severity);
+  return { owner: c.hypercareOwner ? L.person(c.hypercareOwner) : null, days, daysRemaining: remaining, liveSince: start, open, considerRollback: open.some(i => i.severity === 1) };
+}
+
 const plural = (n, word, pl) => `${n} ${n === 1 ? word : (pl || word + 's')}`;
 const dayDiff = (a, b) => Math.round((Date.parse(String(b).slice(0, 10) + 'T12:00:00Z') - Date.parse(String(a).slice(0, 10) + 'T12:00:00Z')) / 86400000);
 
-/* Portfolio rule (R3): red if any late item or forecast after target; amber if slipping or under 7 days of buffer; else green. */
+/* R6 rule (used only when the engine has no projectHealth): Red only if the forecast finish is after the target or missing data
+   has no plan; Amber if any item is late (finish still meets target) or buffer is under 5 business days; Green otherwise. */
 function ragOf(f) {
   const s = f.stats || {}, reasons = [];
+  if (!s.total) return { status: 'grey', reasons: ['no work is planned yet'], bufferDays: null };
   const late = (f.atRisk || []).filter(w => w.sched === 'late').length || s.late || 0;
-  const slipping = (f.atRisk || []).filter(w => w.sched === 'slip').length || s.slip || 0;
   const finish = s.actualFinish || s.finish, target = f.project.target;
-  const buffer = finish && target ? Math.round((Date.parse(target + 'T12:00:00Z') - Date.parse(String(finish).slice(0, 10) + 'T12:00:00Z')) / 86400000) : null;
-  if (late) reasons.push(`${plural(late, 'work item')} ${late === 1 ? 'is' : 'are'} late`);
+  const buffer = finish && target ? dayDiff(String(finish).slice(0, 10), target) : null;
+  const bizBuffer = finish && target ? businessDaysBetween(String(finish).slice(0, 10), target) : null;
+  const unplanned = (f.notLive || []).filter(b => b.state === 'missing' && !b.resolver);
   if (buffer != null && buffer < 0) reasons.push(`the forecast finish is ${plural(-buffer, 'day')} after target`);
+  if (unplanned.length) reasons.push(`${plural(unplanned.length, 'missing data element')} ${unplanned.length === 1 ? 'has' : 'have'} no plan`);
   if (reasons.length) return { status: 'red', reasons, bufferDays: buffer };
-  if (slipping) reasons.push(`${plural(slipping, 'work item')} ${slipping === 1 ? 'is' : 'are'} slipping`);
-  if (buffer != null && buffer < 7) reasons.push(`there ${buffer === 1 ? 'is' : 'are'} only ${plural(buffer, 'day')} of buffer before target`);
+  if (late) reasons.push(`${plural(late, 'work item')} ${late === 1 ? 'is' : 'are'} late, but the finish still meets the target`);
+  if (bizBuffer != null && bizBuffer < 5) reasons.push(`there ${bizBuffer === 1 ? 'is' : 'are'} only ${plural(bizBuffer, 'business day')} of buffer before target`);
   if (reasons.length) return { status: 'amber', reasons, bufferDays: buffer };
-  return { status: 'green', reasons: [buffer != null ? `there ${buffer === 1 ? 'is' : 'are'} ${plural(buffer, 'day')} of buffer and nothing is late or slipping` : 'nothing is late or slipping'], bufferDays: buffer };
+  return { status: 'green', reasons: [buffer != null ? `there ${buffer === 1 ? 'is' : 'are'} ${plural(buffer, 'day')} of buffer and nothing is late` : 'nothing is late'], bufferDays: buffer };
 }
-const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green' };
-const RAG_PHRASE = { red: 'off track', amber: 'at risk', green: 'on track' };
+function businessDaysBetween(a, b) {
+  let n = 0, d = Date.parse(a + 'T12:00:00Z'); const end = Date.parse(b + 'T12:00:00Z');
+  if (!isFinite(d) || !isFinite(end)) return null;
+  const sign = end >= d ? 1 : -1;
+  while (sign > 0 ? d < end : d > end) { d += sign * 86400000; const w = new Date(d).getUTCDay(); if (w !== 0 && w !== 6) n += sign; }
+  return n;
+}
+const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green', grey: 'Not planned' };
+const RAG_PHRASE = { red: 'off track', amber: 'at risk', green: 'on track', grey: 'not planned yet' };
 
+const money = n => '$' + Math.round(Number(n) || 0).toLocaleString('en-US');
 function fd(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : d; }
 /* R4: "late by N days" = days past due; slip against plan is reported separately */
 function atRiskLine(w) {
@@ -163,14 +230,23 @@ function statusRules(f) {
   const s = f.stats || {};
   const rag = f.rag || ragOf(f);
   const finish = s.finish ? `forecast finish ${fd(s.finish)}` : 'no forecast yet';
+  const ev = f.earnedValue, hc = f.hypercare;
+  const lc = t => (/^[A-Z][a-z]/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t);
+  const evLine = ev && (ev.spi != null || ev.cpi != null)
+    ? `Earned value: schedule performance (SPI) ${ev.spi != null ? ev.spi.toFixed(2) : 'n/a'}, cost performance (CPI) ${ev.cpi != null ? ev.cpi.toFixed(2) : 'n/a'}` +
+      (ev.ac != null && ev.ev != null ? `; ${money(ev.ev)} of work earned for ${money(ev.ac)} spent` : '') + (ev.eac != null ? `; estimate at completion ${money(ev.eac)}` : '') +
+      (ev.bac != null ? ` against a ${money(ev.bac)} budget` : '') : null;
+  const hcLine = hc ? `Hypercare: ${hc.daysRemaining != null ? `${plural(hc.daysRemaining, 'day')} left` : 'in progress'}${hc.owner ? `, owner ${hc.owner}` : ''}; ${plural(hc.open.length, 'open incident')}` : null;
   return {
     rag: rag.status,
     headline: `${RAG_WORD[rag.status]}: ${f.project.name} is ${RAG_PHRASE[rag.status]}, ${s.pct || 0}% done, ${finish} vs target ${fd(f.project.target)}`,
-    summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.join(' and ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
-      `${lateSlip(f)} ${plural(notLiveN(f), 'data element')} ${notLiveN(f) === 1 ? 'is' : 'are'} not yet live.`,
+    summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.map(lc).join('; ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
+      `${lateSlip(f)} ${plural(notLiveN(f), 'data element')} ${notLiveN(f) === 1 ? 'is' : 'are'} not yet live.` + (evLine ? ` ${evLine}.` : '') + (hcLine ? ` ${hcLine}.` : ''),
     highlights: [`${s.done || 0} of ${plural(s.total || 0, 'work item')} complete`]
-      .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${plural(f.readiness.failing.length, 'check')} open`] : []),
-    risks: (f.atRisk || []).map(atRiskLine)
+      .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${plural(f.readiness.failing.length, 'check')} open`] : [])
+      .concat(evLine ? [evLine] : []).concat(hcLine ? [hcLine] : []),
+    risks: (hc ? hc.open.map(i => `Severity ${i.severity} incident "${i.title}" is open${i.severity === 1 ? ': consider rollback' : ''}`) : [])
+      .concat((f.atRisk || []).map(atRiskLine))
       .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (impact ${r.impact}, likelihood ${r.likelihood}, owner ${r.owner})`))
       .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `${r.title}: all linked work is done, so it is likely mitigated. ${r.owner}: confirm and close.`)),
     asks: (f.blockers || []).map(b => b.state === 'pending'
@@ -178,7 +254,8 @@ function statusRules(f) {
         : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
       .concat((f.notLive || []).filter(b => b.state === 'example').map(b => `${b.owner}: provide a live source for ${b.name} (examples only today)`))
       .concat((f.openDiscovered || []).map(x => `Resolve the discovered requirement on ${x.data}: ${x.requirement}`))
-      .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`)),
+      .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`))
+      .concat(hc && hc.considerRollback ? [`${hc.owner || 'Hypercare owner'}: a severity 1 incident is open; decide whether to roll back`] : []),
   };
 }
 
@@ -211,6 +288,65 @@ function modal(t) {
 }
 const COND = /^(if|unless)\b|\b(if|unless)\b|\bwhen\b.*\b(exceed\w*|over|above|greater|more than|below|under)\b|\bover \$|\babove \$|\bgreater than\b|\bmore than \$|\bexceed(s|ing)?\b|\bapproval (is )?required\b/i;
 const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
+/* R6: a title never keeps "()" or a lone parenthesis (left over when a condition is split out of "(if over $5,000)") */
+function tidy(t) {
+  let x = String(t || '');
+  for (let i = 0; i < 3; i++) x = x.replace(/\(\s*[^()\w$%]*\s*\)/g, ' ');
+  const chars = Array.from(x), open = [], drop = new Set();
+  chars.forEach((c, i) => { if (c === '(') open.push(i); else if (c === ')') { if (open.length) open.pop(); else drop.add(i); } });
+  open.forEach(i => drop.add(i));
+  x = chars.filter((c, i) => !drop.has(i)).join('');
+  return x.replace(/\s+([,.;:?!])/g, '$1').replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').replace(/\s{2,}/g, ' ').replace(/^[\s,;:-]+|[\s,;:-]+$/g, '').trim();
+}
+/* R6: data is proposed only for a document, record or field noun phrase ("expense report", "employee bank details",
+   "record of deliveries"), never for a role doing something ("Receiving clerk records the delivery"). */
+const DOC_HEAD = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?)$/;
+const ROLE_WORD = /^(clerks?|managers?|analysts?|officers?|teams?|leads?|specialists?|supervisors?|approvers?|owners?|staff|directors?|buyers?|agents?|administrators?|admins?|coordinators?|accountants?|controllers?|requesters?|requestors?|reviewers?|treasurers?|engineers?|partners?|assistants?|associates?|representatives?|reps?|heads?|employees?|contractors?|vendors?|suppliers?|customers?|users?|hr|it|ap|ar|finance|procurement|treasury|compliance|payable|receivable|department|desk)$/i;
+const VERBISH_HEAD = /^(forms?|reports?|records?|documents?|contracts?|numbers?|letters?|files?|statements?|applications?)$/;
+const NOUNISH = /^(request|review|purchase|change|check|schedule|export|import|issue|post|order|payment|expense|update)$/;
+const DET = /^(the|a|an|this|that|these|those|each|every|all|its|their|his|her|our|your|it|them|any|some|one|both)$/i;
+const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|final|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded)$/i;
+/* a proposal name is acceptable only if it is a document/record/field noun phrase */
+function isDocName(name) {
+  const w = String(name).toLowerCase().replace(/[^a-z0-9&/' -]+/g, ' ').trim().split(/\s+/);
+  if (w[0] === 'record' && w[1] === 'of' && w.length > 2) return true;
+  if (w.length < 2 || !DOC_HEAD.test(w[w.length - 1])) return false;
+  return docPhrases(name).length > 0 || !w.slice(0, -1).some(x => ROLE_WORD.test(x) && !/^(employees?|contractors?|vendors?|suppliers?|customers?)$/.test(x));
+}
+const ndKey = name => 'nd-' + String(name).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+/* every document noun phrase in a line, e.g. "Contractor request form" (modifier + head, or "Record of X") */
+function docPhrases(line, headRe) {
+  const words = String(line).replace(/[^\w'&/-]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  const bare = w => w.toLowerCase().replace(/'s$/, '').replace(/'$/, '');
+  const out = [];
+  words.forEach((w, k) => {
+    const head = bare(w);
+    if (!DOC_HEAD.test(head) || (headRe && !headRe.test(head))) return;
+    const next = words[k + 1] ? bare(words[k + 1]) : '';
+    const prev = k > 0 ? bare(words[k - 1]) : '';
+    if (/^records?$/.test(head) && next === 'of') {
+      /* "record of deliveries" */
+      const tail = [];
+      for (let i = k + 2; i < words.length && tail.length < 3; i++) { const x = bare(words[i]); if (STOP.has(x) || DET.test(x) || VERBS.test(x) || /^(to|in|on|by|or|for|and|with)$/.test(x)) { if (tail.length) break; continue; } tail.push(x); }
+      if (tail.length) out.push(cap('record of ' + tail.join(' ')));
+      return;
+    }
+    /* a verb, not a noun: "clerk records the delivery", "manager reports it", "vendor forms a partnership" */
+    if (!prev || DOC_HEAD.test(next)) return;            /* "timesheet record": the last noun is the head */
+    if (VERBISH_HEAD.test(head) && (DET.test(next) || ROLE_WORD.test(prev))) return;
+    const mods = [];
+    for (let i = k - 1; i >= 0 && mods.length < 2; i--) {
+      const x = bare(words[i]);
+      if (STOP.has(x) || DET.test(x) || (VERBS.test(x) && !(NOUNISH.test(x) && i > 0)) || ADJ_STOP.test(x) || /^(a|an|of|to|in|on|by|or|is|be|at|as|with|before|after|against|through|via|using)$/.test(x)) break;
+      if (ROLE_WORD.test(x) && !/^(employees?|contractors?|vendors?|suppliers?|customers?)$/.test(x)) break;
+      if (/^\d/.test(x) || /[^a-z0-9&/-]/i.test(x)) break;
+      mods.unshift(/^[A-Z]{2,4}s?$/.test(words[i]) ? words[i] : x);   /* keep acronyms: PO, W-9, ERP */
+    }
+    if (!mods.length) return;
+    out.push(cap(mods.concat([head === 'id' || head === 'ids' ? 'ID' : head]).join(' ')));
+  });
+  return [...new Set(out)];
+}
 const clip = (t, n) => (t.length > n ? t.slice(0, n - 3).replace(/\s+\S*$/, '') + '…' : t);
 function tokens(t) {
   return String(t).toLowerCase().replace(/'s\b/g, '').split(/[^a-z0-9]+/)
@@ -227,25 +363,21 @@ function sopRules(text, docs) {
   const usesData = (nodes, id) => (nodes || []).some(n => (n.data || []).includes(id) || (n.subs || []).some(x => (x.data || []).includes(id)) || (n.branches || []).some(b => usesData(b.nodes, id)));
   const elDomain = Object.fromEntries(dataEls.map(d => [d.id, domainOf([d.name, d.source, d.note].join(' ')) ||
     domainOf(procs.filter(p => usesData(p.tobe, d.id) || usesData(p.asis, d.id)).map(p => p.name + ' ' + p.desc).join(' '))]));
-  const newData = [], seenNew = new Set(dataEls.map(d => String(d.name).toLowerCase()));
-  const propose = (name, reason) => {
-    const key = name.toLowerCase();
-    if (!name || seenNew.has(key) || newData.length >= 15) return;
-    seenNew.add(key); newData.push({ name, reason });
-  };
-  const phraseFor = (line, nounRe) => {
-    const words = line.replace(/[^\w'$-]+/g, ' ').trim().split(/\s+/);
-    let k = -1; words.forEach((w, i) => { if (nounRe.test(w.toLowerCase().replace(/'s$/, ''))) k = i; });
-    if (k < 0) return null;
-    const out = [words[k]];
-    for (let i = k - 1; i >= 0 && out.length < 3; i--) {
-      const w = words[i].replace(/'s$/i, '');
-      if (STOP.has(w.toLowerCase()) || VERBS.test(w) || /^(a|an|of|to|in|on|by|or|is|be)$/i.test(w)) break;
-      out.unshift(w);
+  const newData = [], existing = new Set(dataEls.map(d => String(d.name).toLowerCase()));
+  /* R6: every proposal has a stable key and lists the steps that need it; the step carries {key, name} in newData */
+  const propose = (name, reason, node) => {
+    name = tidy(name);
+    if (!name || existing.has(name.toLowerCase())) return;
+    const key = ndKey(name);
+    let p = newData.find(x => x.key === key);
+    if (!p) { if (newData.length >= 15) return; p = { key, name, reason, steps: [] }; newData.push(p); }
+    if (node && node.id) {
+      if (!p.steps.includes(node.id)) p.steps.push(node.id);
+      const nd = node.newData || (node.newData = []);
+      if (!nd.some(x => x.key === key)) nd.push({ key, name: p.name });
     }
-    return out.length > 1 ? cap(out.join(' ').toLowerCase()) : null;
   };
-  const linkData = (line) => {
+  const linkData = (line, node) => {
     const lower = line.toLowerCase();
     const lineDomain = domainOf(line) || docDomain;
     const lt = new Set(tokens(line));
@@ -258,15 +390,16 @@ function sopRules(text, docs) {
       if (shared.length >= 2) {
         if (lineDomain === elDomain[d.id]) hits.push(d.id);
         else {
-          const nm = phraseFor(line, new RegExp('^(' + shared.join('|') + ')s?$')) || cap(shared.join(' '));
+          /* only a document/record/field phrase is proposed; a shared word in a role phrase is not data */
+          const nm = docPhrases(line).find(ph => shared.some(t => tokens(ph).includes(t)));
           const src = /\bfrom\s+(?:the\s+)?([A-Z][\w-]+)/.exec(line);
-          propose(nm, `Mentioned in "${clip(line, 80)}"${src ? ` (source: ${src[1]})` : ''}. "${d.name}" shares words but is ${elDomain[d.id] || 'other'} data, not ${lineDomain || 'the same domain'}, so it was not linked.`);
+          if (nm) propose(nm, `Mentioned in "${clip(line, 80)}"${src ? ` (source: ${src[1]})` : ''}. "${d.name}" shares words but is ${elDomain[d.id] || 'other'} data, not ${lineDomain || 'the same domain'}, so it was not linked.`, node);
         }
       }
     }
     if (!hits.length) {
-      const nm = phraseFor(line, /^(details|record|records|form|data|number|certificate|statement|matrix|report|file|profile)$/);
-      if (nm) { const src = /\bfrom\s+(?:the\s+)?([A-Z][\w-]+)/.exec(line); propose(nm, `Mentioned in "${clip(line, 80)}"${src ? ` (source: ${src[1]})` : ''}; no existing data element matches.`); }
+      const src = /\bfrom\s+(?:the\s+)?([A-Z][\w-]+)/.exec(line);
+      docPhrases(line).forEach(nm => propose(nm, `Mentioned in "${clip(line, 80)}"${src ? ` (source: ${src[1]})` : ''}; no existing data element matches.`, node));
     }
     return [...new Set(hits)];
   };
@@ -284,9 +417,9 @@ function sopRules(text, docs) {
   let seq = 0;
   const makeStep = (title, line) => {
     /* R4: titles are never truncated */
-    const n = { id: 's' + (++seq), type: 'step', title: cap(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, '')) };
+    const n = { id: 's' + (++seq), type: 'step', title: cap(tidy(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, ''))) };
     const o = ownerOf(line); if (o) n.owner = o;
-    const d = linkData(line); if (d.length) n.data = d;
+    const d = linkData(line, n); if (d.length) n.data = d;
     const sys = systemOf(line); if (sys) n.system = sys;
     return n;
   };
@@ -301,9 +434,9 @@ function sopRules(text, docs) {
     return { cond: t, action: t };
   };
   const decisionTitle = (cond) => {
-    let c = cond.replace(/[.;?]$/, '').trim();
+    let c = tidy(cond).replace(/[.;?]$/, '').replace(/^(?:if|when|unless)\s+/i, '').trim();
     if (/^(over|above|under|below|more than|greater than|less than|exceeds?)\b/i.test(c)) c = 'amount ' + c;
-    return cap(c) + '?';
+    return cap(tidy(c)).replace(/[.;?]$/, '') + '?';
   };
 
   /* state shared across lines */
@@ -387,7 +520,7 @@ function sopRules(text, docs) {
   for (const rl of raw) {
     const t = rl.trim();
     const m = TRIGGER_LINE.exec(t) || TRIGGER_PROSE.exec(t);
-    if (m) { trigger = cap(m[m.length - 1].replace(/[.;]$/, '').trim()); break; }
+    if (m) { trigger = cap(tidy(m[m.length - 1].replace(/[.;]$/, '').trim())) || 'Process starts'; break; }
   }
   const NUM = /^(?:step\s+)?(\d+)[.):]\s+|^step\s+\d+\s*[-–:]\s*/i;
   const SUBNUM = /^\d+\.\d+[.)]?\s+/;
@@ -409,7 +542,7 @@ function sopRules(text, docs) {
       const els = ELSE_RE.exec(body);
       if (els && lastDecision) { branchWith(lastDecision.branches[1], els[2].trim(), gotoOf(body)); continue; }
       if (last.type === 'parallel') { const st = makeStep(modal(body), body); last.branches.push({ label: branchLabel(st, last.branches.length), nodes: [st] }); continue; }
-      const sub = { title: cap(body.replace(/[.;]$/, '')), data: linkData(body) };
+      const sub = { title: cap(tidy(body.replace(/[.;]$/, ''))), data: linkData(body, last) };
       (last.subs || (last.subs = [])).push(sub);
       continue;
     }
@@ -444,11 +577,28 @@ function sanitizeSop(out, docs) {
     used.add(id); return id;
   };
   const gotos = [];
+  /* R6: proposals are document/record/field noun phrases only, each with a stable key */
+  const existing = new Set(list(docs, 'dataElement').map(d => String(d.name).toLowerCase()));
+  const props = [];
+  (Array.isArray(out && out.newData) ? out.newData : []).forEach(x => {
+    const name = x && typeof x.name === 'string' ? tidy(x.name).slice(0, 80) : '';
+    if (!name || !isDocName(name) || existing.has(name.toLowerCase()) || props.length >= 15) return;
+    const key = ndKey(name);
+    if (props.some(p => p.key === key)) return;
+    props.push({ key, name, reason: typeof x.reason === 'string' ? x.reason.slice(0, 300) : '', steps: [] });
+  });
+  const tagNew = (node, raw) => {
+    const names = (Array.isArray(raw && raw.newData) ? raw.newData : []).map(v => (typeof v === 'string' ? v : v && v.name) || '').filter(Boolean);
+    const hits = props.filter(p => names.some(nm => ndKey(nm) === p.key));
+    if (!hits.length) return;
+    node.newData = hits.map(p => ({ key: p.key, name: p.name }));
+    hits.forEach(p => { if (!p.steps.includes(node.id)) p.steps.push(node.id); });
+  };
   const cleanNode = (n, depth) => {
     if (!n || typeof n.title !== 'string' || !n.title.trim()) return null;
-    if (n.type === 'trigger' && depth === 0) return { id: idFor(n, 'k'), type: 'trigger', title: n.title.trim().slice(0, 300) };
+    if (n.type === 'trigger' && depth === 0) return { id: idFor(n, 'k'), type: 'trigger', title: (tidy(n.title) || 'Process starts').slice(0, 300) };
     if ((n.type === 'decision' || n.type === 'parallel') && depth === 0 && Array.isArray(n.branches)) {
-      const g = { id: idFor(n, n.type === 'parallel' ? 'p' : 'd'), type: n.type, title: n.title.trim().slice(0, 300) };
+      const g = { id: idFor(n, n.type === 'parallel' ? 'p' : 'd'), type: n.type, title: (tidy(n.title) || (n.type === 'parallel' ? 'In parallel' : 'Decision?')).slice(0, 300) };
       g.branches = n.branches.slice(0, 4).map(b => {
         const br = { label: String((b && b.label) || '').slice(0, 30) || 'Branch',
           nodes: (Array.isArray(b && b.nodes) ? b.nodes : []).slice(0, 10).map(x => cleanNode(x, 1)).filter(Boolean) };
@@ -457,21 +607,22 @@ function sanitizeSop(out, docs) {
       });
       return g;
     }
-    const node = { id: idFor(n, 's'), type: 'step', title: n.title.trim().slice(0, 300) };
+    const title = tidy(n.title);
+    if (!title) return null;
+    const node = { id: idFor(n, 's'), type: 'step', title: title.slice(0, 300) };
     if (typeof n.owner === 'string' && peopleIds.has(n.owner)) node.owner = n.owner;
     const data = cleanData(n.data); if (data.length) node.data = data;
     const touches = strArr(n.touches, 4).map(x => x.slice(0, 40)); if (touches.length) node.touches = touches;
     if (typeof n.system === 'string' && n.system.trim()) node.system = n.system.trim().slice(0, 40);
     const subs = (Array.isArray(n.subs) ? n.subs : []).filter(x => x && typeof x.title === 'string' && x.title.trim()).slice(0, 12)
-      .map(x => ({ title: x.title.trim().slice(0, 300), data: cleanData(x.data) }));
+      .map(x => ({ title: (tidy(x.title) || x.title.trim()).slice(0, 300), data: cleanData(x.data) }));
     if (subs.length) node.subs = subs;
+    tagNew(node, n);
     return node;
   };
   const nodes = (Array.isArray(out && out.nodes) ? out.nodes : []).slice(0, 40).map(n => cleanNode(n, 0)).filter(Boolean);
   gotos.forEach(b => { if (!used.has(b.goto)) delete b.goto; });   /* drop loop-backs to unknown steps */
-  const newData = (Array.isArray(out && out.newData) ? out.newData : []).filter(x => x && typeof x.name === 'string' && x.name.trim()).slice(0, 15)
-    .map(x => ({ name: x.name.trim().slice(0, 80), reason: typeof x.reason === 'string' ? x.reason.slice(0, 300) : '' }));
-  return { nodes, newData, notes: typeof (out && out.notes) === 'string' ? out.notes.slice(0, 600) : '' };
+  return { nodes, newData: props, notes: typeof (out && out.notes) === 'string' ? out.notes.slice(0, 600) : '' };
 }
 
 /* ---------- entry point ---------- */
@@ -527,7 +678,8 @@ async function run(kind, body, docs, today) {
         '{"headline": string, "summary": string (2-3 sentences), "highlights": [string], "risks": [string], "asks": [string]}. ' +
         'Refer to work, data and people only by the names and titles given; never output identifiers. ' +
         'The headline MUST start with the supplied rag status word (Red, Amber or Green) and must not contradict it. ' +
-        'Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close".',
+        'Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close". The rag reasons are the only reasons for the status: do not call the project off track or red for any other reason. ' +
+        'Mention earnedValue (SPI and CPI) when supplied, and when hypercare is supplied report days remaining and open incidents; an open severity 1 incident means "consider rollback".',
         JSON.stringify(facts), 900);
       if (typeof out.headline !== 'string' || typeof out.summary !== 'string') throw new Error('shape');
       /* the headline must agree with the computed RAG (R3) */

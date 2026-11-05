@@ -21,5 +21,17 @@ Business/process analysts and SMEs map processes: the steps, the data each step 
 - **Must stand on its own** as a PMO surface, without requiring a Jira integration. It shouldn't try to out-Jira Jira on sprints or boards.
 - **Goals:** low learning curve, excellent customer experience, minimal customer involvement.
 
+
+## Rule #1 (founder, overrides everything): ease of use for non-technical people
+- **Every capability is planned as "a non-technical user can easily achieve X".** Users are SMEs, managers and approvers of varying ages, tech comfort, reading levels and devices (including phones).
+- **If the job gets done but the system is difficult or overly complex, the solution is not correct.**
+- **Rapid market adoption** depends on someone being productive in minutes, with no training.
+- **Implications:**
+  - Simple by default; advanced power behind progressive disclosure ("More options").
+  - Plain words (no jargon such as SIT, go/no-go, CPI, BPMN or regex unless asked for).
+  - Guided next steps on every screen.
+  - Few choices per screen, large targets, and readable on a phone.
+  - Defaults that are right without configuration.
+
 ## The showroom
 `/concepts/pmoflow/` is a no-login demo with fictional Northwind data. Each visitor gets a private sandbox. The "Viewing as" switcher stands in for real sign-in.

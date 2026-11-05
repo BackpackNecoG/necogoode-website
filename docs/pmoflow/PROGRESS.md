@@ -3,10 +3,11 @@
 **How to resume:**
 - Read this file, then `AGENT-ONBOARDING.md`, then the latest `CONTRACTS-R<n>.md`.
 - The loop is: **build round → regression (all suites) → deploy → two independent reviews (concept-aware + blind buyer vs Jira) → write the next delta → repeat.**
-- **Exit when:** every blind-buyer phase is ≥ A- with at most 2 at B+, **and** every concept pillar is ≥ A- with at most 2 at B+.
+- **Exit when:** every usability-panel task is ≥ A- (gating), **and** every blind-buyer phase is ≥ A- with at most 2 at B+, **and** every concept pillar is ≥ A- with at most 2 at B+.
 - Don't stop between rounds unless a decision genuinely needs the founder.
 
 **Founder rulings that shape the loop:**
+- **Ease of use is the #1 gating grade.** Plan every capability as "a non-technical user can easily achieve X". If it works but is hard or complex, it is not correct. Reviews now include a usability panel of non-technical personas doing timed tasks. Exit also requires every usability task to be A- or better.
 - Boards, sprints, timeline and map are all views of the same work data. Add views freely; never fork the data.
 - Hosted display layer; the customer's data and keys stay in their tenant.
 - Report progress to the founder as agents complete and as cycles start, stop or enter review.

@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart } from './project.js';
+import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -45,7 +45,7 @@ function projectsHTML(projects) {
     const rc = {}; g.projects.forEach(p => { const k = rag(p, projectStats(p.id)).k; rc[k] = (rc[k] || 0) + 1; });
     return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · forecast cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} red</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} amber</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
   }).join('');
-  return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><button class="btn sm primary" data-new-project>+ New project</button></h3>
+  return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><span class="pmo-h3acts"><button class="btn sm" data-export-pf title="Download every project's status, schedule, cost and earned value as CSV">Export CSV</button><button class="btn sm primary" data-new-project>+ New project</button></span></h3>
     <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Forecast / target</th><th>Schedule</th><th>Release</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="pmo-rule"><span class="rag rag-red"><i></i>Red</span><span class="rag rag-amber"><i></i>Amber</span><span class="rag rag-green"><i></i>Green</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
 }
@@ -65,18 +65,32 @@ function financialsHTML(projects) {
       <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
       <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${esc(money(f.forecast))}</td>
       <td class="pmo-num" data-fin-actual>${esc(money(f.actual))}</td>
-      <td class="pmo-num">${v == null ? '<span class="hint">—</span>' : `<span class="pmo-var ${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : v < 0 ? '−' : ''}${esc(money(Math.abs(v)))}</span>`}</td></tr>`;
+      <td class="pmo-num">${v == null ? '<span class="hint">—</span>' : `<span class="pmo-var ${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : v < 0 ? '−' : ''}${esc(money(Math.abs(v)))}</span>`}</td>
+      ${evCells(earnedValue(j))}</tr>`;
   };
   const body = groups.map(g => {
     const f = g.projects.map(financials), sum = k => f.reduce((a, x) => a + (x[k] || 0), 0);
-    return `<tr class="pmo-prog-h"><td colspan="5"><b>${esc(g.program)}</b> <span class="hint">planned ${esc(money(sum('planned')))} · forecast ${esc(money(sum('forecast')))} · actual ${esc(money(sum('actual')))}</span></td></tr>${g.projects.map(row).join('')}`;
+    return `<tr class="pmo-prog-h"><td colspan="8"><b>${esc(g.program)}</b> <span class="hint">planned ${esc(money(sum('planned')))} · forecast ${esc(money(sum('forecast')))} · actual ${esc(money(sum('actual')))}</span></td></tr>${g.projects.map(row).join('')}`;
   }).join('');
   const tot = k => all.reduce((a, x) => a + (x[k] || 0), 0);
   return `<div class="card" data-financials><h3>Financials <span class="n">${esc(money(tot('forecast')))} forecast</span></h3>
-    <div class="hint" style="margin:-4px 0 10px">Planned budget vs forecast cost (all work) vs actual cost (done work). Cost = effort × the owner’s day rate (default ${esc(money(DEFAULT_RATE))}/day); edit rates in Workload.</div>
-    <div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned</th><th class="pmo-num">Forecast</th><th class="pmo-num">Actual</th><th class="pmo-num">Forecast vs plan</th></tr></thead><tbody>${body}
-      <tr class="pmo-fin-tot"><td><b>Portfolio</b></td><td class="pmo-num"><b>${esc(money(tot('planned')))}</b></td><td class="pmo-num"><b>${esc(money(tot('forecast')))}</b></td><td class="pmo-num"><b>${esc(money(tot('actual')))}</b></td><td></td></tr></tbody></table></div>
+    <div class="hint" style="margin:-4px 0 10px">Planned budget vs forecast cost (all work) vs actual cost (done work). Cost = effort × the owner’s day rate (default ${esc(money(DEFAULT_RATE))}/day); edit rates in Workload. Earned value: SPI and CPI below 1.00 mean behind schedule or over cost; EAC is the forecast total at today’s cost efficiency, from logged hours.</div>
+    <div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned</th><th class="pmo-num">Forecast</th><th class="pmo-num">Actual</th><th class="pmo-num">Forecast vs plan</th><th class="pmo-num" title="Schedule performance index: earned value ÷ planned value">SPI</th><th class="pmo-num" title="Cost performance index: earned value ÷ actual cost (logged hours × day rate ÷ 8)">CPI</th><th class="pmo-num" title="Estimate at completion: budget ÷ CPI">EAC</th></tr></thead><tbody>${body}
+      <tr class="pmo-fin-tot"><td><b>Portfolio</b></td><td class="pmo-num"><b>${esc(money(tot('planned')))}</b></td><td class="pmo-num"><b>${esc(money(tot('forecast')))}</b></td><td class="pmo-num"><b>${esc(money(tot('actual')))}</b></td><td></td><td></td><td></td><td></td></tr></tbody></table></div>
     <div class="pmo-wl-key"><span><i class="plan"></i>Planned budget</span><span><i class="fc"></i>Forecast cost</span><span><i class="act"></i>Actual cost</span><span><i class="over"></i>Forecast over budget</span></div></div>`;
+}
+
+const evCells = ev => ev ? `<td class="pmo-num" data-ev-spi><b class="${idxCls(ev.spi)}">${fmtIdx(ev.spi)}</b></td><td class="pmo-num" data-ev-cpi><b class="${idxCls(ev.cpi)}">${fmtIdx(ev.cpi)}</b></td><td class="pmo-num" data-ev-eac>${esc(money(ev.eac))}</td>` : '<td class="pmo-num hint">—</td><td class="pmo-num hint">—</td><td class="pmo-num hint">—</td>';
+
+/* ---------------------------------------------------------------- R6: portfolio CSV */
+export function portfolioCSVRows(projects) {
+  const head = ['Program', 'Project', 'Project manager', 'Release manager', 'Status', 'RAG', 'RAG reasons', 'Progress %', 'Work done', 'Work total', 'Late', 'Slipping', 'Forecast finish', 'Target', 'Planned budget', 'Forecast cost', 'Actual cost', 'PV', 'EV', 'AC', 'SPI', 'CPI', 'EAC'];
+  const rows = byProgram(projects).flatMap(g => g.projects.map(j => {
+    const s = projectStats(j.id), r = rag(j, s), fi = finishInfo(j, s), f = financials(j), ev = earnedValue(j) || {};
+    const n = v => v == null ? '' : Math.round(v * 100) / 100;
+    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), j.status === 'live' ? 'Live' : 'Active', r.label, r.reason || '', s.pct, s.done, s.total, s.late, s.slip, fi.date || '', j.target || '', f.planned || '', Math.round(f.forecast), Math.round(f.actual), n(ev.pv), n(ev.ev), n(ev.ac), n(ev.spi), n(ev.cpi), n(ev.eac)];
+  }));
+  return [head, ...rows];
 }
 
 /* ---------------------------------------------------------------- burndown (R5) */
@@ -91,7 +105,7 @@ function burnHTML(projects) {
 /* ---------------------------------------------------------------- workload */
 /* Engine R2: workload(docs, today) -> {person, open, late, dueNext7, effortNext14, capacityNext14, overloaded}.
    Older signature was (docs, projectId, today); both are handled. */
-function workloadRows() {
+export function workloadRows() {
   let rows = eng('workload', null, docs(), today());
   if (!Array.isArray(rows) || (rows[0] && rows[0].effortNext14 === undefined)) rows = eng('workload', [], docs(), undefined, today()) || [];
   const seen = new Set(rows.map(r => typeof r.person === 'object' && r.person ? r.person.id : r.person));
@@ -294,12 +308,13 @@ function reportHTML(projects) {
     const d = rep.data, ai = String(d.source || '').toLowerCase() === 'ai';
     const list = (h, arr, cls) => (arr && arr.length) ? `<div class="pmo-rep-sec ${cls}"><h4>${h}</h4><ul>${arr.map(x => `<li>${esc(txt(x))}</li>`).join('')}</ul></div>` : '';
     out = `<div class="pmo-rep">
-      <div class="pmo-rep-top"><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ Generated by AI' : 'Rules-based'}</span><span class="hint">${ai ? 'Written from project facts only. Check before sending.' : 'Built from project facts by deterministic rules.'}</span><button class="btn sm" data-copy-rep style="margin-left:auto">Copy</button></div>
+      <div class="pmo-rep-top"><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ Generated by AI' : 'Rules-based'}</span><span class="hint">${ai ? 'Written from project facts only. Check before sending.' : 'Built from project facts by deterministic rules.'}</span><span class="pmo-rep-btns"><button class="btn sm" data-copy-rep>Copy</button><button class="btn sm" data-print-pf-rep>Print / PDF</button></span></div>
+      <div class="pmo-rep-print-h">${ragBadge(rag(j, projectStats(j.id)))} <b>${esc(j.name)}</b> · status report · ${esc(fmt(today()))}</div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div></div>`;
   }
-  return `<div class="card"><h3>Status report</h3>
+  return `<div class="card" data-pf-rep><h3>Status report</h3>
     <div class="pmo-tlbar"><select class="pmo-sel" data-rep-prj aria-label="Project for status report">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
       <button class="btn sm primary" data-gen-rep ${rep && rep.loading ? 'disabled' : ''}>${rep && rep.data ? 'Regenerate' : '✦ Generate report'}</button></div>${out}</div>`;
 }
@@ -358,5 +373,13 @@ export function bind(root) {
     if (!rep || !rep.data) return;
     toast((await copyText(reportText(j, rep.data))) ? 'Report copied' : 'Copy failed: select the text and copy manually');
   });
+  on('[data-print-pf-rep]', () => {
+    document.body.classList.add('pmo-print-pf');
+    const done = () => { document.body.classList.remove('pmo-print-pf'); window.removeEventListener('afterprint', done); };
+    window.addEventListener('afterprint', done);
+    window.print();
+    setTimeout(done, 1500);
+  });
+  on('[data-export-pf]', () => { const n = downloadCSV(`portfolio-${today()}.csv`, portfolioCSVRows(store.list('project'))); toast(`Exported ${n} project${n === 1 ? '' : 's'} to CSV`); });
   bindFeed(root, 'risk', e => String(e.ref || '').startsWith('risk:'));
 }

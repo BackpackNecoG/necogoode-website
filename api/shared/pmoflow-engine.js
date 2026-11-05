@@ -117,6 +117,9 @@
     setDiff('Data', a.data, n.data).forEach(x => ch.push(x));
     const s = textChange('SLA', a.sla, n.sla); if (s) ch.push(s);
     const y = textChange('System', a.system, n.system); if (y) ch.push(y);
+    // R6 node types: subprocess {calls: processId}, wait {wait: text}, message {direction: send|receive, party}.
+    if ((a.type || 'step') !== (n.type || 'step')) ch.push('Type ' + (a.type || 'step') + ' → ' + (n.type || 'step'));
+    [['Calls', 'calls'], ['Wait', 'wait'], ['Message', 'direction'], ['Party', 'party']].forEach(([l, k]) => { const c = textChange(l, a[k], n[k]); if (c) ch.push(c); });
     // Sub-steps are compared only when the as-is step documents them (undefined = not decomposed).
     if (Array.isArray(a.subs)) {
       const at = a.subs.map(x => x && x.title || ''), nt = (n.subs || []).map(x => x && x.title || '');
@@ -360,8 +363,7 @@
     return lines;
   }
 
-  // Longest binding forecast chain ending at the project finish, root first. All done: the chain ending
-  // at the latest actual finish. A dependency is on the path only when it sets its successor's forecast.
+  // Longest chain ending at the project finish, root first. All done: the chain ending at the latest actual finish.
   function criticalPath(docs, projectId, today) {
     const fc = forecastAll(docs, today);
     const items = list(docs, 'workItem').filter(w => w.projectId === projectId);
@@ -369,11 +371,20 @@
     const finish = projectStats(docs, projectId, today).finish;
     const allDone = items.every(w => w.status === 'done');
     const ends = items.filter(w => (allDone ? (w.doneAt || w.due) : (w.status !== 'done' && fc[w.id].forecast)) === finish);
+    // R6: the full predecessor chain. Each step back takes the binding item (forecast `via`) when there is one,
+    // otherwise the dependency (done or open) with the latest finish.
+    const idx = byId(list(docs, 'workItem'));
+    const finOf = id => fc[id] && fc[id].forecast || (idx[id] && (idx[id].doneAt || idx[id].due)) || '';
+    const predOf = id => {
+      if (fc[id] && fc[id].via && idx[fc[id].via]) return fc[id].via;
+      const preds = depIds(idx[id]).filter(x => idx[x]);
+      return preds.sort((a, b) => String(finOf(b)).localeCompare(String(finOf(a))) || String(a).localeCompare(String(b)))[0] || null;
+    };
     let best = [];
     ends.forEach(w => {
       const chain = [], seen = new Set();
       let cur = w.id;
-      while (cur && !seen.has(cur)) { seen.add(cur); chain.unshift(cur); cur = fc[cur] && fc[cur].via; }
+      while (cur && !seen.has(cur)) { seen.add(cur); chain.unshift(cur); cur = predOf(cur); }
       if (chain.length > best.length) best = chain;
     });
     return best;
@@ -417,7 +428,7 @@
 
   function stepState(docs, projectId, pid, stepId, today) {
     const items = list(docs, 'workItem').filter(w => w.projectId === projectId && w.pid === pid && w.step === stepId);
-    if (!items.length) return { items, status: 'none', done: 0, due: null, forecast: null, next: null, sched: 'ok', blockers: [] };
+    if (!items.length) return { items, status: 'none', done: 0, due: null, forecast: null, next: null, sched: 'ok', blockers: [], built: false, awaitingLive: false };
     const fc = forecastAll(docs, today);
     const done = items.filter(w => w.status === 'done').length;
     const status = done === items.length ? 'done' : (items.some(w => w.status !== 'idle') ? 'prog' : 'idle');
@@ -433,6 +444,9 @@
       blockers: open.length && step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'missing') : [],
       needsLive: step ? (step.data || []).filter(d => { const e = effectiveAvail(docs, d); return e === 'example' || e === 'pending'; }) : [],
       pending: step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'pending') : [],
+      // R6: work done but data not effectively live = "Built · awaiting live data" (amber), never green Done.
+      built: status === 'done',
+      awaitingLive: status === 'done' && !!step && stepData(step).some(d => effectiveAvail(docs, d) !== 'live'),
     };
   }
 
@@ -457,27 +471,76 @@
       onTrack: !target || !finish || finish <= target,
     };
     if (allDone) out.actualFinish = finish;
-    // RAG (portfolio rule): red = any late item or forecast after target; amber = slipping or < 7 days of buffer;
-    // green otherwise. Zero work = "Not planned" (grey), never green. Every pill carries its reason.
+    // RAG (R6): the single projectHealth rule; see healthOf.
     out.notPlanned = items.length === 0;
-    const reasons = [];
-    let rag;
-    if (out.notPlanned) { rag = 'grey'; reasons.push('No work planned yet'); }
-    else {
-      const buffer = target && finish ? diffDays(target, finish) : null;
-      if (out.late) reasons.push(nWord(out.late, 'late item'));
-      if (buffer != null && buffer < 0) reasons.push('Forecast ' + fmtDay(finish) + ' is after the target ' + fmtDay(target));
-      if (reasons.length) rag = 'red';
-      else {
-        if (out.slip) reasons.push(nWord(out.slip, 'item') + ' slipping');
-        if (buffer != null && buffer < 7) reasons.push('Only ' + nWord(buffer, 'day') + ' of buffer before the target');
-        rag = reasons.length ? 'amber' : 'green';
-        if (!reasons.length) reasons.push(allDone ? 'All work done' : buffer == null ? 'On track; no target date set' : 'On track: ' + nWord(buffer, 'day') + ' of buffer');
-      }
-    }
-    out.rag = rag;
-    out.ragReason = reasons.join('; ');
+    const h = healthOf(docs, project, items, fc, finish, allDone, today);
+    out.rag = h.rag;
+    out.ragReason = h.reasons.join('; ');
     return out;
+  }
+
+  // R6 project RAG. red   = forecast finish after the target, or a step needs data that is effectively missing
+  //                         and no work item resolves it (unplanned missing data);
+  //                 amber = any open item late or slipping while the finish still meets the target,
+  //                         or fewer than 5 business days of buffer;
+  //                 grey  = no work ("Not planned"); green otherwise. Every result carries plain reasons.
+  function unplannedMissing(docs, project) {
+    const work = list(docs, 'workItem');
+    const seen = new Set(), out = [];
+    linkedProcesses(docs, project).forEach(p => flatSteps(p.tobe).forEach(s => stepData(s).forEach(id => {
+      if (seen.has(id)) return; seen.add(id);
+      if (effectiveAvail(docs, id) === 'missing' && !work.some(w => w.resolves === id)) out.push(id);
+    })));
+    return out;
+  }
+  function healthOf(docs, project, items, fc, finish, allDone, today) {
+    const reasons = [];
+    if (!items.length) return { rag: 'grey', reasons: ['Not planned: no work yet'] };
+    const target = project && isDate(project.target) ? project.target : null;
+    const red = [];
+    if (target && finish && finish > target) red.push('Forecast finish ' + fmtDay(finish) + ' is after the target ' + fmtDay(target));
+    const um = allDone ? [] : unplannedMissing(docs, project);
+    if (um.length) {
+      const names = um.map(id => { const d = get(docs, 'dataElement', id); return (d && d.name) || id; });
+      red.push(joinList(names, 3) + ' ' + (um.length === 1 ? 'is' : 'are') + ' missing with no work planned to provide ' + (um.length === 1 ? 'it' : 'them'));
+    }
+    if (red.length) return { rag: 'red', reasons: red };
+    const open = items.filter(w => w.status !== 'done');
+    const late = open.filter(w => fc[w.id] && fc[w.id].sched === 'late').length;
+    const slip = open.filter(w => fc[w.id] && fc[w.id].sched === 'slip').length;
+    if (late) reasons.push(nWord(late, 'item') + ' late' + (target ? ', but the finish still meets the target' : ''));
+    if (slip) reasons.push(nWord(slip, 'item') + ' slipping' + (target && !late ? ', but the finish still meets the target' : ''));
+    const buffer = target && finish && !allDone ? businessDaysBetween(finish, target) : null;
+    if (buffer != null && buffer < 5) reasons.push('Only ' + nWord(buffer, 'business day') + ' of buffer before the target');
+    if (reasons.length) return { rag: 'amber', reasons };
+    return { rag: 'green', reasons: [allDone ? 'All work done' : buffer == null ? 'On track; no target date set' : 'On track: ' + nWord(buffer, 'business day') + ' of buffer'] };
+  }
+  function projectHealth(docs, projectId, today) {
+    const project = get(docs, 'project', projectId);
+    const items = list(docs, 'workItem').filter(w => w.projectId === projectId);
+    const fc = forecastAll(docs, today);
+    const allDone = items.length > 0 && items.every(w => w.status === 'done');
+    const finish = allDone ? maxDate(items.map(w => w.doneAt || w.due)) : maxDate(items.filter(w => w.status !== 'done').map(w => fc[w.id].forecast));
+    return healthOf(docs, project, items, fc, finish, allDone, today);
+  }
+
+  // R6 one schedule badge per item, by priority: late > causing slip > slipping > due soon > on track.
+  const BADGE_LABEL = { done: 'Done', late: 'Late', causing: 'Causing slip', slipping: 'Slipping', soon: 'Due soon', ontrack: 'On track' };
+  function badgeOf(w, r) {
+    let key;
+    if (!w || !r) key = 'ontrack';
+    else if (w.status === 'done') key = 'done';
+    else if (r.sched === 'late') key = 'late';
+    else if (r.causesSlip) key = 'causing';
+    else if (r.sched === 'slip') key = 'slipping';
+    else if (r.sched === 'soon') key = 'soon';
+    else key = 'ontrack';
+    return { key, label: BADGE_LABEL[key] };
+  }
+  function scheduleBadge(docs, workId, today) {
+    const w = get(docs, 'workItem', workId);
+    if (!w) return { key: 'ontrack', label: BADGE_LABEL.ontrack };
+    return badgeOf(w, forecastAll(docs, today)[workId]);
   }
 
   /* ------------------------------------------------------------------ */
@@ -586,10 +649,18 @@
 
     // process-valid
     const problems = [];
+    const procExists = id => !!get(docs, 'process', id);
     procs.forEach(p => {
       const ids = allNodeIds(p.tobe);
       const where = ' in ' + (p.name || 'a linked process');
-      flatSteps(p.tobe).forEach(s => { if (!s.owner) problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || 'untitled') + '"' + where + ' has no owner' }); });
+      // R6: wait and message nodes need no owner; a subprocess must call an existing (other) process.
+      flatSteps(p.tobe).forEach(s => {
+        if (!s.owner && s.type !== 'wait' && s.type !== 'message') problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || 'untitled') + '"' + where + ' has no owner' });
+        if (s.type === 'subprocess') {
+          if (!s.calls || !procExists(s.calls)) problems.push({ pid: p.id, node: s.id, problem: 'Subprocess "' + (s.title || 'untitled') + '"' + where + (s.calls ? ' calls a process that does not exist' : ' does not say which process it calls') });
+          else if (s.calls === p.id) problems.push({ pid: p.id, node: s.id, problem: 'Subprocess "' + (s.title || 'untitled') + '"' + where + ' calls its own process' });
+        }
+      });
       flatGateways(p.tobe).forEach(g => {
         const br = g.branches || [];
         if (!br.some(b => b && ((b.nodes || []).length || b.goto))) problems.push({ pid: p.id, node: g.id, problem: 'Gateway "' + (g.title || 'untitled') + '"' + where + ' has only empty branches' });
@@ -743,14 +814,33 @@
     checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: !missingCo.length && tasks.length > 0 && !gonogoNoOwner.length,
       detail: coDetail.join(' '), items: missingCo.concat(tasks.length ? [] : ['tasks'], gonogoNoOwner.map(x => 'task:' + (x.id || x.task || x.step || ''))) });
 
-    // exceptions (warning only): work items and linked processes changed after the approval of a BU whose
-    // section they touch. Items: work ids and "process:<id>". Stale ones block through bu-signoff.
-    const excW = work.filter(w => w.updatedAt && workBus(w).some(bu => { const ap = validFor(bu); return ap && String(w.updatedAt) > apprAt(ap); }));
-    const excP = procs.filter(p => p.updatedAt && procBus(p).some(bu => { const ap = validFor(bu); return ap && String(p.updatedAt) > apprAt(ap); }));
-    const excNames = excW.map(w => '"' + (w.title || 'untitled item') + '"').concat(excP.map(p => 'the ' + (p.name || 'linked') + ' process'));
-    checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: excNames.length === 0, warning: true,
-      detail: excNames.length ? capFirst(joinList(excNames, 5)) + (excNames.length === 1 ? ' was' : ' were') + ' changed after sign-off; ' + (excNames.length === 1 ? 'its section needs' : 'those sections need') + ' re-approval.' : 'No work or process changed after sign-off.',
-      items: excW.map(w => w.id).concat(excP.map(p => 'process:' + p.id)) });
+    // exceptions (warning only), R6: computed from the same staleness function (changedSince) as bu-signoff, so the
+    // two always agree. Items: work ids, "process:<id>" and "cutover". Stale ones block through bu-signoff.
+    const excRefs = new Map();
+    const cutoverBus = [];
+    stale.forEach(x => x.changed.forEach(c => {
+      if (/#cutover$/.test(c.ref)) { if (!cutoverBus.includes(x.bu)) cutoverBus.push(x.bu); return; }
+      if (!excRefs.has(c.ref)) excRefs.set(c.ref, c);
+    }));
+    const excList = [...excRefs.values()];
+    const excW = excList.filter(c => c.ref.startsWith('workItem:')), excP = excList.filter(c => c.ref.startsWith('process:'));
+    const excNames = excW.map(c => '"' + c.label + '"').concat(excP.map(c => c.label));
+    const exDetail = [];
+    if (excNames.length) exDetail.push(capFirst(joinList(excNames, 5)) + (excNames.length === 1 ? ' was' : ' were') + ' changed after sign-off; ' + (excNames.length === 1 ? 'its section needs' : 'those sections need') + ' re-approval.');
+    if (cutoverBus.length) exDetail.push('Cutover plan changed after ' + joinList(cutoverBus.slice().sort()) + ' sign-off.');
+    // Runbook (R6): an open task whose planned start + duration has passed is overdue (warning). `today` may carry
+    // a time (ISO date-time); a date alone means the start of that day (UTC).
+    const nowMs = /T\d/.test(String(today || '')) && !isNaN(Date.parse(today)) ? Date.parse(today) : toMs(today);
+    const overdueTasks = (Array.isArray(co.tasks) ? co.tasks.filter(Boolean) : []).filter(t => {
+      if (t.done || !t.plannedStart) return false;
+      const st = Date.parse(/T\d/.test(String(t.plannedStart)) ? t.plannedStart : String(t.plannedStart).slice(0, 10) + 'T00:00:00Z');
+      return !isNaN(st) && !isNaN(nowMs) && st + (isFinite(+t.durationMins) ? +t.durationMins : 0) * 60000 < nowMs;
+    });
+    if (overdueTasks.length) exDetail.push(nWord(overdueTasks.length, 'runbook task') + ' ' + isAre(overdueTasks.length) + ' overdue: ' + joinList(overdueTasks.map(t => '"' + (t.task || t.title || 'untitled task') + '"'), 3) + '.');
+    checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: excNames.length === 0 && cutoverBus.length === 0 && overdueTasks.length === 0, warning: true,
+      detail: exDetail.length ? exDetail.join(' ') : 'No work or process changed after sign-off.',
+      items: excW.map(c => c.ref.slice('workItem:'.length)).concat(excP.map(c => c.ref), cutoverBus.length ? ['cutover'] : [], overdueTasks.map(t => 'task:' + (t.id || t.task || ''))),
+      cutoverBus, overdueTasks: overdueTasks.map(t => t.id || t.task || '') });
 
     checks.forEach(finishCheck);
     // Sign-off opens only when every other blocking check passes.
@@ -945,6 +1035,7 @@
       });
       const col = {
         name, rows: vals.length, nulls: vals.length - present.length, distinct: new Set(present).size,
+        duplicates: present.length - new Set(present).size,   // R6: non-empty values repeating an earlier value
         minLen: lens.length ? Math.min(...lens) : 0, maxLen: lens.length ? Math.max(...lens) : 0,
       };
       // Numeric min/max only for measure-like columns. Identifier-like digit columns
@@ -1003,10 +1094,29 @@
       if (f.max != null) sp.maxLen = +f.max;
     }
     if (f.pattern && !mask) { try { sp.regex = new RegExp(f.pattern, 'u'); } catch (e) { sp.regex = null; } }
+    sp.sem = semOf(f.name);
     sp.values = Array.isArray(f.values) && f.values.length ? f.values.map(String)
       : (type === 'list' && / \/ /.test(fmt) ? fmt.split('/').map(x => x.trim()).filter(Boolean) : null);
     return sp;
   }
+  // R6 semantic kind of a field from its name, used to tailor generated values: email, phone, postal, address,
+  // city, id (number/code/reference/account), name (legal/company/holder/contact), else text.
+  function semOf(name) {
+    const t = ' ' + tokens(name) + ' ';
+    if (/ e ?mail /.test(t)) return 'email';
+    if (/ (phone|fax|mobile|tel) /.test(t)) return 'phone';
+    if (/ (zip|postal|postcode) /.test(t)) return 'postal';
+    if (/ (address|street|addr) /.test(t)) return 'address';
+    if (/ (city|town) /.test(t)) return 'city';
+    if (/ (name|holder|payee|contact) /.test(t)) return 'name';
+    if (/ (id|ids|number|no|num|code|ref|reference|account|iban|swift|bic|ein|ssn|tin|sku) /.test(t)) return 'id';
+    if (/ (vendor|company|supplier|bank) /.test(t)) return 'name';
+    return 'text';
+  }
+  const SEM_SAMPLE = { email: 'ap@northwind.example', phone: '+1 555 0142', postal: '75201', address: '125 Harbor Way, Suite 4',
+    city: 'Lakeview', id: 'NW100245', name: 'Northwind Supply Co', text: 'Standard terms apply' };
+  // Free text: special-character cases apply only here (never to ids, emails, phones, postal codes or patterned fields).
+  function isFreeText(sp) { return sp.type === 'text' && !sp.values && !sp.mask && !sp.regex && sp.length == null && !['id', 'email', 'phone', 'postal'].includes(sp.sem); }
   function allowedSpecials(sp) {
     if (sp.mask) return new Set(chars(sp.mask).filter(c => !RE_ALNUM_SPACE.test(c) && c !== '#'));
     if (sp.type === 'number') return new Set(['-', '+', '.']);
@@ -1093,14 +1203,17 @@
       const hasHave = n => (n === 1 ? 'has' : 'have');
       if (sp.required && nulls > 0) out.push({ field: f.name, issue: 'required-nulls', detail: nulls + ' of ' + rows + ' ' + N(rows) + ' ' + isAre(nulls) + ' empty; the spec says ' + N(1) + ' is required.' });
       if (filled <= 0) continue;
+      // R6: duplicates in a field marked unique (profiles from before R6 have no duplicates count: skipped).
+      if (f.unique && +col.duplicates > 0) out.push({ field: f.name, issue: 'duplicates', detail: col.duplicates + ' of ' + rows + ' ' + N(rows) + ' ' + (+col.duplicates === 1 ? 'repeats' : 'repeat') + ' an earlier value; the spec says each ' + N(1) + ' must be unique.' });
       const pats = col.patterns || [];
       const isDigitsPat = p => /^9(\{\d+\})?$/.test(p);
       if (sp.length != null && (col.minLen !== sp.length || col.maxLen !== sp.length)) {
         const groups = {};
-        pats.forEach(p => { const L = chars(expandPattern(p.pattern)).length; if (L !== sp.length) { const k = L + (isDigitsPat(p.pattern) ? ' digits' : ' characters'); groups[k] = (groups[k] || 0) + p.count; } });
-        const unit = sp.type === 'digits' ? ' digits' : ' characters';
+        // R6: like with like — observed lengths use the spec's unit (digits for a plain digits spec, else characters).
+        const unit = sp.type === 'digits' && !sp.mask ? ' digits' : ' characters';
+        pats.forEach(p => { const L = chars(expandPattern(p.pattern)).length; if (L !== sp.length) { const k = L + (unit === ' digits' && !isDigitsPat(p.pattern) ? ' characters' : unit); groups[k] = (groups[k] || 0) + p.count; } });
         const parts = Object.keys(groups).map(k => groups[k] + ' of ' + rows + ' ' + N(rows) + ' ' + hasHave(groups[k]) + ' ' + k);
-        out.push({ field: f.name, issue: 'length-mismatch', detail: (parts.length ? parts.join('; ') : capFirst(N(2)) + ' range from ' + col.minLen + ' to ' + col.maxLen + unit) + '; the spec says ' + sp.length + (parts.length ? '' : unit) + '.' });
+        out.push({ field: f.name, issue: 'length-mismatch', detail: (parts.length ? parts.join('; ') : capFirst(N(2)) + ' range from ' + col.minLen + ' to ' + col.maxLen + unit) + '; the spec requires ' + sp.length + unit + '.' });
       }
       if (sp.minLen != null && col.minLen < sp.minLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'The shortest ' + N(1) + ' is ' + nWord(col.minLen, 'character') + '; the spec minimum is ' + sp.minLen + '.' });
       if (sp.maxLen != null && col.maxLen > sp.maxLen) out.push({ field: f.name, issue: 'length-mismatch', detail: 'The longest ' + N(1) + ' is ' + nWord(col.maxLen, 'character') + '; the spec allows ' + sp.maxLen + '.' });
@@ -1140,7 +1253,7 @@
   /* ------------------------------------------------------------------ */
   function digitsOf(n) { let s = ''; for (let i = 0; i < n; i++) s += '1234567890'[i % 10]; return s; }
   function textOf(n) { const a = 'Abcdefghijklmnopqrstuvwxyz'; let s = ''; for (let i = 0; i < n; i++) s += a[i % 26]; return s; }
-  function strOfLen(sp, n) { return sp.type === 'digits' ? digitsOf(n) : textOf(n); }
+  function strOfLen(sp, n) { return sp.type === 'digits' ? digitsOf(n) : sp.sem === 'id' && n > 2 ? 'NW' + digitsOf(n - 2) : textOf(n); }
   function fmtNum(sp, n) { return sp.type === 'currency' ? n.toFixed(2) : String(n); }
 
   function validSample(sp) {
@@ -1153,6 +1266,7 @@
       return fmtNum(sp, sp.type === 'number' && lo != null && hi != null ? Math.round(v) : v);
     }
     if (sp.type === 'date') return '2026-01-15';
+    if (sp.type === 'text' && sp.sem && SEM_SAMPLE[sp.sem] && validate(sp, SEM_SAMPLE[sp.sem])) return SEM_SAMPLE[sp.sem];
     const n = sp.length != null ? sp.length : Math.max(sp.minLen || 0, Math.min(sp.maxLen != null ? sp.maxLen : 9, 9));
     return strOfLen(sp, Math.max(n, 1));
   }
@@ -1179,6 +1293,13 @@
     ["O'Neill Supply", 'apostrophe'], ['Zoë Café', 'accented letters'], ['Ames & Sons', 'ampersand'],
     ['Acme Rockets 🚀', 'emoji'], ['  Acme Ltd  ', 'leading and trailing spaces'],
   ];
+  // R6: special-character cases tailored to the kind of free text; emoji only in name fields.
+  const SPECIAL_BY_SEM = {
+    name: SPECIAL_TEXT,
+    address: [["12 O'Connell St", 'apostrophe'], ['8 Rue Saint-Rémy, Montréal', 'accented letters'], ['Unit #4, 9 Elm Rd', 'hash and comma'], ['  125 Harbor Way  ', 'leading and trailing spaces']],
+    city: [["Coeur d'Alene", 'apostrophe'], ['São Paulo', 'accented letters'], ['  Lakeview  ', 'leading and trailing spaces']],
+    text: [["Vendor's terms", 'apostrophe'], ['Résumé on file', 'accented letters'], ['Net 30 & 2% discount', 'ampersand and percent'], ['  Standard terms  ', 'leading and trailing spaces']],
+  };
 
   // Row count for a profile column: column rows, else the profile doc's rows, else nulls + pattern counts.
   function colRows(col, profile) {
@@ -1255,8 +1376,8 @@
       }
 
       // Free-text fields: special characters.
-      if (sp.type === 'text' && !sp.values && !sp.mask && !sp.regex && sp.length == null)
-        SPECIAL_TEXT.forEach(([input, what]) => add(f, 'edge', input, ok(input), 'spec', 'Special characters: ' + what));
+      if (isFreeText(sp))
+        (SPECIAL_BY_SEM[sp.sem] || SPECIAL_BY_SEM.text).forEach(([input, what]) => add(f, 'edge', input, ok(input), 'spec', 'Special characters: ' + what));
 
       // Cross-field rules (expectation depends on the other field, given in `context`).
       const cr = crossRule(f, de.fields || []);
@@ -1273,7 +1394,7 @@
       // Profile edge cases
       const col = columnFor(f, cols);
       if (!col) continue;
-      (col.specials || []).forEach(c => {
+      if (isFreeText(sp)) (col.specials || []).forEach(c => {   // R6: free text only (no "1-2-3456789" for an EIN)
         const base = chars(valid);
         const input = base.length > 1 ? base[0] + c + base.slice(1).join('') : base.join('') + c;
         add(f, 'edge', input, ok(input), 'profile', 'Observed special character "' + c + '"');
@@ -1397,10 +1518,20 @@
     const push = sg => {
       sg.key = 'sug-' + (++n);
       sg.effortDays = 2;
-      if (anchor) { sg.start = addBusinessDays(maxDate([anchor].concat(sg.deps.map(finishOf))), 0); sg.due = addBusinessDays(sg.start, sg.effortDays); }
-      else { sg.start = null; sg.due = null; }
       out.push(sg);
       return sg;
+    };
+    // R6 dates: an item with no open dependency ("can start now") starts on the anchor (today); otherwise the
+    // business day after its latest dependency finishes (FS). Spans = effortDays stretched by one factor (1–2×)
+    // so the chain spreads toward the target while keeping a buffer of max(5, 15%) business days before it.
+    const schedule = factor => {
+      const span = Math.max(1, Math.round(2 * factor));
+      out.forEach(sg => {
+        if (!anchor) { sg.start = null; sg.due = null; return; }
+        const fins = sg.deps.map(finishOf).filter(isDate);
+        sg.start = fins.length ? maxDate([anchor, addBusinessDays(maxDate(fins), 1)]) : anchor;
+        sg.due = addBusinessDays(sg.start, span);
+      });
     };
     const hasWork = (pid, nodeId) => work.some(w => w.projectId === projectId && w.pid === pid && w.step === nodeId);
     const resolversFor = (p, st) => {
@@ -1428,20 +1559,41 @@
           const st = diff.nodes[nd.id];
           if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
             const firstStep = flatSteps((nd.branches || []).flatMap(b => (b && b.nodes) || []))[0];
-            push({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
-              kind: 'build', owner: (firstStep && firstStep.owner) || p.owner || null, deps: [] });
+            const g = push({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
+              kind: 'build', owner: (firstStep && firstStep.owner) || p.owner || null, deps: flowPrev.slice() });
+            flowPrev = [g.key];
           }
-          (nd.branches || []).forEach(b => visit(b && b.nodes));
+          // each branch follows the gateway; the step after the gateway follows every branch's last work
+          const atGate = flowPrev, ends = [];
+          (nd.branches || []).forEach(b => { flowPrev = atGate; visit(b && b.nodes); ends.push(...flowPrev); });
+          flowPrev = [...new Set(ends.length ? ends : atGate)];
           return;
         }
         if (!isStep(nd)) return;
         const needs = resolversFor(p, nd);
         const st = diff.nodes[nd.id];
-        if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id))
-          push({ pid: p.id, step: nd.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (nd.title || 'untitled step'), kind: 'build', owner: nd.owner || null, deps: needs });
+        if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
+          const sg = push({ pid: p.id, step: nd.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (nd.title || 'untitled step'), kind: 'build', owner: nd.owner || null,
+            deps: [...new Set(flowPrev.concat(needs))] });
+          flowPrev = [sg.key];
+        } else {
+          const open = work.filter(w => w.projectId === projectId && w.pid === p.id && w.step === nd.id && w.status !== 'done').map(w => w.id);
+          if (hasWork(p.id, nd.id)) flowPrev = open;   // all done: nothing to wait for
+        }
       });
+      // R6 flow order: a step's build item depends (FS) on the nearest preceding step's work in map order
+      // (its suggested build item, else its open work items), plus its data resolvers.
+      let flowPrev = [];
       visit(p.tobe);
     });
+    schedule(1);
+    if (anchor && out.length) {
+      const target = isDate(project.target) && project.target > anchor ? project.target : defaultTarget(anchor);
+      const avail = businessDaysBetween(anchor, target);
+      const usable = avail - Math.max(5, Math.ceil(avail * 0.15));
+      const needed = businessDaysBetween(anchor, maxDate(out.map(x => x.due)));
+      if (needed > 0 && usable > needed) schedule(Math.min(2, usable / needed));
+    }
     return out;
   }
 
@@ -1514,7 +1666,7 @@
     const ds = dates[dep.id] || { start: dep.start, due: plannedFinish(dep) };
     if (d.type === 'SS') return { field: 'start', min: addBusinessDays(ds.start, d.lag) };
     if (d.type === 'FF') return { field: 'due', min: addBusinessDays(ds.due, d.lag) };
-    return { field: 'start', min: addBusinessDays(ds.due, d.lag) };
+    return { field: 'start', min: addBusinessDays(ds.due, 1 + d.lag) };   // R6: FS starts the business day after
   }
   function scheduleConflicts(docs, projectId) {
     const all = list(docs, 'workItem');
@@ -1535,7 +1687,8 @@
     return out;
   }
   // Proposed {workId: {start, due}} that resolves conflicts: items (all open project items, or `workIds`) move later
-  // only, keep their business-day duration, and are processed in dependency order. Unchanged items are omitted.
+  // only, keep their business-day span exactly, and are processed in dependency order. Items without a conflict
+  // never move. FS: the successor starts the business day after its predecessor finishes. Unchanged items are omitted.
   function autoSchedule(docs, projectId, workIds) {
     const all = list(docs, 'workItem');
     const idx = byId(all);
@@ -1545,18 +1698,19 @@
       if (state[id] === 2) return; if (state[id] === 1) return;   // cycle: leave as is
       state[id] = 1;
       const w = idx[id];
-      const dur = businessDaysBetween(w.start, w.due) > 0 ? businessDaysBetween(w.start, w.due) : duration(w);
-      let start = w.start, due = w.due;
+      // R6: the business-day span is kept exactly (a same-day item stays same-day) and only items with a conflict move.
+      const dur = isDate(w.start) && isDate(w.due) ? Math.max(0, businessDaysBetween(w.start, w.due)) : 0;
+      let start = w.start, due = w.due, moved = false;
       normDeps(w).forEach(d => { if (idx[d.id] && movable.has(d.id)) place(d.id); });
       if (movable.has(id) && isDate(start) && isDate(due)) {
         normDeps(w).forEach(d => {
           const dep = idx[d.id]; if (!dep) return;
           const req = depRequirement(dep, d, dates);
           if (!isDate(req.min)) return;
-          if (req.field === 'start' && start < req.min) { start = req.min; due = addBusinessDays(start, dur); }
-          if (req.field === 'due' && due < req.min) { due = req.min; start = addBusinessDays(due, -dur); }
+          if (req.field === 'start' && start < req.min) { start = addBusinessDays(req.min, 0); due = addBusinessDays(start, dur); moved = true; }
+          if (req.field === 'due' && due < req.min) { due = addBusinessDays(req.min, 0); start = addBusinessDays(due, -dur); moved = true; }
         });
-        start = addBusinessDays(start, 0); due = addBusinessDays(due, 0);
+        if (moved && start < addBusinessDays(w.start, 0)) { start = addBusinessDays(w.start, 0); due = addBusinessDays(start, dur); }
       }
       dates[id] = { start, due };
       state[id] = 2;
@@ -1675,6 +1829,223 @@
       variance: planned == null ? null : Math.round((forecastCost - planned) * 100) / 100, overBudget: planned != null && forecastCost > planned,
       program: project && project.program || null };
   }
+  // R6 earned value. Each item's value = workCost, scaled so values sum to BAC when budget.planned is set.
+  //  PV: value scheduled by today (linear across start→due in business days; due ≤ today = all).
+  //  EV: done = full value; in progress = value × fraction (progress 0–1, else pct 0–100, else 0.5); idle = 0.
+  //  AC: Σ time[].hours × dayRate/8 (rate of the person who logged, else the owner, else 800).
+  //  SPI = EV/PV, CPI = EV/AC (null when the divisor is 0); EAC = BAC/CPI, or BAC when CPI is null.
+  function progressOf(w) {
+    if (w.status === 'done') return 1;
+    if (w.status === 'idle' || !w.status) return 0;
+    if (w.progress != null && isFinite(+w.progress)) return Math.min(1, Math.max(0, +w.progress));
+    if (w.pct != null && isFinite(+w.pct)) return Math.min(1, Math.max(0, +w.pct / 100));
+    return 0.5;
+  }
+  function scheduledFraction(w, today) {
+    if (!isDate(today) || !isDate(w.due)) return 0;
+    if (w.due <= today) return 1;
+    if (!isDate(w.start) || w.start > today) return 0;
+    const span = businessDaysBetween(w.start, w.due);
+    return span > 0 ? Math.min(1, Math.max(0, businessDaysBetween(w.start, today) / span)) : 0;
+  }
+  function rateOf(docs, id) { const p = personMap(docs)[id]; return p && p.dayRate != null && isFinite(+p.dayRate) ? +p.dayRate : null; }
+  function earnedValue(docs, projectId, today) {
+    const project = get(docs, 'project', projectId);
+    const items = list(docs, 'workItem').filter(w => w.projectId === projectId);
+    const r2 = n => Math.round(n * 100) / 100;
+    const costs = items.map(w => workCost(docs, w));
+    const total = costs.reduce((a, b) => a + b, 0);
+    const planned = project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) && +project.budget.planned > 0 ? +project.budget.planned : null;
+    const BAC = planned != null ? planned : total;
+    const scale = total > 0 ? BAC / total : 0;
+    let PV = 0, EV = 0, AC = 0;
+    items.forEach((w, i) => {
+      const v = costs[i] * scale;
+      PV += v * scheduledFraction(w, today);
+      EV += v * progressOf(w);
+      (Array.isArray(w.time) ? w.time : []).forEach(t => {
+        const h = t && isFinite(+t.hours) ? +t.hours : 0;
+        const rate = rateOf(docs, t && t.by) ?? rateOf(docs, w.owner) ?? DEFAULT_DAY_RATE;
+        AC += h * rate / 8;
+      });
+    });
+    const SPI = PV > 0 ? r2(EV / PV) : null, CPI = AC > 0 ? r2(EV / AC) : null;
+    const EAC = CPI ? r2(BAC / (EV / AC)) : r2(BAC);
+    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC };
+  }
+
+  // R6 capacity leveling. Load: each open item's effort (effortDays, default 1) is spread evenly over the business
+  // days from start to due (inclusive); weeks start on Monday; capacity = person.capacity days/week (default 4).
+  // While a (person, week) is over capacity, the latest-starting idle, non-critical item of that person active in
+  // that week moves one business day later (start and due together, so its business-day span is kept), and FS
+  // successors that would now start too early move with it. An overload with no movable item, or that only one item
+  // causes, is left in overloadsAfter. Returns {shifts: {workId: {start, due}}, overloadsBefore, overloadsAfter}.
+  function bizDaysIncl(start, due) {
+    const out = [];
+    if (!isDate(due)) return out;
+    let d = addBusinessDays(isDate(start) && start <= due ? start : due, 0);
+    for (let g = 0; d <= due && g < 1000; g++) { out.push(d); d = addBusinessDays(d, 1); }
+    return out.length ? out : [addBusinessDays(due, 0)];
+  }
+  function mondayOf(d) { const ms = toMs(d); return iso(ms - ((weekday(ms) + 6) % 7) * DAY); }
+  function shiftBiz(d, n) { return isDate(d) ? addBusinessDays(addBusinessDays(d, 0), n) : d; }
+  function weeklyLoad(items, dates, people) {
+    const load = {};
+    items.forEach(w => {
+      if (!w.owner || w.status === 'done') return;
+      const dt = dates[w.id];
+      const days = bizDaysIncl(dt.start, dt.due);
+      if (!days.length) return;
+      const per = effortOf(w) / days.length;
+      days.forEach(d => { const k = w.owner + '|' + mondayOf(d); load[k] = (load[k] || 0) + per; });
+    });
+    const capOf = id => people[id] && people[id].capacity != null && isFinite(+people[id].capacity) ? +people[id].capacity : 4;
+    return Object.keys(load).map(k => { const [person, week] = k.split('|'); return { person, week, load: Math.round(load[k] * 100) / 100, capacity: capOf(person) }; })
+      .filter(o => o.load > o.capacity + 1e-9).sort((a, b) => a.week.localeCompare(b.week) || a.person.localeCompare(b.person));
+  }
+  function levelResources(docs, projectId, today) {
+    const items = list(docs, 'workItem').filter(w => w.projectId === projectId && isDate(w.due));
+    const people = personMap(docs);
+    const dates = {}, orig = {};
+    items.forEach(w => { dates[w.id] = { start: isDate(w.start) ? w.start : w.due, due: w.due }; orig[w.id] = Object.assign({}, dates[w.id]); });
+    const critical = new Set(criticalPath(docs, projectId, today));
+    const before = weeklyLoad(items, dates, people);
+    const moved = {}, stuck = new Set();
+    const activeIn = (w, week) => bizDaysIncl(dates[w.id].start, dates[w.id].due).some(d => mondayOf(d) === week);
+    const push = (w, n) => {
+      dates[w.id] = { start: shiftBiz(dates[w.id].start, n), due: shiftBiz(dates[w.id].due, n) };
+      moved[w.id] = (moved[w.id] || 0) + n;
+      items.forEach(s => {   // FS successors keep starting after this item finishes
+        if (s.status === 'done') return;
+        normDeps(s).forEach(dp => {
+          if (dp.id !== w.id || dp.type !== 'FS') return;
+          const need = addBusinessDays(dates[w.id].due, 1 + dp.lag);
+          if (dates[s.id].start < need) push(s, businessDaysBetween(dates[s.id].start, need));
+        });
+      });
+    };
+    for (let guard = 0; guard < 3000; guard++) {
+      const o = weeklyLoad(items, dates, people).find(x => !stuck.has(x.person + '|' + x.week));
+      if (!o) break;
+      const active = items.filter(w => w.owner === o.person && w.status !== 'done' && activeIn(w, o.week));
+      const cands = active.length < 2 ? [] : active.filter(w => w.status === 'idle' && !critical.has(w.id) && (moved[w.id] || 0) < 130
+        && (!isDate(today) || dates[w.id].start >= today || moved[w.id]))
+        .sort((a, b) => dates[b.id].start.localeCompare(dates[a.id].start) || String(b.id).localeCompare(String(a.id)));
+      const candSet = new Set(cands.map(w => w.id));
+      const fixedLoad = active.filter(w => !candSet.has(w.id)).reduce((a, w) => {
+        const days = bizDaysIncl(dates[w.id].start, dates[w.id].due);
+        return a + effortOf(w) / days.length * days.filter(d => mondayOf(d) === o.week).length;
+      }, 0);
+      if (!cands.length || fixedLoad > o.capacity + 1e-9) { stuck.add(o.person + '|' + o.week); continue; }
+      push(cands[0], 1);
+    }
+    const shifts = {};
+    items.forEach(w => { if (dates[w.id].start !== orig[w.id].start || dates[w.id].due !== orig[w.id].due) shifts[w.id] = dates[w.id]; });
+    return { shifts, overloadsBefore: before, overloadsAfter: weeklyLoad(items, dates, people) };
+  }
+
+  // R6 what-if: apply scenario.dates {workId: {start?, due?}} to a copy of the docs and compare with the plan.
+  // Cost here = effort × owner dayRate where effort is effortDays, or — when unset — the item's business-day span
+  // (start→due, min 1), so resizing a bar in a scenario changes its cost. finish = projectStats finish.
+  function spanCost(docs, w) {
+    const p = personMap(docs)[w.owner];
+    const rate = p && p.dayRate != null && isFinite(+p.dayRate) ? +p.dayRate : DEFAULT_DAY_RATE;
+    return (hasEffort(w) ? +w.effortDays : duration(w)) * rate;
+  }
+  function compareScenario(docs, projectId, scenario, today) {
+    const sd = (scenario && scenario.dates) || {};
+    const changed = [];
+    const workItem = ((docs && docs.workItem) || []).map(e => {
+      if (!e) return e;
+      const d = e.data || {}, id = e.id != null ? e.id : d.id;
+      const x = sd[id];
+      if (!x || d.projectId !== projectId) return e;
+      const nd = Object.assign({}, d);
+      if (isDate(x.start)) nd.start = x.start;
+      if (isDate(x.due)) nd.due = x.due;
+      if (nd.start === d.start && nd.due === d.due) return e;
+      changed.push(id);
+      return Object.assign({}, e, { data: nd });
+    });
+    const docs2 = Object.assign({}, docs, { workItem });
+    const cost = dd => Math.round(list(dd, 'workItem').filter(w => w.projectId === projectId).reduce((a, w) => a + spanCost(dd, w), 0) * 100) / 100;
+    return { planFinish: projectStats(docs, projectId, today).finish, scenarioFinish: projectStats(docs2, projectId, today).finish,
+      planCost: cost(docs), scenarioCost: cost(docs2), changed };
+  }
+
+  // R6 default target for a new project: the first business day on or after today + 60 calendar days.
+  function defaultTarget(today) { return isDate(today) ? addBusinessDays(addDays(today, 60), 0) : null; }
+
+  // R6 latest real outcome per case/script id for a project's runs (optionally one env), same rules as the gate:
+  // 'not-run'/'skipped' never override; a script pass without evidence counts only from a 'ci' run.
+  // Returns {id: {outcome, runId, at}}.
+  function latestOutcomes(docs, projectId, env) {
+    const m = {};
+    list(docs, 'testRun').filter(r => r.projectId === projectId && (!env || r.env === env))
+      .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')))
+      .forEach(r => (r.results || []).forEach(x => {
+        const k = x && (x.caseId || x.scriptId); if (!k) return;
+        if (x.outcome === 'not-run' || x.outcome === 'skipped') return;
+        if (x.scriptId && x.outcome === 'pass' && r.source !== 'ci' && !String(x.evidence || '').trim()) return;
+        m[k] = { outcome: x.outcome, runId: r.id, at: r.at || null };
+      }));
+    return m;
+  }
+
+  // R6 traceability headline: spec-field coverage beside UAT and dev pass counts.
+  // fields = spec fields of data used by the project's to-be steps; covered = a non-custom case on that field.
+  // uat: cases + UAT scripts/scenarios whose latest UAT outcome is pass; dev: cases whose latest dev outcome is pass.
+  function testCoverage(docs, projectId) {
+    const project = get(docs, 'project', projectId);
+    const used = [...new Set(linkedProcesses(docs, project).flatMap(p => flatSteps(p.tobe).flatMap(stepData)))];
+    const usedSet = new Set(used);
+    const dataIdx = byId(list(docs, 'dataElement'));
+    const cases = list(docs, 'testCase').filter(c => usedSet.has(c.dataId));
+    let fieldsTotal = 0;
+    const uncoveredFields = [];
+    used.forEach(d => ((dataIdx[d] && dataIdx[d].fields) || []).forEach(f => {
+      if (!f) return;
+      fieldsTotal++;
+      const k = tokens(f.name);
+      if (!cases.some(c => c.dataId === d && c.kind !== 'custom' && tokens(c.field) === k)) uncoveredFields.push({ data: d, field: f.name });
+    }));
+    const scripts = !project ? [] : (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, projectId))
+      .concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []);
+    const uat = latestOutcomes(docs, projectId, 'uat'), dev = latestOutcomes(docs, projectId, 'dev');
+    const passed = (m, ids) => ids.filter(id => m[id] && m[id].outcome === 'pass').length;
+    const uatIds = cases.map(c => c.id).concat(scripts.map(s => s.id));
+    return { fieldsTotal, fieldsCovered: fieldsTotal - uncoveredFields.length, uncoveredFields,
+      uat: { done: passed(uat, uatIds), total: uatIds.length }, dev: { done: passed(dev, cases.map(c => c.id)), total: cases.length } };
+  }
+
+  // R6 defect lifecycle: new → triaged → in-progress → fixed → verified → closed.
+  //  closed   = defectStatus 'closed' or the work item is done;
+  //  verified = the referenced case/script (testRef) has a latest outcome of pass from a run after the run that
+  //             raised the defect (any env of the project) — a passing retest verifies automatically;
+  //  else defectStatus when valid ('in progress' accepted), else from status (prog → in-progress, otherwise new).
+  const DEFECT_STATES = ['new', 'triaged', 'in-progress', 'fixed', 'verified', 'closed'];
+  function defectState(docs, defectId) {
+    const w = typeof defectId === 'string' ? get(docs, 'workItem', defectId) : defectId;
+    if (!w) return null;
+    const ds = String(w.defectStatus || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+    if (ds === 'closed' || w.status === 'done') return 'closed';
+    const ref = w.testRef || {};
+    const itemId = ref.caseId || ref.scriptId;
+    if (itemId) {
+      const last = latestOutcomes(docs, w.projectId)[itemId];
+      const src = ref.runId ? get(docs, 'testRun', ref.runId) : null;
+      const after = !src || !last || String(last.at || '') > String(src.at || '') || (!src.at && last.runId !== src.id);
+      if (last && last.outcome === 'pass' && last.runId !== ref.runId && after) return 'verified';
+    }
+    if (ds === 'verified') return 'fixed';   // verified needs a passing retest
+    if (DEFECT_STATES.includes(ds)) return ds;
+    return w.status === 'prog' ? 'in-progress' : 'new';
+  }
+  // Defects of a project that a passing retest has verified and that can now be closed.
+  function defectsVerifiable(docs, projectId) {
+    return list(docs, 'workItem').filter(w => w.projectId === projectId && w.kind === 'defect' && defectState(docs, w) === 'verified').map(w => w.id);
+  }
+
   // Burndown of remaining effort (days). Points on business days from the earliest work start to max(target, today);
   // weekly (Mondays) when the span exceeds 90 business days. remaining = total − effort done by that date (doneAt,
   // else due); null after today. ideal falls linearly from the total at start to 0 at the target.
@@ -1706,6 +2077,9 @@
     explainForecast, sprints, sprintOf, addBusinessDays, businessDaysBetween,
     caseLabel, diffVersions, scheduleConflicts, autoSchedule, generateScenarios, usageOf, workCost, projectFinancials, burndown,
     humanPatterns, evidenceOf,
+    // R6
+    projectHealth, scheduleBadge, earnedValue, levelResources, compareScenario, defaultTarget,
+    testCoverage, defectState, defectsVerifiable, latestOutcomes,
     // helpers (stable, safe to use from pages)
     parseCsv, maskValue, patternOf, expandPattern, fieldSpec, validate, addDays, diffDays,
   };

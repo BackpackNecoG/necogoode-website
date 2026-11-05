@@ -90,7 +90,11 @@ function unpackData(e) {
   try { return JSON.parse(s); } catch (x) { return null; }
 }
 const rowKey = (type, id) => `${type}~${id}`;
-function invertedTs() { return String(9999999999999 - Date.now()).padStart(13, '0') + '-' + crypto.randomBytes(3).toString('hex'); }
+/* R6: the row key follows the event's own timestamp, so storage order and time order agree */
+function invertedTs(at) {
+  const t = Date.parse(at); const ms = isFinite(t) ? t : Date.now();
+  return String(9999999999999 - ms).padStart(13, '0') + '-' + crypto.randomBytes(3).toString('hex');
+}
 
 /* ---------- API ---------- */
 async function getWorkspace(wsId) {
@@ -151,7 +155,7 @@ async function deleteDoc(wsId, type, id) {
 async function appendEvent(wsId, ev) {
   const e = { at: ev.at || new Date().toISOString(), actor: String(ev.actor || 'unknown').slice(0, 64), action: String(ev.action || 'update').slice(0, 32),
     ref: String(ev.ref || '').slice(0, 140), summary: String(ev.summary || '').slice(0, 300) };
-  await db().upsert(T.events, Object.assign({ PartitionKey: wsId, RowKey: invertedTs(), app: APP }, e));
+  await db().upsert(T.events, Object.assign({ PartitionKey: wsId, RowKey: invertedTs(e.at), app: APP }, e));
   return e;
 }
 
@@ -163,7 +167,8 @@ async function listEvents(ws, opts) {
   let filter = `PartitionKey eq '${q(ws.id)}'`;
   if (opts.ref) filter += ` and ref eq '${q(opts.ref)}'`;
   const rows = await db().list(T.events, filter);
-  const stored = rows.sort((a, b) => (a.RowKey < b.RowKey ? -1 : 1))
+  /* newest first by event time; ties (same ms, independent writes) fall back to write order, newest first */
+  const stored = rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : String(b.Timestamp || '').localeCompare(String(a.Timestamp || ''))))
     .map(r => ({ at: r.at, actor: r.actor, action: r.action, ref: r.ref, summary: r.summary }));
   const seeded = seed(ws.seedDate).events.filter(e => !opts.ref || e.ref === opts.ref);
   return stored.concat(seeded).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit);

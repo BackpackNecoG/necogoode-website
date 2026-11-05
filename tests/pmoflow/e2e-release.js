@@ -1,4 +1,5 @@
-/* E2E for stream R (round 4): gate evidence independence, cutover runbook, simulated pipeline status, testing depth,
+/* E2E for stream R (round 6: approver view, attestation, chronological audit, rollback pipeline, hypercare, grant box from approval,
+   one-shot tests, traceability, JUnit mapping, defect lifecycle, import data/kinds; round 4/5 coverage kept): gate evidence independence, cutover runbook, simulated pipeline status, testing depth,
    dialogs that keep input, and SOP import loop-backs / blank owners.
    Main path: access-review-automation passes the gate end to end WITH the data owner's live confirmation, goes live with a
    simulated pipeline failure, rolls back in one click, then goes live again with a succeeding pipeline.
@@ -43,6 +44,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const check = async (p, id) => (await rd(p)).checks.find(c => c.id === id);
   const overflow = () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1);
   const x = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const dismiss = async () => { for (let i = 0; i < 4 && await page.$('.overlay'); i++) { await page.click('.overlay [data-act=cancel]'); await settle(400); } };
   const txt = async sel => ((await page.textContent(sel)) || '').replace(/\s+/g, ' ');
 
   try {
@@ -113,6 +115,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
       await page.fill(`${row} >> [data-tt]`, task);
       if (owner) await page.selectOption(`${row} >> [data-to]`, owner);
       await page.fill(`${row} >> [data-tp]`, when);
+      await page.fill(`${row} >> [data-td]`, '30');
       if (gng) await page.check(`${row} >> [data-tg]`);
     };
     await fillTask(0, 'Freeze manual access changes', 'dk', '2026-11-14T08:00', false);
@@ -126,7 +129,21 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.click('.overlay [data-act=save]'); await settle(1000);
     const tasks = await st(`return store.get('project', a).cutover.tasks;`, AR);
     const gngId = tasks[1].id;
-    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && /^2026-11-14T08:30/.test(tasks[1].planned), 'runbook saved in order; the go/no-go task is owned by Priya Shah');
+    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && /^2026-11-14T08:30/.test(tasks[1].plannedStart) && tasks[1].durationMins === 30, 'runbook saved in order with plannedStart and durationMins; the go/no-go task is owned by Priya Shah');
+    /* overdue: a task whose planned end has passed shows a warning */
+    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '2026-01-05T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved into the past (e2e)');`, AR);
+    await settle(800);
+    ok(await page.$(`[data-rbtask="${tasks[2].id}"][data-overdue]`) && /1 runbook task is overdue/.test(await txt('[data-runbook-overdue]')), 'overdue runbook task: warning on the runbook and an "Overdue" badge');
+    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '2026-11-14T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved back (e2e)');`, AR);
+    await settle(800);
+    ok(!(await page.$('[data-runbook-overdue]')), 'warning clears once the task is back on schedule');
+    /* checklist density: one line per check, detail on demand, plain labels */
+    const lines = await page.$$eval('details[data-check] summary', ss => ss.map(x => x.getBoundingClientRect().height));
+    ok(lines.length >= 8 && lines.every(h => h < 44), `checklist is one line per check (${lines.length} rows, max ${Math.round(Math.max(...lines))}px)`);
+    ok(!(await page.$$eval('details[data-check] [data-plain]', els => els.some(e => /\b(SIT|UAT|CP)\b|go\/no-go/i.test(e.textContent)))), 'check labels are plain language (no SIT, UAT, CP or go/no-go jargon)');
+    ok(await page.$('details[data-check=cutover-plan] summary[title*="Cutover"]'), 'jargon explained in a tooltip (cutover)');
+    await page.click('details[data-check=work-done] summary'); await settle(200);
+    ok(await page.isVisible('details[data-check=work-done] [data-detail]') && /Hide detail/.test(await txt('details[data-check=work-done] .rl-more')), '"Show detail" expands the check and turns into "Hide detail"');
     ok(!!(await st(`return store.get('project', a).cutoverUpdatedAt;`, AR)), 'cutover edit stamps cutoverUpdatedAt');
     ok((await check(AR, 'cutover-plan')).pass, 'cutover-plan check passes');
     ok(await page.$eval(`[data-rb-done="${gngId}"]`, c => c.disabled) && /Only Priya Shah can confirm/.test(await txt(`[data-rbtask="${gngId}"]`)), "the PM can't tick Priya's go/no-go task; the runbook says only she can");
@@ -152,9 +169,28 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
       for (let k = 0; k < 3; k++) {
         const need = await page.$$eval('.rl-bu.stale, .rl-bu.pending', els => els.map(e => e.dataset.bu));
         if (!need.length) break;
-        for (const bu of need) { await setMe(bu === 'IT' ? 'dk' : 'ps'); await page.click(`[data-bu="${bu}"] [data-signoff=approved]`); await stepUpOk(); }
+        for (const bu of need) { await setMe(bu === 'IT' ? 'dk' : 'ps'); await page.click(`[data-bu="${bu}"] [data-signoff=approved]`);
+          await page.waitForSelector('.overlay [data-attest-modal]'); await page.fill('.overlay [data-attest-modal]', `I reviewed the ${bu} steps, data evidence and UAT results (e2e).`);
+          await page.click('.overlay [data-act=go]'); await stepUpOk(); }
       }
     };
+    /* R6 approver view: one screen for one BU, attestation required */
+    await setMe('ps');
+    ok(await page.$('[data-review-mine="Compliance"]'), '"Review my section" shows for the persona\'s BU (Compliance)');
+    ok(await page.$('[data-bu="IT"] [data-bu-review="IT"]') && await page.$('[data-bu="Compliance"] [data-bu-review]'), 'each BU card links to its review screen');
+    await page.click('[data-review-mine]'); await page.waitForSelector('[data-bu-view="Compliance"]'); await settle(500);
+    ok(/[?&]bu=Compliance/.test(page.url()), 'approver view route: /release/:prj?bu=Compliance');
+    ok((await page.$$('[data-bu-step]')).length >= 1 && await page.$('[data-bu-data], .rl-bv-data, .empty') && await page.$('[data-bu-test], .rl-bv-tests, .empty') && /Open defects/.test(await txt('.rl-bv')) && /Changes since last sign-off/.test(await txt('.rl-bv')), 'approver view shows steps, data and evidence, test results, open defects and changes since sign-off');
+    ok(!(await page.$('[data-bu-step] a[href*="access-review"]')) || (await page.$$eval('[data-bu-step]', els => els.length)) < 4, 'only this BU\'s steps are listed');
+    await page.click('[data-bu-decide=approved]'); await settle(300);
+    ok(/attesting/.test(await txt('[data-attest-err]')) && !(await page.$('.overlay input[name=code]')), 'Approve with an empty attestation is refused inline, before step-up');
+    await page.fill('[data-attest]', 'Reviewed the certification step, approver matrix evidence and the UAT pass (e2e).');
+    await page.click('[data-bu-decide=approved]'); await stepUpOk(); await settle(600);
+    const aprC = await st(`return store.list('approval', x => x.projectId === a && x.bu === 'Compliance').sort((x, y) => y.at.localeCompare(x.at))[0];`, AR);
+    ok(aprC && aprC.decision === 'approved' && /certification step/.test(aprC.attestation) && aprC.stepUp, 'approval stores the attestation note and step-up');
+    ok(/certification step/.test(await txt('[data-attestation]')), 'attestation shown on the approver view');
+    await shot('03-approver-view');
+    await page.click('[data-bu-back]'); await page.waitForSelector('#signoff'); await settle(400);
     await signAll();
     let r2 = await rd(AR);
     ok(r2.pass, 'access-review gate passes: ' + r2.checks.filter(c => c.status === 'fail').map(c => c.id + ': ' + c.detail).join(' | '));
@@ -181,11 +217,21 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.selectOption('.overlay select[name=env]', 'uat');
     await page.selectOption('.overlay select[name=access]', 'write');
     await page.fill('.overlay textarea[name=reason]', 'Load test certifications');
-    const far = await st(`const d = new Date(store.state.today + 'T12:00:00'); d.setDate(d.getDate() + 45); return d.toISOString().slice(0, 10);`);
-    await page.fill('.overlay input[name=expires]', far);
+    await page.fill('.overlay input[name=days]', '45');
     await page.click('.overlay [data-act=send]'); await settle(300);
-    ok(await page.$('.overlay') && /within the next 30 days/.test(await txt('.overlay [data-err]')), 'expiry over 30 days: dialog stays open with the error inline');
-    await page.click('.overlay [data-act=cancel]'); await settle();
+    ok(await page.$('.overlay') && /from 1 to 30/.test(await txt('.overlay [data-err]')) && await page.inputValue('.overlay textarea[name=reason]') === 'Load test certifications', 'duration over 30 days: dialog stays open with the error inline, input kept');
+    await page.fill('.overlay input[name=days]', '30');
+    await page.selectOption('.overlay select[name=env]', 'dev');
+    await page.selectOption('.overlay select[name=access]', 'read');
+    await page.click('.overlay [data-act=send]'); await settle(1000);
+    const gq = await st(`return store.list('grant', g => g.projectId === a && g.status === 'requested' && g.reason === 'Load test certifications')[0];`, AR);
+    ok(gq && !gq.expires && gq.durationDays === 30 && /30 days from approval/.test(await txt(`[data-grant="${gq.id}"] [data-expiry]`)), 'requested grant shows "30 days from approval" (no countdown, no expiry yet)');
+    const gOwner = await st(`const g = store.get('grant', a); const de = store.get('dataElement', g.dataId); const p = store.get('project', 'access-review-automation'); return g.requestedBy === de.owner ? p.owner : de.owner;`, gq.id);
+    await setMe(gOwner);
+    await page.click(`[data-grant="${gq.id}"] [data-gact=approve]`); await stepUpOk(); await settle(800);
+    const ga = await st(`return store.get('grant', a);`, gq.id);
+    const exp30 = await st(`const d = new Date(store.state.today + 'T12:00:00'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10);`);
+    ok(ga.status === 'active' && ga.expires === exp30 && ga.approvedAt, `expiry set at approval: ${ga.expires} (approval + 30 days)`);
 
     /* ---------- 7. release manager vs non-RM ---------- */
     console.log('Release manager only');
@@ -213,7 +259,12 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.waitForSelector('[data-pipeline-failed]', { timeout: 10000 }); await settle(900);
     ok(/Nothing was promoted or published/.test(await txt('[data-pipeline-failed] [data-no-side-effects]')), 'failure banner: "Nothing was promoted or published"');
     const relF = await st(`return store.list('release', r => r.projectId === a && r.kind !== 'rollback').sort((x, y) => y.at.localeCompare(x.at))[0];`, AR);
-    ok(relF.status === 'failed' && relF.pipeline && relF.pipeline.log.map(x => x.phase).join('>') === 'queued>running>failed', 'failed release recorded, phases logged');
+    ok(relF.status === 'failed', 'failed release recorded');
+    const audF = async () => { await page.waitForFunction(() => { const b = document.querySelector('[data-rl-history]'); return b && !/Loading/.test(b.textContent); }, null, { timeout: 10000 }); return page.$$eval('[data-rl-history] [data-audit]', els => els.map(e => ({ a: e.dataset.audit, t: e.textContent.replace(/\s+/g, ' '), at: e.querySelector('time').getAttribute('datetime') }))); };
+    await page.reload(); await page.waitForSelector('#cutover'); await settle(800);
+    let au = await audF();
+    ok(au.filter(e => /Go-live pipeline failed/i.test(e.t)).length === 1, 'failed go-live: exactly one failure entry in the audit log (' + au.filter(e => /fail/i.test(e.t)).map(e => e.a).join(',') + ')');
+    ok(au.every((e, i) => !i || e.at >= au[i - 1].at), 'audit log is in chronological order (oldest first)');
     ok(await st(`return store.get('process', 'access-review').version;`) === v0 && await st(`return store.get('project', a).status;`, AR) === 'active', 'no promotion: version unchanged, project still active');
     ok(await st(`return JSON.stringify(store.list('grant', g => g.projectId === a).map(g => g.status));`, AR) === grants0, 'no grant expiry');
     ok(await page.$('.rl-latest [data-failed] [data-no-side-effects]'), 'release record says nothing was promoted or published');
@@ -225,9 +276,26 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.click('.overlay [data-act=go]');
     await stepUpOk();
     await page.waitForSelector('[data-pipe-phase=succeeded]', { timeout: 15000 });
-    await page.waitForFunction(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.list('release').some(r => r.projectId === 'access-review-automation' && r.kind === 'golive' && r.status === 'succeeded' && r.pipeline && r.pipeline.log); }, null, { timeout: 10000 }); await settle(800);
+    await page.waitForFunction(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.list('release').some(r => r.projectId === 'access-review-automation' && r.kind === 'golive' && r.status === 'succeeded'); }, null, { timeout: 10000 }); await settle(800);
     ok(await st(`return store.get('project', a).status;`, AR) === 'live' && await st(`return store.get('process', 'access-review').version;`) === v0 + 1, 'retry: project live, process promoted');
     ok(!(await page.$('[data-pipeline-failed]')), 'no failure banner after success');
+    await page.reload(); await page.waitForSelector('[data-hypercare]'); await settle(800);
+    au = await audF();
+    const last = re => { let k = -1; au.forEach((e, i) => { if (re.test(e.a + ' ' + e.t)) k = i; }); return k; };
+    const order = [last(/^golive-approved/), last(/^pipeline-succeeded .*Deployment/), last(/^release .*Released/), last(/expired at go-live/)];
+    ok(order.every(i => i >= 0) && order.every((v, i) => !i || v > order[i - 1]), `audit order after go-live: approval → pipeline → promotion → grants expired (${order.join(' < ')})`);
+    ok(au.every((e, i) => !i || e.at >= au[i - 1].at), 'audit timestamps strictly follow the display order');
+    /* hypercare */
+    console.log('Hypercare');
+    ok(/Priya Shah/.test(await txt('[data-hypercare] .rl-hc-h')) && /\d+ of 10 days left/.test(await txt('[data-hypercare] h3')), 'hypercare card: owner and days remaining');
+    await page.click('[data-inc-add]'); await settle(200);
+    ok(!(await page.$eval('[data-inc-err]', e => e.hidden)), 'incident without a title: inline error');
+    await page.fill('[data-inc-title]', 'Auto-removal job revoked a service account');
+    await page.selectOption('[data-inc-sev]', '1');
+    await page.click('[data-inc-add]'); await settle(1000);
+    ok(await st(`return (store.get('project', a).incidents || []).some(i => i.severity === 1 && i.status === 'open' && i.title === 'Auto-removal job revoked a service account');`, AR), 'sev-1 incident stored on project.incidents');
+    ok(await page.$('[data-consider-rollback]') && /Consider rollback/.test(await txt('[data-consider-rollback]')), 'open sev-1 shows "Consider rollback"');
+    await shot('05b-hypercare');
     await setMe('ta');
     ok(await page.$('.rl-rb [data-why=rm]') && !(await page.$('[data-rollback]')), 'non-RM cannot roll back; told who can');
     expect403 = true;
@@ -235,12 +303,29 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     expect403 = false;
     ok(forbRb === 403, 'server refuses rollback from a non-RM (403)');
     await setMe('mc');
-    await page.click('[data-rollback]');
+    console.log('Rollback pipeline: failure then success');
+    await page.click('.rl-rb [data-rollback]');
+    await page.waitForSelector('.overlay textarea[name=reason]');
+    await page.fill('.overlay textarea[name=reason]', 'Removal job flagged service accounts');
+    await page.check('.overlay [data-simfail]');
+    await page.click('.overlay [data-act=rollback]');
+    await stepUpOk();
+    await page.waitForSelector('[data-pipe-kind=rollback]', { timeout: 15000 });
+    ok(await page.$('[data-pipe-kind=rollback]'), 'rollback shows a pipeline status');
+    await page.waitForSelector('[data-rollback-failed]', { timeout: 15000 }); await settle(800);
+    ok(await st(`return store.get('project', a).status;`, AR) === 'live' && await st(`return store.get('process', 'access-review').version;`) === v0 + 1, 'failed rollback: nothing restored, still live');
+    ok(/Nothing was restored/.test(await txt('[data-rollback-failed]')), 'rollback failure banner: "Nothing was restored"');
+    await page.reload(); await page.waitForSelector('[data-hypercare]'); await settle(800);
+    au = await audF();
+    ok(au.filter(e => /Rollback pipeline failed/i.test(e.t)).length === 1, 'failed rollback: exactly one failure entry');
+    await shot('05c-rollback-failed');
+    await page.click('.rl-rb [data-rollback]');
     await page.waitForSelector('.overlay textarea[name=reason]');
     await page.fill('.overlay textarea[name=reason]', 'Removal job flagged service accounts');
     await page.click('.overlay [data-act=rollback]');
     await stepUpOk();
-    await page.waitForSelector('.rl-latest [data-kind=rollback]', { timeout: 20000 }); await settle(800);
+    await page.waitForFunction(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.get('project', 'access-review-automation').status === 'active'; }, null, { timeout: 15000 });
+    await page.waitForSelector('[data-pipe-kind=rollback][data-pipe-phase=succeeded], .rl-latest [data-kind=rollback]:not([data-failed])', { timeout: 20000 }); await settle(3500);
     ok(await st(`return store.get('project', a).status;`, AR) === 'active' && await st(`return store.get('process', 'access-review').version;`) === v0, 'rollback restored the previous version');
     const undone = await page.$$eval('.rl-latest [data-undone] li', els => els.map(e => e.textContent));
     ok(undone.length >= 2 && undone.some(x => /Re-published SOP/.test(x)) && undone.some(x => /Restored/.test(x)), 'rollback shows the side effects it undid: ' + undone.slice(0, 2).join(' | '));
@@ -249,6 +334,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.waitForFunction(() => !/Loading/.test(document.querySelector('[data-rl-history]').textContent), null, { timeout: 10000 });
     const audit = await txt('[data-rl-history]');
     ok(/pipeline failed/i.test(audit) && /rolled back/i.test(audit), 'gate audit log shows the failed pipeline and the rollback');
+    au = await audF();
+    const rbo = [last(/^rollback-approved/), last(/^pipeline-succeeded .*Rollback/), last(/^rollback .*Restored/)];
+    ok(rbo.every(i => i >= 0) && rbo.every((v, i) => !i || v > rbo[i - 1]), `rollback audit order: approved → pipeline → restore (${rbo.join(' < ')})`);
 
     /* ---------- 9. BU sections from touches tags, including the trigger; "No approver in HR" ---------- */
     console.log('BU sections from touches and the trigger');
@@ -268,7 +356,16 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await open(`/testing/${VM}?de=D2`);
     await page.click('[data-prof-sample]');
     await page.waitForSelector('.ts-driftsum, .ts-ok', { timeout: 15000 }); await settle();
-    await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 }); await settle(800);
+    const genBefore = await st(`return store.list('testCase', c => c.dataId === 'D2').map(c => c.id);`);
+    await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 });
+    const shownNow = +(await txt('#cases h3 .n')).trim(); const haveNow = await st(`return store.list('testCase', c => c.dataId === 'D2').length;`);
+    ok(shownNow === haveNow && haveNow > genBefore.length, `one press generates everything and the count updates immediately (${genBefore.length} → ${shownNow})`);
+    await page.waitForSelector('[data-gen]:not([data-gen-busy])', { timeout: 60000 }); await settle(300);
+    ok(+(await txt('#cases h3 .n')).trim() === haveNow, 'count unchanged after the saves land (no stale or double count)');
+    await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/No new test cases/', { timeout: 10000 }); await settle(300);
+    ok(+(await txt('#cases h3 .n')).trim() === haveNow, 'a second press adds nothing: generation is one-shot and complete');
+    const d2owner = await st(`return store.get('dataElement', 'D2').owner;`);
+    ok(await st(`return store.list('testCase', c => c.dataId === 'D2' && !a.before.includes(c.id)).every(c => c.tester === a.owner);`, { before: genBefore, owner: d2owner }), 'generated cases default to the data owner as tester');
     const nProf = await page.$$eval('#cases tr[data-origin-row=profile]', r => r.length);
     ok(nProf > 0 && await page.$('[data-profile-cases]'), `profile-derived cases shown (${nProf}) with an explanation`);
     await page.click('[data-origin=profile]'); await settle();
@@ -278,14 +375,29 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const labels = await page.$$eval('#cases [data-case-label]', els => els.map(e => e.textContent.trim()));
     ok(labels.length && labels.every(l => /^TC\d+$/.test(l)) && !(await page.$$eval('#cases td', tds => tds.some(td => /\btc-[a-z0-9]/.test(td.textContent)))), `cases show TC<n> labels, never raw ids (${labels.slice(0, 3).join(', ')}…)`);
     ok(await st(`return window.PMOEngine.caseLabel(store.state.docs, a);`, firstCase) === await txt(`#cases tr[data-case="${firstCase}"] [data-case-label]`).then(t => t.trim()), 'label matches E().caseLabel');
-    await page.selectOption('select[name=bulkTester]', 'ar');
-    await page.click('[data-bulk-assign]'); await page.waitForSelector('.toast >> text=/assigned to Ana Ruiz/', { timeout: 60000 }); await settle(800);
-    ok(await st(`return store.list('testCase', c => c.dataId === 'D2').every(c => c.tester === 'ar');`), 'bulk-assigned every D2 case to Ana Ruiz');
+    const unassigned = await st(`return store.list('testCase', c => c.dataId === 'D2' && !c.tester).map(c => c.id);`);
+    if (unassigned.length) {
+      await page.selectOption('select[name=bulkTester]', 'ar');
+      await page.click('[data-bulk-assign]'); await page.waitForSelector('.toast >> text=/assigned to Ana Ruiz/', { timeout: 60000 }); await settle(800);
+    }
+    ok(await st(`return store.list('testCase', c => c.dataId === 'D2').every(c => c.tester) && a.every(id => store.get('testCase', id).tester === 'ar');`, unassigned), `bulk-assigned the ${unassigned.length} unassigned D2 cases to Ana Ruiz; every case has a tester`);
+    const unc0 = +(await page.getAttribute('[data-trace-fields]', 'data-trace-fields'));
+    const tde = await page.$$eval('[data-gen-de]', bs => bs.map(b => b.dataset.genDe).filter(x => x !== 'D8'));
+    if (tde.length) {
+      await page.click(`[data-gen-de="${tde[0]}"]`); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 }); await settle(300);
+      ok(!(await page.$(`[data-trace-de="${tde[0]}"]`)) && +(await page.getAttribute('[data-trace-fields]', 'data-trace-fields')) < unc0, `"Generate" in the traceability header covers that element's fields at once (${unc0} → ${await page.getAttribute('[data-trace-fields]', 'data-trace-fields')} uncovered)`);
+      await page.waitForFunction(() => !document.querySelector('[data-gen-busy]'), null, { timeout: 60000 }); await settle(4000);
+    }
     for (const d of await page.$$eval('.ts-list [data-de]', as => as.map(a => a.dataset.de))) {
       if (d === 'D2' || d === 'D8') continue;
       await page.click(`.ts-list [data-de="${d}"]`); await settle(300);
-      await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case|No new test cases/', { timeout: 60000 }); await settle(500);
+      await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case|No new test cases|Still saving/', { timeout: 60000 });
+      await page.waitForSelector('[data-gen]:not([data-gen-busy])', { timeout: 60000 }); await settle(300);
     }
+    /* traceability headline: UAT done/total next to spec-field coverage */
+    const tcov = await st(`return window.PMOEngine.testCoverage(store.state.docs, a);`, VM);
+    ok(await page.getAttribute('[data-trace-uat]', 'data-trace-uat') === `${tcov.uat.done}/${tcov.uat.total}` && +(await page.getAttribute('[data-trace-fields]', 'data-trace-fields')) === tcov.uncoveredFields.length, `traceability header matches E().testCoverage: UAT ${tcov.uat.done}/${tcov.uat.total}, ${tcov.uncoveredFields.length} uncovered`);
+    ok(await page.$('[data-trace-uat]') && await page.$('[data-trace-fields]'), 'traceability header: UAT done/total next to spec-field coverage: ' + (await txt('[data-trace]')).slice(0, 90));
     /* profile view: no "?" row counts and no duplicate humanized pattern rows */
     await page.click('.ts-list [data-de="D2"]'); await settle(400);
     const profTxt = await txt('.ts-main .card');
@@ -312,7 +424,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(await page.$('[data-fields-custom-only]') && /doesn't count/.test(await txt('[data-field-gaps]')) && /free-form check/.test(await txt('[data-field-gaps]')), 'custom-only field flagged with the reason it does not count');
     ok((await check(VM, 'tests-passed')).uncoveredFields.some(x => x.dataId === 'D8' && x.field === 'Risk tier'), 'engine agrees: Risk tier is uncovered');
     ok(/custom only/.test(await txt('[data-cov-row="data:D8"]')), 'coverage matrix row explains the custom-only gap');
-    await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 }); await settle(800);
+    await page.click('[data-gen]'); await page.waitForSelector('.toast >> text=/Generated \\d+ test case/', { timeout: 60000 });
+    await page.waitForSelector('[data-gen]:not([data-gen-busy])', { timeout: 60000 }); await settle(500);
     ok(!(await page.$('[data-field-gaps]')) && await page.$('[data-fields-covered]'), 'generating spec cases closes the gap');
 
     console.log('Multi-step UAT scripts and scenarios');
@@ -375,10 +488,12 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.evaluate(sid => { document.querySelectorAll(`.overlay [data-row="s:${sid}"] select`).forEach(s => { s.value = 'pass'; }); }, multi.id);
     await page.click('.overlay [data-act=save]'); await settle(300);
     ok(/passed: add evidence/.test(await txt('.overlay [data-err]')), 'a UAT script pass without evidence is refused');
-    /* bulk: select all, no note -> error; with note -> everything passes with that evidence */
+    /* bulk: nothing selected -> inline hint at once; select all, no note -> hint; with note -> everything passes with that evidence */
+    await page.click('.overlay [data-bulk-pass]');
+    ok(await page.isVisible('.overlay [data-bulk-hint]') && /Nothing selected/.test(await txt('.overlay [data-bulk-hint]')), '"Mark selected as passed" with nothing selected shows an inline hint immediately');
     await page.check('.overlay [data-pick-all]');
     await page.click('.overlay [data-bulk-pass]'); await settle(200);
-    ok(/one evidence note/.test(await txt('.overlay [data-err]')), '"Mark selected as passed" needs an evidence note');
+    ok(/one evidence note/.test(await txt('.overlay [data-bulk-hint]')), '"Mark selected as passed" needs an evidence note');
     await page.fill('.overlay [data-bulk-ev]', 'UAT evidence pack, folder VO-UAT-1');
     await page.click('.overlay [data-bulk-pass]'); await settle(200);
     const evAll = await page.$$eval('.overlay .ts-case', rows => rows.filter(r => !r.closest('[hidden]')).every(r => { const e = r.querySelector('input[name^="e_"]'); return [...r.querySelectorAll('select')].every(s => s.value === 'pass') && e && e.value === 'UAT evidence pack, folder VO-UAT-1'; }));
@@ -391,6 +506,13 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     }, multi.id);
     await page.click('.overlay [data-act=save]');
     await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 });
+    if (await page.$('.overlay [data-close-offer]')) {   /* the seeded defect's item passed: it is verified and closing is offered first */
+      ok(/Verified/.test(await txt('.overlay h2')), 'a passing result verifies the linked seeded defect and offers to close it');
+      await page.click('.overlay [data-act=cancel]'); await page.waitForSelector('.overlay [data-def-row]', { timeout: 10000 });
+    }
+    await page.selectOption('.overlay [data-def-row] select[name^="sev_"]', '1');
+    await page.selectOption('.overlay [data-def-row] select[name^="pri_"]', 'High');
+    ok(/Step \d+: fail/.test(await page.inputValue('.overlay [data-def-row] textarea[name^="repro_"]')), 'defect dialog prefills steps to reproduce from the failing step');
     await page.click('.overlay [data-act=create]'); await settle(1500);
     const run1 = await st(`return store.list('testRun', r => r.projectId === a && r.cycleId === ${JSON.stringify(cyc.id)})[0];`, VM);
     const scnRes = run1.results.find(x => x.scriptId === sc0.id);
@@ -398,6 +520,18 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(run1.results.filter(x => x.caseId).every(x => x.evidence === 'UAT evidence pack, folder VO-UAT-1'), 'the bulk evidence note is on each selected case');
     const def = await st(`return store.list('workItem', w => w.projectId === a && w.kind === 'defect' && w.status !== 'done' && w.testRef && w.testRef.scriptId === a2)[0];`.replace('a2', JSON.stringify(multi.id)), VM);
     ok(!!def, 'defect created for the failing script');
+    ok(def.severity === 1 && def.priority === 'High' && def.env === 'uat' && def.repro && def.defectStatus === 'new' && await st(`return window.PMOEngine.defectState(store.state.docs, a);`, def.id) === 'new', 'defect has severity, priority, env, repro and starts as new');
+    const stepOwner = await st(`const s = store.get('project', a.p).uatScripts.find(x => x.id === a.s); const pr = store.get('process', s.pid); const f = n => { for (const x of n || []) { if (x.id === s.step) return x; for (const b of x.branches || []) { const r = f(b.nodes); if (r) return r; } } return null; }; return (f(pr.tobe) || {}).owner;`, { p: VM, s: multi.id });
+    ok(def.owner === stepOwner && (await st(`return store.get('project', a).uatScripts.find(x => x.id === ${JSON.stringify(scripts[0].id)}).tester;`, VM)), 'defect owner is the step owner; adopted scripts default their tester');
+    console.log('Defect lifecycle');
+    await setMe(def.owner);
+    ok((await txt(`[data-defect-row="${def.id}"]`)).includes('new'), 'defects card lists it as new');
+    for (const [to, label] of [['triaged', 'Triage'], ['in-progress', 'Start fix'], ['fixed', 'Mark fixed']]) {
+      await page.click(`[data-defect-row="${def.id}"] [data-dnext]`); await settle(900);
+      ok(await page.$(`[data-defect-row="${def.id}"][data-dstate="${to}"]`), `${label} → ${to}`);
+    }
+    ok(await page.$(`[data-defect-row="${def.id}"] [data-await-retest]`), 'fixed defects wait for a passing retest');
+    await setMe('ps');
     const psProg = await txt(`[data-cycle-id="${cyc.id}"] [data-tester-progress=ps]`);
     const nRec = run1.results.length;
     ok(new RegExp(`${nRec} recorded`).test(psProg), `Priya's progress counts her recorded results: ${psProg.trim()}`);
@@ -422,6 +556,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
       await page.click('.overlay [data-act=close]'); await settle(1200);
     }
     ok(await st(`const w = store.get('workItem', a); return w.status === 'done' && /Retest passed/.test(w.fixNote);`, def.id), 'linked defect closed with the passing retest as proof');
+    const log = await st(`return (store.get('workItem', a).stateLog || []).map(x => x.state).join('>');`, def.id);
+    ok(/new>triaged>in-progress>fixed>verified>closed/.test(log), 'lifecycle recorded: ' + log + ' (verified automatically by the passing retest)');
+    ok(await st(`return window.PMOEngine.defectState(store.state.docs, a);`, def.id) === 'closed', 'E().defectState agrees: closed');
 
     console.log('JUnit: label or title, environment, skipped');
     await setMe('ta');
@@ -429,7 +566,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const xml1 = `<testsuite name="vendor-full">${devCases.map(c => `<testcase classname="northwind.vendor" name="${x(c.de)} ${c.lbl} validates"/>`).join('')}</testsuite>`;
     await page.click('[data-ci]'); await page.waitForSelector('.overlay [data-ci-xml]');
     ok((await page.$$eval('.overlay [data-ci-env] option', o => o.map(x => x.value))).join() === 'dev,sit,uat,prod-verify', 'JUnit import asks for the environment');
-    await page.fill('.overlay [data-ci-xml]', xml1); await page.click('.overlay [data-act=import]'); await settle(1500);
+    await page.fill('.overlay [data-ci-xml]', xml1); await page.click('.overlay [data-act=preview]'); await page.waitForSelector('.overlay [data-ci-map]');
+    ok((await page.$$('.overlay [data-ci-row]')).length === devCases.length && !(await page.$('.overlay [data-ci-row].un')), 'JUnit preview lists every testcase with its matched case before importing');
+    await page.click('.overlay [data-act=import]'); await settle(1500); await dismiss();
     const ci1 = await st(`return store.list('testRun', r => r.projectId === a && r.ciSuite === 'vendor-full')[0];`, VM);
     ok(ci1 && ci1.results.length === devCases.length && ci1.results.every(x => x.matchedBy === 'label') && ci1.env === 'dev', `every case matched by its TC label (${ci1 && ci1.results.length}/${devCases.length})`);
     const devFull = (await txt('[data-cov=dev]')).trim();
@@ -439,8 +578,10 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const titleName = `${tc.field.toUpperCase()} -- ${tc.kind}!`;
     const xml2 = `<testsuite name="vendor-partial"><testcase classname="ci" name="${titleName}"><failure message="Boundary rejected"/></testcase><testcase classname="ci" name="${multi.title.toLowerCase().replace(/ /g, '_')}"/><testcase classname="ci" name="${x(sk.de)} ${sk.lbl}"><skipped message="flaky sandbox"/></testcase><testcase classname="ci" name="unrelated smoke test"/></testsuite>`;
     await page.click('[data-ci]'); await page.waitForSelector('.overlay [data-ci-xml]');
-    await page.fill('.overlay [data-ci-xml]', xml2); await page.click('.overlay [data-act=import]');
-    await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 }); await page.click('.overlay [data-act=cancel]'); await settle(1500);
+    await page.fill('.overlay [data-ci-xml]', xml2); await page.click('.overlay [data-act=preview]'); await page.waitForSelector('.overlay [data-ci-map]');
+    ok((await page.$$('.overlay [data-ci-row].un')).length === 1 && /unmatched/.test(await txt('.overlay [data-ci-row].un')), 'preview marks the unrelated test as unmatched');
+    await page.click('.overlay [data-act=import]');
+    await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 }); await page.click('.overlay [data-act=cancel]'); await settle(1500); await dismiss();
     const ci2 = await st(`return store.list('testRun', r => r.projectId === a && r.ciSuite === 'vendor-partial')[0];`, VM);
     const tHit = ci2 && ci2.results.find(x => x.caseId && x.outcome === 'fail');
     ok(tHit && tHit.matchedBy === 'title' && tHit.caseId === tc.id, `JUnit "${titleName}" matched the ${tc.field} ${tc.kind} case by title`);
@@ -452,7 +593,14 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     /* a SIT import */
     await page.click('[data-ci]'); await page.waitForSelector('.overlay [data-ci-xml]');
     await page.selectOption('.overlay [data-ci-env]', 'sit');
-    await page.fill('.overlay [data-ci-xml]', `<testsuite name="vendor-sit"><testcase classname="ci" name="${x(sk.de)} ${sk.lbl}"/></testsuite>`); await page.click('.overlay [data-act=import]'); await settle(1500);
+    await page.fill('.overlay [data-ci-xml]', `<testsuite name="vendor-sit"><testcase classname="ci" name="sit smoke check 7"/></testsuite>`); await page.click('.overlay [data-act=preview]'); await page.waitForSelector('.overlay [data-ci-map]');
+    ok(await page.$('.overlay [data-ci-row].un'), 'unrecognised test starts unmatched');
+    await page.click('.overlay [data-act=import]'); await settle(300);
+    ok(/at least one/.test(await txt('.overlay [data-err]')), 'importing with everything unmatched is refused inline');
+    await page.selectOption('.overlay [data-ci-pick]', 'c:' + sk.id);
+    ok(/mapped by hand/.test(await txt('.overlay [data-ci-row]')), 'dropdown maps it by hand');
+    await page.click('.overlay [data-act=import]'); await settle(1500);
+    ok(await st(`return store.list('testRun', r => r.projectId === a && r.ciSuite === 'vendor-sit')[0].results[0];`, VM).then(r => r.caseId === sk.id && r.matchedBy === 'manual'), 'manual mapping imported (matchedBy manual)');
     ok(await st(`return store.list('testRun', r => r.projectId === a && r.ciSuite === 'vendor-sit')[0].env;`, VM) === 'sit' && /SIT \(latest\)/.test(await txt('#coverage thead')), 'SIT run imported and shown as its own coverage column');
     await shot('08-testing-vm');
 
@@ -510,15 +658,46 @@ The process starts when an employee submits an expense claim.
       return { ok: !!b && all.some(n => n.id === b.goto), tobe: !!tb && p.tobe.some(n => n.id === tb.goto) };`, newPid);
     ok(loop.ok && loop.tobe, 'loop-back persisted with goto pointing at real as-is and to-be node ids');
 
+    console.log('Import SOP: titles, proposed data, wait/message nodes');
+    await open('/import');
+    /* the parser's output is injected so the e2e controls exactly what it returns (including the new node kinds) */
+    await st(`window.__api = store.api; store.api = async (path, body) => path === '/ai/sop-import' ? ({ source: 'rules', name: 'Vendor dispute handling ()', nodes: [
+      { id: 'k', type: 'trigger', title: 'A vendor disputes an invoice ()' },
+      { id: 'a', type: 'step', title: 'Accounts Payable logs the dispute () in the dispute register', owner: 'mc', subs: ['Attach the vendor dispute letter ( )'] },
+      { id: 'b', type: 'wait', title: 'Wait 2 business days for vendor response ()', wait: '2 business days' },
+      { id: 'c', type: 'message', title: 'Notify vendor of the outcome', direction: 'send', party: 'Vendor' },
+      { id: 'd', type: 'step', title: 'Treasury files the dispute resolution memo' }],
+      newData: [{ name: 'Dispute register entry', reason: 'Mentioned in "Accounts Payable logs the dispute in the dispute register"' }, { name: 'Dispute resolution memo ()' }, { name: 'Receiving clerk records' }], notes: 'Injected by the e2e.' }) : window.__api(path, body);`);
+    await page.fill('[data-sop]', 'Vendor dispute SOP (injected parser output)');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-step', { timeout: 15000 }); await settle();
+    const titles = await page.$$eval('.is-draft textarea, .is-trig, .is-nd-name', els => els.map(e => e.value || e.textContent));
+    ok(titles.length && !titles.some(t => /\(\s*\)/.test(t)), 'no "()" in any draft title, sub-step, trigger or proposal');
+    ok(await page.$('.is-step[data-type=wait] [data-kind=wait]') && await page.$('.is-step[data-type=message] [data-kind=message]') && await page.inputValue('.is-step[data-type=message] [data-f=party]') === 'Vendor', 'wait and message nodes render with their details');
+    const props = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(props.join('|') === 'Dispute register entry|Dispute resolution memo' && /Receiving clerk records/.test(await txt('.is-notes')), 'only document/record/field noun phrases proposed ("Receiving clerk records" is not): ' + props.join(', '));
+    ok((await page.$$('[data-nd-target]')).length === 2 && (await page.$$('[data-newchip]')).length === 2, 'each proposal shows the step it will be added to, and the step shows it');
+    await page.click('[data-create]'); await page.waitForSelector('.overlay input[name=name]');
+    ok(/creates 2 data elements/.test(await txt('.overlay [data-create-data]')) && !/\(\s*\)/.test(await page.inputValue('.overlay input[name=name]')), 'create dialog says it creates exactly 2 data elements; name has no "()"');
+    await page.click('.overlay [data-act=create]');
+    await page.waitForURL(/\/process\/proc-[\w-]+\?mode=edit/, { timeout: 15000 });
+    const pid2 = page.url().match(/process\/([\w-]+)/)[1]; await settle(800);
+    await st(`store.api = window.__api;`);
+    const made = await st(`const p = store.get('process', a); const ids = new Set(); const walk = ns => (ns || []).forEach(n => { (n.data || []).forEach(d => ids.add(d)); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(p.tobe);
+      const des = store.list('dataElement', d => d.source === 'Proposed by SOP import' && /Dispute/.test(d.name));
+      return { n: des.length, linked: des.every(d => ids.has(d.id)), names: des.map(d => d.name), kinds: p.tobe.map(n => n.type), titles: p.tobe.map(n => n.title), wait: (p.tobe.find(n => n.type === 'wait') || {}).wait, msg: p.tobe.find(n => n.type === 'message') };`, pid2);
+    ok(made.n === 2 && made.linked && !made.names.some(n => /\(/.test(n)), 'the 2 proposed elements were created and both are in the new process\'s data requirements: ' + made.names.join(', '));
+    ok(made.kinds.includes('wait') && made.kinds.includes('message') && made.wait === '2 business days' && made.msg.party === 'Vendor' && made.msg.direction === 'send', 'wait and message nodes kept on create: ' + made.kinds.join(','));
+    ok(!made.titles.some(t => /\(\s*\)/.test(t)), 'created process titles have no "()"');
+
     /* ---------- 12. widths ---------- */
     console.log('Widths');
     for (const [w, h] of [[1440, 1000], [390, 844]]) {
       await page.setViewportSize({ width: w, height: h });
-      for (const p of ['/release/' + AR, '/release/' + VM, '/testing/' + VM, '/import']) {
+      for (const p of ['/release/' + AR, '/release/' + AR + '?bu=IT', '/release/' + VM, '/release/' + VM + '?bu=Compliance', '/testing/' + VM, '/import']) {
         await open(p);
         if (p === '/import') { await page.click('[data-sample]'); await page.click('[data-draft]'); await page.waitForSelector('.is-step', { timeout: 30000 }); await settle(); }
         ok(await overflow(), `no horizontal overflow at ${w}: ${p}`);
-        if (w === 390) await shot('m-' + p.replace(/\//g, '_').replace(/^_/, ''));
+        if (w === 390) await shot('m-' + p.replace(/[\/?=]/g, '_').replace(/^_/, ''));
       }
     }
     await page.setViewportSize({ width: 390, height: 844 });

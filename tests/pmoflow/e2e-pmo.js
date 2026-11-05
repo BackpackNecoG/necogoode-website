@@ -314,7 +314,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ---- Board ---- */
   console.log('R4 board');
   await page.click('.pmo-tabs a[data-tab="board"]'); await page.waitForSelector('[data-board]'); await settle();
-  check('board: three columns', (await page.locator('.pmo-col-h b').allInnerTexts()).join('|') === 'Not started|In progress|Done');
+  const stNames = await page.evaluate(async ([u, prj]) => { const j = (await import(u)).store.get('project', prj); return (j.statuses || []).map(x => x.name); }, [STORE, PRJ]);
+  check('R6 board: columns follow project.statuses (seeded Not started / In progress / In review / Done)', stNames.length === 4 && (await page.locator('.pmo-col-h b').allInnerTexts()).join('|') === stNames.join('|'), stNames);
   const nItems = await page.evaluate(async ([u, id]) => (await import(u)).store.list('workItem', w => w.projectId === id).length, [STORE, PRJ]);
   check('board: one card per work item', await page.locator('.pmo-board .pmo-card').count() === nItems, nItems);
   const card0 = page.locator('.pmo-board .pmo-card').first();
@@ -327,11 +328,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot('20-board-1440');
   const idleCard = page.locator('.pmo-col[data-col="idle"] .pmo-card').first();
   const bId = await idleCard.getAttribute('data-card');
-  await idleCard.dragTo(page.locator('.pmo-col[data-col="prog"] .pmo-col-b')); await settle();
+  await idleCard.dragTo(page.locator('.pmo-col[data-col="prog"] .pmo-col-h')); await settle();
   const bDoc = await getDoc('workItem', bId);
   check('board drag Not started -> In progress sets status + updatedAt', bDoc.status === 'prog' && !!bDoc.updatedAt && !bDoc.doneAt, bDoc);
   check('board: card now in In progress column', await page.locator(`.pmo-col[data-col="prog"] [data-card="${bId}"]`).count() === 1);
-  await page.locator(`.pmo-card[data-card="${bId}"]`).dragTo(page.locator('.pmo-col[data-col="done"] .pmo-col-b')); await settle();
+  await page.locator(`.pmo-card[data-card="${bId}"]`).dragTo(page.locator('.pmo-col[data-col="done"] .pmo-col-h')); await settle();
   const bDone = await getDoc('workItem', bId);
   check('board drag -> Done sets doneAt to today', bDone.status === 'done' && bDone.doneAt === todayStr, bDone);
   /* keyboard alternative: focus a card, Tab to its status select */
@@ -388,8 +389,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('sprint drag: card shows in target sprint', await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-card="${mId}"]`).count() === 1);
   check('history: sprint move summarised', new RegExp(`Planned “.+” in ${target.name}`).test(await feedText()));
   /* keyboard alternative + over-capacity: pile one owner's open work into the same sprint */
-  for (let k = 0; k < 6 && !(await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-over]`).count()); k++) {
-    const sel = page.locator(`.pmo-spr[data-sprint]:not([data-sprint="${target.id}"]) select[data-sprint-pick]:not([disabled])`).first();
+  for (let k = 0; k < 14 && !(await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-over]`).count()); k++) {
+    /* prefer work owned by someone already in the target sprint, so effort grows faster than capacity */
+    const inTarget = await page.locator(`.pmo-spr[data-sprint="${target.id}"] .pmo-card .pmo-card-h .av`).evaluateAll(xs => xs.map(x => x.getAttribute('title')));
+    const own = page.locator(`.pmo-spr[data-sprint]:not([data-sprint="${target.id}"]) .pmo-card`).filter({ has: page.locator(inTarget.map(t => `.pmo-card-h .av[title="${t}"]`).join(',') || '.none') }).locator('select[data-sprint-pick]:not([disabled])').first();
+    const sel = await own.count() ? own : page.locator(`.pmo-spr[data-sprint]:not([data-sprint="${target.id}"]) select[data-sprint-pick]:not([disabled])`).first();
     if (!await sel.count()) break;
     await sel.selectOption(target.id); await settle();
   }
@@ -411,7 +415,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ---- shared filter bar + saved views ---- */
   console.log('R4 filters + saved views');
-  for (const m of ['board', 'sprints', 'timeline', 'work']) { await prjGo('?mode=' + m, '[data-fbar]'); check(`filter bar on ${m}`, await page.locator('[data-fbar] [data-f]').count() === 6); }
+  for (const m of ['board', 'sprints', 'timeline', 'work']) { await prjGo('?mode=' + m, '[data-fbar]'); check(`filter bar on ${m} (6 filters + one per custom field)`, await page.locator('[data-fbar] [data-f]').count() === 7 && await page.locator('[data-fbar] [data-f="cf_riskArea"]').count() === 1); }
   await prjGo('?mode=work', 'table.pmo-work');
   const ownerPick = await page.$eval('[data-fbar] select[data-f="owner"]', s => s.options[1].value);
   await page.selectOption('[data-fbar] select[data-f="owner"]', ownerPick); await settle();
@@ -575,7 +579,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     check('suggestions: gateway targets labelled', await page.locator('.overlay [data-sg-gateway]').count() > 0);
     const depSrc = await page.evaluate(() => [...document.querySelectorAll('.overlay .pmo-sg')].flatMap(sg => [...sg.querySelectorAll('input[name^="dep_"]:checked')].map(i => i.value)).filter(v => v.startsWith('S:'))
       .map(v => document.querySelector(`.overlay .pmo-sg[data-sg="${v.slice(2)}"] .hint`).textContent));
-    check('suggestions: dependencies come from data resolvers', depSrc.every(t => t.includes('resolves')), depSrc);
+    /* R6: flow-order deps (previous step's work, finish → start) plus data resolvers; dates spread toward the target */
+    check('R6 suggestions: dependencies on other suggestions exist (flow order + resolvers)', depSrc.length > 0, depSrc);
+    const sgEng = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); return window.PMOEngine.suggestWorkFromDiff(store.state.docs, prj, store.state.today); }, [STORE, PRJ]);
+    check('R6 suggestions: the modal shows the engine\'s flow-order deps ("can start now" only where there are none)', sgEng.some(x => (x.deps || []).length) && await page.locator('.overlay [data-sg-now]').count() === sgEng.filter(x => !(x.deps || []).length).length, sgEng.map(x => [x.title, x.deps]));
+    check('R6 suggestions: dates spread from today toward the target (not all on one day)', new Set(starts).size > 1 && new Set(dues).size > 1, { starts, dues });
+    check('R6 suggestions: "can start now" items start today', sgEng.filter(x => !(x.deps || []).length).every(x => x.start === todayStr || isWkend(todayStr)), sgEng.map(x => [x.start, x.deps]));
+    check('R6 suggestions: spread summary shows range, target and start-now count', /Spread .+ → .+/.test(await page.innerText('.overlay [data-sg-spread]')) && /can start now/.test(await page.innerText('.overlay [data-sg-spread]')));
   }
   await shot('06-suggest-modal-1440', false);
   if (nSugg > 1) {
@@ -761,7 +771,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.fill('[data-activity] textarea[name="cmt"]', 'E2E R5 activity comment'); await page.click('[data-activity] [data-post]'); await settle();
   check('R5 activity: stays open and shows the new comment', await page.locator('[data-activity]').evaluate(d => d.open) && (await page.locator('[data-activity]').innerText()).includes('E2E R5 activity comment'));
   await prjGo('', '.canvas.pm');
-  check('R5 activity: Map keeps Comments + History cards (no toggle)', await page.locator('[data-activity]').count() === 0 && await page.locator('.side .card > h3', { hasText: /^Comments$/ }).count() === 1);
+  check('R6 activity: Map also collapses comments + history into the one Activity toggle', await page.locator('[data-activity]').count() === 1 && await page.locator('.side .card > h3', { hasText: /^Comments$/ }).count() === 0);
   /* settings: PM only */
   await asPersona('^Maya Chen');
   check('R5 settings: disabled for non-PM with explanation', await page.locator('[data-settings]').isDisabled() && /Only Tom Alvarez \(project manager\)/.test(await page.getAttribute('[data-settings]', 'title')));
@@ -861,17 +871,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     check('R5 history: external dependency named', /now after .+ \(external\)/.test(await feedText()));
   }
 
-  console.log('R5 causing slip + status reasons');
-  const slipIds = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const fc = window.PMOEngine.forecastAll(store.state.docs, store.state.today); return store.list('workItem', w => w.projectId === prj && w.status !== 'done' && fc[w.id] && fc[w.id].causesSlip).map(w => w.id); }, [STORE, PRJ]);
-  check('R5 causing slip: the engine flags some items', slipIds.length > 0, slipIds.length);
+  console.log('R5/R6 causing slip: one schedule badge per item');
+  const badgeKeys = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const o = {}; store.list('workItem', w => w.projectId === prj).forEach(w => { o[w.id] = window.PMOEngine.scheduleBadge(store.state.docs, w.id, store.state.today).key; }); return o; }, [STORE, PRJ]);
+  const KEYMAP = { done: 'done', late: 'late', causing: 'causing', slipping: 'slip', soon: 'soon', ontrack: 'ok' };
+  const slipIds = Object.keys(badgeKeys).filter(id => badgeKeys[id] === 'causing');
+  check('R5 causing slip: the engine flags some items (E().scheduleBadge)', slipIds.length > 0, badgeKeys);
+  const oneBadge = async (rowSel) => page.evaluate(([sel, keys, km]) => [...document.querySelectorAll(sel)].map(el => { const id = el.dataset.wid || el.dataset.card; const b = [...el.querySelectorAll('[data-sched]')]; return b.length === 1 && b[0].dataset.sched === km[keys[id]] ? null : { id, n: b.length, shown: b.map(x => x.dataset.sched), want: keys[id] }; }).filter(Boolean), [rowSel, badgeKeys, KEYMAP]);
+  const wb = await oneBadge('tr[data-wid]');
+  check('R6 exactly one schedule badge per Work row, matching E().scheduleBadge', wb.length === 0, wb);
   const hasBadge = async sel => (await Promise.all(slipIds.map(async id => await page.locator(sel(id)).count() > 0))).every(Boolean);
   check('R5 causing slip: badge on every flagged Work row', await hasBadge(id => `tr[data-wid="${id}"] [data-causes-slip]`) && await page.locator('tr[data-wid] [data-causes-slip]').count() === slipIds.length);
   await prjGo('?mode=board', '[data-board]');
+  const cb = await oneBadge('.pmo-card[data-card]');
+  check('R6 exactly one schedule badge per Board card, matching E().scheduleBadge', cb.length === 0, cb);
   check('R5 causing slip: badge on every flagged Board card', await hasBadge(id => `[data-card="${id}"] [data-causes-slip]`) && await page.locator('[data-card] [data-causes-slip]').count() === slipIds.length);
   await prjGo('?mode=timeline', '.tl .tbar');
   check('R5 causing slip: badge on every flagged Timeline row', await page.locator('.tl tr [data-causes-slip]').count() === slipIds.length);
   await prjGo('', '.canvas.pm .node');
-  const slipSteps = await page.evaluate(async ([u, ids]) => { const { store } = await import(u); return [...new Set(ids.map(id => store.get('workItem', id).step))]; }, [STORE, slipIds]);
+  const slipSteps = await page.evaluate(async ([u, ids, prj]) => { const { store } = await import(u); return [...new Set(ids.map(id => store.get('workItem', id)).filter(w => window.PMOEngine.stepState(store.state.docs, prj, w.pid, w.step, store.state.today).sched !== 'late').map(w => w.step))]; }, [STORE, slipIds, PRJ]);
+  check('R6 map: no step shows both "Causing slip" and an on-track badge', await page.evaluate(() => [...document.querySelectorAll('.canvas.pm .node[data-step]')].every(n => !(n.querySelector('[data-causes-slip]') && n.querySelector('[data-sched="ok"]')))));
   check('R5 causing slip: badge on the Map step of each flagged item', (await Promise.all(slipSteps.map(async s => await page.locator(`.canvas.pm .node[data-step="${s}"] [data-causes-slip]`).count() === 1))).every(Boolean), slipSteps);
   await shot('22-map-causing-slip-1440');
   /* zero-work project: grey "Not planned" everywhere, never Green; created with PM + release manager */
@@ -918,7 +936,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const spPick = await page.locator('[data-sburn-pick] option').nth(1).getAttribute('value');
   await page.selectOption('[data-sburn-pick]', spPick); await settle();
   check('R5 sprint burndown: picking a sprint redraws it', await page.inputValue('[data-sburn-pick]') === spPick);
-  check('R5 project burndown in the side panel', (await page.getAttribute('[data-burn="project"] [data-line="ideal"]', 'd')).startsWith('M'));
+  check('R6 rail: exactly one burndown on Sprints (the sprint burndown, in the rail)', await page.locator('[data-burn], [data-burn-empty]').count() === 1 && await page.locator('.side [data-sprint-burn]').count() === 1);
   await shot('24-sprints-burndown-1440');
   await prjGo('', '.canvas.pm');
   await page.click('[data-report]'); await page.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 });
@@ -934,12 +952,293 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot('25-report-recipients-1440', false);
   check('R5: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
 
+  /* ================= R6 ================= */
+  console.log('R6 health (projectHealth) everywhere');
+  const tom6 = await asPersona('Project Manager');
+  const healthAll = await page.evaluate(async u => { const { store } = await import(u); const o = {}; store.list('project').forEach(p => { o[p.id] = { live: p.status === 'live', n: store.list('workItem', w => w.projectId === p.id).length, h: window.PMOEngine.projectHealth(store.state.docs, p.id, store.state.today) }; }); return o; }, STORE);
+  const wantK = x => x.live ? 'live' : !x.n ? 'none' : ({ red: 'red', amber: 'amber', green: 'green' })[x.h.rag] || 'none';
+  await prjGo('', '.canvas.pm');
+  const hdrRag = { k: await page.getAttribute('.pmo-hrag .rag', 'data-rag-k'), why: await page.innerText('.pmo-hrag [data-rag-reason]').catch(() => '') };
+  check('R6 header RAG = E().projectHealth with its reasons', hdrRag.k === wantK(healthAll[PRJ]) && (healthAll[PRJ].h.reasons || []).every(r => hdrRag.why.includes(r.slice(0, 20))), { hdrRag, h: healthAll[PRJ] });
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  const homeRag = await page.evaluate(() => [...document.querySelectorAll('.home-grid a.tile[href*="/project/"]')].map(a => [decodeURIComponent(a.getAttribute('href').split('/project/')[1]), a.querySelector('.rag').dataset.ragK]));
+  check('R6 home tiles RAG = projectHealth', homeRag.length > 0 && homeRag.every(([id, k]) => k === wantK(healthAll[id])), homeRag);
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
+  const pfRag = await page.evaluate(() => [...document.querySelectorAll('[data-prow]')].map(r => [r.dataset.prow, r.querySelector('.rag').dataset.ragK, (r.querySelector('[data-rag-reason]') || {}).textContent || '']));
+  check('R6 portfolio rows RAG = projectHealth, reasons shown', pfRag.length > 0 && pfRag.every(([id, k, why]) => k === wantK(healthAll[id]) && (k === 'none' || k === 'live' || why.length > 3)), pfRag);
+  check('R6 RAG rule states the new meaning (Red only when the finish is at risk)', (await page.innerText('.pmo-rule')).includes('forecast finish is after the target'));
+
+  console.log('R6 view-aware right rail');
+  const railOf = async () => page.evaluate(() => ({ blockers: !!document.querySelector('.side [data-blockers]'), upnext: !!document.querySelector('.side [data-upnext]'), legend: !!document.querySelector('.side [data-legend]'),
+    conf: !!document.querySelector('.side [data-rail-conflicts]'), crit: !!document.querySelector('.side [data-rail-crit]'), sstats: !!document.querySelector('.side [data-sprint-stats]'),
+    burn: document.querySelectorAll('[data-burn], [data-burn-empty]').length, fsum: !!document.querySelector('.side [data-filter-summary]'), act: document.querySelectorAll('.side [data-activity]').length, comments: document.querySelectorAll('.side .card > h3').length }));
+  await prjGo('', '.canvas.pm'); const rMap = await railOf();
+  check('R6 rail Map: blockers, up next, legend; no timeline/sprint cards', rMap.blockers && rMap.upnext && rMap.legend && !rMap.conf && !rMap.crit && !rMap.sstats && rMap.burn === 0 && rMap.act === 1, rMap);
+  await prjGo('?mode=timeline', '.tl .tbar'); const rTl = await railOf();
+  check('R6 rail Timeline: conflicts + critical path only', rTl.conf && rTl.crit && !rTl.blockers && !rTl.upnext && !rTl.sstats && rTl.burn === 0 && rTl.act === 1, rTl);
+  await prjGo('?mode=board', '[data-board]'); const rB = await railOf();
+  check('R6 rail Board: sprint stats, no burndown', rB.sstats && rB.burn === 0 && !rB.blockers && !rB.crit && rB.act === 1, rB);
+  await prjGo('?mode=sprints', '[data-sprints]'); const rS = await railOf();
+  check('R6 rail Sprints: sprint stats + exactly one burndown', rS.sstats && rS.burn === 1 && rS.act === 1, rS);
+  await prjGo('?mode=work&status=open', 'table.pmo-work'); const rW = await railOf();
+  check('R6 rail Work: filter summary', rW.fsum && !rW.blockers && !rW.crit && rW.act === 1 && /showing/i.test(await page.innerText('[data-filter-summary]')) && (await page.innerText('[data-filter-summary]')).includes('not done'), Object.assign(rW, { t: await page.innerText('[data-filter-summary]') }));
+
+  console.log('R6 timeline: resize, keyboard, critical path chain');
+  await prjGo('?mode=timeline', '.tl .tbar');
+  const cpE = await E5('criticalPath', PRJ, todayStr);
+  const cpRail = await page.locator('[data-rail-crit] [data-crit-item]').evaluateAll(xs => xs.map(x => x.dataset.critItem));
+  check('R6 critical path: rail lists the full engine chain in order', cpE.length > 0 && JSON.stringify(cpRail) === JSON.stringify(cpE), { cpE, cpRail });
+  const cpMine = await page.evaluate(async ([u, ids, prj]) => { const { store } = await import(u); return ids.filter(id => (store.get('workItem', id) || {}).projectId === prj); }, [STORE, cpE, PRJ]);
+  check('R6 critical path: external links in the chain are labelled in the rail', await page.locator('[data-rail-crit] [data-crit-ext]').count() === cpE.length - cpMine.length);
+  check('R6 critical path: every chain bar in this project highlighted', await page.locator('.tl .tbar.pmo-crit').count() === cpMine.length, { cpE, bars: await page.locator('.tl .tbar.pmo-crit').evaluateAll(xs => xs.map(x => x.dataset.bar)), toggle: await page.isChecked('[data-crit-toggle]') });
+  const rzId = await page.evaluate(() => { const b = [...document.querySelectorAll('.tl button.tbar[data-bar]')].find(x => x.getBoundingClientRect().width > 40); return b && b.dataset.bar; });
+  check('R6 resize: owner/PM bars carry a right-edge handle', !!rzId && await page.locator('.tl span.tbar [data-rsz]').count() === 0 && await page.locator('.tl button.tbar [data-rsz]').count() === await page.locator('.tl button.tbar').count());
+  if (rzId) {
+    const rz0 = await getDoc('workItem', rzId);
+    const pxDay = await page.evaluate(id => { const box = document.querySelector('#pmoTl'); return document.querySelector(`[data-bar="${id}"]`).parentElement.clientWidth / Number(box.dataset.span); }, rzId);
+    await page.locator(`.tl [data-bar="${rzId}"]`).scrollIntoViewIfNeeded();
+    const h = await page.locator(`.tl [data-bar="${rzId}"] [data-rsz]`).boundingBox();
+    await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2); await page.mouse.down();
+    for (let k = 1; k <= 6; k++) await page.mouse.move(h.x + h.width / 2 + pxDay * 2 * k / 6, h.y + h.height / 2);
+    check('R6 resize: live tip shows the new due date', /^Due [A-Z][a-z]{2} \d+ \(\+2d\)/.test(await page.locator('.pmo-dragtip').innerText().catch(() => '')));
+    await page.mouse.up(); await settle();
+    const rz1 = await getDoc('workItem', rzId);
+    check('R6 resize: due +2d, start unchanged', rz1.start === rz0.start && shift(rz0.due, rz1.due) === 2, { rz0: [rz0.start, rz0.due], rz1: [rz1.start, rz1.due] });
+    check('R6 resize: no modal opened', await page.locator('.overlay').count() === 0);
+    check('R6 history: resize summarised', /Resized “.+” on the timeline: due .+ → .+ \(\+2d\)/.test(await feedText()));
+    /* keyboard: ←/→ moves one business day, Shift resizes */
+    await page.focus(`.tl button.tbar[data-bar="${rzId}"]`);
+    await page.keyboard.press('ArrowRight'); await settle();
+    const k1 = await getDoc('workItem', rzId);
+    const biz = await page.evaluate(([a, n]) => window.PMOEngine.addBusinessDays(a, n), [rz1.start, 1]);
+    const bizDue = await page.evaluate(([a, n]) => window.PMOEngine.addBusinessDays(a, n), [rz1.due, 1]);
+    check('R6 keyboard →: moves one business day (start and due)', k1.start === biz && k1.due === bizDue, { rz1, k1, biz, bizDue });
+    check('R6 keyboard: focus stays on the bar after re-render', await page.evaluate(id => document.activeElement && document.activeElement.dataset.bar === id, rzId));
+    await page.keyboard.press('Shift+ArrowLeft'); await settle();
+    const k2 = await getDoc('workItem', rzId);
+    check('R6 keyboard Shift+←: due one business day earlier, start kept', k2.start === k1.start && k2.due === await page.evaluate(([a]) => window.PMOEngine.addBusinessDays(a, -1), [k1.due]), { k1, k2 });
+    await page.keyboard.press('ArrowLeft'); await settle();
+    const k3 = await getDoc('workItem', rzId);
+    check('R6 keyboard ←: moves back one business day', k3.start === await page.evaluate(([a]) => window.PMOEngine.addBusinessDays(a, -1), [k2.start]), { k2, k3 });
+  }
+  /* auto-schedule preview = the fixed engine */
+  await page.click('[data-autosched]'); await modalOpen();
+  const asE = await E5('autoSchedule', PRJ);
+  const asMoves = Object.entries(asE && asE.moves ? asE.moves : asE || {}).filter(([id, v]) => { const w = healthAll && true; return v && v.start; });
+  const asShown = await page.locator('.overlay [data-as-row]').count();
+  check('R6 auto-schedule preview rows come from E().autoSchedule (only changed items)', asShown <= asMoves.length && (asShown > 0 || await page.locator('.overlay [data-as-none]').count() === 1), { asShown, n: asMoves.length });
+  check('R6 auto-schedule copy: durations kept exactly, conflict-free items stay', /Durations are kept exactly/.test(await page.innerText('.overlay .modal')) || await page.locator('.overlay [data-as-none]').count() === 1);
+  await act('cancel');
+  await shot('30-r6-timeline-1440');
+
+  console.log('R6 capacity leveling');
+  await page.click('[data-level]'); await modalOpen();
+  const lvE = await E5('levelResources', PRJ, todayStr);
+  check('R6 leveling preview: before/after overload counts from E().levelResources', Number(await page.innerText('[data-lv-before]')) === lvE.overloadsBefore.length && Number(await page.innerText('[data-lv-after]')) === lvE.overloadsAfter.length, { b: lvE.overloadsBefore.length, a: lvE.overloadsAfter.length });
+  const lvShift = Object.keys(lvE.shifts || {});
+  check('R6 leveling preview: one before → after row per proposed shift', await page.locator('.overlay [data-lv-row]').count() === lvShift.length, lvShift);
+  await shot('31-r6-level-1440', false);
+  if (lvShift.length) {
+    await act('apply'); await page.waitForSelector('.toast:has-text("Applied")', { timeout: 20000 }).catch(() => {}); await settle();
+    const applied = await page.evaluate(async ([u, sh]) => { const { store } = await import(u); return Object.entries(sh).every(([id, v]) => { const w = store.get('workItem', id); return w.start === v.start && w.due === v.due; }); }, [STORE, lvE.shifts]);
+    check('R6 leveling apply: work items take the proposed dates', applied);
+    check('R6 leveling apply: overloads reduced', (await E5('levelResources', PRJ, todayStr)).overloadsBefore.length <= lvE.overloadsAfter.length);
+    check('R6 history: leveling summarised', /Leveled “.+”/.test(await feedText()));
+  } else await act('cancel');
+
+  console.log('R6 what-if scenarios');
+  await prjGo('?mode=timeline', '.tl .tbar');
+  const live0 = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const o = {}; store.list('workItem', w => w.projectId === prj).forEach(w => { o[w.id] = [w.start, w.due]; }); return o; }, [STORE, PRJ]);
+  await page.click('[data-scen-new]'); await modalOpen();
+  await page.fill('.overlay input[name="name"]', ''); await page.click('.overlay [data-act="create"]'); await page.waitForSelector('.overlay .banner');
+  check('R6 scenario: name required, dialog kept', (await page.innerText('.overlay .banner')).includes('name'));
+  await page.fill('.overlay input[name="name"]', 'E2E push the bank work'); await act('create'); await settle();
+  await page.waitForSelector('[data-scenario]');
+  check('R6 scenario: URL carries the scenario + banner says it is a scenario', /[?&]sc=/.test(page.url()) && /WHAT-IF SCENARIO/.test(await page.innerText('[data-scenario]')) && /Nothing in the live plan changes until you apply/.test(await page.innerText('[data-scenario]')));
+  const sc6 = (await getDoc('project', PRJ)).scenarios.find(x => x.name === 'E2E push the bank work');
+  check('R6 scenario: project.scenarios clones the plan dates', sc6 && Object.keys(sc6.dates).length === Object.keys(live0).length && Object.entries(sc6.dates).every(([id, d]) => live0[id] && d.due === live0[id][1]), sc6);
+  check('R6 scenario: every open bar is draggable for the PM, and the timeline is outlined', await page.locator('.tl.pmo-tl-scen').count() === 1 && await page.locator('.tl button.tbar').count() > 0);
+  const scBar = await page.evaluate(() => { const b = [...document.querySelectorAll('.tl button.tbar[data-bar]')].find(x => x.getBoundingClientRect().width > 30); return b && b.dataset.bar; });
+  const pxD = await page.evaluate(id => document.querySelector(`[data-bar="${id}"]`).parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span), scBar);
+  await page.locator(`.tl [data-bar="${scBar}"]`).scrollIntoViewIfNeeded();
+  const bb6 = await page.locator(`.tl [data-bar="${scBar}"]`).boundingBox();
+  await page.mouse.move(bb6.x + 8, bb6.y + bb6.height / 2); await page.mouse.down();
+  for (let k = 1; k <= 6; k++) await page.mouse.move(bb6.x + 8 + pxD * 10 * k / 6, bb6.y + bb6.height / 2);
+  await page.mouse.up(); await settle();
+  const scAfter = (await getDoc('project', PRJ)).scenarios.find(x => x.id === sc6.id);
+  const liveAfter = await getDoc('workItem', scBar);
+  check('R6 scenario drag: scenario dates move +10d', shift(live0[scBar][0], scAfter.dates[scBar].start) === 10 && shift(live0[scBar][1], scAfter.dates[scBar].due) === 10, { live: live0[scBar], sc: scAfter.dates[scBar] });
+  check('R6 scenario drag: the live plan is untouched', liveAfter.start === live0[scBar][0] && liveAfter.due === live0[scBar][1], liveAfter);
+  check('R6 scenario: moved bar marked', await page.locator(`.tl [data-bar="${scBar}"].pmo-scen-moved`).count() === 1);
+  const cmpE = await page.evaluate(async ([u, prj, id]) => { const { store } = await import(u); const j = store.get('project', prj); return window.PMOEngine.compareScenario(store.state.docs, prj, j.scenarios.find(x => x.id === id), store.state.today); }, [STORE, PRJ, sc6.id]);
+  const fmtD = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  check('R6 scenario compare: finish and cost from E().compareScenario', (await page.innerText('[data-cmp-finish]')) === fmtD(cmpE.scenarioFinish) && (await page.innerText('[data-cmp-cost]')).replace(/\D/g, '') === String(Math.round(cmpE.scenarioCost)) && (await page.innerText('[data-scen-compare]')).includes('plan ' + fmtD(cmpE.planFinish)), cmpE);
+  await shot('32-r6-scenario-1440');
+  await sleep(500); await page.reload(); await page.waitForSelector('[data-scenario]');
+  check('R6 scenario: reload keeps the scenario open', await page.locator(`.tl [data-bar="${scBar}"].pmo-scen-moved`).count() === 1);
+  await page.click('[data-scen-apply]'); await modalOpen(); await act('apply'); await settle();
+  const liveApplied = await getDoc('workItem', scBar);
+  check('R6 scenario apply: live item takes the scenario dates', liveApplied.start === scAfter.dates[scBar].start && liveApplied.due === scAfter.dates[scBar].due, liveApplied);
+  check('R6 scenario apply: scenario removed, back on the plan', !((await getDoc('project', PRJ)).scenarios || []).some(x => x.id === sc6.id) && await page.locator('[data-scenario]').count() === 0 && !/[?&]sc=/.test(page.url()));
+  check('R6 history: scenario applied', /Applied scenario “E2E push the bank work”/.test(await feedText()));
+  /* second scenario: discard leaves the plan alone */
+  await page.click('[data-scen-new]'); await modalOpen(); await page.fill('.overlay input[name="name"]', 'E2E throwaway'); await act('create'); await settle(); await page.waitForSelector('[data-scenario]');
+  const sc7 = (await getDoc('project', PRJ)).scenarios.find(x => x.name === 'E2E throwaway');
+  await page.focus(`.tl button.tbar[data-bar="${scBar}"]`); await page.keyboard.press('ArrowRight'); await settle();
+  check('R6 scenario keyboard: → moves the scenario date only', (await getDoc('project', PRJ)).scenarios.find(x => x.id === sc7.id).dates[scBar].start !== liveApplied.start && (await getDoc('workItem', scBar)).start === liveApplied.start);
+  await page.click('[data-scen-discard]'); await modalOpen(); await act('discard'); await settle();
+  check('R6 scenario discard: removed, live plan unchanged', !((await getDoc('project', PRJ)).scenarios || []).some(x => x.id === sc7.id) && (await getDoc('workItem', scBar)).start === liveApplied.start);
+  await asPersona('Maya'); await prjGo('?mode=timeline', '.tl .tbar');
+  check('R6 scenario: non-PM cannot create one (explains who can)', await page.locator('[data-scen-new]').isDisabled() && /project manager/.test(await page.getAttribute('[data-scen-new]', 'title')));
+  await asPersona('Project Manager');
+
+  console.log('R6 custom statuses + fields');
+  await prjGo('?mode=board', '[data-board]');
+  await page.click('[data-customize]'); await modalOpen();
+  check('R6 customize: one row per status, in order', await page.locator('.overlay [data-st-row]').count() === stNames.length);
+  /* validation: removing every "finished" status keeps the dialog and input */
+  const doneRow = page.locator('.overlay [data-st-row]').filter({ has: page.locator('select[data-k="maps"] option[value="done"]:checked') });
+  await doneRow.locator('[data-cz-del]').click();
+  await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
+  check('R6 customize: needs a finished status (dialog kept)', /finished/.test(await page.innerText('.overlay .banner')) && await page.locator('.overlay [data-st-row]').count() === stNames.length - 1);
+  await act('cancel');
+  await page.click('[data-customize]'); await modalOpen();
+  await page.click('.overlay [data-cz-add-st]');
+  const newRow = page.locator('.overlay [data-st-row]').last();
+  await newRow.locator('[data-k="name"]').fill('Blocked'); await newRow.locator('[data-k="maps"]').selectOption('prog');
+  const blkIdx = () => page.locator('.overlay [data-st-row] [data-k="name"]').evaluateAll(xs => xs.findIndex(x => x.value === 'Blocked'));
+  for (let k = 0; k < 3; k++) await page.locator('.overlay [data-st-row]').nth(await blkIdx()).locator('[data-cz-up]').click(); /* up to second place */
+  await page.click('.overlay [data-cz-add-fd]');
+  const fRow = page.locator('.overlay [data-fd-row]').last();
+  await fRow.locator('[data-k="label"]').fill('Vendor tier'); await fRow.locator('[data-k="type"]').selectOption('select');
+  check('R6 customize: options input appears for a pick list', await fRow.locator('[data-k="options"]').isVisible());
+  await fRow.locator('[data-k="options"]').fill('Gold, Silver');
+  await shot('33-r6-customize-1440', false);
+  await act('save'); await settle();
+  const pj6 = await getDoc('project', PRJ);
+  check('R6 statuses saved in order with mappings', pj6.statuses.map(x => x.name).join('|') === 'Not started|Blocked|In progress|In review|Done' && pj6.statuses.find(x => x.name === 'Blocked').maps === 'prog', pj6.statuses);
+  check('R6 field saved: {key, label, type, options}', pj6.fields.some(f => f.key === 'vendorTier' && f.label === 'Vendor tier' && f.type === 'select' && f.options.join() === 'Gold,Silver'), pj6.fields);
+  check('R6 board columns follow the new statuses', (await page.locator('.pmo-col-h b').allInnerTexts()).join('|') === 'Not started|Blocked|In progress|In review|Done');
+  const blkCol = pj6.statuses.find(x => x.name === 'Blocked').id;
+  const mv6 = await page.locator('.pmo-col[data-col="idle"] .pmo-card.pmo-cdrag').first().getAttribute('data-card');
+  await dnd(`.pmo-card[data-card="${mv6}"]`, `.pmo-col[data-col="${blkCol}"] .pmo-col-b`);
+  const mvDoc = await getDoc('workItem', mv6);
+  check('R6 drag into a custom status: statusId + engine mapping saved', mvDoc.statusId === blkCol && mvDoc.status === 'prog' && !mvDoc.doneAt, mvDoc);
+  check('R6 card shows in the custom column', await page.locator(`.pmo-col[data-col="${blkCol}"] [data-card="${mv6}"]`).count() === 1);
+  check('R6 history: custom status move named', /Not started → Blocked/.test(await feedText()));
+  /* custom field values on a work item */
+  await prjGo('?mode=work', 'table.pmo-work');
+  await page.click(`[data-edit-work="${mv6}"]`); await modalOpen();
+  check('R6 work modal: a control per custom field, status select lists custom statuses', await page.locator('.overlay [data-cf-inputs] [name="cf_riskArea"]').count() === 1 && await page.locator('.overlay [name="cf_vendorTier"]').count() === 1 && await page.locator('.overlay select[name="status"] option').count() === 5);
+  await page.selectOption('.overlay [name="cf_vendorTier"]', 'Gold'); await act('save'); await settle();
+  check('R6 custom field value saved in workItem.custom', (await getDoc('workItem', mv6)).custom.vendorTier === 'Gold');
+  check('R6 history: custom field change named', /Vendor tier — → Gold/.test(await feedText()));
+  await page.selectOption('[data-fbar] [data-f="cf_vendorTier"]', 'Gold'); await settle();
+  check('R6 filter by custom field: only matching items, in the URL', new URL(page.url()).searchParams.get('cf_vendorTier') === 'Gold' && await page.locator('tr[data-wid]').count() === 1 && await page.locator(`tr[data-wid="${mv6}"]`).count() === 1);
+  check('R6 filter summary names the custom field', (await page.innerText('[data-filter-summary]')).includes('Vendor tier Gold'));
+  await page.click('[data-fclear]'); await settle();
+  await prjGo('?mode=board', '[data-board]');
+  check('R6 board card tags show custom field values', await page.locator(`[data-card="${mv6}"] [data-ftag="vendorTier"]`).count() === 1 && await page.locator('[data-card] [data-ftag="riskArea"]').count() > 0);
+  await page.uncheck('[data-cf-tags]'); await settle();
+  check('R6 card tags are optional (toggle off hides them)', await page.locator('.pmo-board [data-ftag]').count() === 0);
+  await page.check('[data-cf-tags]'); await settle();
+  await sleep(500); await page.reload(); await page.waitForSelector('[data-board]');
+  check('R6 reload: custom status + field persist', await page.locator(`.pmo-col[data-col="${blkCol}"] [data-card="${mv6}"] [data-ftag="vendorTier"]`).count() === 1);
+
+  console.log('R6 time logging + earned value');
+  await prjGo('?mode=work', 'table.pmo-work');
+  const t0 = (await getDoc('workItem', mv6)).time || [];
+  await page.click(`[data-log-time="${mv6}"]`); await modalOpen();
+  await page.fill('.overlay input[name="hours"]', '0'); await page.fill('.overlay input[name="note"]', 'Vendor call'); await page.click('.overlay [data-act="log"]'); await page.waitForSelector('.overlay .banner');
+  check('R6 log time: hours validated, note kept', /between 0.25 and 24/.test(await page.innerText('.overlay .banner')) && await page.inputValue('.overlay input[name="note"]') === 'Vendor call');
+  await page.fill('.overlay input[name="hours"]', '3.5'); await act('log'); await settle();
+  const t1 = (await getDoc('workItem', mv6)).time;
+  check('R6 log time: entry {by, date, hours, note} appended', t1.length === t0.length + 1 && t1[t1.length - 1].by === tom6 && t1[t1.length - 1].hours === 3.5 && t1[t1.length - 1].date === todayStr && t1[t1.length - 1].note === 'Vendor call', t1);
+  check('R6 work row shows hours logged', /3\.5h logged|\d+(\.\d)?h logged/.test(await page.innerText(`tr[data-wid="${mv6}"] [data-hours]`)));
+  check('R6 history: time logged', /Logged 3\.5h on “.+”/.test(await feedText()));
+  const ev6 = await E5('earnedValue', PRJ, todayStr);
+  check('R6 header earned value = E().earnedValue (SPI, CPI, EAC)', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-eac] b')).replace(/\D/g, '') === String(Math.round(ev6.EAC)), ev6);
+
+  console.log('R6 exports');
+  const [dl1] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-work]')]);
+  const csv1 = fs.readFileSync(await dl1.path(), 'utf8').replace(/^﻿/, '');
+  const lines1 = csv1.trim().split(/\r\n/);
+  const nWork = await page.locator('tr[data-wid]').count();
+  check('R6 work CSV: header + one row per shown item, custom fields as columns', /\.csv$/.test(dl1.suggestedFilename()) && lines1[0].startsWith('ID,Title,Process,Step,Owner,Status') && lines1[0].includes('Risk area') && lines1[0].includes('Vendor tier') && lines1.length === nWork + 1, { name: dl1.suggestedFilename(), head: lines1[0], n: lines1.length, nWork });
+  check('R6 work CSV: custom status name and hours exported', lines1.some(l => l.startsWith(mv6 + ',') && l.includes(',Blocked,') && l.includes('Gold')));
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('[data-financials]');
+  const evRow = await page.evaluate(id => { const r = document.querySelector(`[data-fin="${id}"]`); return r && [r.querySelector('[data-ev-spi]').textContent, r.querySelector('[data-ev-cpi]').textContent]; }, PRJ);
+  check('R6 portfolio financials: SPI/CPI from E().earnedValue', evRow && evRow[0] === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && evRow[1] === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)), { evRow, ev6 });
+  const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-pf]')]);
+  const lines2 = fs.readFileSync(await dl2.path(), 'utf8').replace(/^﻿/, '').trim().split(/\r\n/);
+  const nPrj = await page.evaluate(async u => (await import(u)).store.list('project').length, STORE);
+  check('R6 portfolio CSV: one row per project with RAG, cost and EV columns', lines2.length === nPrj + 1 && /RAG,RAG reasons/.test(lines2[0]) && /SPI,CPI,EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
+  await page.click('[data-gen-rep]'); await page.waitForSelector('[data-pf-rep] .pmo-rep-h', { timeout: 30000 });
+  await page.evaluate(() => { window.__pfPrinted = 0; window.print = () => { window.__pfPrinted++; window.__pfCls = document.body.classList.contains('pmo-print-pf'); }; });
+  await page.click('[data-print-pf-rep]');
+  check('R6 portfolio report: Print / PDF prints only the report', await page.evaluate(() => window.__pfPrinted === 1 && window.__pfCls === true));
+  await page.emulateMedia({ media: 'print' }); await page.evaluate(() => document.body.classList.add('pmo-print-pf'));
+  check('R6 print stylesheet: only the report is visible', await page.evaluate(() => getComputedStyle(document.querySelector('[data-financials]')).visibility === 'hidden' && getComputedStyle(document.querySelector('[data-pf-rep] .pmo-rep-h')).visibility === 'visible'));
+  await page.evaluate(() => document.body.classList.remove('pmo-print-pf')); await page.emulateMedia({ media: 'screen' });
+
+  console.log('R6 dashboard');
+  await page.evaluate(() => { try { localStorage.removeItem('pmoflow.dashboard'); } catch (e) { /* */ } });
+  await page.goto(ROOT + '/dashboard'); await page.waitForSelector('[data-dash-grid]');
+  check('R6 dashboard: nav entry active', (await page.innerText('#nav a.on')).trim() === 'Dashboard');
+  const wids = () => page.locator('[data-widget]').evaluateAll(xs => xs.map(x => x.dataset.widget));
+  const w0 = await wids();
+  check('R6 dashboard: default widgets (RAG, EV, go-lives, blockers, risks, workload, burndown)', ['rag', 'burndown', 'ev', 'workload', 'risks', 'blockers', 'golives'].every(k => w0.includes(k)) && w0.length === 7, w0);
+  const dashRag = await page.evaluate(() => [...document.querySelectorAll('[data-widget="rag"] [data-dash-prj]')].map(a => [a.dataset.dashPrj, a.querySelector('.rag').dataset.ragK]));
+  check('R6 dashboard RAG widget = projectHealth', dashRag.length === nPrj && dashRag.every(([id, k]) => k === wantK(healthAll[id]) || id === PRJ), dashRag);
+  check('R6 dashboard: program roll-up cards group by project.program', await page.locator('[data-rollup] [data-program]').count() === await page.evaluate(async u => new Set((await import(u)).store.list('project').map(p => String(p.program || '').trim() || 'No program')).size, STORE));
+  check('R6 dashboard: blockers, go-lives, risks and EV widgets have rows', await page.locator('[data-dash-blocker]').count() > 0 && await page.locator('[data-dash-golive]').count() > 0 && await page.locator('[data-dash-risk]').count() > 0 && await page.locator('[data-dash-ev]').count() === nPrj);
+  check('R6 dashboard: no overflow @1440', await noOverflow());
+  await shot('34-r6-dashboard-1440');
+  await page.click('[data-w-remove="workload"]'); await settle();
+  check('R6 dashboard: remove a widget', !(await wids()).includes('workload') && await page.locator('[data-dash-add] option[value="workload"]').count() === 1);
+  await page.click('[data-w-down="rag"]'); await settle();
+  const w1 = await wids();
+  check('R6 dashboard: reorder (RAG moved down one)', w1.indexOf('rag') === w0.indexOf('rag') + 1, w1);
+  await page.selectOption('[data-dash-add]', 'workload'); await settle();
+  check('R6 dashboard: add a widget (goes to the end)', (await wids()).slice(-1)[0] === 'workload');
+  const prog1 = await page.getAttribute('[data-rollup] [data-program]', 'data-program');
+  await page.click(`[data-rollup] [data-program="${prog1}"]`); await settle();
+  check('R6 dashboard: program roll-up filters every widget', await page.inputValue('[data-dash-program]') === prog1 && await page.locator('[data-widget="rag"] .pmo-dash-grp').count() === 1);
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('pmoflow.dashboard')));
+  check('R6 dashboard: layout saved in localStorage', saved && saved.widgets.join() === (await wids()).join() && saved.program === prog1, saved);
+  await page.reload(); await page.waitForSelector('[data-dash-grid]');
+  check('R6 dashboard: reload keeps layout + program', (await wids()).join() === saved.widgets.join() && await page.inputValue('[data-dash-program]') === prog1);
+  await page.evaluate(() => localStorage.setItem('pmoflow.dashboard', '{not json'));
+  await page.reload(); await page.waitForSelector('[data-dash-grid]');
+  check('R6 dashboard: corrupt layout falls back to the default', (await wids()).length === 7);
+  await page.click('[data-dash-reset]'); await settle();
+
+  console.log('R6 map: built but data not live');
+  const builtStep = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', prj);
+    for (const pid of j.processes) { const p = store.get('process', pid); for (const s of E.flatSteps(p.tobe)) { const items = store.list('workItem', w => w.projectId === prj && w.pid === pid && w.step === s.id); if (items.length && (s.data || []).some(d => E.effectiveAvail(store.state.docs, d) !== 'live')) return { pid, sid: s.id, items: items.map(w => w.id) }; } } return null; }, [STORE, PRJ]);
+  if (builtStep) {
+    await page.evaluate(async ([u, ids, t]) => { const { store } = await import(u); for (const id of ids) { const w = store.get('workItem', id); if (w.status !== 'done') await store.save('workItem', id, Object.assign({}, w, { status: 'done', statusId: 'done', doneAt: t, updatedAt: new Date().toISOString() }), 'E2E: finished the build'); } }, [STORE, builtStep.items, todayStr]);
+    await prjGo('', '.canvas.pm .node');
+    if (!await page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`).count()) { await page.click('[data-expand="1"]').catch(() => {}); await settle(); }
+    const node = page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`);
+    check('R6 map: done work on not-live data is "Built · awaiting live data" (amber), never green Done', await node.locator('[data-built-awaiting]').count() === 1 && await node.evaluate(n => n.classList.contains('s-built') && !n.classList.contains('s-done')));
+    check('R6 map legend explains the amber built state', (await page.innerText('[data-legend]')).includes('Built · awaiting live data'));
+  } else check('R6 map: a step with work on not-live data exists', false);
+
+  console.log('R6 default new-project target');
+  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  await page.locator('.pmo-hero [data-new-project]').click(); await modalOpen();
+  const dt = await page.evaluate(async u => window.PMOEngine.defaultTarget((await import(u)).store.state.today), STORE);
+  check('R6 new project: target defaults to E().defaultTarget(today)', await page.inputValue('.overlay input[name="target"]') === dt && !isWkend(dt), dt);
+  await act('cancel');
+  check('R6: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
+
   /* ---------------- phone width ---------------- */
   console.log('phone 390');
   await page.setViewportSize({ width: 390, height: 844 });
   const phone = [['/', '10-home-390', '.pmo-attn'], [prjPath + '?mode=map', '11-project-map-390', '.canvas.pm .node'], [prjPath + '?mode=timeline', '12-project-timeline-390', '.tl .tbar'],
     [prjPath + '?mode=work', '13-project-work-390', 'table.pmo-work'], ['/portfolio', '14-portfolio-390', '.pmo-ptable'],
-    [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]'], ['/portfolio', '26-portfolio-r5-390', '[data-financials]']];
+    [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]'], ['/portfolio', '26-portfolio-r5-390', '[data-financials]'], ['/dashboard', '35-dashboard-390', '[data-dash-grid]']];
   for (const [p, name, sel] of phone) {
     await page.goto(ROOT + p.replace(/^\/concepts\/pmoflow/, '')); await page.waitForSelector(sel); await sleep(300);
     const label = p.replace(/^.*\/project\/[^?]+/, '/project');
@@ -958,6 +1257,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('suggest modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
   await shot('17-suggest-390', false); await act('cancel');
   /* timeline scrolls inside its own box at 390 */
+  await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=timeline'); await page.waitForSelector('.tl .tbar');
+  await page.click('[data-scen-new]'); await modalOpen(); await sleep(150);
+  check('R6 scenario modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
+  await act('cancel');
+  await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=board'); await page.waitForSelector('[data-board]');
+  await page.click('[data-customize]'); await modalOpen(); await sleep(150);
+  check('R6 statuses & fields modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
+  await shot('36-customize-390', false); await act('cancel');
   await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=timeline'); await page.waitForSelector('.tl .tbar');
   check('timeline scrolls in its container @390', await page.evaluate(() => { const t = document.querySelector('.tl'); return t.scrollWidth > t.clientWidth; }));
 

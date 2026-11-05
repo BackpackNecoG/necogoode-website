@@ -1,4 +1,4 @@
-/* E2E for stream D (process / step / data pages), rounds 1 to 5.
+/* E2E for stream D (process / step / data pages), rounds 1 to 6.
    Usage: node tests/pmoflow/e2e-design.js [port]   (dev server must be running on that port) */
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -37,10 +37,29 @@ const isGw = n => n && (n.type === 'decision' || n.type === 'parallel');
 const flat = ns => (ns || []).flatMap(n => isGw(n) ? (n.branches || []).flatMap(b => flat(b.nodes)) : (n.type === 'trigger' || n.type === 'end') ? [] : [n]);
 const allNodes = ns => (ns || []).flatMap(n => [n, ...(isGw(n) ? (n.branches || []).flatMap(b => allNodes(b.nodes)) : [])]);
 function expectedBpmn(nodes) {
-  const all = allNodes(nodes);
+  const all = allNodes(nodes), st = flat(nodes);
   /* a gateway emits a split plus a join, unless every branch loops back */
   const gws = t => all.filter(n => n.type === t).length + all.filter(n => n.type === t && !(n.branches || []).every(b => b.goto)).length;
-  return { userTask: flat(nodes).length, exclusiveGateway: gws('decision'), parallelGateway: gws('parallel'), startEvent: 1, endEvent: 1, lane: Math.max(1, new Set(flat(nodes).map(n => n.owner || '')).size) };
+  /* R6 node types: subprocess -> callActivity, wait -> timer catch event, message -> throw (send) / catch (receive) event */
+  return { userTask: st.filter(n => !['subprocess', 'wait', 'message'].includes(n.type)).length, callActivity: st.filter(n => n.type === 'subprocess').length,
+    intermediateCatchEvent: st.filter(n => n.type === 'wait' || (n.type === 'message' && n.direction === 'receive')).length, intermediateThrowEvent: st.filter(n => n.type === 'message' && n.direction !== 'receive').length,
+    exclusiveGateway: gws('decision'), parallelGateway: gws('parallel'), startEvent: 1, endEvent: 1, lane: Math.max(1, new Set(st.map(n => n.owner || '')).size) };
+}
+/* R6: a node-type/field model of a map, ids replaced by positions, for lossless round-trip comparison */
+function modelOf(nodes, dataName) {
+  const all = allNodes(nodes); const pos = {}; all.forEach((n, i) => pos[n.id] = i);
+  const arr = v => (v || []).slice();
+  const one = n => {
+    const o = { type: n.type || 'step', title: n.title || '' };
+    if (n.type === 'end') return o;
+    o.owner = n.owner || ''; o.touches = arr(n.touches); o.data = arr(n.data).map(dataName);
+    if (isGw(n)) return Object.assign({ type: n.type, title: n.title, branches: (n.branches || []).map(b => ({ label: b.label, goto: b.goto != null ? pos[b.goto] : null, nodes: b.nodes.map(one) })) });
+    if (n.type === 'trigger') return o;
+    Object.assign(o, { sla: n.sla || '', system: n.system || '', durationHrs: n.durationHrs || 0, subs: (n.subs || []).map(x => ({ title: x.title, data: arr(x.data).map(dataName) })) });
+    if (n.type === 'wait') o.wait = n.wait; if (n.type === 'message') { o.direction = n.direction || 'send'; o.party = n.party; } if (n.type === 'subprocess') o.calls = n.calls || n.callsName;
+    return o;
+  };
+  return nodes.map(one);
 }
 const docsOf = st => st.docs;
 
@@ -78,8 +97,12 @@ const docsOf = st => st.docs;
   const titles = () => page.$$eval('#canvas .node .ttl', els => els.map(e => e.textContent.trim()));
   const getProc = async id => (await state()).docs.process.find(d => d.id === id).data;
   const getData = async id => (await state()).docs.dataElement.find(d => d.id === id).data;
-  const exportBpmn = async name => {
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-bpmn]')]);
+  /* R6: Export opens a dialog (optional External parties pool), then downloads */
+  const exportBpmn = async (name, pool) => {
+    await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]');
+    const cb = await page.$('.overlay input[name=pool]');
+    if (cb && !(await cb.isDisabled())) { if (pool === false) await cb.uncheck(); else if (pool) await cb.check(); }
+    const [dl] = await Promise.all([page.waitForEvent('download'), act('download')]);
     const file = `${OUT}/${name}.bpmn`; await dl.saveAs(file); return fs.readFileSync(file, 'utf8');
   };
   const bpmnCheck = (xml, nodes, label) => {
@@ -91,8 +114,9 @@ const docsOf = st => st.docs;
     for (const [k, v] of Object.entries(exp)) ok((r.counts[k] || 0) === v, `${label}: ${k} count ${r.counts[k] || 0} === ${v}`);
     ok((r.counts.sequenceFlow || 0) >= exp.userTask + 1, `${label}: sequence flows connect the map (${r.counts.sequenceFlow})`);
     ok(!r.danglingRefs.length, `${label}: every sequenceFlow ref resolves${r.danglingRefs.length ? ' — dangling: ' + r.danglingRefs.join(',') : ''}`);
-    ok((r.counts.BPMNShape || 0) === Object.values(exp).reduce((a, v) => a + v, 0) && (r.counts.BPMNEdge || 0) === r.counts.sequenceFlow, `${label}: diagram has a shape per element and lane, and an edge per flow`);
-    const flowNodes = exp.userTask + exp.exclusiveGateway + exp.parallelGateway + 2;
+    const parts = r.counts.participant || 0, mflows = r.counts.messageFlow || 0;
+    ok((r.counts.BPMNShape || 0) === Object.values(exp).reduce((a, v) => a + v, 0) + parts && (r.counts.BPMNEdge || 0) === r.counts.sequenceFlow + mflows, `${label}: diagram has a shape per element, lane and pool, and an edge per flow`);
+    const flowNodes = Object.entries(exp).filter(([k]) => k !== 'lane').reduce((a, [, v]) => a + v, 0);
     ok((r.counts.flowNodeRef || 0) === flowNodes, `${label}: every flow node sits in exactly one lane (${r.counts.flowNodeRef} === ${flowNodes})`);
   };
   /* every icon-only control (no visible text) carries an aria-label */
@@ -151,7 +175,7 @@ const docsOf = st => st.docs;
       await shot('process-' + m); await overflow('process ' + m + ' @1440'); await iconCheck('process ' + m);
     }
     const tabOrder = await page.$$eval('.d-modes button', bs => bs.map(b => b.textContent.trim()));
-    ok(tabOrder.join(',') === 'As-is,To-be,Diff,Swimlanes,Edit', 'mode tabs in order: ' + tabOrder.join(','));
+    ok(tabOrder.join(',') === 'As-is,To-be,Diff,Swimlanes,Impact,Edit', 'mode tabs in order: ' + tabOrder.join(','));
 
     console.log('# R3: effective data state on map cards, diffSummary counts');
     await nav(`/process/${pid}?mode=tobe`);
@@ -760,6 +784,7 @@ const docsOf = st => st.docs;
     await page.waitForSelector('.overlay .d-err');
     ok(/Name the live source/.test(await page.textContent('.overlay .d-err')), 'confirm live requires a source');
     await page.fill('.overlay input[name=source]', 'Northwind ERP vendor API (read)');
+    ok((await page.textContent('.overlay [data-probe-target]')).trim() === 'Northwind ERP vendor API (read)', 'R6: editing the source updates the connection check’s probe target');
     await act('confirm');
     await page.waitForSelector('.overlay .d-err');
     ok(/Choose the evidence/.test(await page.textContent('.overlay .d-err')), 'R5: confirm live requires evidence: ' + await page.textContent('.overlay .d-err'));
@@ -789,6 +814,7 @@ const docsOf = st => st.docs;
     await nav(`/data/${msId}`);
     ok(await page.isVisible('.hdr [data-eff="live"]') && await page.isVisible(`[data-confirmed]:has-text("Confirmed live by ${meName}")`) && !(await page.$('[data-confirm-card]')), 'after reload: live, "Confirmed live by <owner>", no confirm card');
     ok(await page.isVisible('.hdr [data-evidence="attested"]:has-text("Attested (weaker)")'), 'R5: data page shows the evidence type (attested, weaker)');
+    ok(conf.source === 'Northwind ERP vendor API (read)' && await page.isVisible('.hdr .res .chip:has-text("Northwind ERP vendor API (read)")'), 'R6: the confirmed source becomes the element source shown in the header');
     await shot('data-attested');
     await nav(`/process/${impPid}?mode=tobe`);
     ok(await page.isVisible(`[data-hl="${msId}"] [data-evidence="attested"]`), 'R5: process panel shows the evidence type');
@@ -981,8 +1007,14 @@ const docsOf = st => st.docs;
     await page.screenshot({ path: `${OUT}/import-version-modal.png` });
     await overflow('import version modal @1440');
     await saving(() => act('import'));
-    await page.waitForURL(/mode=diff/);
+    await page.waitForURL(/mode=diff/); await settle();
     const ipi = await getProc(impPid);
+    /* R6: the header version label and KPIs follow the import, and the KPIs agree with diffSummary */
+    const dsI = ENG.diffSummary(ipi);
+    ok(ipi.tobeRev === 2 && (await page.textContent('[data-ver-label]')).trim() === `v${ipi.version || 1} · to-be rev 2` && /imp-revised\.bpmn/.test(await page.textContent('[data-ver-from]')), 'R6: header version label updates to "to-be rev 2" from the imported file');
+    ok(/to-be rev 2/.test(await page.textContent('[data-ver-current]')), 'R6: version picker "Current" shows the new revision');
+    ok((await page.textContent('[data-kpi-diff] b')).trim() === `${dsI.new}+${dsI.changed}` && (await page.textContent('.d-hdr .kpi >> nth=0')).includes(String(flat(ipi.tobe).length)), `R6: KPIs agree with diffSummary after import (${dsI.new}+${dsI.changed}, ${flat(ipi.tobe).length} steps)`);
+    ok(new RegExp(`${dsI.new}\\+${dsI.changed} new/changed`).test(await page.textContent('[data-hdr-toggle]')), 'R6: phone summary row agrees too');
     const fi = flat(ipi.tobe);
     const keptOk = fl.filter(n => n.id !== ren.id).every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === o.title && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
     ok(keptOk && fi.length === fl.length, 'matched steps keep id, data tags, sub-steps, owners and as-is links');
@@ -990,7 +1022,7 @@ const docsOf = st => st.docs;
     ok(ipi.id === impPid && ipi.drafts.some(d => d.name === 'Before import of imp-revised.bpmn'), 'still the same process; the previous version was saved first');
     ok((await getProc(impPid)).asis.length === ipv.asis.length, 'as-is untouched by a to-be import');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Imported 'imp-revised.bpmn' as a new to-be version/.test(t)), 'history shows the version import');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Imported 'imp-revised.bpmn' as to-be revision 2/.test(t)), 'history shows the version import');
     await shot('process-import-version');
 
     console.log('# R5: deleting a step that has work');
@@ -1038,9 +1070,246 @@ const docsOf = st => st.docs;
     await nav(`/process/${impPid}?mode=tobe`); await page.click('[data-newdata]'); await page.waitForSelector('.overlay select[name=owner]');
     ok(await page.inputValue('.overlay select[name=owner]') === me, 'New data element dialog: owner defaults to the creator'); await act('cancel');
 
+    console.log('# R6: node types on the seed map — subprocess, wait, message (map, diff, swimlanes, step page)');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    st = await state();
+    const allProcs = (st.docs.process || []).map(d => d.data);
+    const vo = allProcs.find(p => ['subprocess', 'wait', 'message'].every(t => flat(p.tobe).some(n => n.type === t)));
+    ok(!!vo, 'seed has a process using subprocess, wait and message nodes');
+    const spN = flat(vo.tobe).find(n => n.type === 'subprocess'), wN = flat(vo.tobe).find(n => n.type === 'wait'), mN = flat(vo.tobe).find(n => n.type === 'message');
+    const called = allProcs.find(p => p.id === spN.calls);
+    await nav(`/process/${vo.id}?mode=tobe`);
+    const spCard = `#canvas .node[data-ntype="subprocess"][data-node="${spN.id}"]`;
+    ok(await page.isVisible(spCard + '.d-nt-sub') && (await page.textContent(spCard + ' [data-sub-steps]')).trim() === `${flat(called.tobe).length} steps` && (await page.textContent(spCard)).includes('Calls ' + called.name), `subprocess card: calls ${called.name}, shows its step count (${flat(called.tobe).length})`);
+    ok(await page.isVisible(`#canvas .node.d-nt-wait[data-node="${wN.id}"] [data-wait]:has-text("Waits ${wN.wait}")`), 'wait card: distinct (pill) and shows the wait');
+    ok(await page.isVisible(`#canvas .node.d-nt-msg[data-node="${mN.id}"] [data-msg="${mN.direction === 'receive' ? 'receive' : 'send'}"] .d-party:has-text("${mN.party}")`), 'message card: distinct, shows direction and party');
+    const icons = await page.$$eval('#canvas .node[data-ntype] .ic', els => els.map(e => e.closest('.node').dataset.ntype + ':' + !!e.querySelector('svg')));
+    ok(['subprocess:true', 'wait:true', 'message:true'].every(x => icons.includes(x)) && icons.includes('step:false'), 'typed nodes carry their own icon; plain steps keep their number');
+    await shot('r6-typed-map');
+    await page.click(spCard + ' [data-open-sub]'); await page.waitForURL(new RegExp(`/process/${called.id}$`)); await settle();
+    ok((await page.textContent('#app h1')).trim() === called.name, '"Open" on a subprocess drills into the called process');
+    await nav(`/process/${vo.id}?mode=diff`);
+    ok(await page.isVisible(`#canvas [data-ntype="subprocess"]`) && await page.isVisible('#canvas [data-ntype="wait"]') && await page.isVisible('#canvas [data-ntype="message"]'), 'typed nodes appear in Diff');
+    const dvo = ENG.diffProcess(vo);
+    ok((await page.$$('#canvas .node[data-ntype="wait"] .chip.diff-new, #canvas .node[data-ntype="wait"] .chip.diff-changed')).length === (dvo.nodes[wN.id] === 'same' ? 0 : 1), 'typed nodes carry their NEW/CHANGED chip in Diff');
+    await nav(`/process/${vo.id}?mode=lanes`);
+    ok(await page.isVisible('[data-ext-lane]:has-text("External parties")') && !!(await page.$(`[data-ext-msg="${mN.id}"]`)) && !!(await page.$('.d-lanes .node[data-ntype="subprocess"]')) && !!(await page.$('.d-lanes .node[data-ntype="wait"]')), 'Swimlanes: typed nodes in their owners’ lanes; messages reach an "External parties" lane');
+    console.log('# R6: swimlanes do not clip at 1280');
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await nav(`/process/${vo.id}?mode=lanes`);
+    const ln = await page.evaluate(() => {
+      const w = document.querySelector('.d-lanewrap'), cs = getComputedStyle(w), wr = w.getBoundingClientRect();
+      const heads = [...document.querySelectorAll('.d-lanes .lane-h')].map(h => h.getBoundingClientRect().width);
+      const clipped = [...document.querySelectorAll('.d-lanes .lane-c .node')].filter(n => { const c = n.closest('.lane-c').getBoundingClientRect(), b = n.getBoundingClientRect(); return b.left < c.left - 1 || b.right > c.right + 1 || n.scrollWidth > n.clientWidth + 1; }).length;
+      const canvas = document.querySelector('#canvas').getBoundingClientRect();
+      w.scrollLeft = w.scrollWidth; const ext = document.querySelector('[data-ext-lane]'); const er = ext ? ext.getBoundingClientRect() : null;
+      return { ox: cs.overflowX, minHead: Math.min(...heads), clipped, inCanvas: wr.right <= canvas.right + 1, extVisible: !!er && er.right <= w.getBoundingClientRect().right + 1 && er.left >= wr.left - 1 };
+    });
+    ok(ln.ox === 'auto', 'swimlanes container scrolls sideways (overflow-x: auto) @1280');
+    ok(ln.minHead >= 219.5, `every lane is at least 220 px wide @1280 (${Math.round(ln.minHead)})`);
+    ok(ln.clipped === 0 && ln.inCanvas, 'no card is clipped and the lanes stay inside the canvas @1280');
+    ok(ln.extVisible, 'scrolling the lanes reaches the last (External parties) lane @1280');
+    await overflow('swimlanes @1280'); await shot('r6-lanes-1280');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await nav(`/process/${vo.id}/step/${spN.id}`);
+    ok(await page.isVisible('[data-step-type="subprocess"]') && await page.isVisible(`[data-step-type] [data-open-sub]:has-text("Open ${called.name}")`), 'step page of a subprocess: type, called process and "Open"');
+    await nav(`/process/${vo.id}/step/${wN.id}`);
+    ok(await page.isVisible(`[data-step-type="wait"]:has-text("Waits ${wN.wait}")`), 'step page of a wait shows the wait');
+    console.log('# R6: BPMN export maps the node types and carries PMOFlow data in extensionElements');
+    await nav(`/process/${vo.id}?mode=tobe`);
+    await page.click('[data-bpmn]'); await page.waitForSelector('.overlay input[name=pool]');
+    ok(await page.isChecked('.overlay input[name=pool]') && /1 message node|\d+ message nodes/.test(await page.textContent('.overlay .mb')), 'export dialog offers the External parties pool (on when there are message nodes)');
+    await act('cancel');
+    const xvo = await exportBpmn('r6-seed-pool', true);
+    bpmnCheck(xvo, vo.tobe, 'seed to-be with pool');
+    ok(xvo.includes('xmlns:pmoflow="https://necogoode.com/pmoflow"') && /<bpmn:extensionElements>\s*<pmoflow:node nodeType="step"/.test(xvo), 'extensionElements in the pmoflow namespace');
+    ok(xvo.includes(`<bpmn:callActivity id="N_${spN.id}"`) && xvo.includes(`calledElement="Process_${spN.calls}"`), 'subprocess -> callActivity with calledElement');
+    ok(new RegExp(`<bpmn:intermediateCatchEvent id="N_${wN.id}"[^>]*>[\\s\\S]*?<bpmn:timerEventDefinition[^>]*>\\s*<bpmn:timeDuration>P2D</bpmn:timeDuration>`).test(xvo), 'wait -> intermediateCatchEvent with a timerEventDefinition (P2D)');
+    ok(new RegExp(`<bpmn:intermediate${mN.direction === 'receive' ? 'Catch' : 'Throw'}Event id="N_${mN.id}"[^>]*>[\\s\\S]*?<bpmn:messageEventDefinition`).test(xvo) && /<bpmn:message id="Message_/.test(xvo), 'message -> intermediate throw/catch event with a messageEventDefinition');
+    ok(/<bpmn:collaboration id="Collaboration_1">/.test(xvo) && /<bpmn:participant id="Participant_External" name="External parties" \/>/.test(xvo) && new RegExp(`<bpmn:messageFlow [^>]*sourceRef="N_${mN.id}" targetRef="Participant_External"`).test(xvo) && /bpmnElement="Collaboration_1"/.test(xvo), 'External parties pool with a messageFlow from each message node');
+    const s2d = flat(vo.tobe).find(n => (n.data || []).length && n.sla && n.system && (n.subs || []).some(x => (x.data || []).length));
+    if (s2d) { const nm = st.docs.dataElement.find(d => d.id === s2d.data[0]).data.name; ok(xvo.includes(`<pmoflow:data ref="${s2d.data[0]}" name="${nm.replace(/&/g, '&amp;')}" />`) && new RegExp(`sla="${s2d.sla}" system="${s2d.system.replace(/&/g, '&amp;')}"`).test(xvo) && /<pmoflow:sub title="[^"]+">\s*<pmoflow:data /.test(xvo) && /<pmoflow:touch name=/.test(xvo), 'data refs by name (and id), sla, system, touches and sub-steps travel in extensionElements'); }
+    const xnp = await exportBpmn('r6-seed-nopool', false);
+    ok(!/collaboration/.test(xnp) && !/messageFlow/.test(xnp) && /messageEventDefinition/.test(xnp), 'without the pool: no collaboration or message flows, message events kept');
+
+    console.log('# R6: authoring subprocess, wait and message; "Create and tag" with owner and source');
+    await nav(`/process/${newPid}?mode=edit&v=tobe`);
+    const insAt = async kind => { const n = (await page.$$('[data-ins="root"]')).length; await page.click(`[data-ins="root"] >> nth=${n - 1}`); await page.waitForSelector('.overlay .d-kinds'); await act(kind); await page.waitForSelector('.overlay input[name=title]'); };
+    await page.click('[data-ins="root"] >> nth=0'); await page.waitForSelector('.overlay .d-kinds');
+    const kinds = await page.$$eval('.overlay .d-kind', bs => bs.map(b => b.dataset.act).join(','));
+    ok(kinds === 'step,subprocess,wait,message,decision,parallel', 'insert picker offers step, subprocess, wait, message, decision, parallel');
+    await page.screenshot({ path: `${OUT}/r6-insert-picker.png` }); await act('cancel');
+    await insAt('subprocess');
+    ok(!(await page.isVisible('.overlay [data-subs]')) && await page.isVisible('.overlay select[name=calls]'), 'subprocess dialog: pick the process to call (no sub-steps)');
+    await page.selectOption('.overlay select[name=calls]', vo.id);
+    await page.fill('.overlay input[name=system]', 'ERP');
+    await saving(() => act('save'));
+    let np = await getProc(newPid);
+    const spAdded = flat(np.tobe).find(n => n.type === 'subprocess');
+    ok(spAdded && spAdded.calls === vo.id && spAdded.title === 'Run ' + vo.name && spAdded.system === 'ERP', `subprocess saved: calls ${vo.name}, default title "${spAdded && spAdded.title}"`);
+    await insAt('wait');
+    ok(!(await page.isVisible('.overlay [data-picks]')) && !(await page.isVisible('.overlay input[name=sla]')), 'wait dialog: no data or SLA fields');
+    await page.fill('.overlay input[name=wait]', '2 business days');
+    await page.fill('.overlay input[name=title]', 'Wait 2 business days for vendor response');
+    await saving(() => act('save'));
+    await insAt('message');
+    await page.selectOption('.overlay select[name=direction]', 'receive');
+    await page.fill('.overlay input[name=party]', 'Vendor');
+    await page.fill('.overlay input[name=title]', 'Receive signed quote');
+    const other2 = st.people.find(x => x.id !== me);
+    ok(await page.inputValue('.overlay [data-nd-owner]') === me, '"Create and tag": owner defaults to me');
+    await page.fill('.overlay [data-nd-name]', 'E2E signed quote');
+    await page.selectOption('.overlay [data-nd-owner]', other2.id);
+    await page.fill('.overlay [data-nd-source]', 'Vendor portal inbox');
+    await page.click('.overlay [data-nd-create]');
+    ok(new RegExp(`owned by ${other2.name}, source Vendor portal inbox`).test(await page.textContent('.overlay [data-nd-msg]')), '"Create and tag" confirms owner and source inline');
+    await page.screenshot({ path: `${OUT}/r6-message-modal.png` });
+    /* two writes: the new data element, then the process */
+    const wProc = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 });
+    await saving(() => act('save')); ok((await wProc).ok(), 'process saved after the new data element');
+    await settle();
+    st = await state(); np = await getProc(newPid);
+    const msgAdded = flat(np.tobe).find(n => n.type === 'message'), wAdded = flat(np.tobe).find(n => n.type === 'wait');
+    const sq = st.docs.dataElement.map(d => d.data).find(d => d.name === 'E2E signed quote');
+    ok(wAdded && wAdded.wait === '2 business days' && wAdded.title === 'Wait 2 business days for vendor response', 'wait saved with its duration');
+    ok(msgAdded && msgAdded.direction === 'receive' && msgAdded.party === 'Vendor' && (msgAdded.data || []).includes(sq && sq.id), 'message saved: receive from Vendor, tagged with the new data');
+    ok(sq && sq.owner === other2.id && sq.source === 'Vendor portal inbox', '"Create and tag" saved the chosen owner and source');
+    await nav(`/process/${newPid}?mode=tobe`);
+    ok(await page.isVisible('#canvas .node.d-nt-sub') && await page.isVisible('#canvas .node.d-nt-wait') && await page.isVisible('#canvas .node.d-nt-msg [data-msg="receive"]'), 'authored typed nodes render with their own visuals');
+    await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+    const h6 = await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent).join('\n'));
+    ok(/Added subprocess 'Run /.test(h6) && /Added wait 'Wait 2 business days/.test(h6) && /Added message 'Receive signed quote'/.test(h6), 'history names each typed node');
+    await shot('r6-authored-tobe');
+    await page.reload(); await page.waitForSelector('#canvas .node.d-nt-msg');
+    ok(true, 'typed nodes persist after reload');
+
+    console.log('# R6: lossless BPMN round trip (export -> import -> export)');
+    const dn = id => { const d = st.docs.dataElement.find(x => x.id === id); return d ? d.data.name : id; };
+    const x1 = await exportBpmn('r6-rt-1', true);
+    bpmnCheck(x1, np.tobe, 'authored typed to-be');
+    await nav('/processes');
+    const rtPid = await importFile(`${OUT}/r6-rt-1.bpmn`);
+    st = await state();
+    const rt = await getProc(rtPid);
+    const mA = modelOf(np.tobe, dn), mB = modelOf(rt.asis, dn);
+    const diffAt = (a, b) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); let i = 0; while (i < ja.length && ja[i] === jb[i]) i++; return ja.slice(Math.max(0, i - 60), i + 40) + ' ≠ ' + jb.slice(Math.max(0, i - 60), i + 40); };
+    ok(JSON.stringify(mA) === JSON.stringify(mB), 'import reads back every node type, gateway, loop-back, data tag, sla, system, touches, sub-steps and owner' + (JSON.stringify(mA) === JSON.stringify(mB) ? '' : ': ' + diffAt(mA, mB)));
+    ok(!st.docs.dataElement.some(d => d.data.note && /BPMN import of r6-rt-1/.test(d.data.note)), 'round trip in the same workspace creates no duplicate data elements');
+    await nav(`/process/${rtPid}?mode=tobe`);
+    const x2 = await exportBpmn('r6-rt-2', true);
+    const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
+    const n1 = norm(x1, np.tobe, newPid), n2 = norm(x2, rt.tobe, rtPid);
+    ok(n1 === n2, 'export -> import -> export gives the same BPMN (ids aside)' + (n1 === n2 ? '' : ': ' + diffAt(n1, n2)));
+    ok(JSON.stringify(modelOf(rt.tobe, dn)) === JSON.stringify(mA), 'the imported to-be fork has the same model');
+    /* the seed map adds gateways (decision branches), data tags, sub-steps with data, SLA and system to the round trip */
+    await nav(`/process/${vo.id}?mode=tobe`);
+    const xv1 = await exportBpmn('r6-rt-seed-1', true);
+    await nav('/processes');
+    const rvPid = await importFile(`${OUT}/r6-rt-seed-1.bpmn`);
+    st = await state();
+    const rv = await getProc(rvPid);
+    const mV = modelOf(vo.tobe, dn), mR = modelOf(rv.asis, dn);
+    ok(allNodes(vo.tobe).some(isGw) && JSON.stringify(mV) === JSON.stringify(mR), 'seed map round trip (gateways, typed nodes, data, sub-steps, sla, system) is lossless' + (JSON.stringify(mV) === JSON.stringify(mR) ? '' : ': ' + diffAt(mV, mR)));
+    await nav(`/process/${rvPid}?mode=tobe`);
+    const xv2 = await exportBpmn('r6-rt-seed-2', true);
+    const v1n = norm(xv1, vo.tobe, vo.id), v2n = norm(xv2, rv.tobe, rvPid);
+    ok(v1n === v2n, 'seed map: export -> import -> export gives the same BPMN (ids aside)' + (v1n === v2n ? '' : ': ' + diffAt(v1n, v2n)));
+    /* a foreign file: callActivity, timer and message events without PMOFlow extension data still map */
+    const foreign6 = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D6" targetNamespace="urn:northwind">
+  <message id="M1" name="Carrier: pickup booked" />
+  <collaboration id="C1"><participant id="PA" name="Returns" processRef="P6" /><participant id="PB" name="Carrier" /><messageFlow id="MF1" sourceRef="PB" targetRef="R1" /></collaboration>
+  <process id="P6" name="Northwind returns pickup" isExecutable="false">
+    <startEvent id="S" name="Pickup requested" /><callActivity id="CA" name="${vo.name}" calledElement="Process_${vo.id}" />
+    <intermediateCatchEvent id="T1" name="Wait for the carrier window"><timerEventDefinition id="TD"><timeDuration>PT4H</timeDuration></timerEventDefinition></intermediateCatchEvent>
+    <intermediateCatchEvent id="R1" name="Pickup confirmed"><messageEventDefinition id="MD" messageRef="M1" /></intermediateCatchEvent>
+    <endEvent id="E" name="Done" />
+    <sequenceFlow id="F1" sourceRef="S" targetRef="CA" /><sequenceFlow id="F2" sourceRef="CA" targetRef="T1" /><sequenceFlow id="F3" sourceRef="T1" targetRef="R1" /><sequenceFlow id="F4" sourceRef="R1" targetRef="E" />
+  </process>
+</definitions>`;
+    fs.writeFileSync(`${OUT}/r6-foreign.bpmn`, foreign6);
+    await nav('/processes');
+    const f6 = flat((await getProc(await importFile(`${OUT}/r6-foreign.bpmn`))).asis);
+    ok(f6.map(n => n.type).join(',') === 'subprocess,wait,message', 'foreign BPMN: callActivity -> subprocess, timer -> wait, message catch -> message');
+    ok(f6[0].calls === vo.id && f6[1].wait === '4 hours' && f6[2].direction === 'receive' && f6[2].party === 'Carrier', `foreign BPMN: calledElement resolved, PT4H -> "4 hours", party from the message flow (${f6[1].wait}, ${f6[2].party})`);
+
+    console.log('# R6: step status combines work and data; late is red');
+    st = await state();
+    const prjOf = pid0 => (st.docs.project || []).map(d => d.data).find(j => (j.processes || []).includes(pid0) && j.status !== 'live');
+    const vp = prjOf(vo.id);
+    const builtStep = flat(vo.tobe).find(n => { const s0 = ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today); return s0.status === 'done' && [...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])].some(d => ENG.effectiveAvail(st.docs, d) !== 'live'); });
+    ok(!!builtStep, 'seed has a step whose work is done but whose data is not live');
+    await nav(`/process/${vo.id}/step/${builtStep.id}`);
+    const bs = await page.evaluate(() => { const k = document.querySelector('[data-step-status]'); const b = k.querySelector('b'); return { st: k.dataset.stepStatus, txt: b.textContent.trim(), color: getComputedStyle(b).color }; });
+    ok(bs.st === 'built' && bs.txt === 'Built · awaiting live data' && bs.color === 'rgb(180, 83, 9)', `done work + data not live = amber "Built · awaiting live data", never green Done (${bs.txt}, ${bs.color})`);
+    await nav(`/data/${builtStep.data[0]}`);
+    ok(await page.isVisible(`[data-impact] tr[data-use="tobe"]:has-text("${builtStep.title}") [data-built]`), 'data page impact table shows the same combined status');
+    const lateStep = flat(vo.tobe).find(n => n.type === 'step' && ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today).status === 'prog');
+    const ago = n => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+    ok(await putDoc('workItem', 'wi-e2e-late', { id: 'wi-e2e-late', projectId: vp.id, pid: vo.id, step: lateStep.id, title: 'E2E overdue check', owner: me, status: 'prog', start: ago(10), due: ago(3), deps: [], effortDays: 1 }, 'Test fixture: overdue item') === 200, 'fixture: an overdue item');
+    await nav(`/process/${vo.id}/step/${lateStep.id}`);
+    const ls = await page.evaluate(() => { const k = document.querySelector('[data-step-status]'); const b = k.querySelector('b'); return { st: k.dataset.stepStatus, txt: b.textContent.trim(), color: getComputedStyle(b).color }; });
+    ok(/-late$/.test(ls.st) && /late/.test(ls.txt) && ls.color === 'rgb(220, 38, 38)', `late shows red in the drill-down (${ls.txt}, ${ls.color})`);
+    ok(await page.isVisible('.d-wi:has-text("E2E overdue check") .b-late'), 'the overdue item carries one red schedule badge');
+    const badgeTexts = await page.$$eval('.d-wiwrap', ws => ws.map(w => w.querySelectorAll('.wi .badge').length));
+    ok(badgeTexts.every(n => n === 1), 'one schedule badge per work item');
+    await shot('r6-step-late');
+    await page.evaluate(async () => fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/workItem/wi-e2e-late`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', summary: 'Test fixture removed' }) }));
+
+    console.log('# R6: step-level Impact and the process Impact tab');
+    st = await state();
+    const sA = flat(vo.tobe).find(n => (n.data || []).length && (st.docs.workItem || []).some(d => d.data.step === n.id && d.data.pid === vo.id && d.data.status !== 'done'));
+    await nav(`/process/${vo.id}/step/${sA.id}`);
+    const expShared = new Set(); (sA.data || []).concat((sA.subs || []).flatMap(x => x.data || [])).forEach(d => (st.docs.process || []).map(x => x.data).forEach(p => flat(p.tobe).forEach(t => { if (!(p.id === vo.id && t.id === sA.id) && [...(t.data || []), ...(t.subs || []).flatMap(x => x.data || [])].includes(d)) expShared.add(p.id + '/' + t.id); })));
+    ok(+(await page.getAttribute('[data-imp-shared]', 'data-imp-shared')) === expShared.size, `step Impact lists every other step sharing data (${expShared.size})`);
+    ok(+(await page.getAttribute('[data-imp-projects]', 'data-imp-projects')) === 1 && await page.isVisible(`[data-imp-prj="${vp.id}"]`), 'step Impact lists the project with open work on it');
+    const st0 = await page.getAttribute('[data-step-impact]', 'data-step-impact');
+    /* expected: no same-step conflict; an overlap only if another active project changes a step that shares this step's data */
+    st = await state();
+    const actPrj = new Set((st.docs.project || []).map(d => d.data).filter(j => j.status !== 'live' && j.id !== vp.id).map(j => j.id));
+    const otherOnShared = (st.docs.workItem || []).map(d => d.data).some(w => w.status !== 'done' && actPrj.has(w.projectId) && (expShared.has(w.pid + '/' + w.step) || (w.resolves && (sA.data || []).includes(w.resolves))));
+    ok(st0 === (otherOnShared ? 'overlap' : 'clear'), `one project on the step: ${otherOnShared ? 'Overlap (another project changes a step sharing its data)' : 'no conflicts'} (${st0})`);
+    /* a second active project with open work on the same step */
+    const due5 = (() => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 7); return d.toISOString().slice(0, 10); })();
+    ok(await putDoc('project', 'prj-e2e-x', { id: 'prj-e2e-x', name: 'E2E Parallel Change', desc: '', owner: me, releaseManager: me, resources: [me], target: due5, processes: [vo.id], status: 'active', baselines: [] }, 'Test fixture: second project') === 200
+      && await putDoc('workItem', 'wi-e2e-x', { id: 'wi-e2e-x', projectId: 'prj-e2e-x', pid: vo.id, step: sA.id, title: 'E2E parallel tweak', owner: me, status: 'idle', start: st.today, due: due5, deps: [] }, 'Test fixture: overlapping work') === 200, 'fixture: a second project changing the same step');
+    await nav(`/process/${vo.id}/step/${sA.id}`);
+    ok(await page.getAttribute('[data-step-impact]', 'data-step-impact') === 'conflict' && await page.isVisible('[data-conflict="same-step"]:has-text("E2E Parallel Change")') && +(await page.getAttribute('[data-imp-projects]', 'data-imp-projects')) === 2, 'two active projects on one step: Conflict, naming both');
+    ok(await page.getAttribute('[data-impact-kpi]', 'data-impact-kpi') === 'conflict', 'step KPI shows the conflict');
+    await shot('r6-step-impact');
+    st = await state();
+    const sB = flat(vo.tobe).find(n => n.id !== sA.id && (n.data || []).some(d => (sA.data || []).includes(d)) && (st.docs.workItem || []).some(d => d.data.step === n.id && d.data.pid === vo.id && d.data.status !== 'done' && d.data.projectId === vp.id));
+    if (sB) {
+      await nav(`/process/${vo.id}/step/${sB.id}`);
+      ok(await page.getAttribute('[data-step-impact]', 'data-step-impact') === 'overlap' && await page.isVisible('[data-conflict="shared-data"]:has-text("E2E Parallel Change")'), `another project changing a step that shares data: Overlap (amber) on “${sB.title}”`);
+    } else ok(false, 'seed has a second step sharing data with open work');
+    await nav(`/process/${vo.id}?mode=impact`);
+    ok(await page.isVisible('[data-mode="impact"].on') && await page.isVisible('[data-impact-tab]'), 'process page has an Impact tab');
+    const rowsN = (await page.$$('[data-impact-row]')).length;
+    ok(rowsN === flat(vo.tobe).length, `Impact tab rolls up every to-be step (${rowsN})`);
+    ok(await page.getAttribute(`[data-impact-row="${sA.id}"]`, 'data-impact-status') === 'conflict' && (!sB || await page.getAttribute(`[data-impact-row="${sB.id}"]`, 'data-impact-status') === 'overlap'), 'Impact tab statuses agree with the step pages');
+    ok(+(await page.getAttribute(`[data-impact-row="${sA.id}"] [data-shared-n]`, 'data-shared-n')) === expShared.size && +(await page.getAttribute(`[data-impact-row="${sA.id}"] [data-prj-n]`, 'data-prj-n')) === 2, 'Impact tab row: shared steps and projects match the step page');
+    ok(/^[1-9]\d*\//.test(await page.getAttribute('[data-impact-sum]', 'data-impact-sum')), 'Impact tab summary counts the conflict');
+    await shot('r6-impact-tab'); await overflow('impact tab @1440');
+    await page.click(`[data-impact-row="${sA.id}"] a`); await page.waitForURL(new RegExp(`/step/${sA.id}$`));
+    ok(true, 'Impact tab row drills into the step');
+    for (const [t, i] of [['workItem', 'wi-e2e-x'], ['project', 'prj-e2e-x']]) await page.evaluate(async ([t, i]) => fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/${t}/${i}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', summary: 'Test fixture removed' }) }), [t, i]);
+
+    console.log('# R6: unique fields (duplicates are flagged by profiling)');
+    await nav(`/data/${did}`);
+    await page.click('[data-fedit="0"]'); await page.waitForSelector('.overlay input[name=unique]');
+    await page.check('.overlay input[name=unique]');
+    ok(/unique/.test(await page.textContent('.overlay [data-specsum]')), 'spec builder: "Unique" reads back in the summary');
+    await saving(() => act('save'));
+    ok((await getData(did)).fields[0].unique === true && /Unique/.test(await page.textContent('.d-spec tr >> nth=1')), 'field.unique saved and shown as a rule');
+
     console.log('# phone 390');
     await page.setViewportSize({ width: 390, height: 844 });
-    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'edit', 'compare']) { await nav(`/process/${pid}?mode=${m}`); await overflow(`process ${m} @390`); await shot('phone-process-' + m); }
+    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'impact', 'edit', 'compare']) { await nav(`/process/${pid}?mode=${m}`); await overflow(`process ${m} @390`); await shot('phone-process-' + m); }
+    await nav(`/process/${vo.id}/step/${sA.id}`); await overflow('step impact @390'); await shot('phone-step-impact');
+    await nav(`/process/${newPid}?mode=tobe`); await overflow('typed nodes @390'); await shot('phone-typed');
+    await page.click('[data-hdr-toggle]'); await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]'); await overflow('export dialog @390'); await page.screenshot({ path: `${OUT}/phone-export.png` }); await act('cancel'); await page.click('[data-hdr-toggle]');
+    await nav(`/process/${newPid}?mode=edit&v=tobe`); await page.click('[data-ins="root"] >> nth=0'); await page.waitForSelector('.overlay .d-kinds'); await overflow('insert picker @390'); await page.screenshot({ path: `${OUT}/phone-insert-picker.png` }); await act('cancel');
     console.log('# R5: phone — the map starts near the top; KPIs and controls collapse into a summary row');
     await nav(`/process/${pid}?mode=tobe`);
     const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top + scrollY, tools: !!document.querySelector('.d-hdr .d-hdrtools').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));

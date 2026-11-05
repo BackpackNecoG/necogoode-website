@@ -25,6 +25,11 @@ The process starts when a hiring manager submits a contractor request.
 8. On the first invoice, Accounts Payable matches it to the approved contractor timesheet record before scheduling payment.`;
 
 const strip = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+/* R6: never leave "()" (or "( )", "[]") in a title, and tidy the spacing it leaves behind. */
+export const cleanTitle = t => String(t || '').replace(/\s*[([]\s*[)\]]/g, '').replace(/\s+([,.;:!?])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+/* R6 node kinds beyond steps and gateways. The parser may return any of these; each renders and is kept on create. */
+const KINDS = { wait: { icon: '⏱', label: 'Wait' }, message: { icon: '✉', label: 'Message' }, subprocess: { icon: '⊞', label: 'Sub-process' } };
+const kindOf = t => ({ timer: 'wait', wait: 'wait', message: 'message', send: 'message', receive: 'message', subprocess: 'subprocess', callActivity: 'subprocess' }[t] || null);
 const clone = o => JSON.parse(JSON.stringify(o));
 
 /* Map server output (ids, names or roles) to people and data elements. Exact matches only: no keyword guessing. */
@@ -46,7 +51,7 @@ const isGate = n => n && (n.type === 'decision' || n.type === 'parallel' || (Arr
 let srcSeq = 0;
 const srcId = n => (n && typeof n.id === 'string' && n.id) ? n.id : 'x' + (++srcSeq);
 function normStep(n) {
-  const title = String(n.title || n.text || n.name || '').trim();
+  const title = cleanTitle(n.title || n.text || n.name || '');
   if (!title) return null;
   return {
     type: 'step', title, src: srcId(n),
@@ -54,17 +59,27 @@ function normStep(n) {
     data: [...new Set((n.data || n.dataElements || []).map(matchData).filter(Boolean))],
     touches: Array.isArray(n.touches) ? n.touches.map(String) : [],
     system: typeof n.system === 'string' ? n.system.trim() : '',
-    subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: s, data: [] } : { title: String(s.title || s.text || '').trim(), data: [...new Set((s.data || []).map(matchData).filter(Boolean))] }).filter(s => s.title),
+    subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [...new Set((s.data || []).map(matchData).filter(Boolean))] }).filter(s => s.title),
     newData: Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')).filter(Boolean) : [],
   };
 }
+/* wait / message / sub-process nodes keep their kind and the fields that describe them */
+function normKind(n, kind) {
+  const title = cleanTitle(n.title || n.text || n.name || '');
+  if (!title) return null;
+  const x = { type: kind, title, src: srcId(n), owner: matchPerson(n.owner || n.ownerId || n.role), data: [...new Set((n.data || []).map(matchData).filter(Boolean))], touches: Array.isArray(n.touches) ? n.touches.map(String) : [], subs: [], newData: Array.isArray(n.newData) ? n.newData.map(y => String(typeof y === 'string' ? y : y.name || '')).filter(Boolean) : [], system: '' };
+  ['wait', 'duration', 'timer', 'direction', 'party', 'calls', 'processId', 'sla'].forEach(k => { if (n[k] != null && n[k] !== '') x[k] = n[k]; });
+  if (n.type === 'send' || n.type === 'receive') x.direction = x.direction || n.type;
+  return x;
+}
 function normNode(n) {
   if (!n || n.type === 'trigger' || n.type === 'end') return null;
+  const k = kindOf(n.type); if (k) return normKind(n, k);
   if (isGate(n)) {
-    const branches = (n.branches || []).map(b => { const br = { label: String((b && b.label) || '').trim() || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : normStep(x)).filter(Boolean) };
+    const branches = (n.branches || []).map(b => { const br = { label: cleanTitle((b && b.label) || '') || 'Branch', nodes: ((b && b.nodes) || []).map(x => isGate(x) ? null : kindOf(x && x.type) ? normKind(x, kindOf(x.type)) : normStep(x)).filter(Boolean) };
       if (b && b.goto != null && b.goto !== '') br.goto = String(b.goto); return br; });
     while (branches.length < 2) branches.push({ label: branches.length ? 'No' : 'Yes', nodes: [] });
-    return { type: n.type === 'parallel' ? 'parallel' : 'decision', title: String(n.title || n.text || 'Decision').trim(), src: srcId(n), branches };
+    return { type: n.type === 'parallel' ? 'parallel' : 'decision', title: cleanTitle(n.title || n.text || 'Decision') || 'Decision', src: srcId(n), branches };
   }
   return normStep(n);
 }
@@ -74,17 +89,42 @@ function normalize(res) {
   resolveGotos(nodes);
   const existing = new Set(store.list('dataElement').map(d => strip(d.name)));
   const seen = new Set();
-  const newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x)
+  let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x)
     .filter(x => x && String(x.name || '').trim())
-    .map(x => ({ name: String(x.name).trim(), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: existing.has(strip(x.name)) }))
-    .filter(x => { const k = strip(x.name); if (seen.has(k)) return false; seen.add(k); return true; })
-    .map(x => Object.assign(x, { create: !x.exists }));
+    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: existing.has(strip(x.name)) }))
+    .filter(x => { const k = strip(x.name); if (seen.has(k)) return false; seen.add(k); return true; });
+  const skipped = newData.filter(x => !isDataNoun(x.name)).map(x => x.name);
+  newData = newData.filter(x => isDataNoun(x.name)).map(x => Object.assign(x, { create: !x.exists }));
   let notes = res && (res.notes || res.note || res.warnings);
   notes = Array.isArray(notes) ? notes.map(String) : notes ? [String(notes)] : [];
+  if (skipped.length) notes.push(`Not proposed as data (they name a person or an action, not a document, record or field): ${skipped.join(', ')}.`);
   const src = res && res.source === 'rules' ? 'Rules' : 'AI';
   const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
   const trigger = (res && (res.trigger || (res.process && res.process.trigger))) || (trigNode && trigNode.title) || '';
-  return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger };
+  newData.forEach(x => { x.target = targetOf(nodes, x); });
+  return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger: cleanTitle(trigger) };
+}
+
+/* R6: a data proposal must name a document, record or field, never a person doing something ("Receiving clerk records"). */
+const ROLE = /^(clerk|manager|coordinator|officer|analyst|lead|owner|approver|specialist|admin|administrator|team|staff|employee|agent|supervisor|director|controller|buyer|requester|requestor|reviewer|contractor)$/;
+function isDataNoun(name) {
+  const w = strip(name).split(' ').filter(Boolean);
+  if (!w.length) return false;
+  if (w.length >= 2 && ROLE.test(w[w.length - 2]) && /[a-z]s$/.test(w[w.length - 1])) return false;   /* role + verb */
+  if (ROLE.test(w[w.length - 1])) return false;                                                     /* a person, not data */
+  return true;
+}
+/* The step a proposal links to on create (by source id). Every created element lands in some step's data requirements:
+   the step the parser named, the step that lists it, the step quoted in its reason, a step naming it, else the first step. */
+function targetOf(nodes, x) {
+  const steps = allSteps(nodes, []); if (!steps.length) return null;
+  let t = null;
+  if (typeof x.step === 'number') t = steps[x.step];
+  else if (x.step) t = steps.find(y => strip(y.title) === strip(x.step));
+  if (!t) t = steps.find(y => (y.newData || []).some(n => strip(n) === strip(x.name)));
+  if (!t) { const m = /Mentioned in "([^"]+?)…?"/.exec(x.reason || ''); const q = m && strip(m[1]); if (q && q.length >= 12) t = steps.find(y => strip(y.title).startsWith(q) || q.startsWith(strip(y.title))); }
+  if (!t) t = steps.find(y => strip(y.title).includes(strip(x.name)));
+  return (t || steps[0]).src;
 }
 
 /* goto may arrive as a node id, a 1-based step number or a step title; keep it only if it resolves to a draft node. */
@@ -125,7 +165,7 @@ function ownerSel(s) {
 }
 function dataChips(s) {
   const linked = s.data.map(id => `<span class="chip">${esc((store.get('dataElement', id) || {}).name || id)}</span>`);
-  const proposed = (s.newData || []).filter(n => { const p = ui.draft.newData.find(x => strip(x.name) === strip(n)); return p && p.create; }).map(n => `<span class="chip is-newchip">+ ${esc(n)}</span>`);
+  const proposed = ui.draft.newData.filter(x => x.create && !x.exists && x.target === s.src).map(x => `<span class="chip is-newchip" data-newchip>+ ${esc(x.name)}</span>`);
   return linked.length || proposed.length ? `<div class="chips">${linked.concat(proposed).join('')}</div>` : '';
 }
 function stepBody(s, path, label) {
@@ -133,6 +173,17 @@ function stepBody(s, path, label) {
     <div class="is-row">${ownerSel(s)}${dataPicker(s, path)}<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System"></div>${dataChips(s)}
     ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><textarea data-f="title" rows="${Math.min(4, Math.max(1, Math.ceil(sb.title.length / 60)))}" class="is-subt" aria-label="Sub-step ${k + 1}">${esc(sb.title)}</textarea><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
     <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
+}
+/* R6: wait / message / sub-process nodes */
+function kindBody(s, path) {
+  const k = KINDS[s.type];
+  const procs = store.list('process');
+  const extra = s.type === 'wait' ? `<input class="is-sys" data-f="wait" value="${esc(s.wait || s.duration || '')}" placeholder="How long, e.g. 2 business days" aria-label="Wait duration">`
+    : s.type === 'message' ? `<select data-f="direction" aria-label="Direction"><option value="send" ${s.direction !== 'receive' ? 'selected' : ''}>Send to</option><option value="receive" ${s.direction === 'receive' ? 'selected' : ''}>Receive from</option></select><input class="is-sys" data-f="party" value="${esc(s.party || '')}" placeholder="External party, e.g. Vendor" aria-label="External party">`
+    : `<select data-f="calls" aria-label="Process it calls"><option value="">Choose the process it calls…</option>${procs.map(p => `<option value="${esc(p.id)}" ${p.id === (s.calls || s.processId) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
+  return `<div class="is-body is-kind" data-path="${esc(path)}" data-kind="${esc(s.type)}"><div class="is-gate-h"><span class="is-kicon" aria-hidden="true">${k.icon}</span><span class="is-kind">${k.label}</span></div>
+    <textarea class="is-title" data-f="title" rows="2" aria-label="${k.label} title">${esc(s.title)}</textarea>
+    <div class="is-row">${extra}${s.type === 'message' ? ownerSel(s) : ''}</div>${dataChips(s)}</div>`;
 }
 /* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
 function gotoRow(g, b, bpath) {
@@ -147,7 +198,7 @@ function gateBody(g, path) {
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Parallel gateway' : 'Decision question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
       <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Branch label"><span class="hint" data-branch-hint>${/^(no|otherwise|else)$/i.test(b.label) && b.nodes.length ? 'Otherwise · ' : ''}${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? 'loops back' : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
-      ${b.nodes.map((s, k) => `<div class="is-bstep">${stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
+      ${b.nodes.map((s, k) => `<div class="is-bstep">${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
 }
@@ -158,21 +209,24 @@ export function render() {
   const gates = d ? d.nodes.filter(x => x.type === 'decision').length : 0;
   const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
+  if (d) newData.forEach(x => { if (!x.target || !targets(d.nodes).some(n => n.src === x.target)) x.target = targetOf(d.nodes, x); });
+  const tgtTxt = src => { if (!d) return ''; const all = targets(d.nodes); const t = all.find(n => n.src === src); if (!t) return ''; const i = d.nodes.indexOf(t); return `${i >= 0 ? 'Step ' + (i + 1) : 'Branch step'}: ${t.title.slice(0, 60)}`; };
+  const kinds = d ? targets(d.nodes).filter(x => KINDS[x.type]).length : 0;
   const noOwner = d ? allSteps(d.nodes, []).filter(x => !x.owner).length : 0;
   const loops = d ? d.nodes.reduce((n, g) => n + (g.branches || []).filter(b => b.goto).length, 0) : 0;
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>Proposed new data elements</h4>
-      <p class="hint">The parser found data the SOP needs that matches no existing element closely enough to link. Tick the ones to create on import; they start as Missing and owned by you.</p>
+      <p class="hint">The parser found data the SOP needs that matches no existing element closely enough to link. Each ticked one is created on import (Missing, owned by you) and added to the data requirements of the step shown.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
-        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New data element name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(x.reason)}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : ''}</span></label>`).join('')}</div>` : '';
+        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New data element name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(x.reason)}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
 
-  const draftHtml = d ? `<div class="card is-draft"><h3>Draft process<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span><span class="n">${n} steps${gates ? ` · ${gates} decision${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} parallel` : ''}</span></h3>
+  const draftHtml = d ? `<div class="card is-draft"><h3>Draft process<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span><span class="n">${n} steps${gates ? ` · ${gates} decision${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} parallel` : ''}${kinds ? ` · ${kinds} wait/message` : ''}</span></h3>
     ${ui.notes.length ? `<div class="note is-notes"><b>${ui.source === 'AI' ? 'AI notes' : 'Parser notes'}</b><ul>${ui.notes.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
     ${noOwner ? `<div class="is-ownerprompt" data-owner-prompt><b>${noOwner} step${noOwner === 1 ? '' : 's'} need${noOwner === 1 ? 's' : ''} an owner.</b> The SOP didn't name a person, role or business unit we could match, so the owner is left blank rather than guessed. Choose one for each highlighted step.</div>` : ''}
     ${loops ? `<div class="hint" data-loops>${loops} loop-back${loops === 1 ? '' : 's'} found (“resubmit”, “return to step N”). They're drawn as return arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">Trigger</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
-      <span class="is-n">${s.type === 'step' ? i + 1 : '◆'}</span>
-      ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + (i + 1)) : gateBody(s, String(i))}
+      <span class="is-n">${s.type === 'step' ? i + 1 : KINDS[s.type] ? KINDS[s.type].icon : '◆'}</span>
+      ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + (i + 1)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
     <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add decision</button><button class="btn sm" data-add-par>+ Add parallel</button><button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Create process</button></div></div>` : '';
@@ -199,6 +253,7 @@ function readDraft(root) {
     const t = own('[data-f=title]')[0]; if (t) node.title = t.value;
     const o = own('[data-f=owner]')[0]; if (o) node.owner = o.value;
     const sy = own('[data-f=system]')[0]; if (sy) node.system = sy.value.trim();
+    ['wait', 'direction', 'party', 'calls'].forEach(k => { const x = own(`[data-f=${k}]`)[0]; if (x) node[k] = x.value.trim(); });
     if (node.type === 'step' && own('[data-f=data]').length) node.data = own('[data-f=data]').filter(x => x.checked).map(x => x.value);
   });
   root.querySelectorAll('[data-blabel]').forEach(el => { const [p, b] = el.dataset.blabel.split(/\.b(?=\d+$)/); const g = at(p); if (g && g.branches[+b]) g.branches[+b].label = el.value; });
@@ -240,7 +295,8 @@ export function bind(root) {
   });
   root.querySelectorAll('[data-goto]').forEach(el => el.onchange = () => { readDraft(root); const [p, j] = el.dataset.goto.split(/\.b(?=\d+$)/); const br = at(p).branches[+j]; if (el.value) br.goto = el.value; else delete br.goto; store.emit(); });
   root.querySelectorAll('[data-f=owner],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; rerender(); });
-  root.querySelectorAll('[data-f=title],[data-f=system],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
+  root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
+  root.querySelectorAll('[data-f=direction],[data-f=calls]').forEach(el => el.onchange = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
   root.querySelectorAll('[data-rm-path]').forEach(b => b.onclick = () => { readDraft(root); removeAt(b.dataset.rmPath); store.emit(); });
   root.querySelectorAll('[data-add-sub]').forEach(b => b.onclick = () => { readDraft(root); const s = at(b.dataset.addSub); (s.subs = s.subs || []).push({ title: 'New sub-step', data: [] }); store.emit(); });
@@ -272,7 +328,7 @@ async function createProcess() {
     seen.add(k);
   }
 
-  const guess = d.name || firstLine(ui.text).replace(/^Northwind Traders\s*[—-]\s*/i, '') || 'Imported process';
+  const guess = cleanTitle(d.name || firstLine(ui.text).replace(/^Northwind Traders\s*[—-]\s*/i, '')) || 'Imported process';
   const steps = allSteps(nodes, []);
   const r = await modal({
     title: 'Create process',
@@ -280,32 +336,29 @@ async function createProcess() {
       <div class="field"><label>Description</label><textarea name="desc">${esc('Imported from SOP. ' + steps.length + ' steps.')}</textarea></div>
       <div class="field"><label>Trigger</label><input name="trigger" value="${esc(d.trigger || 'Process starts')}"></div>
       ${steps.some(x => !x.owner) ? `<div class="is-ownerprompt" data-create-noowner>${steps.filter(x => !x.owner).length} step${steps.filter(x => !x.owner).length === 1 ? ' has' : 's have'} no owner yet. You can create the process now and choose owners in the editor; the go-live gate needs an owner on every to-be step.</div>` : ''}
-      ${picks.length ? `<div class="hint">Also creates ${picks.length} data element${picks.length === 1 ? '' : 's'}: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
+      ${picks.length ? `<div class="hint" data-create-data="${picks.length}">Also creates ${picks.length} data element${picks.length === 1 ? '' : 's'} and adds each to its step's data requirements: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
       <div class="hint">Creates version 1 of the as-is process and a to-be copy you can redesign. Opens in the editor.</div>`,
     actions: [{ id: 'create', label: 'Create', primary: true }],
   });
   if (r.action !== 'create') return;
-  const name = (r.form.name || '').trim() || 'Imported process';
+  const name = cleanTitle(r.form.name) || 'Imported process';
 
   /* 1. create the ticked data elements, remembering name -> id for linking */
   const made = new Map();
   try {
     for (const x of picks) {
       const id = store.newId('D');
-      await store.save('dataElement', id, { id, name: x.name.trim(), owner: store.state.me, source: 'Proposed by SOP import', avail: 'missing', note: x.reason || `Needed by the “${name}” process.`, fields: [], samples: [], discovered: [] },
-        `Created data element “${x.name.trim()}” from an imported SOP`);
+      await store.save('dataElement', id, { id, name: cleanTitle(x.name), owner: store.state.me, source: 'Proposed by SOP import', avail: 'missing', note: x.reason || `Needed by the “${name}” process.`, fields: [], samples: [], discovered: [] },
+        `Created data element “${cleanTitle(x.name)}” from an imported SOP`);
       made.set(strip(x.name), id);
     }
   } catch (e) { toast('Could not create data: ' + e.message); return; }
-  /* proposals that name a step (index or title) also link to it */
-  /* proposals link to the step they came from: an explicit step (index or title), or the line the parser quoted */
+  /* every created element is added to the data requirements of the step shown next to it in the draft */
   picks.forEach(x => {
     const id = made.get(strip(x.name)); if (!id) return;
-    let s = null;
-    if (typeof x.step === 'number') s = steps[x.step];
-    else if (x.step) s = steps.find(y => strip(y.title) === strip(x.step));
-    else { const m = /Mentioned in "([^"]+?)…?"/.exec(x.reason || ''); const q = m && strip(m[1]); if (q && q.length >= 12) s = steps.find(y => strip(y.title).startsWith(q) || q.startsWith(strip(y.title))); }
-    if (s && !s.data.includes(id)) s.data.push(id);
+    let t = x.target && targets(nodes).find(n => n.src === x.target && Array.isArray(n.data));
+    if (!t) { const src = targetOf(nodes, x); t = targets(nodes).find(n => n.src === src); }
+    if (t && !t.data.includes(id)) t.data.push(id);
   });
 
   /* 2. build the as-is tree with fresh ids, then the to-be copy with `from` links */
@@ -313,7 +366,10 @@ async function createProcess() {
   const idOf = new Map();
   const mkStep = s => {
     const extra = (s.newData || []).map(n => made.get(strip(n))).filter(Boolean);
-    const node = { id: nid(), type: 'step', title: s.title.trim(), data: [...new Set(s.data.concat(extra))], touches: (s.touches || []).slice() };
+    const node = { id: nid(), type: KINDS[s.type] ? s.type : 'step', title: cleanTitle(s.title), data: [...new Set((s.data || []).concat(extra))], touches: (s.touches || []).slice() };
+    if (s.type === 'wait' && s.wait) node.wait = s.wait;
+    if (s.type === 'message') { node.direction = s.direction === 'receive' ? 'receive' : 'send'; if (s.party) node.party = s.party; }
+    if (s.type === 'subprocess' && s.calls) node.calls = s.calls;
     if (s.src) idOf.set(s.src, node.id);
     if (s.owner) node.owner = s.owner;
     if (s.system) node.system = s.system;
@@ -321,8 +377,8 @@ async function createProcess() {
     if (subs.length) node.subs = subs;
     return node;
   };
-  const mk = n => { if (n.type === 'step') return mkStep(n);
-    const g = { id: nid(), type: n.type, title: n.title.trim(), branches: n.branches.map(b => { const br = { label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) }; if (b.goto) br._goto = b.goto; return br; }) };
+  const mk = n => { if (n.type === 'step' || KINDS[n.type]) return mkStep(n);
+    const g = { id: nid(), type: n.type, title: cleanTitle(n.title) || 'Decision', branches: n.branches.map(b => { const br = { label: (b.label || '').trim() || 'Branch', nodes: b.nodes.filter(s => String(s.title || '').trim()).map(mkStep) }; if (b.goto) br._goto = b.goto; return br; }) };
     if (n.src) idOf.set(n.src, g.id); return g; };
   const asis = [{ id: nid(), type: 'trigger', title: ((r.form.trigger || '').trim() || 'Process starts'), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
   /* loop-backs: point each branch at the new id of its target; drop targets that were removed from the draft */

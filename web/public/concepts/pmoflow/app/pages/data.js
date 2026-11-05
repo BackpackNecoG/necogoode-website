@@ -19,6 +19,7 @@ const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(
 function ruleText(f) {
   const r = [];
   if (f.required) r.push('Required');
+  if (f.unique) r.push('Unique');
   if ((f.values || []).length) r.push('one of ' + f.values.join(' / '));
   if (f.matches) r.push('Must match ' + f.matches);
   if (f.rule) String(f.rule).split(/\s*[·;]\s*/).forEach(x => x && r.push(x));
@@ -27,7 +28,7 @@ function ruleText(f) {
   return r.filter(x => { const k = String(x).trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).join(' · ') || '—';
 }
 /* plain-English headline for each spec-drift issue key */
-const DRIFT = { 'missing-column': 'not found in the extract', 'required-nulls': 'required but sometimes empty', 'length-mismatch': 'length differs from the spec', 'non-digit': 'has characters that are not digits',
+const DRIFT = { duplicate: 'has duplicate values; it must be unique', duplicates: 'has duplicate values; it must be unique', 'duplicate-values': 'has duplicate values; it must be unique', 'not-unique': 'has duplicate values; it must be unique', 'missing-column': 'not found in the extract', 'required-nulls': 'required but sometimes empty', 'length-mismatch': 'length differs from the spec', 'non-digit': 'has characters that are not digits',
   'unexpected-specials': 'has unexpected characters', 'type-mismatch': 'values are not the expected type', 'out-of-range': 'values outside the allowed range', 'pattern-mismatch': 'format differs from the spec' };
 const driftTitle = d => DRIFT[d.issue] || String(d.issue || 'differs from the spec').replace(/[-_]+/g, ' ');
 /* the engine writes plain English; any raw shape code left in a message (e.g. 9{8}) is humanized here as a safety net */
@@ -81,7 +82,7 @@ export function render(params) {
 
   const allUsers = [...users, ...asisUsers];
   const impact = `<div class="card" style="margin-top:16px" data-impact><h3>Impact: every step that uses this <span class="n" data-usage-total="${users.length}/${asisUsers.length}">${users.length} to-be · ${asisUsers.length} as-is</span></h3>${allUsers.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Map</th><th>Process</th><th>Owner</th><th>Project</th></tr>
-    ${allUsers.map(u => { const prj = u.ver === 'tobe' ? projectsFor(u.pid)[0] : null; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}" data-use="${u.ver}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td><span class="chip ${u.ver === 'asis' ? '' : 'd-chip-tobe'}">${u.ver === 'asis' ? 'As-is' : 'To-be'}</span></td><td>${esc(u.p.name)}</td><td>${esc(pname(u.s.owner))}</td><td class="d-nowrap">${u.ver === 'asis' ? '<span class="hint">Today’s process</span>' : prj ? stepBadge(st) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No step uses this data element yet.</div>'}</div>`;
+    ${allUsers.map(u => { const prj = u.ver === 'tobe' ? projectsFor(u.pid)[0] : null; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}" data-use="${u.ver}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td><span class="chip ${u.ver === 'asis' ? '' : 'd-chip-tobe'}">${u.ver === 'asis' ? 'As-is' : 'To-be'}</span></td><td>${esc(u.p.name)}</td><td>${esc(pname(u.s.owner))}</td><td class="d-nowrap">${u.ver === 'asis' ? '<span class="hint">Today’s process</span>' : prj ? stepBadge(st, u.s) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No step uses this data element yet.</div>'}</div>`;
   /* R5: test cases, labelled TC<n> */
   const cases = store.list('testCase', c => c.dataId === did);
   const uncovered = fields.filter(f => !cases.some(c => String(c.field || '').toLowerCase() === String(f.name).toLowerCase()));
@@ -148,6 +149,7 @@ export function buildField(b) {
   const name = String(b.name || '').trim(); if (!name) errs.push('Give the field a name.');
   const k = FMT_LABEL[b.fmt] ? b.fmt : 'text';
   const out = { name, formatKind: k, required: !!b.required };
+  if (b.unique) out.unique = true; /* R6: no two records may share a value; profiling flags duplicates */
   const lenMode = HAS_LEN[k] ? (b.lenMode || 'any') : 'any';
   let len = null, lo = null, hi = null;
   if (lenMode === 'exact') { len = numOr(b.len); if (len == null || isNaN(len) || len < 1 || !Number.isInteger(len)) { errs.push('Exact length must be a whole number of 1 or more.'); len = null; } }
@@ -209,7 +211,7 @@ function builderState(f) {
   const lenMode = f.length != null && f.length !== '' ? 'exact' : HAS_LEN[k] && (f.min != null || f.max != null) ? 'range' : 'any';
   const st = { name: f.name || '', fmt: k, lenMode, len: f.length != null ? f.length : '', lenMin: HAS_LEN[k] && f.min != null ? f.min : '', lenMax: HAS_LEN[k] && f.max != null ? f.max : '',
     amtMin: k === 'money' && f.min != null ? f.min : '', amtMax: k === 'money' && f.max != null ? f.max : '', values: (f.values || []).join(', '),
-    required: !!f.required || /(^|·)\s*required\s*($|·)/i.test(String(f.rule || '')), matches, rule, pattern: f.pattern || '', customPattern: !!f.patternCustom };
+    required: !!f.required || /(^|·)\s*required\s*($|·)/i.test(String(f.rule || '')), unique: !!f.unique, matches, rule, pattern: f.pattern || '', customPattern: !!f.patternCustom };
   /* a pattern saved before the builder that the choices would not regenerate is kept as a hand-written one */
   if (st.pattern && !st.customPattern && buildField(Object.assign({}, st, { name: st.name || 'x', values: st.values || 'x', customPattern: false })).field.pattern !== st.pattern) st.customPattern = true;
   return st;
@@ -218,7 +220,7 @@ function readBuilder(root) {
   const v = n => { const el = root.querySelector(`[name="${n}"]`); return el ? el.value : ''; };
   const ck = n => { const el = root.querySelector(`[name="${n}"]:checked`); return el ? el.value : ''; };
   return { name: v('name'), fmt: ck('fmt') || 'text', lenMode: ck('lenMode') || 'any', len: v('len'), lenMin: v('lenMin'), lenMax: v('lenMax'), amtMin: v('amtMin'), amtMax: v('amtMax'),
-    values: v('values'), required: !!root.querySelector('[name="required"]:checked'), matches: v('matches'), rule: v('rule'), pattern: v('pattern'), customPattern: root.querySelector('[data-adv]').dataset.custom === '1' };
+    values: v('values'), required: !!root.querySelector('[name="required"]:checked'), unique: !!root.querySelector('[name="unique"]:checked'), matches: v('matches'), rule: v('rule'), pattern: v('pattern'), customPattern: root.querySelector('[data-adv]').dataset.custom === '1' };
 }
 async function fieldModal(f, siblings, st, err) {
   st = st || builderState(f);
@@ -235,6 +237,7 @@ async function fieldModal(f, siblings, st, err) {
       <div class="frow" data-sec="money"><div class="field"><label>Smallest amount</label><input name="amtMin" inputmode="decimal" value="${esc(st.amtMin)}" placeholder="e.g. 0" /></div><div class="field"><label>Largest amount</label><input name="amtMax" inputmode="decimal" value="${esc(st.amtMax)}" placeholder="e.g. 25000" /></div></div>
       <div class="field" data-sec="list"><label>Allowed values (separate with commas)</label><input name="values" value="${esc(st.values)}" placeholder="e.g. Checking, Savings" /></div>
       <label class="d-check"><input type="checkbox" name="required" value="yes" ${st.required ? 'checked' : ''} /> Required: it can never be left empty</label>
+      <label class="d-check"><input type="checkbox" name="unique" value="yes" ${st.unique ? 'checked' : ''} /> Unique: no two records share a value (profiling flags duplicates)</label>
       <div class="frow"><div class="field"><label>Must match another field</label><select name="matches"><option value="">No</option>${[...new Set([...others, ...(st.matches && !others.includes(st.matches) ? [st.matches] : [])])].map(n => `<option value="${esc(n)}" ${n === st.matches ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
         <div class="field"><label>Other rule (plain words)</label><input name="rule" value="${esc(st.rule)}" placeholder="e.g. Must be before the due date" /></div></div>
       <div class="d-specsum" data-specsum aria-live="polite"></div>
@@ -257,7 +260,7 @@ async function fieldModal(f, siblings, st, err) {
     m.querySelector('[data-advnote]').innerHTML = adv.dataset.custom === '1' ? 'You edited this pattern by hand, so it no longer follows the choices above. <button type="button" class="btn sm" data-advreset>Use the generated pattern</button>' : 'Updates as you change the choices above. Edit it only if you need something the choices cannot say.';
     const rb = m.querySelector('[data-advreset]'); if (rb) rb.onclick = () => { adv.dataset.custom = ''; sync(); };
     const full = buildField(b).field;
-    m.querySelector('[data-specsum]').innerHTML = `<b>Reads as:</b> ${esc(specSummary(full))}${full.required ? ' · required' : ''}${(full.values || []).length ? ' · one of ' + esc(full.values.join(' / ')) : ''}${full.matches ? ' · must match ' + esc(full.matches) : ''}`;
+    m.querySelector('[data-specsum]').innerHTML = `<b>Reads as:</b> ${esc(specSummary(full))}${full.required ? ' · required' : ''}${full.unique ? ' · unique' : ''}${(full.values || []).length ? ' · one of ' + esc(full.values.join(' / ')) : ''}${full.matches ? ' · must match ' + esc(full.matches) : ''}`;
   };
   m.addEventListener('change', e => { if (e.target !== patEl) sync(); });
   m.addEventListener('input', e => {
@@ -293,7 +296,7 @@ async function confirmLive(did, cur, save) {
         <div class="field"><label id="d-ev-l">Evidence</label><div class="d-evs" role="radiogroup" aria-labelledby="d-ev-l">
           ${opt('profile', !prof || blk.length, `<b>Latest profile</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest profile · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} drift issue${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : '<span class="pass">matches the specification</span>'}
             ${blk.length ? `<ul class="d-blklist">${blk.slice(0, 5).map(d => `<li>${esc(d.field)}: ${esc(plainDetail(d.detail))}</li>`).join('')}</ul><div class="fail">Blocked: fix the blocking drift and profile again, or use other evidence.</div>` : drift.length ? '<div class="hint">Only columns with no spec differ; they do not block.</div>' : ''}` : '<span class="hint">No profile yet. Profile a real extract in Testing to use this.</span>'}</div>`)}
-          ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated in-tenant probe of the recorded source${x.source ? ` (${esc(x.source)})` : ''}. It must pass.</div>
+          ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated in-tenant probe of <b data-probe-target>${esc(vals.source != null ? vals.source : (x.liveSource || x.source || '')) || 'the source above'}</b>. It must pass.</div>
             <div class="d-checkrow"><button type="button" class="btn sm" data-run-check>Run connection check</button><span data-check-result aria-live="polite" class="${lastCheck ? (lastCheck.ok ? 'pass' : 'fail') : 'hint'}">${lastCheck ? `${lastCheck.ok ? '✓ Passed' : '✗ Failed'} ${esc(fmtTime(lastCheck.at))}: ${esc(lastCheck.detail || '')}` : 'Not run yet.'}</span></div>`)}
           ${opt('attested', false, `<b>Evidence link and note</b> <span class="badge d-ev d-ev-weak">Attested · weaker</span><div class="hint">The gate shows attested evidence as a warning.</div>
             <div class="frow d-evattest"><div class="field"><label>Evidence link</label><input name="evlink" value="${esc(vals.evlink || '')}" placeholder="https://…" inputmode="url" /></div><div class="field"><label>Note</label><input name="evnote" value="${esc(vals.evnote || '')}" placeholder="What the link shows" /></div></div>`)}
@@ -302,17 +305,26 @@ async function confirmLive(did, cur, save) {
     });
     const m = [...document.querySelectorAll('.overlay .modal')].pop();
     const rc = m.querySelector('[data-run-check]'), out = m.querySelector('[data-check-result]');
+    /* R6: the probe targets whatever source is typed; a check run against another source no longer counts */
+    const srcEl = m.querySelector('[name=source]'), tgt = m.querySelector('[data-probe-target]');
+    srcEl.addEventListener('input', () => {
+      tgt.textContent = srcEl.value.trim() || 'the source above';
+      const ran = check || cur().check;
+      if (ran && ran.source && ran.source !== srcEl.value.trim()) { out.className = 'hint'; out.textContent = `The last check probed ${ran.source}. Run it again for this source.`; }
+    });
     /* typing into an option's inputs selects that option */
     m.querySelectorAll('[data-evopt] input:not([type=radio])').forEach(i => i.addEventListener('focus', () => { const r = i.closest('[data-evopt]').querySelector('input[type=radio]'); if (r && !r.disabled) r.checked = true; }));
     rc.onclick = async () => {
       const radio = m.querySelector('input[name=ev][value=check]'); radio.checked = true;
       rc.disabled = true; out.className = 'hint'; out.textContent = 'Running…';
       try {
-        const typed = (m.querySelector('[name=source]').value || '').trim();
+        const typed = (srcEl.value || '').trim();
+        if (!typed) { out.className = 'fail'; out.textContent = 'Name the live source first: the check probes it.'; rc.disabled = false; return; }
         const now = cur();
-        if (!now.source && typed) { await store.save('dataElement', did, Object.assign(clone(now), { source: typed }), `Set the source of '${now.name}' to ${typed}`); }
+        /* the probe reads the element's recorded source, so a changed source is saved first (and the header follows) */
+        if (typed !== (now.source || '')) { await store.save('dataElement', did, Object.assign(clone(now), { source: typed }), `Changed the source of '${now.name}' to ${typed}`); }
         const r = await store.api('/check/' + encodeURIComponent(did));
-        check = { ok: !!r.ok, at: r.at || new Date().toISOString(), detail: r.detail || '', by: store.state.me };
+        check = { ok: !!r.ok, at: r.at || new Date().toISOString(), detail: r.detail || '', by: store.state.me, source: typed };
         /* mirror what the server stored, so a later save keeps it */
         const doc = (store.state.docs.dataElement || []).find(d => d.id === did); if (doc) doc.data.check = check;
         out.className = check.ok ? 'pass' : 'fail';
@@ -334,6 +346,7 @@ async function confirmLive(did, cur, save) {
       const c = check || cur().check;
       if (!c) { err = 'Run the connection check first.'; continue; }
       if (!c.ok) { err = 'The connection check did not pass, so it cannot be the evidence.'; continue; }
+      if (c.source && c.source !== vals.source) { err = `The last check probed ${c.source}, not ${vals.source}. Run the check again.`; check = null; continue; }
       evidence = { type: 'check', ref: c.at, at, by };
     } else if (vals.ev === 'attested') {
       if (!/^https?:\/\/\S+\.\S+/i.test(vals.evlink)) { err = 'Add an evidence link that starts with https://'; continue; }
@@ -343,7 +356,7 @@ async function confirmLive(did, cur, save) {
     const d = clone(cur());
     if (check) d.check = check;
     Object.assign(d, { avail: 'live', liveConfirmedBy: by, liveConfirmedAt: at, liveSource: vals.source, liveEvidence: evidence });
-    if (!d.source) d.source = vals.source;
+    d.source = vals.source; /* the confirmed live source is the element's source: the header shows it */
     await save(d, `Confirmed '${d.name}' live (source: ${vals.source}; evidence: ${EVID[evidence.type].long.toLowerCase()})`);
     return;
   }

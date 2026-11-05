@@ -63,7 +63,7 @@ test('POST /workspaces creates a workspace; state has every doc type and people'
   assert.equal(s.body.today, new Date().toISOString().slice(0, 10));
   assert.equal(s.body.docs.dataElement.length, 8);
   assert.equal(s.body.docs.process.length, 3);
-  assert.equal(s.body.docs.workItem.length, 15);
+  assert.equal(s.body.docs.workItem.length, 17);
 });
 
 test('workspace creation is limited to 5 per IP hash per day', async () => {
@@ -106,7 +106,7 @@ test('PUT/DELETE doc persist and append events (newest first)', async () => {
   st = await state(ws);
   assert.equal(find(st, 'workItem', 'W6').data.status, 'prog');
   assert.equal(find(st, 'workItem', 'W11'), undefined);
-  assert.equal(st.docs.workItem.length, 15); /* 15 seeded - W11 + W99 */
+  assert.equal(st.docs.workItem.length, 17); /* 17 seeded - W11 + W99 */
 
   r = await call('GET', `ws/${ws}/events`, null, { ref: 'workItem:W99' });
   assert.equal(r.status, 200);
@@ -277,7 +277,9 @@ test('seed: relative dates, edge-case CSVs, fictional data', () => {
   assert.equal(ia.tobe.find(n => n.type === 'parallel').branches.length, 2);
   assert.ok(ia.tobe.some(n => n.sla && n.system));
   assert.ok(s.docs.project.find(d => d.id === 'access-review-automation').data.cutover.rollbackOwner);
-  assert.equal(s.docs.project.find(d => d.id === 'vendor-modernization').data.cutover, undefined);
+  /* R6: vendor-modernization has a runbook but no rollback plan yet, so the cutover check stays open */
+  const vmc = s.docs.project.find(d => d.id === 'vendor-modernization').data.cutover;
+  assert.ok(vmc.tasks.length >= 3 && !vmc.rollbackOwner && !vmc.rollbackPlan);
   assert.ok(s.docs.risk.every(d => Array.isArray(d.data.workItems) && d.data.workItems.length));
   assert.ok(s.docs.approval.every(d => d.data.snapshotAt));
 });
@@ -520,13 +522,15 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
   assert.ok(!ev.some(e => /set live at go-live/.test(e.summary)));
 });
 
-test('R3 status report: RAG agrees with the headline; risk reconciliation', async () => {
+test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', async () => {
   const ws = await newWs();
   let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
-  assert.equal(r.body.rag, 'red');
-  assert.equal(r.body.facts.rag.status, 'red');
-  assert.match(r.body.headline, /^Red: /);
-  assert.ok(!/on track/i.test(r.body.headline));
+  /* R6: a late item whose finish still meets the target is Amber, never Red */
+  assert.ok(r.body.facts.atRisk.some(x => x.daysPastDue > 0), 'seed has a late item');
+  assert.ok(r.body.facts.stats.finish <= r.body.facts.project.target, 'finish meets target');
+  assert.equal(r.body.rag, 'amber');
+  assert.equal(r.body.facts.rag.status, 'amber');
+  assert.match(r.body.headline, /^Amber: /);
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'green');
   assert.match(r.body.headline, /^Green: .*on track/);
@@ -539,7 +543,13 @@ test('R3 status report: RAG agrees with the headline; risk reconciliation', asyn
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'amber');
   assert.match(r.body.headline, /^Amber: /);
-  assert.ok(/buffer/.test(r.body.summary));
+  if (!(engine && engine.projectHealth)) assert.ok(/buffer/.test(r.body.summary));
+  /* R6: Red only when the forecast finish is after the target */
+  const before = new Date(Date.parse(finish + 'T12:00:00Z') - 2 * 86400000).toISOString().slice(0, 10);
+  await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target: before }) });
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
+  assert.equal(r.body.rag, 'red');
+  assert.match(r.body.headline, /^Red: .*off track/);
   /* risk reconciliation: R1 links W2+W3; finish both */
   for (const id of ['W2', 'W3']) {
     const w = find(st, 'workItem', id).data;
@@ -562,8 +572,9 @@ test('R3 AI path: a headline that contradicts the RAG is corrected (mocked Azure
       headline: 'Green: everything on track (W6 fine)', summary: 'All good with D2.', highlights: ['W1 done'], risks: [], asks: [] }) } }] }) }; };
     const r = await ai.run('status-report', { projectId: 'vendor-modernization' }, st.docs, st.today);
     assert.equal(r.body.source, 'ai');
-    assert.equal(r.body.rag, 'red');
-    assert.match(r.body.headline, /^Red: /);
+    assert.notEqual(r.body.rag, 'green');
+    assert.equal(r.body.rag, r.body.facts.rag.status);
+    assert.match(r.body.headline, new RegExp('^' + { red: 'Red', amber: 'Amber' }[r.body.rag] + ': '));
     assert.ok(!r.body.summary.includes('D2') && !r.body.highlights[0].includes('W1'), 'ids scrubbed from AI output');
     assert.ok(sentBody.messages[0].content.includes('rag status'));
     assertNoIds(JSON.parse(sentBody.messages[1].content), st.docs, 'facts sent to the model');
@@ -576,7 +587,7 @@ test('R3 AI path: a headline that contradicts the RAG is corrected (mocked Azure
 test('R3 event summaries use names, never ids', async () => {
   const ws = await newWs();
   let st = await state(ws);
-  await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, find(st, 'grant', 'G2').data, { status: 'approved', approvedBy: 'lp' }) });
+  await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, find(st, 'grant', 'G2').data, { status: 'approved', approvedBy: 'lp', approvedAt: new Date().toISOString(), expires: st.today }) });
   await call('PUT', `ws/${ws}/doc/testRun/TR7`, { actor: 'ps', data: { projectId: 'vendor-modernization', env: 'uat', at: '2026-11-04T15:00:00.000Z', by: 'ps', results: [] } });
   await call('PUT', `ws/${ws}/doc/workItem/W5`, { actor: 'ps', summary: 'Moved W5 after W4 and D8 review', data: find(st, 'workItem', 'W5').data });
   await call('DELETE', `ws/${ws}/doc/risk/R3`, { actor: 'ta' });
@@ -923,4 +934,261 @@ test('R5 runbook ticks: task owner may confirm own task without staling approval
   r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: edited });
   assert.equal(r.status, 200);
   assert.ok(r.body.doc.data.cutoverUpdatedAt > stamp);
+});
+
+/* ------------------------------ Round 6 ------------------------------ */
+const since = async (ws, at) => (await call('GET', `ws/${ws}/events`, null, { limit: '500' })).body.events.filter(e => e.at >= at).reverse();
+const strictlyIncreasing = evs => evs.every((e, i) => i === 0 || evs[i - 1].at < e.at);
+
+test('R6 audit order: go-live events are truthful and strictly chronological; a failed go-live writes one failure event', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  await readyAccessReview(ws);
+  /* failure first */
+  let r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true, stepUp: { at: new Date().toISOString() } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.failed, true);
+  assert.equal(r.body.release.stepUp.by, 'ta');
+  let evs = await since(ws, r.body.release.at);
+  assert.deepEqual(evs.map(e => e.action), ['golive-approved', 'pipeline-started', 'golive-failed', 'notify']);
+  assert.ok(strictlyIncreasing(evs), JSON.stringify(evs.map(e => e.at)));
+  assert.equal(evs.filter(e => /fail/i.test(e.action) || /failed/i.test(e.summary) && e.action !== 'notify').length, 1, 'exactly one failure event');
+  assert.equal(Date.parse(evs[1].at) - Date.parse(evs[0].at), 1, '+1 ms per step');
+  /* success */
+  await new Promise(res => setTimeout(res, 5));
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  evs = await since(ws, r.body.release.at);
+  assert.deepEqual(evs.map(e => e.action), ['golive-approved', 'pipeline-started', 'pipeline-succeeded', 'release', 'golive', 'sop-publish', 'expire', 'notify'],
+    'approval -> pipeline started -> pipeline result -> promotion -> SOP publish -> grants expired -> notifications');
+  assert.ok(strictlyIncreasing(evs));
+  evs.forEach((e, i) => { if (i) assert.equal(Date.parse(e.at) - Date.parse(evs[i - 1].at), 1); });
+  assert.equal(evs[6].ref, 'grant:G4');
+  assert.match(evs[0].summary, /approved by Tom Alvarez \(step-up verified\)/);
+  assertNoIds(evs.map(e => e.summary), (await state(ws)).docs, 'audit summaries');
+  /* the events endpoint (newest first) is exactly the reverse */
+  const newest = (await call('GET', `ws/${ws}/events`, null, { limit: '8' })).body.events;
+  assert.deepEqual(newest.map(e => e.action), evs.map(e => e.action).reverse());
+  const st = await state(ws);
+  assert.equal(find(st, 'project', 'access-review-automation').data.liveAt, evs[4].at);
+});
+
+test('R6 rollback runs a simulated pipeline: a failed rollback restores nothing; success is ordered', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  await readyAccessReview(ws);
+  let r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const goliveId = r.body.release.id;
+  await new Promise(res => setTimeout(res, 5));
+  /* failed rollback */
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta', reason: 'Reminder emails duplicated', simulateFailure: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.failed, true);
+  assert.equal(r.body.release.kind, 'rollback');
+  assert.equal(r.body.release.status, 'failed');
+  assert.equal(r.body.release.actions[0].status, 'simulated-failed');
+  let evs = await since(ws, r.body.release.at);
+  assert.deepEqual(evs.map(e => e.action), ['rollback-approved', 'pipeline-started', 'rollback-failed', 'notify']);
+  assert.ok(strictlyIncreasing(evs));
+  let st = await state(ws);
+  assert.equal(find(st, 'process', 'access-review').data.version, 2, 'nothing restored');
+  assert.equal(find(st, 'project', 'access-review-automation').data.status, 'live', 'still live');
+  assert.equal(find(st, 'release', goliveId).data.rolledBackBy, undefined);
+  assert.deepEqual(st.docs.notification.map(d => d.data).filter(n => n.ref === 'release:' + r.body.release.id).map(n => n.to), ['ta']);
+  /* successful rollback */
+  await new Promise(res => setTimeout(res, 5));
+  r = await call('POST', `ws/${ws}/rollback/access-review-automation`, { actor: 'ta', reason: 'Reminder emails duplicated' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.release.status, 'succeeded');
+  assert.equal(r.body.release.actions[0].type, 'pipeline');
+  evs = await since(ws, r.body.release.at);
+  assert.deepEqual(evs.map(e => e.action), ['rollback-approved', 'pipeline-started', 'pipeline-succeeded', 'rollback', 'sop-publish', 'rollback', 'notify'],
+    'rollback approved -> pipeline -> restore -> re-publish -> notifications');
+  assert.equal(evs[3].ref, 'process:access-review');
+  assert.equal(evs[5].ref, 'project:access-review-automation');
+  assert.ok(strictlyIncreasing(evs));
+  st = await state(ws);
+  assert.equal(find(st, 'process', 'access-review').data.version, 1);
+  assert.equal(find(st, 'release', goliveId).data.rolledBackBy, r.body.release.id);
+});
+
+test('R6 status report: projectHealth RAG, earned value, hypercare incidents', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
+  if (typeof engine.projectHealth === 'function') {
+    const h = engine.projectHealth(st.docs, 'vendor-modernization', st.today);
+    assert.equal(r.body.rag, h.rag);
+    assert.deepEqual(r.body.facts.rag.reasons, h.reasons.map(x => (typeof x === 'string' ? x : x.text || x.label)));
+    assert.equal(r.body.facts.rag.source, 'projectHealth');
+  }
+  const ev = r.body.facts.earnedValue;
+  assert.ok(ev && typeof ev.spi === 'number' && typeof ev.cpi === 'number' && ev.ac > 0, JSON.stringify(ev));
+  if (typeof engine.earnedValue === 'function') {
+    const e = engine.earnedValue(st.docs, 'vendor-modernization', st.today);
+    const k = Object.keys(e).find(x => x.toLowerCase() === 'spi');
+    assert.equal(ev.spi, Math.round(e[k] * 100) / 100);
+  }
+  assert.match(r.body.summary, /\(SPI\) \d+\.\d\d, cost performance \(CPI\) \d+\.\d\d/);
+  assert.ok(r.body.highlights.some(x => /^Earned value/.test(x)));
+  assert.equal(r.body.facts.hypercare, null, 'no hypercare before go-live');
+  /* live: hypercare days and incidents; an open sev-1 means "consider rollback" */
+  await readyAccessReview(ws);
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  st = await state(ws);
+  const proj = find(st, 'project', 'access-review-automation').data;
+  const incidents = [{ id: 'I1', title: 'Removal job revoked a manager by mistake', severity: 1, at: new Date().toISOString(), by: 'ps', status: 'open' },
+    { id: 'I2', title: 'Reminder email typo', severity: 4, at: new Date().toISOString(), by: 'dk', status: 'closed' }];
+  const put = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { incidents }) });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
+  const hc = r.body.facts.hypercare;
+  assert.equal(hc.owner, 'Priya Shah');
+  assert.equal(hc.days, 10);
+  assert.equal(hc.daysRemaining, 10);
+  assert.deepEqual(hc.open.map(i => i.title), ['Removal job revoked a manager by mistake'], 'closed incidents are not open');
+  assert.equal(hc.considerRollback, true);
+  assert.ok(r.body.risks.some(x => /Severity 1 incident "Removal job revoked a manager by mistake" is open: consider rollback/.test(x)));
+  assert.ok(r.body.asks.some(x => /roll back/.test(x)));
+  assert.match(r.body.summary, /Hypercare: 10 days left, owner Priya Shah; 1 open incident\./);
+});
+
+test('R6 SOP parser: no "()" titles; only document/record/field phrases are proposed, each with a stable key', () => {
+  const docs = seed('2026-11-04').docs;
+  const sop = [
+    '1. Receiving clerk records the delivery in the ERP',
+    '2. Finance approves the payment (if over $5,000)',
+    '3. AP clerk attaches the W-9 () and the bank statement',
+    '4. Keep a record of deliveries for the audit',
+    '5. Employee submits the expense report with receipts',
+    '6. Clerk enters the PO number and the employee ID (see policy',
+    '7. Manager reports the variance to Treasury',
+  ].join('\n');
+  const r = ai.sopRules(sop, docs);
+  const all = [];
+  const walk = ns => ns.forEach(n => { all.push(n); (n.subs || []).forEach(x => all.push(x)); (n.branches || []).forEach(b => walk(b.nodes)); });
+  walk(r.nodes);
+  for (const n of all) {
+    assert.ok(!/\(\s*\)/.test(n.title), `empty parentheses in "${n.title}"`);
+    assert.equal((n.title.match(/\(/g) || []).length, (n.title.match(/\)/g) || []).length, `unbalanced parentheses in "${n.title}"`);
+  }
+  assert.ok(all.some(n => n.title === 'Finance approves the payment'));
+  assert.ok(all.some(n => n.title === 'Amount over $5,000?'));
+  const names = r.newData.map(x => x.name);
+  assert.deepEqual(names.sort(), ['Bank statement', 'Employee ID', 'Expense report', 'PO number', 'Record of deliveries'].sort(), JSON.stringify(names));
+  assert.ok(!names.some(x => /clerk|records the|manager|reports the/i.test(x)), 'no role phrases');
+  /* stable keys; every proposal names the steps that need it, and those steps carry {key, name} */
+  const ids = new Set(all.filter(n => n.id).map(n => n.id));
+  for (const p of r.newData) {
+    assert.match(p.key, /^nd-[a-z0-9-]+$/);
+    assert.ok(p.steps.length && p.steps.every(id => ids.has(id)), p.name);
+    for (const id of p.steps) assert.ok(all.find(n => n.id === id).newData.some(x => x.key === p.key && x.name === p.name));
+  }
+  assert.equal(new Set(r.newData.map(x => x.key)).size, r.newData.length);
+  assert.deepEqual(ai.sopRules(sop, docs).newData.map(x => x.key), r.newData.map(x => x.key), 'deterministic keys');
+  /* the employee-vs-vendor cross-domain proposal keeps its document phrase */
+  const e = ai.sopRules("1. Accounts Payable pulls the employee's bank details from Workday", docs);
+  assert.deepEqual(e.newData.map(x => [x.key, x.name]), [['nd-employee-bank-details', 'Employee bank details']]);
+});
+
+test('R6 SOP AI path: model proposals are filtered to document phrases and keyed (mocked Azure OpenAI)', async () => {
+  const docs = seed('2026-11-04').docs;
+  const saved = global.fetch;
+  Object.assign(process.env, { AZURE_OPENAI_ENDPOINT: 'https://example.invalid', AZURE_OPENAI_KEY: 'k', AZURE_OPENAI_DEPLOYMENT: 'd' });
+  try {
+    global.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+      nodes: [{ type: 'trigger', title: 'Delivery arrives' }, { id: 'x1', type: 'step', title: 'Receiving clerk records the delivery ()', newData: ['Delivery receipt', 'Receiving clerk records'] }],
+      newData: [{ name: 'Receiving clerk records', reason: 'r' }, { name: 'Delivery receipt', reason: 'r' }, { name: 'Bank remittance details', reason: 'exists' }] }) } }] }) });
+    const r = await ai.run('sop-import', { text: '1. Receiving clerk records the delivery' }, docs, '2026-11-04');
+    assert.equal(r.body.source, 'ai');
+    assert.deepEqual(r.body.newData.map(x => [x.key, x.name, x.steps]), [['nd-delivery-receipt', 'Delivery receipt', ['x1']]]);
+    assert.equal(r.body.nodes[1].title, 'Receiving clerk records the delivery');
+    assert.deepEqual(r.body.nodes[1].newData, [{ key: 'nd-delivery-receipt', name: 'Delivery receipt' }]);
+  } finally {
+    global.fetch = saved;
+    ['AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_KEY', 'AZURE_OPENAI_DEPLOYMENT'].forEach(k => delete process.env[k]);
+  }
+});
+
+test('R6 seed: statuses, custom field, time, budget/program, day rates, new node types, unique fields, defects, runbook', () => {
+  const s = seed('2026-11-04');
+  const prj = id => s.docs.project.find(d => d.id === id).data;
+  const vm = prj('vendor-modernization'), ar = prj('access-review-automation');
+  for (const p of [vm, ar]) {
+    assert.deepEqual(p.statuses.map(x => x.name), ['Not started', 'In progress', 'In review', 'Done']);
+    assert.ok(p.statuses.every(x => ['idle', 'prog', 'done'].includes(x.maps)));
+    assert.ok(p.budget.planned > 0 && p.program);
+  }
+  assert.deepEqual(vm.fields, [{ key: 'riskArea', label: 'Risk area', type: 'select', options: ['Compliance', 'Banking', 'Integration', 'Process'] }]);
+  assert.equal(ar.fields, undefined);
+  const work = s.docs.workItem.map(d => d.data);
+  assert.ok(work.filter(w => w.projectId === 'vendor-modernization').every(w => vm.fields[0].options.includes(w.custom.riskArea)));
+  const logged = work.filter(w => ['done', 'prog'].includes(w.status));
+  assert.ok(logged.length >= 8 && logged.every(w => w.time.length && w.time.every(t => t.by && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && t.hours > 0 && t.hours <= 8)));
+  assert.ok(logged.every(w => w.time.every(t => t.date >= w.start && t.date < '2026-11-04' && ![0, 6].includes(new Date(t.date + 'T12:00:00Z').getUTCDay()))));
+  assert.ok(work.filter(w => w.status === 'idle').every(w => !w.time));
+  assert.ok(s.people.every(p => p.dayRate > 0));
+  /* new node types in vendor-onboarding's to-be */
+  const vo = s.docs.process.find(d => d.id === 'vendor-onboarding').data;
+  const sp = vo.tobe.find(n => n.type === 'subprocess');
+  assert.ok(sp && s.docs.process.some(d => d.id === sp.calls) && sp.calls === 'invoice-approval' && sp.owner);
+  const wait = vo.tobe.find(n => n.type === 'wait');
+  assert.equal(wait.title, 'Wait up to 2 business days for vendor documents');
+  const msg = vo.tobe.find(n => n.type === 'message');
+  assert.deepEqual([msg.title, msg.direction, msg.party], ['Notify vendor of activation', 'send', 'Vendor']);
+  assert.ok([sp, wait, msg].every(n => n.owner));
+  /* unique fields */
+  const field = (did, name) => s.docs.dataElement.find(d => d.id === did).data.fields.find(f => f.name === name);
+  assert.equal(field('D1', 'Tax ID (EIN)').unique, true);
+  assert.equal(field('D2', 'Account number').unique, true);
+  /* defects */
+  const defects = work.filter(w => w.kind === 'defect');
+  assert.ok(defects.length >= 2);
+  for (const d of defects) {
+    assert.ok([1, 2, 3, 4].includes(d.severity) && d.priority && ['dev', 'sit', 'uat', 'prod-verify'].includes(d.env) && d.repro.length > 20);
+    assert.ok(['new', 'triaged', 'in progress', 'fixed', 'verified', 'closed'].includes(d.defectStatus));
+  }
+  assert.ok(defects.some(d => d.status !== 'done' && d.testRef && d.testRef.caseId === 'TC4'));
+  /* runbook */
+  assert.ok(vm.cutover.tasks.length >= 3);
+  assert.ok(vm.cutover.tasks.every(t => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(t.plannedStart) && t.durationMins > 0 && t.owner && t.done === false));
+  assert.ok(vm.cutover.tasks.some(t => t.gonogo));
+  /* grants: the time box starts at approval */
+  const g = id => s.docs.grant.find(d => d.id === id).data;
+  assert.equal(g('G2').status, 'requested');
+  assert.equal(g('G2').expires, undefined, 'no countdown on a requested grant');
+  for (const x of s.docs.grant.map(d => d.data).filter(x => x.approvedAt)) assert.equal(fn._internal.grantExpiryError(Object.assign({}, x, { status: 'active' })), null, x.id);
+  assert.ok(JSON.stringify(s.docs).length < 400000);
+});
+
+test('R6 grants: the API never starts a countdown on requested grants; approved expiry is at most 30 days from approval', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const g2 = find(st, 'grant', 'G2').data;
+  const now = new Date().toISOString();
+  const plus = n => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+  /* approve without an expiry: refused */
+  let r = await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, g2, { status: 'active', approvedBy: 'lp', approvedAt: now }) });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /30 days from approval/);
+  /* 31 days after approval: refused; 30: accepted */
+  r = await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, g2, { status: 'active', approvedBy: 'lp', approvedAt: now, expires: plus(31) }) });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /at most 30 days after approval/);
+  /* approval time from the log when approvedAt is missing */
+  r = await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, g2, { status: 'active', approvedBy: 'lp', expires: plus(29),
+    log: g2.log.concat([{ at: new Date(Date.now() - 5 * 86400000).toISOString(), by: 'lp', action: 'approved (step-up verified); access active' }]) }) });
+  assert.equal(r.status, 400, 'log approval 5 days ago + 29 days > 30');
+  r = await call('PUT', `ws/${ws}/doc/grant/G2`, { actor: 'lp', data: Object.assign({}, g2, { status: 'active', approvedBy: 'lp', approvedAt: now, expires: plus(30) }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  /* a new requested grant is stored as sent: no expiry invented */
+  r = await call('PUT', `ws/${ws}/doc/grant/G9`, { actor: 'dk', data: { projectId: 'access-review-automation', dataId: 'D7', env: 'uat', access: 'read', reason: 'UAT', requestedBy: 'dk', status: 'requested', log: [] } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.doc.data.expires, undefined);
+  /* the gate refuses go-live while a request is open (it never ages into access) */
+  await readyAccessReview(ws);
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
+  assert.equal(r.status, 409);
+  st = await state(ws);
+  assert.equal(find(st, 'grant', 'G9').data.expires, undefined);
 });

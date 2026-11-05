@@ -26,6 +26,7 @@ const rid = x => x.caseId || x.scriptId;
 const ENVS = ['dev', 'sit', 'uat', 'prod-verify'];
 const ENV_TXT = { dev: 'Dev', sit: 'SIT', uat: 'UAT', 'prod-verify': 'Prod verify' };
 const envTxt = e => ENV_TXT[e] || String(e || '').toUpperCase();
+const ENV_TIP = { dev: 'Development: where the build is made', sit: 'SIT (system integration testing): the systems tested together', uat: 'UAT (user acceptance testing): the people who run the process confirm it works', 'prod-verify': 'A check in production right after go-live' };
 const envOpts = v => ENVS.map(e => `<option value="${e}" ${e === v ? 'selected' : ''}>${ENV_TXT[e]}</option>`).join('');
 const scriptEnv = e => e !== 'dev'; /* scripts and scenarios run in SIT, UAT and prod verify */
 /* R5: case labels TC<n> (per element, stable by creation) everywhere; raw ids never shown */
@@ -168,9 +169,10 @@ export function render(params) {
       <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch; end-to-end scenarios walk each whole path. Environments: Dev, SIT, UAT and Prod verify. Coverage counts each item's latest result across every run in that environment.</p></div>
     <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Dev coverage · latest per case', devCov, 'dev')}${covKpi('UAT coverage · latest per item', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
     ${tc ? `<div class="ts-strip ${tc.pass ? 'pass' : 'fail'}" data-tests-check="${tc.pass ? 'pass' : 'fail'}"><span class="rl-ic ${tc.pass ? 'pass' : 'fail'}">${tc.pass ? '✓' : '✕'}</span>
-      <div><b>Go-live check: ${esc(tc.label)}</b> — ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}`;
+      <div><b>Go-live check: ${esc(tc.label)}</b> — ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}
+    ${traceStrip(prj, des)}`;
 
-  const projectCards = `<div class="ts-proj">${coverageCard(prj, des, runs, sc)}${cyclesCard(prj, des, sc)}${scriptsCard(prj, sc)}${scenariosCard(prj, scn)}${runsCard(prj, des, runs, caseIds, sc)}
+  const projectCards = `<div class="ts-proj">${coverageCard(prj, des, runs, sc)}${cyclesCard(prj, des, sc)}${scriptsCard(prj, sc)}${scenariosCard(prj, scn)}${runsCard(prj, des, runs, caseIds, sc)}${defectsCard(prj)}
     <div class="card"><h3>Test history</h3><div data-ts-history><div class="hint">Loading…</div></div></div></div>`;
 
   if (!des.length) return header + `<div class="card" style="margin-top:16px"><div class="empty">This project's processes use no data elements yet. Add data to the to-be steps to test it.</div></div>` + projectCards;
@@ -182,6 +184,32 @@ export function render(params) {
 
   return header + `<div class="ts-layout">${list}<div class="ts-main">${profileCard(de)}${casesCard(de)}${discoveredCard(de)}
     <div class="two ts-act"><div class="card"><h3>Comments</h3>${commentsPanel('dataElement:' + de.id)}</div><div class="card"><h3>History · ${esc(de.name)}</h3>${historyPanel('dataElement:' + de.id)}</div></div></div></div>` + projectCards;
+}
+
+/* R6 traceability headline: UAT done/total next to spec-field coverage, from E().testCoverage (local fallback).
+   Uncovered fields are listed per data element with a one-press "Generate". */
+function traceOf(prj, des) {
+  const e = E(); let tc = null;
+  if (e && e.testCoverage) { try { tc = e.testCoverage(store.state.docs, prj.id, store.state.today); } catch (err) { tc = null; } }
+  const by = latestBy(prj.id, 'uat'); const items = uatItems(prj);
+  const uatL = { done: items.filter(x => by[x.id] && by[x.id].outcome === 'pass').length, total: items.length };
+  const unc = []; let fTotal = 0;
+  des.forEach(d => { fTotal += (d.fields || []).length; const fc = fieldCoverage(d); fc.missing.concat(fc.customOnly).forEach(f => unc.push({ dataId: d.id, field: f })); });
+  const pick = (o, ...ks) => { for (const k of ks) { const v = k.split('.').reduce((a, x) => a == null ? a : a[x], o); if (v != null) return v; } return null; };
+  const uat = tc ? { done: pick(tc, 'uat.done', 'uat.passed', 'uatDone', 'uat.pass') ?? uatL.done, total: pick(tc, 'uat.total', 'uatTotal') ?? uatL.total } : uatL;
+  const engUnc = tc && pick(tc, 'fields.uncovered', 'uncoveredFields', 'uncovered');
+  const uncovered = Array.isArray(engUnc) ? engUnc.map(x => typeof x === 'string' ? { dataId: '', field: x } : { dataId: x.dataId || x.data || '', field: x.field || x.name || '' }) : unc;
+  const total = tc ? (pick(tc, 'fields.total', 'fieldsTotal', 'specFields') ?? fTotal) : fTotal;
+  return { uat, fields: { total, uncovered, covered: Math.max(0, total - uncovered.length) }, engine: !!tc };
+}
+function traceStrip(prj, des) {
+  const t = traceOf(prj, des);
+  const u = t.uat, f = t.fields;
+  const byDe = new Map(); f.uncovered.forEach(x => { if (!byDe.has(x.dataId)) byDe.set(x.dataId, []); byDe.get(x.dataId).push(x.field); });
+  const full = u.total && u.done === u.total;
+  return `<div class="ts-trace" data-trace><div class="ts-trace-k"><span class="ts-trace-n ${full ? 'pass' : 'fail'}" data-trace-uat="${u.done}/${u.total}"><b>UAT ${u.done}/${u.total}</b><small title="User acceptance testing: data cases, UAT scripts and adopted end-to-end scenarios whose latest UAT result passed">cases, scripts and scenarios passed in UAT</small></span>
+      <span class="ts-trace-n ${f.uncovered.length ? 'fail' : 'pass'}" data-trace-fields="${f.uncovered.length}"><b>${f.uncovered.length ? `${f.uncovered.length} spec field${f.uncovered.length === 1 ? '' : 's'} without a case` : `All ${f.total} spec fields covered`}</b><small>${f.covered}/${f.total} fields have a spec- or profile-based case</small></span></div>
+    ${f.uncovered.length ? `<div class="ts-trace-l">${[...byDe.entries()].map(([did, fs]) => { const d = store.get('dataElement', did); return `<div class="ts-trace-r" data-trace-de="${esc(did)}"><span><b>${esc(d ? d.name : 'Data')}</b> · ${esc(fs.join(', '))}</span>${d ? `<button class="btn sm" data-gen-de="${esc(did)}">Generate</button>` : ''}</div>`; }).join('')}</div>` : ''}</div>`;
 }
 
 const rowsOf = prof => prof ? (prof.rows != null ? prof.rows : prof.rowCount != null ? prof.rowCount : Math.max(0, ...(prof.columns || []).map(c => (c.nulls || 0) + (c.nonNull || 0)))) : 0;
@@ -249,7 +277,7 @@ function casesCard(de) {
   const unassigned = all.filter(c => !c.tester).length;
   const noSpec = !(de.fields || []).length;
   return `<div class="card" id="cases"><h3>Test cases<span class="n">${all.length}</span></h3>
-    <div class="ts-prof-tools"><button class="btn sm primary" data-gen ${noSpec && !latestProfile(de.id) ? 'disabled title="Add a spec or a profile first"' : ''}>Generate test cases</button><button class="btn sm" data-add-case>Add custom case</button>
+    <div class="ts-prof-tools">${ui.genBusy && ui.genBusy[de.id] ? '<button class="btn sm primary" data-gen data-gen-busy disabled>Saving generated cases…</button>' : `<button class="btn sm primary" data-gen ${noSpec && !latestProfile(de.id) ? 'disabled title="Add a spec or a profile first"' : ''}>Generate test cases</button>`}<button class="btn sm" data-add-case>Add custom case</button>
       <span class="hint">${noSpec ? 'No spec yet: add custom cases by field name, or write the spec on the data page.' : `Generated from the spec${latestProfile(de.id) ? ' and the latest profile' : ''}. Duplicates are skipped.`}</span></div>
     ${fc.missing.length || fc.customOnly.length ? fieldCoverageNote(fc) : (de.fields || []).length ? `<div class="ts-ok" data-fields-covered>Every spec field (${(de.fields || []).length}) has at least one spec- or profile-based case.</div>` : ''}
     ${all.length ? `<div class="ts-filters" role="group" aria-label="Filter by origin">${[['all', 'All', all.length], ['spec', 'Spec', n('spec')], ['profile', 'Profile', n('profile')], ['user', 'Custom', n('user')]].map(([k, l, c]) => `<button class="ts-fb ${ui.origin === k ? 'on' : ''}" data-origin="${k}" aria-pressed="${ui.origin === k}">${l} <b>${c}</b></button>`).join('')}
@@ -382,7 +410,7 @@ function coverageCard(prj, des, runs, sc) {
   return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n">${gaps ? `${gaps} uncovered` : 'all covered'}</span></h3>
     <div class="hint" style="margin-bottom:8px">Rows are the project's data elements, to-be steps and adopted end-to-end scenarios. Red rows have a coverage gap: every spec field needs a case generated from the spec or profile (custom-only fields don't count), and every new or changed step needs a script. Each cell is the latest result per item across every run in that environment.</div>
     ${skipped || noEv.size ? `<div class="ts-warn" data-cov-notes>${skipped ? `<span data-skipped-count="${skipped}">${skipped} skipped (JUnit &lt;skipped/&gt;, counted as not run)</span>` : ''}${skipped && noEv.size ? ' · ' : ''}${noEv.size ? `<span data-noev-count="${noEv.size}">${noEv.size} script or scenario pass${noEv.size === 1 ? '' : 'es'} without evidence (don't count)</span>` : ''}</div>` : ''}
-    <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step / scenario</th><th>Cases / scripts</th>${envs.map(env => `<th>${esc(envTxt(env))} (latest)</th>`).join('')}<th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;
+    <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step / scenario</th><th>Cases / scripts</th>${envs.map(env => `<th title="${esc(ENV_TIP[env] || '')}">${esc(envTxt(env))} (latest)</th>`).join('')}<th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;
 }
 
 /* ---------- planned test cycles (R4): project.testCycles = [{id, name, env, start, end, testers:[personId]}]; runs carry cycleId ---------- */
@@ -455,6 +483,41 @@ function runsCard(prj, des, runs, caseIds, sc) {
     }).join('') : '<div class="empty">No runs recorded yet.</div>'}</div>`;
 }
 
+function defectsCard(prj) {
+  const all = store.list('workItem', w => w.projectId === prj.id && w.kind === 'defect');
+  const st = all.map(w => ({ w, s: dState(w) }));
+  const order = x => (x.s === 'closed' ? 10 : 0) + (+x.w.severity || 3);
+  st.sort((a, b) => order(a) - order(b));
+  const open = st.filter(x => x.s !== 'closed').length;
+  const counts = DSTATES.map(k => [k, st.filter(x => x.s === k).length]).filter(x => x[1]);
+  return `<div class="card" id="defects"><h3>Defects<span class="n">${open} open · ${all.length}</span></h3>
+    <div class="hint" style="margin-bottom:6px">Lifecycle: new → triaged → in progress → fixed → <b>verified</b> (automatic when a retest of the failing item passes) → closed. Owner: the step owner, or the data owner for a data case.</div>
+    ${counts.length ? `<div class="ts-dsum">${counts.map(([k, n]) => badge(`${n} ${dsTxt(k)}`, DS_CLS[k])).join(' ')}</div>` : ''}
+    ${st.map(({ w, s: ds }) => { const nx = NEXT[ds]; const can = canWorkDefect(prj, w);
+      return `<div class="ts-def ${ds === 'closed' ? 'closed' : ''}" data-defect-row="${esc(w.id)}" data-dstate="${esc(ds)}">
+        <div class="ts-def-h">${badge(dsTxt(ds), DS_CLS[ds])}<b>${esc(w.title)}</b></div>
+        <div class="ts-def-m">${w.severity ? `<span class="chip" data-sev="${esc(w.severity)}">Severity ${esc(SEVS[w.severity] || w.severity)}</span>` : ''}${w.priority ? `<span class="chip">Priority ${esc(w.priority)}</span>` : ''}${w.env ? `<span class="chip">${esc(envTxt(w.env))}</span>` : ''}<span class="hint">${av(w.owner)} ${esc(pname(w.owner))} · due ${esc(fmt(w.due))}</span></div>
+        ${w.repro ? `<details class="ts-repro"><summary>Steps to reproduce</summary><div class="ts-pre">${esc(w.repro)}</div></details>` : ''}
+        <div class="ts-script-a">${ds === 'closed' ? (w.fixNote ? `<span class="hint">${esc(w.fixNote)}</span>` : '') : can
+          ? `${nx ? `<button class="btn sm" data-dnext="${esc(w.id)}" data-to="${esc(nx[0])}">${esc(nx[1])}</button>` : ds === 'verified' ? `<span class="hint" data-verified>Verified by a passing retest${w.verifiedByRun ? ` (${esc(fmt((store.get('testRun', w.verifiedByRun) || {}).at))})` : ''}.</span>` : `<span class="hint" data-await-retest>Fixed: awaiting a passing retest to verify.</span>`}<button class="btn sm" data-dedit="${esc(w.id)}">Edit</button><button class="btn sm ${ds === 'verified' ? 'primary' : ''}" data-close-defect="${esc(w.id)}">Close…</button>`
+          : `<span class="hint" data-why>Only ${esc(pname(w.owner))} or the project owner can move this defect.</span>`}</div></div>`; }).join('') || '<div class="empty">No defects. A failing result offers to raise one.</div>'}</div>`;
+}
+async function editDefect(prj, wid) {
+  const w = store.get('workItem', wid); if (!w) return;
+  const p = modal({ title: 'Edit defect', body: `<div class="field"><label>Title</label><input name="title" value="${esc(w.title)}"></div>
+      <div class="frow"><div class="field"><label>Severity</label><select name="severity">${[1, 2, 3, 4].map(n => `<option value="${n}" ${+w.severity === n ? 'selected' : ''}>${SEVS[n]}</option>`).join('')}</select></div>
+        <div class="field"><label>Priority</label><select name="priority">${PRIOS.map(pr => `<option ${w.priority === pr ? 'selected' : ''}>${pr}</option>`).join('')}</select></div></div>
+      <div class="frow"><div class="field"><label>Environment</label><select name="env">${envOpts(w.env || 'uat')}</select></div><div class="field"><label>Owner</label>${testerSel('owner', w.owner, 'Owner').replace('<option value="">Unassigned</option>', '')}</div></div>
+      <div class="field"><label>Steps to reproduce</label><textarea name="repro">${esc(w.repro || '')}</textarea></div>`,
+    actions: [{ id: 'save', label: 'Save defect', primary: true }] });
+  guard(f => !String(f.title || '').trim() ? { msg: 'A defect needs a title.', field: 'title' } : null);
+  const r = await p; if (r.action !== 'save') return;
+  const f = r.form; const cur = store.get('workItem', wid) || w;
+  await store.save('workItem', wid, Object.assign({}, cur, { title: f.title.trim(), severity: +f.severity, priority: f.priority, env: f.env, repro: (f.repro || '').trim(), owner: f.owner || cur.owner, updatedAt: new Date().toISOString() }), `Edited defect “${f.title.trim()}” (severity ${f.severity}, ${f.priority})`);
+  if (f.owner && f.owner !== cur.owner) await store.notify([f.owner], `${pname(store.state.me)} assigned you a defect: ${f.title.trim()}`, 'workItem:' + wid);
+  toast('Defect saved');
+}
+
 function resultLabel(x, caseIdx, scIdx) {
   if (x.scriptId) { const s = scIdx[x.scriptId]; return s ? `<b>${s.id && String(s.id).startsWith('scn-') || (s.steps || []).some(y => y.step) && !s.given ? 'Scenario' : 'UAT'} · ${esc(s.title)}</b>` : '<b>A deleted UAT script</b>'; }
   const tcse = caseIdx[x.caseId]; const de = tcse && store.get('dataElement', tcse.dataId);
@@ -468,7 +531,7 @@ function resultRow(prj, r, x, caseIdx, scIdx, me) {
   const canClose = dfx && dfx.status !== 'done' && (me === dfx.owner || me === prj.owner);
   const ev = x.evidence ? (isUrl(x.evidence) ? `<a href="${esc(x.evidence.trim())}" target="_blank" rel="noopener noreferrer">${esc(x.evidence.trim())}</a>` : esc(x.evidence)) : '';
   return `<div class="ts-fail" data-result="${esc(rid(x))}">${badge(OUT_TXT(x.outcome), OUT_CLS[x.outcome])} <span>${resultLabel(x, caseIdx, scIdx)}${x.note ? ` — <i>${esc(x.note)}</i>` : ''}${(x.steps || []).filter(y => y.outcome && y.outcome !== 'pass').map(y => `<div class="ts-ev" data-step-out="${esc(y.n)}">Step ${esc(y.n)}: ${esc(y.outcome)}${y.note ? ' — ' + esc(y.note) : ''}</div>`).join('')}${ev ? `<div class="ts-ev">Evidence: ${ev}</div>` : ''}${needsEvidence(x, r) ? '<div class="ts-ev ts-noev" data-noev>No evidence: this pass does not count toward coverage.</div>' : ''}</span>
-    <span class="ts-fail-a">${dfx ? `<a class="chip ts-defect ${dfx.status === 'done' ? 'closed' : ''}" href="${link('/project/' + prj.id + '?mode=work')}" data-link data-defect="${esc(dfx.id)}">Defect · ${esc(pname(dfx.owner))} · ${dfx.status === 'done' ? 'closed' : 'due ' + esc(fmt(dfx.due))}</a>${canClose ? `<button class="btn sm" data-close-defect="${esc(dfx.id)}">Close defect</button>` : ''}`
+    <span class="ts-fail-a">${dfx ? `<a class="chip ts-defect ${dfx.status === 'done' ? 'closed' : ''}" href="${link('/project/' + prj.id + '?mode=work')}" data-link data-defect="${esc(dfx.id)}">Defect · ${esc(dsTxt(dState(dfx)))} · ${esc(pname(dfx.owner))}${dfx.status === 'done' ? '' : ' · due ' + esc(fmt(dfx.due))}</a>${canClose ? `<button class="btn sm" data-close-defect="${esc(dfx.id)}">Close defect</button>` : ''}`
       : x.outcome === 'fail' ? `<button class="btn sm" data-mk-defect="${key}">Create defect</button>` : ''}
     ${x.outcome === 'fail' && tcse ? (logged ? '<span class="hint">Logged as requirement</span>' : `<button class="btn sm" data-discover="${key}">Log as discovered requirement</button>`) : ''}</span></div>`;
 }
@@ -514,23 +577,7 @@ export function bind(root, params) {
   const pp = root.querySelector('[data-prof-paste]'); if (pp) pp.onclick = () => { const v = ui.paste; ui.paste = ''; runProfile(v, 'pasted data'); };
 
   const gen = root.querySelector('[data-gen]');
-  if (gen) gen.onclick = async () => {
-    const e = E(); if (!e || !e.generateTests) { toast('Test generator unavailable.'); return; }
-    if (ui.genBusy) return; ui.genBusy = true;
-    try {
-    const made = e.generateTests(de, latestProfile(de.id) || undefined) || [];
-    const key = c => [c.field, String(c.input), c.kind].join('\u0001');
-    const have = new Set(casesFor(de.id).map(key));
-    let n = 0;
-    for (const c of made) {
-      if (have.has(key(c))) continue; have.add(key(c));
-      const id = store.newId('tc');
-      await store.save('testCase', id, Object.assign({ note: '' }, c, { id, dataId: de.id, createdAt: new Date(Date.now() + n).toISOString() }), `Generated ${c.kind} test for ${de.name}.${c.field}`);
-      n++;
-    }
-    toast(n ? `Generated ${n} test case${n === 1 ? '' : 's'}` : 'No new test cases — all already exist');
-    } finally { ui.genBusy = false; }
-  };
+  if (gen) gen.onclick = () => generateFor(de);
   const add = root.querySelector('[data-add-case]'); if (add) add.onclick = () => editCase(de, null);
   root.querySelectorAll('[data-origin]').forEach(b => b.onclick = () => { ui.origin = b.dataset.origin; store.emit(); });
   const ba = root.querySelector('[data-bulk-assign]'); if (ba) ba.onclick = () => bulkAssign(de, root.querySelector('select[name=bulkTester]').value);
@@ -549,6 +596,7 @@ export function bind(root, params) {
 
 function bindProject(root, prj) {
   const rec = root.querySelector('[data-record]'); if (rec) rec.onclick = () => recordRun(prj);
+  root.querySelectorAll('[data-gen-de]').forEach(b => b.onclick = () => { const d = store.get('dataElement', b.dataset.genDe); if (d) generateFor(d); });
   root.querySelectorAll('[data-run-toggle]').forEach(h => { const t = () => { const id = h.dataset.runToggle; ui.runOpen.has(id) ? ui.runOpen.delete(id) : ui.runOpen.add(id); store.emit(); }; h.onclick = t; h.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
   root.querySelectorAll('[data-retest]').forEach(b => b.onclick = () => recordRun(prj, { retestEnv: b.dataset.retest }));
   const ac = root.querySelector('[data-add-cycle]'); if (ac) ac.onclick = () => editCycle(prj, null);
@@ -560,6 +608,8 @@ function bindProject(root, prj) {
   root.querySelectorAll('[data-discover]').forEach(b => b.onclick = e => { e.stopPropagation(); const [runId, caseId] = b.dataset.discover.split('|'); logDiscovered(runId, caseId); });
   root.querySelectorAll('[data-mk-defect]').forEach(b => b.onclick = async e => { e.stopPropagation(); const [runId, id] = b.dataset.mkDefect.split('|'); await createDefects(prj, runId, [id]); });
   root.querySelectorAll('[data-close-defect]').forEach(b => b.onclick = e => { e.stopPropagation(); closeDefect(prj, b.dataset.closeDefect); });
+  root.querySelectorAll('[data-dnext]').forEach(b => b.onclick = async () => { const w = store.get('workItem', b.dataset.dnext); if (!w) return; if (!canWorkDefect(prj, w)) { toast(`Only ${pname(w.owner)} or the project owner can move this defect.`); return; } await setDefectState(prj, w, b.dataset.to); toast(`Defect ${dsTxt(b.dataset.to)}`); });
+  root.querySelectorAll('[data-dedit]').forEach(b => b.onclick = () => editDefect(prj, b.dataset.dedit));
   const ad = root.querySelector('[data-adopt]'); if (ad) ad.onclick = () => adoptScripts(prj, false);
   const ag = root.querySelector('[data-add-gen]'); if (ag) ag.onclick = () => adoptScripts(prj, true);
   root.querySelectorAll('details[data-script]').forEach(d => d.addEventListener('toggle', () => { d.open ? ui.scriptOpen.add(d.dataset.script) : ui.scriptOpen.delete(d.dataset.script); }));
@@ -594,6 +644,31 @@ function bindProject(root, prj) {
     const nm = idNames();
     hb.innerHTML = evs.length ? evs.map(e => `<div class="ev"><time>${esc(fmtTime(e.at))}</time><span>${av(e.actor)} <b>${esc(pname(e.actor))}</b> ${esc(humanizeSummary(e.summary || e.action, nm))}</span></div>`).join('') : '<div class="hint">No test activity yet.</div>';
   })();
+}
+
+/* R6: one press generates every case at once. All new cases go into the store together and the page re-renders
+   immediately (the count is never stale), then they are persisted and the page re-renders again after the last save.
+   Default tester: the data owner. */
+async function generateFor(de) {
+  const e = E(); if (!e || !e.generateTests) { toast('Test generator unavailable.'); return 0; }
+  ui.genBusy = ui.genBusy || {}; if (ui.genBusy[de.id]) { toast('Still saving the cases just generated.'); return 0; } ui.genBusy[de.id] = true;
+  try {
+    let made = [];
+    try { made = e.generateTests(de, latestProfile(de.id) || undefined) || []; } catch (err) { toast('Could not generate: ' + err.message); return 0; }
+    const key = c => [c.field, String(c.input), c.kind].join('\u0001');
+    const have = new Set(casesFor(de.id).map(key));
+    const t0 = Date.now(); const docs = [];
+    made.forEach(c => { if (have.has(key(c))) return; have.add(key(c)); const id = store.newId('tc');
+      docs.push(Object.assign({ note: '' }, c, { id, dataId: de.id, tester: c.tester || de.owner || undefined, createdAt: new Date(t0 + docs.length).toISOString() })); });
+    if (!docs.length) { toast('No new test cases — all already exist'); return 0; }
+    const arr = store.state.docs.testCase || (store.state.docs.testCase = []);
+    docs.forEach(d => arr.push({ id: d.id, data: d }));
+    store.emit();
+    toast(`Generated ${docs.length} test case${docs.length === 1 ? '' : 's'} for ${de.name}`);
+    for (let i = 0; i < docs.length; i += 6) await Promise.all(docs.slice(i, i + 6).map(d => store.save('testCase', d.id, d, `Generated ${d.kind} test for ${de.name}.${d.field}`)));
+    store.emit();
+    return docs.length;
+  } finally { ui.genBusy[de.id] = false; store.emit(); }
 }
 
 async function editCase(de, c) {
@@ -702,7 +777,8 @@ async function recordRun(prj, opts) {
     body: `<div class="frow"><div class="field"><label>Environment</label><select name="env" data-env ${prev ? 'disabled' : ''}>${envOpts(env0)}</select></div>
       <div class="field"><label>Test cycle</label><select name="cycleId" data-cycle-sel><option value="">No planned cycle</option>${cycles.map(c => `<option value="${esc(c.id)}" data-cenv="${esc(c.env)}" ${c.id === cyc0 ? 'selected' : ''}>${esc(c.name)} · ${esc(envTxt(c.env))}</option>`).join('')}</select></div></div>
       <div class="ts-bulk" data-bulk><label class="ts-pick"><input type="checkbox" data-pick-all aria-label="Select every row"> All</label>
-        <input data-bulk-ev placeholder="Evidence note for the selected rows" aria-label="Evidence note for the selected rows"><button type="button" class="btn sm primary" data-bulk-pass>Mark selected as passed</button><button type="button" class="btn sm" data-reset>Reset to not run</button></div>
+        <input data-bulk-ev placeholder="Evidence note for the selected rows" aria-label="Evidence note for the selected rows"><button type="button" class="btn sm primary" data-bulk-pass>Mark selected as passed</button><button type="button" class="btn sm" data-reset>Reset to not run</button>
+        <span class="ts-bulk-hint" data-bulk-hint role="status" aria-live="polite" hidden></span></div>
       <div class="hint">“Mark selected as passed” sets every step of each selected row to Pass and records the one evidence note on each. Script and scenario passes need evidence.</div>
       ${prev ? `<div class="hint">Only the ${only.size} item${only.size === 1 ? '' : 's'} whose latest ${esc(envTxt(prev.env))} result failed or was blocked. Earlier passes still count toward coverage.</div>` : ''}
       <div class="ts-cov-live hint" data-cov-live></div><div class="ts-err" data-err hidden></div>
@@ -748,8 +824,11 @@ async function recordRun(prj, opts) {
       e.stopPropagation();
       const picked = rows().filter(x => { const c = x.querySelector('[data-pick]'); return c && c.checked; });
       const note = ov.querySelector('[data-bulk-ev]').value.trim();
-      if (!picked.length) { showErr(['Select at least one row to mark as passed.']); return; }
-      if (!note) { showErr(['Add one evidence note: it is recorded on every selected row.']); ov.querySelector('[data-bulk-ev]').setAttribute('aria-invalid', 'true'); return; }
+      const hint = ov.querySelector('[data-bulk-hint]');
+      const say = t => { hint.hidden = false; hint.textContent = t; };
+      if (!picked.length) { say('Nothing selected: tick the rows to pass (or “All”) first.'); return; }
+      if (!note) { say('Add one evidence note: it is recorded on every selected row.'); ov.querySelector('[data-bulk-ev]').setAttribute('aria-invalid', 'true'); ov.querySelector('[data-bulk-ev]').focus(); return; }
+      hint.hidden = true;
       ov.querySelector('[data-bulk-ev]').removeAttribute('aria-invalid');
       picked.forEach(x => { x.querySelectorAll('select').forEach(s => { s.value = 'pass'; }); const ev = x.querySelector(`[name="${CSS.escape('e_' + x.dataset.row)}"]`); if (ev) ev.value = note; const c = x.querySelector('[data-pick]'); if (c) c.checked = false; });
       ov.querySelector('[data-pick-all]').checked = false;
@@ -796,8 +875,40 @@ async function recordRun(prj, opts) {
     prev ? `Recorded ${envTxt(env)} retest (cycle ${cycle}) for ${prj.name}: ${fresh.size} retested, ${fails.length} still failing`
       : `Recorded ${envTxt(env)} test run for ${prj.name}${cyc ? ` in “${cyc.name}”` : ''}: ${results.length} of ${total} run, ${fails.length} failed`);
   toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : `${envTxt(env)} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
-  await offerCloseDefects(prj, id);
+  await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
+}
+
+/* ---------- R6 defect lifecycle: new -> triaged -> in progress -> fixed -> verified (passing retest) -> closed ---------- */
+const DSTATES = ['new', 'triaged', 'in-progress', 'fixed', 'verified', 'closed'];
+const DS_CLS = { new: 'b-late', triaged: 'b-soon', 'in-progress': 'b-prog', fixed: 'b-prog', verified: 'b-done', closed: 'b-idle' };
+const STATUS_OF = { new: 'idle', triaged: 'idle', 'in-progress': 'prog', fixed: 'prog', verified: 'prog', closed: 'done' };
+const NEXT = { new: ['triaged', 'Triage'], triaged: ['in-progress', 'Start fix'], 'in-progress': ['fixed', 'Mark fixed'] };
+const PRIOS = ['High', 'Medium', 'Low'];
+const dsTxt = k => String(k || '').replace(/-/g, ' ');
+const SEVS = { 1: '1 · critical', 2: '2 · major', 3: '3 · minor', 4: '4 · cosmetic' };
+function dState(w) {
+  const e = E();
+  if (e && e.defectState) { try { const r = e.defectState(store.state.docs, w); const v = String(typeof r === 'string' ? r : (r && (r.state || r.status)) || '').replace(/\s+/g, '-'); if (DSTATES.includes(v)) return v; } catch (err) { /* fall through */ } }
+  if (w.status === 'done') return 'closed';
+  const ds = String(w.defectStatus || w.defectState || '').toLowerCase().replace(/[\s_]+/g, '-');
+  return DSTATES.includes(ds) && ds !== 'verified' ? ds : w.status === 'prog' ? 'in-progress' : 'new';
+}
+const canWorkDefect = (prj, w) => store.state.me === w.owner || store.state.me === prj.owner;
+async function setDefectState(prj, w, next, extra, why) {
+  const cur = store.get('workItem', w.id) || w;
+  const patch = Object.assign({ defectStatus: next, status: STATUS_OF[next], updatedAt: new Date().toISOString(), stateLog: (cur.stateLog || []).concat([{ state: next, at: new Date().toISOString(), by: store.state.me }]) }, extra || {});
+  if (next === 'closed') patch.doneAt = store.state.today;
+  await store.save('workItem', w.id, Object.assign({}, cur, patch), `${cur.title}: ${dsTxt(dState(cur))} → ${dsTxt(next)}${why ? ' (' + why + ')' : ''}`);
+}
+/* After any run: defects whose linked item now passes become "verified" automatically, then closing is offered. */
+async function afterRun(prj, runId) {
+  const run = store.get('testRun', runId); if (!run) return;
+  const passed = new Set((run.results || []).filter(x => x.outcome === 'pass').map(rid));
+  const defs = store.list('workItem', w => w.projectId === prj.id && w.kind === 'defect' && w.status !== 'done' && w.testRef && passed.has(w.testRef.caseId || w.testRef.scriptId));
+  for (const w of defs) if (w.defectStatus !== 'verified') await setDefectState(prj, w, 'verified', { verifiedByRun: runId }, `passing ${envTxt(run.env)} retest`);
+  if (defs.length) toast(`${defs.length} defect${defs.length === 1 ? '' : 's'} verified by the passing retest`);
+  await offerCloseDefects(prj, runId);
 }
 
 /* A passing retest offers to close the defects linked to the items that now pass. */
@@ -809,8 +920,8 @@ async function offerCloseDefects(prj, runId) {
   const me = store.state.me;
   const can = w => me === w.owner || me === prj.owner;
   const r = await modal({
-    title: `Retest passed: close ${defs.length} linked defect${defs.length === 1 ? '' : 's'}?`,
-    body: `<p style="margin:0 0 8px">These defects were raised on items that just passed in the ${esc(envTxt(run.env))} run. Closing records the passing run as the proof of the fix.</p>
+    title: `Verified: close ${defs.length} linked defect${defs.length === 1 ? '' : 's'}?`,
+    body: `<p style="margin:0 0 8px">These defects are now <b>verified</b>: they were raised on items that just passed in the ${esc(envTxt(run.env))} run. Closing records the passing run as the proof of the fix.</p>
       <div class="ts-mk" data-close-offer>${defs.map(w => `<label class="ts-mk-r"><input type="checkbox" name="close" value="${esc(w.id)}" ${can(w) ? 'checked' : 'disabled'}><span><b>${esc(w.title)}</b><small>owner ${esc(pname(w.owner))}${can(w) ? '' : ` · only ${esc(pname(w.owner))} or the project owner can close it`}</small></span></label>`).join('')}</div>`,
     actions: [{ id: 'close', label: 'Close selected', primary: true }],
   });
@@ -820,7 +931,7 @@ async function offerCloseDefects(prj, runId) {
   for (const w of defs) {
     if (!pick.has(w.id) || !can(w)) continue;
     const note = `Retest passed in the ${envTxt(run.env)} run, ${fmt(run.at)}`;
-    await store.save('workItem', w.id, Object.assign({}, w, { status: 'done', doneAt: store.state.today, updatedAt: new Date().toISOString(), fixNote: note, closedByRun: runId }), `Closed ${w.title}: ${note}`);
+    await setDefectState(prj, w, 'closed', { fixNote: note, closedByRun: runId }, note);
     n++;
   }
   if (n) toast(`${n} defect${n === 1 ? '' : 's'} closed`);
@@ -874,35 +985,64 @@ async function importCi(prj) {
       <div class="field"><label>JUnit XML</label><textarea name="xml" data-ci-xml class="ts-xml" placeholder="&lt;testsuite name=&quot;vendor-api&quot;&gt;&lt;testcase name=&quot;Bank remittance details TC1&quot;/&gt;…"></textarea></div>
       <div class="frow"><div class="field"><label>Environment the pipeline ran in</label><select name="env" data-ci-env>${envOpts('dev')}</select></div><div class="field"><label>&nbsp;</label><label class="btn sm ts-file">Upload .xml<input type="file" accept=".xml,text/xml,application/xml" data-ci-file hidden></label></div></div>
       <div class="hint">Tests marked <code>&lt;skipped/&gt;</code> are recorded as not run and shown as skipped. They never replace an earlier result.</div>`,
-    actions: [{ id: 'import', label: 'Import run', primary: true }],
+    actions: [{ id: 'preview', label: 'Preview mapping', primary: true }],
   });
   const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
   const fi = ov && ov.querySelector('[data-ci-file]');
   if (fi) fi.onchange = () => { const f = fi.files[0]; if (!f) return; if (f.size > 2 * 1024 * 1024) { toast('File is over 2 MB.'); return; } const rd = new FileReader(); rd.onload = () => { ov.querySelector('[data-ci-xml]').value = String(rd.result); }; rd.readAsText(f); };
+  guard(f => { if (!String(f.xml || '').trim()) return { msg: 'Paste a JUnit XML report or upload a file.', field: 'xml' }; try { const pr = parseJUnit(f.xml); if (!pr.tests.length) return { msg: 'No <testcase> elements found in that report.', field: 'xml' }; } catch (e) { return { msg: 'Could not read the report: ' + e.message, field: 'xml' }; } return null; });
   const r = await p;
-  if (r.action !== 'import') return;
+  if (r.action !== 'preview') return;
   let parsed;
   try { parsed = parseJUnit(r.form.xml); } catch (e) { toast('Could not read the report: ' + e.message); return; }
   const env = ENVS.includes(r.form.env) ? r.form.env : 'dev';
-  const results = []; let unmatched = 0; const seen = new Set(); let byTitle = 0; let skipped = 0;
-  parsed.tests.forEach(t => {
-    const m = matchCiTest(t, cases, scripts, seen);
-    if (!m) { unmatched++; return; }
-    const key = m.caseId || m.scriptId; seen.add(key);
-    if (m.how === 'title') byTitle++;
+  /* R6 preview: each testcase -> the matched case/script, or unmatched; a dropdown maps it by hand before anything is saved */
+  const seen = new Set();
+  const rows = parsed.tests.map((t, i) => { const m = matchCiTest(t, cases, scripts, seen); if (m) seen.add(m.caseId || m.scriptId); return { t, i, m }; });
+  const caseOpt = c => { const de = store.get('dataElement', c.dataId); return { v: 'c:' + c.id, l: `${de ? de.name + ' ' : ''}${caseLbl(c.id)} · ${c.field} ${c.kind}` }; };
+  const opts = cases.map(caseOpt).concat(scripts.map(x => ({ v: 's:' + x.id, l: `${isScn(prj, x.id) ? 'Scenario' : 'Script'} · ${x.title}` })));
+  const val = m => m ? (m.caseId ? 'c:' + m.caseId : 's:' + m.scriptId) : '';
+  const OUT = { pass: ['pass', 'b-done'], fail: ['fail', 'b-late'], skip: ['skipped', 'b-idle'] };
+  const HOW = { label: 'by label', id: 'by id', title: 'by title' };
+  const matchedN = rows.filter(x => x.m).length;
+  const p2 = modal({
+    title: `Map ${parsed.tests.length} test result${parsed.tests.length === 1 ? '' : 's'} · ${parsed.suite}`,
+    body: `<p class="hint" style="margin:0 0 8px">${matchedN} of ${rows.length} matched automatically. Check each row, map unmatched ones by hand or leave them unmatched; nothing is saved until you import. Runs as a <b>${esc(envTxt(env))}</b> run.</p>
+      <div class="ts-cimap" data-ci-map>${rows.map(x => `<div class="ts-cimap-r ${x.m ? '' : 'un'}" data-ci-row="${x.i}"><div class="ts-cimap-t">${badge(OUT[x.t.outcome][0], OUT[x.t.outcome][1])} <code title="${esc(x.t.classname)}">${esc(x.t.name || '(unnamed)')}</code>
+          <small data-ci-how>${x.m ? 'matched ' + HOW[x.m.how] : 'unmatched'}</small></div>
+        <select data-ci-pick="${x.i}" aria-label="Map ${esc(x.t.name)} to"><option value="">Unmatched · don't import</option>${opts.map(o => `<option value="${esc(o.v)}" ${o.v === val(x.m) ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select></div>`).join('')}</div>`,
+    actions: [{ id: 'import', label: 'Import run', primary: true }],
+  });
+  const ovs2 = document.querySelectorAll('.overlay'); const ov2 = ovs2[ovs2.length - 1];
+  if (ov2) ov2.querySelector('[data-ci-map]').addEventListener('change', e => { const sl = e.target.closest('[data-ci-pick]'); if (!sl) return; const row = sl.closest('[data-ci-row]'); row.classList.toggle('un', !sl.value); row.querySelector('[data-ci-how]').textContent = sl.value ? (sl.value === val(rows[+sl.dataset.ciPick].m) ? 'matched ' + HOW[rows[+sl.dataset.ciPick].m.how] : 'mapped by hand') : 'unmatched'; });
+  guard((f, act, mb) => {
+    const picks = [...mb.querySelectorAll('[data-ci-pick]')].map(x => x.value).filter(Boolean);
+    const dup = picks.find((v, i) => picks.indexOf(v) !== i);
+    if (dup) { const o = opts.find(x => x.v === dup); return `Two test results are mapped to “${o ? o.l : dup}”. Map each case or script once.`; }
+    if (!picks.length) return 'Every row is unmatched: map at least one test result, or cancel.';
+    return null;
+  });
+  const r2 = await p2;
+  if (r2.action !== 'import') return;
+  const picked = {}; r2.root.querySelectorAll('[data-ci-pick]').forEach(x => { picked[x.dataset.ciPick] = x.value; });
+  const results = []; let unmatched = 0; let byTitle = 0; let skipped = 0; let byHand = 0;
+  rows.forEach(({ t, i, m }) => {
+    const v = picked[i]; if (!v) { unmatched++; return; }
+    const auto = v === val(m); const how = auto ? m.how : 'manual';
+    if (how === 'title') byTitle++; if (how === 'manual') byHand++;
     if (t.outcome === 'skip') skipped++;
-    const x = { outcome: t.outcome === 'skip' ? 'not-run' : t.outcome, note: t.outcome === 'fail' ? (t.message || 'CI reported a failure') : t.outcome === 'skip' ? `Skipped in CI${t.message ? ': ' + t.message : ''}` : '', evidence: `CI ${parsed.suite}: ${t.classname ? t.classname + '.' : ''}${t.name}`, matchedBy: m.how };
-    if (m.caseId) x.caseId = m.caseId; else x.scriptId = m.scriptId;
+    const x = { outcome: t.outcome === 'skip' ? 'not-run' : t.outcome, note: t.outcome === 'fail' ? (t.message || 'CI reported a failure') : t.outcome === 'skip' ? `Skipped in CI${t.message ? ': ' + t.message : ''}` : '', evidence: `CI ${parsed.suite}: ${t.classname ? t.classname + '.' : ''}${t.name}`, matchedBy: how };
+    if (v.startsWith('c:')) x.caseId = v.slice(2); else x.scriptId = v.slice(2);
     results.push(x);
   });
-  if (!results.length) { toast(`No test in the report matched a case or script (${unmatched} unmatched).`); return; }
+  if (!results.length) { toast('Nothing imported: every row was unmatched.'); return; }
   const id = store.newId('run');
   const fails = results.filter(x => x.outcome === 'fail');
   ui.runOpen.add(id);
-  await store.save('testRun', id, { id, projectId: prj.id, env, at: new Date().toISOString(), by: store.state.me, source: 'ci', ciSuite: parsed.suite, ciUnmatched: unmatched, ciSkipped: skipped, cycle: 1, results },
-    `Imported CI results (${parsed.suite}) as a ${envTxt(env)} run for ${prj.name}: ${results.length} matched (${byTitle} by title), ${fails.length} failed, ${skipped} skipped, ${unmatched} unmatched`);
+  await store.save('testRun', id, { id, projectId: prj.id, env, at: new Date().toISOString(), by: store.state.me, source: 'ci', ciSuite: parsed.suite, ciUnmatched: unmatched, ciSkipped: skipped, ciManual: byHand, cycle: 1, results },
+    `Imported CI results (${parsed.suite}) as a ${envTxt(env)} run for ${prj.name}: ${results.length} matched (${byTitle} by title, ${byHand} by hand), ${fails.length} failed, ${skipped} skipped, ${unmatched} unmatched`);
   toast(`CI import (${envTxt(env)}): ${results.length} matched · ${fails.length} fail · ${skipped} skipped · ${unmatched} unmatched`);
-  await offerCloseDefects(prj, id);
+  await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
 }
 
@@ -922,6 +1062,12 @@ function defectTarget(prj, x) {
   return { pid: at.pid, step: at.step, owner: de.owner || prj.owner, title: `Defect: ${de.name || c.dataId} · ${c.field} ${c.input === '' ? '(empty)' : '“' + String(c.input).slice(0, 24) + '”'} should ${c.expect}`, ref: { caseId: c.id }, where: `${lb.proc} · ${lb.step}` };
 }
 
+function reproOf(x, t, run) {
+  const steps = (x.steps || []).filter(y => y.outcome && y.outcome !== 'pass').map(y => `Step ${y.n}: ${y.outcome}${y.note ? ' — ' + y.note : ''}`);
+  if (x.caseId) { const c = store.get('testCase', x.caseId); if (c) return `In ${envTxt(run.env)}, enter ${c.input === '' ? 'an empty value' : '“' + c.input + '”'} in ${c.field}. Expected: ${c.expect}. ${x.note || ''}`.trim(); }
+  return [`Run “${t.title.replace(/^Defect: /, '')}” in ${envTxt(run.env)}.`].concat(steps).concat(x.note && !steps.length ? [x.note] : []).join('\n');
+}
+
 async function createDefects(prj, runId, ids, offered) {
   const run = store.get('testRun', runId); if (!run) return;
   const rows = (run.results || []).filter(x => ids.includes(rid(x)) && x.outcome === 'fail' && !x.defectId).map(x => ({ x, t: defectTarget(prj, x) })).filter(y => y.t);
@@ -929,8 +1075,11 @@ async function createDefects(prj, runId, ids, offered) {
   const due = addDays(store.state.today, 3);
   const r = await modal({
     title: offered ? `${rows.length} failure${rows.length === 1 ? '' : 's'}: create defects?` : 'Create defect',
-    body: `<p style="margin:0 0 8px">Each defect becomes a work item on the failing step, owned by the step owner (scripts) or the data owner (data cases), due ${esc(fmt(due))}. Go-live is blocked while any defect is open.</p>
-      <div class="ts-mk">${rows.map(({ x, t }) => `<label class="ts-mk-r"><input type="checkbox" name="mk" value="${esc(rid(x))}" checked><span><b>${esc(t.title)}</b><small>${esc(t.where)} · owner ${esc(pname(t.owner))}${x.note ? ' · ' + esc(x.note) : ''}</small></span></label>`).join('')}</div>`,
+    body: `<p style="margin:0 0 8px">Each defect becomes a work item on the failing step, owned by the step owner (scripts) or the data owner (data cases), due ${esc(fmt(due))}. It starts as <b>new</b>; a passing retest marks it <b>verified</b>. Go-live is blocked while any defect is open.</p>
+      <div class="ts-mk">${rows.map(({ x, t }) => { const k = esc(rid(x)); return `<div class="ts-mk-d" data-def-row="${k}"><label class="ts-mk-r"><input type="checkbox" name="mk" value="${k}" checked><span><b>${esc(t.title)}</b><small>${esc(t.where)} · owner ${esc(pname(t.owner))} · ${esc(envTxt(run.env))}</small></span></label>
+        <div class="ts-mk-f"><label>Severity<select name="sev_${k}">${[1, 2, 3, 4].map(n => `<option value="${n}" ${n === 2 ? 'selected' : ''}>${SEVS[n]}</option>`).join('')}</select></label>
+          <label>Priority<select name="pri_${k}">${PRIOS.map(pr => `<option ${pr === 'Medium' ? 'selected' : ''}>${pr}</option>`).join('')}</select></label>
+          <label class="ts-mk-repro">Steps to reproduce<textarea name="repro_${k}" rows="2">${esc(reproOf(x, t, run))}</textarea></label></div></div>`; }).join('')}</div>`,
     actions: [{ id: 'create', label: rows.length === 1 ? 'Create defect' : 'Create defects', primary: true }],
   });
   if (r.action !== 'create') return;
@@ -940,8 +1089,11 @@ async function createDefects(prj, runId, ids, offered) {
   for (const { x, t } of rows) {
     if (!pick.has(rid(x))) continue;
     const wid = store.newId('def');
+    const k = rid(x); const sev = Math.min(4, Math.max(1, +r.form['sev_' + k] || 2));
     await store.save('workItem', wid, { id: wid, projectId: prj.id, pid: t.pid, step: t.step, title: t.title, owner: t.owner, status: 'idle', start: store.state.today, due, deps: [], kind: 'defect', effortDays: 1,
-      testRef: Object.assign({ runId }, t.ref), updatedAt: new Date().toISOString() }, `Created ${t.title} from the ${envTxt(run.env)} run`);
+      severity: sev, priority: PRIOS.includes(r.form['pri_' + k]) ? r.form['pri_' + k] : 'Medium', env: run.env, repro: String(r.form['repro_' + k] || '').trim(), defectStatus: 'new',
+      stateLog: [{ state: 'new', at: new Date().toISOString(), by: store.state.me }],
+      testRef: Object.assign({ runId }, t.ref), updatedAt: new Date().toISOString() }, `Created ${t.title} from the ${envTxt(run.env)} run (severity ${sev})`);
     await store.notify([t.owner], `${pname(store.state.me)} assigned you a defect: ${t.title} (due ${fmt(due)})`, 'workItem:' + wid);
     const res = results.find(y => rid(y) === rid(x)); if (res) res.defectId = wid;
     n++;
@@ -960,7 +1112,7 @@ async function closeDefect(prj, wid) {
   const r = await modal({ title: 'Close defect', body: `<p style="margin:0 0 8px"><b>${esc(w.title)}</b></p><div class="field"><label>Fix note</label><input name="note" placeholder="What was fixed"></div><div class="hint">Re-run the failing row in the next run to prove the fix.</div>`, actions: [{ id: 'close', label: 'Close defect', primary: true }] });
   if (r.action !== 'close') return;
   const note = (r.form.note || '').trim();
-  await store.save('workItem', wid, Object.assign({}, w, { status: 'done', doneAt: store.state.today, updatedAt: new Date().toISOString(), fixNote: note || undefined }), `Closed ${w.title}${note ? ': ' + note : ''}`);
+  await setDefectState(prj, w, 'closed', { fixNote: note || undefined }, note || 'closed by hand');
   toast('Defect closed');
 }
 
@@ -973,7 +1125,8 @@ async function adoptScripts(prj, onlyNew) {
   if (!add.length) { toast('No generated scripts to add.'); return; }
   const next = (onlyNew ? have : []).concat(add.map(s => { const x = { id: s.id, pid: s.pid, step: s.step, title: s.title, given: s.given, when: s.when, then: s.then, data: (s.data || []).slice() };
     if (Array.isArray(s.steps) && s.steps.length) x.steps = s.steps.map((y, i) => ({ n: i + 1, action: String(y.action || ''), expected: String(y.expected || '') }));
-    if (s.tester) x.tester = s.tester; return x; }));
+    const owner = s.tester || stepLabel(s.pid, s.step).owner || (store.get('dataElement', (s.data || [])[0]) || {}).owner;
+    if (owner) x.tester = owner; return x; }));
   await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), onlyNew ? `Added ${add.length} generated UAT script${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} generated UAT scripts for ${prj.name}`);
   toast(onlyNew ? `${add.length} script${add.length === 1 ? '' : 's'} added` : `${add.length} UAT scripts adopted. You can edit them now.`);
 }
@@ -1034,8 +1187,10 @@ async function adoptScenarios(prj, onlyNew) {
   const have = Array.isArray(cur.uatScenarios) ? cur.uatScenarios : [];
   const add = onlyNew ? gen.filter(g => !have.some(h => h.id === g.id)) : gen;
   if (!add.length) { toast('No generated scenarios to add.'); return; }
-  const next = (onlyNew ? have : []).concat(add.map(x => ({ id: x.id, pid: x.pid, title: x.title, data: (x.data || []).slice(),
-    steps: (x.steps || []).map((y, i) => ({ n: i + 1, step: y.step, action: String(y.action || ''), expected: String(y.expected || '') })) })));
+  /* default tester: the owner of the scenario's first owned step, else its first data element's owner */
+  const ownerOf = x => { for (const y of x.steps || []) { const o = stepLabel(x.pid, y.step).owner; if (o) return o; } return (store.get('dataElement', (x.data || [])[0]) || {}).owner; };
+  const next = (onlyNew ? have : []).concat(add.map(x => Object.assign({ id: x.id, pid: x.pid, title: x.title, data: (x.data || []).slice(),
+    steps: (x.steps || []).map((y, i) => ({ n: i + 1, step: y.step, action: String(y.action || ''), expected: String(y.expected || '') })) }, x.tester || ownerOf(x) ? { tester: x.tester || ownerOf(x) } : {})));
   await store.save('project', prj.id, Object.assign({}, cur, { uatScenarios: next }), onlyNew ? `Added ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} for ${prj.name}`);
   toast(`${add.length} scenario${add.length === 1 ? '' : 's'} ${onlyNew ? 'added' : 'adopted'}. They now count toward UAT coverage.`);
 }

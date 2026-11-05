@@ -117,6 +117,25 @@ function tickedTasks(a, b) {
   return ((b && b.tasks) || []).filter((t, i) => { const p = before.get(t.id || i) || {}; return TICK.some(k => JSON.stringify(p[k]) !== JSON.stringify(t[k])); });
 }
 
+/* R6 grants: the API never starts an expiry countdown on a requested grant; the time box starts at approval.
+   Approval time = approvedAt, else the latest "approved…" log entry, else (approving now) the server time. */
+const GRANT_MAX_DAYS = 30;
+function grantApprovalTime(g, prev) {
+  if (typeof g.approvedAt === 'string' && isFinite(Date.parse(g.approvedAt))) return g.approvedAt;
+  const hit = (Array.isArray(g.log) ? g.log : []).filter(e => e && /^approv/i.test(String(e.action || '')) && isFinite(Date.parse(e.at))).map(e => e.at).sort().pop();
+  if (hit) return hit;
+  if (prev && ['approved', 'active'].includes(prev.status) && prev.approvedAt) return prev.approvedAt;
+  return new Date().toISOString();
+}
+function grantExpiryError(g, prev) {
+  if (!['approved', 'active'].includes(g.status)) return null;
+  if (typeof g.expires !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(g.expires)) return 'An approved grant needs an expiry date: access is time-boxed to at most 30 days from approval.';
+  const appr = grantApprovalTime(g, prev);
+  const limit = new Date(Date.parse(appr.slice(0, 10) + 'T12:00:00Z') + GRANT_MAX_DAYS * 86400000).toISOString().slice(0, 10);
+  if (g.expires.slice(0, 10) > limit) return `Access expires at most 30 days after approval (approved ${shortDate(appr)}, so by ${shortDate(limit + 'T12:00:00Z')}).`;
+  return null;
+}
+
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
 
 /* R5 [S] permission rules for PUT. Returns an error message or null. Server promotions bypass this (they write via the store). */
@@ -171,7 +190,22 @@ function pipelineAction(kind, projectId, relId, snapshot) {
       'Accept: application/vnd.github+json\nAuthorization: Bearer <token from Key Vault>\n\n' + JSON.stringify(dispatch, null, 2) };
 }
 
-async function goLive(wsId, docs, project, actor, today, simulateFailure) {
+/* R6: one audit trail in true order. Each step is stamped base + n ms, so the events endpoint
+   (sorted by time) returns approval -> pipeline started -> pipeline result -> promotion -> SOP publish
+   -> grants expired -> notifications, never a tie. */
+function auditClock(base) {
+  const t0 = Date.parse(base);
+  let n = 0;
+  return () => new Date(t0 + (n++)).toISOString();
+}
+/* R6: the release manager's step-up, as the client reports it (simulated MFA). Only the time and method are kept. */
+function stepUpOf(body, actor, at) {
+  const s = body && isPlainObject(body.stepUp) ? body.stepUp : null;
+  const t = s && typeof s.at === 'string' && isFinite(Date.parse(s.at)) && Math.abs(Date.parse(s.at) - Date.parse(at)) < 15 * 60000 ? new Date(Date.parse(s.at)).toISOString() : at;
+  return { by: actor, at: t, method: 'simulated-mfa' };
+}
+
+async function goLive(wsId, docs, project, actor, today, simulateFailure, body) {
   const eng = engine();
   if (!eng || typeof eng.readiness !== 'function') return { status: 503, body: { error: 'engine unavailable' } };
   const projectId = project.id;
@@ -182,7 +216,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure) {
   /* R5 step 2: go/no-go enforcement — every go/no-go runbook task has an owner and is confirmed done */
   const tasks = (project.cutover && Array.isArray(project.cutover.tasks)) ? project.cutover.tasks : [];
   const gng = [];
-  tasks.filter(t => t && t.gonogo).forEach((t, i) => {
+  tasks.filter(t => t && t.gonogo).forEach(t => {
     const label = `Go/no-go task "${String(t.task || 'untitled').trim() || 'untitled'}"`;
     if (!t.owner) gng.push(`${label} has no owner.`);
     if (t.done !== true) gng.push(`${label} is not confirmed (Go/no-go confirmed).`);
@@ -190,91 +224,155 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure) {
   if (gng.length) return { status: 409, body: { error: 'go/no-go not confirmed', reasons: gng } };
 
   const at = new Date().toISOString();
+  const tick = auditClock(at);
+  const log = [];
+  const ev = (action, ref, summary) => log.push({ actor, at: tick(), action, ref, summary });
   const rm = project.releaseManager || project.owner;
   const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
+  const pn = id => (people[id] && people[id].name) || 'the assigned person';
   const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
   const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
   const approvers = [...new Set((docs.approval || []).map(d => d.data)
     .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
+  const stepUp = stepUpOf(body, actor, at);
+  const plan = Object.fromEntries(procDocs.map(pd => [pd.id, (Number(pd.data.version) || 1) + 1]));
+
+  /* 1. approval with step-up, 2. pipeline started */
+  ev('golive-approved', 'project:' + projectId, `Go-live of ${project.name} approved by ${pn(actor)} (step-up verified)`);
+  ev('pipeline-started', 'release:' + relId, `Deployment pipeline started for ${project.name} (simulated)`);
 
   /* R5 step 3: pipeline (simulated). On failure: record it, notify the release manager only, no side effects. */
   if (simulateFailure) {
-    const plan = Object.fromEntries(procDocs.map(pd => [pd.id, (Number(pd.data.version) || 1) + 1]));
     const pipe = pipelineAction('golive', projectId, relId, plan);
     pipe.status = 'simulated-failed';
     pipe.detail += '\n\nRun result: failed at step "deploy automation" (simulated). Nothing was promoted, published or expired.';
-    const release = { id: relId, kind: 'golive', status: 'failed', projectId, at, by: actor, approvers, actions: [pipe,
-      { type: 'notify', target: (people[rm] && people[rm].name) || rm, status: 'simulated-ok', detail: `Pipeline failure notice for ${project.name} sent to the release manager only.` }],
+    const release = { id: relId, kind: 'golive', status: 'failed', projectId, at, by: actor, approvers, stepUp, actions: [pipe,
+      { type: 'notify', target: pn(rm), status: 'simulated-ok', detail: `Pipeline failure notice for ${project.name} sent to the release manager only.` }],
       exceptions: [], checks: JSON.parse(JSON.stringify(gate.checks)), snapshot: {} };
+    /* 3. the one failure event */
+    ev('golive-failed', 'project:' + projectId, `Go-live pipeline failed for ${project.name} (simulated); nothing was promoted, published or expired`);
+    /* 4. notification */
+    const nAt = tick();
+    log.push({ actor, at: nAt, action: 'notify', ref: 'release:' + relId, summary: `Pipeline failure notice sent to the release manager (${pn(rm)})` });
     await store.putDoc(wsId, 'release', relId, release);
     const nid = 'ntf-' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
-    await store.putDoc(wsId, 'notification', nid, { id: nid, to: rm, text: `Go-live pipeline failed for ${project.name}. Nothing was changed; fix and retry.`, ref: 'release:' + relId, at, read: false });
-    await store.appendEvent(wsId, { actor, at, action: 'golive-failed', ref: 'project:' + projectId, summary: `Go-live pipeline failed for ${project.name}; no changes were made` });
+    await store.putDoc(wsId, 'notification', nid, { id: nid, to: rm, text: `Go-live pipeline failed for ${project.name}. Nothing was changed; fix and retry.`, ref: 'release:' + relId, at: nAt, read: false });
+    for (const e of log) await store.appendEvent(wsId, e);
     return { status: 200, body: { ok: false, failed: true, release, project } };
   }
+  /* 3. pipeline result */
+  ev('pipeline-succeeded', 'release:' + relId, `Deployment pipeline succeeded for ${project.name} (simulated)`);
 
-  /* R5 step 4: side effects, success only */
-  const events = [], snapshot = {};
+  /* 4. promotion (success only) */
+  const snapshot = {}, promoted = [];
   for (const pd of procDocs) {
     const p = JSON.parse(JSON.stringify(pd.data));
     const prevVersion = Number(p.version) || 1;
     const version = prevVersion + 1;
     /* keep the pre-release version viewable (and restorable): as-is plus the to-be that replaced it */
     p.released = (p.released || []).concat([{ version: prevVersion, at, by: actor, asis: cloneNodes(p.asis, false), tobe: JSON.parse(JSON.stringify(p.tobe || [])) }]);
-    const promoted = cloneNodes(p.tobe, false);
-    p.asis = promoted;
-    p.tobe = cloneNodes(promoted, true);
+    const nodes = cloneNodes(p.tobe, false);
+    p.asis = nodes;
+    p.tobe = cloneNodes(nodes, true);
     p.version = version;          /* no updatedAt stamp: promotion must never make approvals stale (R3) */
     snapshot[p.id] = version;
+    promoted.push(p);
     await store.putDoc(wsId, 'process', p.id, p);
-    events.push({ action: 'release', ref: 'process:' + p.id, summary: `Released ${p.name} v${version}: to-be promoted to as-is (v${prevVersion} kept in history)` });
+    ev('release', 'process:' + p.id, `Released ${p.name} v${version}: to-be promoted to as-is (v${prevVersion} kept in history)`);
   }
+  const liveAt = tick();
+  const proj = Object.assign({}, project, { status: 'live', liveAt });
+  await store.putDoc(wsId, 'project', projectId, proj);
+  log.push({ actor, at: liveAt, action: 'golive', ref: 'project:' + projectId, summary: `${project.name} went live` });
+  /* 5. SOP publish */
+  for (const p of promoted) ev('sop-publish', 'process:' + p.id, `Published ${p.name} v${snapshot[p.id]} as the controlled SOP; v${snapshot[p.id] - 1} archived`);
+  /* 6. grants expired (requested ones are denied; their expiry is left alone: it never started) */
   for (const gd of (docs.grant || []).filter(d => d.data.projectId === projectId)) {
     const g = JSON.parse(JSON.stringify(gd.data));
     const next = g.status === 'active' || g.status === 'approved' ? 'expired' : g.status === 'requested' ? 'denied' : null;
     if (!next) continue;
-    g.status = next; g.expires = today;
-    g.log = (g.log || []).concat([{ at, by: actor, action: next === 'expired' ? 'expired at go-live' : 'denied at go-live' }]);
+    const gAt = tick();
+    g.status = next;
+    if (next === 'expired') g.expires = today;
+    g.log = (g.log || []).concat([{ at: gAt, by: actor, action: next === 'expired' ? 'expired at go-live' : 'denied at go-live' }]);
     await store.putDoc(wsId, 'grant', g.id, g);
-    events.push({ action: 'update', ref: 'grant:' + g.id, summary: `${describe('grant', g, docs)} ${next} at go-live` });
+    log.push({ actor, at: gAt, action: next === 'expired' ? 'expire' : 'update', ref: 'grant:' + g.id, summary: `${describe('grant', g, docs)} ${next} at go-live` });
   }
   /* R4: go-live never flips data to live; only the data owner's confirmation (liveConfirmedBy + liveSource) does */
+  const team = (project.resources || []).map(pn).join(', ');
   const release = {
-    id: relId, kind: 'golive', status: 'succeeded', projectId, at, by: actor, approvers,
+    id: relId, kind: 'golive', status: 'succeeded', projectId, at, by: actor, approvers, stepUp,
     actions: [pipelineAction('golive', projectId, relId, snapshot),
       ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
-      { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
-        detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
+      { type: 'notify', target: team, status: 'simulated-ok', detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
     exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')),
     checks: JSON.parse(JSON.stringify(gate.checks)),
     snapshot,
   };
   await store.putDoc(wsId, 'release', relId, release);
-  const proj = Object.assign({}, project, { status: 'live', liveAt: at });
-  await store.putDoc(wsId, 'project', projectId, proj);
-  events.push({ action: 'create', ref: 'release:' + relId, summary: `Go-live release recorded with ${release.actions.length} simulated action(s)` });
-  events.push({ action: 'golive', ref: 'project:' + projectId, summary: `${project.name} went live` });
-  for (const e of events) await store.appendEvent(wsId, Object.assign({ actor, at }, e));
+  /* 7. notifications */
+  ev('notify', 'release:' + relId, `Go-live notice for ${project.name} sent to ${team || 'the project team'}`);
+  for (const e of log) await store.appendEvent(wsId, e);
   return { status: 200, body: { ok: true, release, project: proj } };
 }
 
-async function rollback(wsId, docs, project, actor, reason) {
+async function rollback(wsId, docs, project, actor, body) {
   const projectId = project.id;
   if (project.status !== 'live') return { status: 409, body: { error: 'only a live project can be rolled back', reasons: ['Project status is ' + (project.status || 'active') + '.'] } };
+  const reason = String((body && body.reason) || '').slice(0, 500);
   const at = new Date().toISOString();
-  const events = [], snapshot = {}, undone = [];
+  const tick = auditClock(at);
+  const log = [];
+  const ev = (action, ref, summary) => log.push({ actor, at: tick(), action, ref, summary });
+  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
+  const pn = id => (people[id] && people[id].name) || 'the assigned person';
+  const rm = project.releaseManager || project.owner;
   const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
+  const relId = 'rel-' + projectId.slice(0, 36) + '-rb-' + Date.now().toString(36);
+  const stepUp = stepUpOf(body, actor, at);
   /* R5: the go-live being reversed */
   const undoes = (docs.release || []).map(d => d.data).filter(r => r.projectId === projectId && r.kind === 'golive' && r.status !== 'failed' && !r.rolledBackBy)
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+  /* what would be restored: each process whose previous released version exists */
+  const plan = [];
   for (const pd of procDocs) {
-    const p = JSON.parse(JSON.stringify(pd.data));
-    const cur = Number(p.version) || 1;
-    const released = p.released || [];
+    const cur = Number(pd.data.version) || 1;
+    const released = pd.data.released || [];
     let idx = -1;
     for (let i = released.length - 1; i >= 0; i--) if (!released[i].rolledBack && released[i].version === cur - 1) { idx = i; break; }
-    if (idx < 0) continue;
+    if (idx >= 0) plan.push({ pd, cur, idx });
+  }
+  const target = Object.fromEntries(plan.map(x => [x.pd.id, x.cur - 1]));
+
+  /* R6: 1. rollback approved, 2. pipeline started */
+  ev('rollback-approved', 'project:' + projectId, `Rollback of ${project.name} approved by ${pn(actor)} (step-up verified)` + (reason ? `: ${reason.slice(0, 120)}` : ''));
+  ev('pipeline-started', 'release:' + relId, `Rollback pipeline started for ${project.name} (simulated)`);
+
+  if (body && body.simulateFailure === true) {
+    /* R6: a failed rollback restores nothing; one failure event; the release manager is told */
+    const pipe = pipelineAction('rollback', projectId, relId, target);
+    pipe.status = 'simulated-failed';
+    pipe.detail += '\n\nRun result: failed at step "restore previous version" (simulated). Nothing was restored or re-published.';
+    const release = { id: relId, kind: 'rollback', status: 'failed', projectId, at, by: actor, approvers: [], stepUp, reason,
+      actions: [pipe, { type: 'notify', target: pn(rm), status: 'simulated-ok', detail: `Rollback failure notice for ${project.name} sent to the release manager only.` }],
+      exceptions: [], snapshot: {}, undone: [], undoes: undoes ? undoes.id : null };
+    ev('rollback-failed', 'project:' + projectId, `Rollback pipeline failed for ${project.name} (simulated); nothing was restored, the release stays live`);
+    const nAt = tick();
+    log.push({ actor, at: nAt, action: 'notify', ref: 'release:' + relId, summary: `Rollback failure notice sent to the release manager (${pn(rm)})` });
+    await store.putDoc(wsId, 'release', relId, release);
+    const nid = 'ntf-' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
+    await store.putDoc(wsId, 'notification', nid, { id: nid, to: rm, text: `Rollback pipeline failed for ${project.name}. Nothing was restored; the release is still live.`, ref: 'release:' + relId, at: nAt, read: false });
+    for (const e of log) await store.appendEvent(wsId, e);
+    return { status: 200, body: { ok: false, failed: true, release, project } };
+  }
+  ev('pipeline-succeeded', 'release:' + relId, `Rollback pipeline succeeded for ${project.name} (simulated)`);
+
+  /* 3. restore */
+  const snapshot = {}, undone = [], restored = [];
+  for (const { pd, cur, idx } of plan) {
+    const p = JSON.parse(JSON.stringify(pd.data));
+    const released = p.released || [];
     const prev = released[idx];
     /* the rolled-back version stays viewable in history, flagged */
     released.splice(idx, 1);
@@ -285,33 +383,38 @@ async function rollback(wsId, docs, project, actor, reason) {
     p.version = cur - 1;
     p.updatedAt = at;
     snapshot[p.id] = p.version;
+    restored.push({ p, cur });
     await store.putDoc(wsId, 'process', p.id, p);
-    events.push({ action: 'rollback', ref: 'process:' + p.id, summary: `Rolled ${p.name} back from v${cur} to v${cur - 1}` });
+    ev('rollback', 'process:' + p.id, `Restored ${p.name} from v${cur} to v${cur - 1}`);
     undone.push({ type: 'process-version', target: p.name, from: cur, to: cur - 1, detail: `Restored the v${cur - 1} as-is and its designed to-be` });
+  }
+  const proj = Object.assign({}, project, { status: 'active', rolledBackAt: at });
+  delete proj.liveAt;
+  await store.putDoc(wsId, 'project', projectId, proj);
+  /* 4. re-publish */
+  for (const { p, cur } of restored) {
+    ev('sop-publish', 'process:' + p.id, `Re-published ${p.name} SOP v${cur - 1}; v${cur} withdrawn`);
     undone.push({ type: 'sop-publish', target: `SOP library: ${p.name}`, from: cur, to: cur - 1, detail: `Re-published SOP v${cur - 1}; v${cur} withdrawn` });
   }
   undone.push({ type: 'grants', target: 'Access grants', detail: 'Grants expired at go-live stay expired (least privilege); request access again if needed' });
-  const people = Object.fromEntries((docs.person || []).map(d => [d.id, d.data]));
-  const relId = 'rel-' + projectId.slice(0, 36) + '-rb-' + Date.now().toString(36);
+  ev('rollback', 'project:' + projectId, `${project.name} rolled back to the previous process versions`);
   const owner = project.cutover && project.cutover.rollbackOwner;
+  const team = (project.resources || []).map(pn).join(', ');
   const release = {
-    id: relId, kind: 'rollback', projectId, at, by: actor, approvers: [],
+    id: relId, kind: 'rollback', projectId, at, by: actor, approvers: [], stepUp,
     actions: [pipelineAction('rollback', projectId, relId, snapshot),
       ...procDocs.filter(pd => snapshot[pd.id]).map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Re-published v${snapshot[pd.id]} of ${pd.data.name} as the controlled SOP; v${snapshot[pd.id] + 1} was withdrawn.` })),
-      { type: 'notify', target: (project.resources || []).map(id => (people[id] && people[id].name) || id).join(', '), status: 'simulated-ok',
+      { type: 'notify', target: team, status: 'simulated-ok',
         detail: `Rollback notice for ${project.name}` + (owner && people[owner] ? `; rollback owner ${people[owner].name}.` : '.') }],
-    reason: String(reason || '').slice(0, 500), exceptions: [], snapshot,
+    reason, exceptions: [], snapshot,
     status: 'succeeded', undone, undoes: undoes ? undoes.id : null,
   };
   await store.putDoc(wsId, 'release', relId, release);
   if (undoes) await store.putDoc(wsId, 'release', undoes.id, Object.assign({}, undoes, { rolledBackBy: relId, rolledBackAt: at }));
-  const proj = Object.assign({}, project, { status: 'active', rolledBackAt: at });
-  delete proj.liveAt;
-  await store.putDoc(wsId, 'project', projectId, proj);
-  events.push({ action: 'create', ref: 'release:' + relId, summary: 'Rollback release recorded' });
-  events.push({ action: 'rollback', ref: 'project:' + projectId, summary: `${project.name} rolled back to the previous process versions` });
-  for (const e of events) await store.appendEvent(wsId, Object.assign({ actor, at }, e));
+  /* 5. notifications */
+  ev('notify', 'release:' + relId, `Rollback notice for ${project.name} sent to ${team || 'the project team'}`);
+  for (const e of log) await store.appendEvent(wsId, e);
   return { status: 200, body: { ok: true, release, project: proj } };
 }
 
@@ -384,6 +487,11 @@ module.exports = async function (context, req) {
         /* R5 [S]: permissions */
         const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
         if (denied) return fail(403, denied);
+        /* R6: a grant's time box starts at approval: an approved or active grant expires within 30 days of it */
+        if (type === 'grant') {
+          const bad = grantExpiryError(data, prev && prev.data);
+          if (bad) return fail(400, bad);
+        }
         /* R5: cutover edits are stamped so approvals taken before them go stale */
         if (type === 'project' && cutoverStructureChanged(prev && prev.data.cutover, data.cutover) &&
           (!data.cutoverUpdatedAt || (prev && prev.data.cutoverUpdatedAt === data.cutoverUpdatedAt))) data.cutoverUpdatedAt = new Date().toISOString();
@@ -502,8 +610,8 @@ module.exports = async function (context, req) {
       const rm = project.releaseManager || project.owner;
       if (actorOf(body) !== rm) return fail(403, `Only the release manager (${personName(st.docs, rm)}) can ${action === 'golive' ? 'take' : 'roll back'} ${project.name}${action === 'golive' ? ' live' : ''}.`);
       const r = action === 'golive'
-        ? await goLive(wsId, st.docs, project, actorOf(body), today, body.simulateFailure === true)
-        : await rollback(wsId, st.docs, project, actorOf(body), body && body.reason);
+        ? await goLive(wsId, st.docs, project, actorOf(body), today, body.simulateFailure === true, body)
+        : await rollback(wsId, st.docs, project, actorOf(body), body);
       return send(r.status, r.body);
     }
 
@@ -514,4 +622,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, describe, WS_RE, ID_RE };
+module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };
