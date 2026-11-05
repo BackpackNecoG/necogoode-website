@@ -720,3 +720,5 @@
 .rs-notready span{color:var(--ink2)}
 .rs-mine.wait{background:var(--idle-fill);color:var(--ink);border:1px solid var(--line);display:flex;flex-direction:column;cursor:default}
 .rl-early{background:var(--soon-soft);border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:8px 10px;font-size:13.5px;margin-bottom:8px}
+.is-waitl{display:flex;align-items:center;gap:8px;flex:1 1 260px;font-size:14px;color:var(--ink2);min-width:0}
+.is-waitl .is-wait{flex:1 1 auto;min-width:0}

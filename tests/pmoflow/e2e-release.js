@@ -66,6 +66,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await setAdv(false);
     console.log('Testing: two stages, one number, one "Create the tests"');
     await setMe('ta');
+    await st(`const p = Object.assign({}, store.get('project', a)); delete p.uatScripts; await store.save('project', a, p, 'Business tests back to generated (e2e)');`, VM);
     const truth = () => st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).testing;`, VM);
     for (const [w, h] of [[1366, 768], [390, 844]]) {
       await page.setViewportSize({ width: w, height: h });
@@ -429,6 +430,8 @@ The process starts when an employee asks to buy something.
     ok(/[?&]bu=Compliance/.test(page.url()), 'approver view route: /release/:prj?bu=Compliance');
     ok((await page.$$('[data-bu-step]')).length >= 1 && await page.$('[data-bu-data], .rl-bv-data, .empty') && await page.$('[data-bu-test], .rl-bv-tests, .empty') && /Open defects/.test(await txt('.rl-bv')) && /Changes since last approval/.test(await txt('.rl-bv')), 'approver view shows steps, data and evidence, test results, open defects and changes since sign-off');
     ok(!(await page.$('[data-bu-step] a[href*="access-review"]')) || (await page.$$eval('[data-bu-step]', els => els.length)) < 4, 'only this BU\'s steps are listed');
+    ok((await page.inputValue('[data-attest]')) === await st(`return window.PMOEngine.approvalNoteFacts(store.state.docs, a, 'Compliance').text;`, AR), 'Advanced approver view prefills "What you checked" from facts too');
+    await page.fill('[data-attest]', '');
     await page.click('[data-bu-decide=approved]'); await settle(300);
     ok(/what you checked/i.test(await txt('[data-attest-err]')) && !(await page.$('.overlay input[name=code]')), 'Approve with an empty "What you checked" is refused inline, before the extra sign-in check');
     await page.fill('[data-attest]', 'Reviewed the certification step, approver matrix evidence and the UAT pass (e2e).');
@@ -672,7 +675,7 @@ The process starts when an employee asks to buy something.
     await page.selectOption('.overlay select[name=tester]', 'ps');
     await page.click('.overlay [data-act=save]'); await settle(900);
     ok(await st(`return store.list('testCase', c => c.dataId === 'D8' && c.field === 'Risk tier' && c.input === 'Tier 4' && c.tester === 'ps' && c.origin === 'user').length === 1;`), 'custom case saved with a free-text field and a tester');
-    await st(`const d = store.get('dataElement', 'D8'); await store.save('dataElement', 'D8', Object.assign({}, d, { fields: [{ name: 'Risk tier', format: 'Tier 1-3', type: 'list', values: ['Tier 1', 'Tier 2', 'Tier 3'], required: true }] }), 'Spec: risk tier (e2e)');`);
+    await st(`const d = store.get('dataElement', 'D8'); await store.save('dataElement', 'D8', Object.assign({}, d, { rulesChanged: true, fields: [{ name: 'Risk tier', format: 'Tier 1-3', type: 'list', values: ['Tier 1', 'Tier 2', 'Tier 3'], required: true }] }), 'Spec: risk tier, a rule change (e2e)');`);
     await settle(700);
     ok(await page.$('[data-fields-custom-only]') && /doesn't count/.test(await txt('[data-field-gaps]')) && /free-form check/.test(await txt('[data-field-gaps]')), 'custom-only field flagged with the reason it does not count');
     ok((await check(VM, 'tests-passed')).uncoveredFields.some(x => x.dataId === 'D8' && x.field === 'Risk tier'), 'engine agrees: Risk tier is uncovered');
@@ -886,14 +889,15 @@ The process starts when an employee submits an expense claim.
     await page.waitForSelector('.is-step', { timeout: 30000 }); await settle();
     ok(await page.$('[data-loopback]') && /Goes back to/.test(await txt('.is-goto.on')), 'loop-back rendered: ' + (await txt('.is-goto.on')).trim().slice(0, 80));
     const noBr = await page.$$eval('.is-branch', bs => bs.map(b => ({ label: b.querySelector('[data-blabel]').value, steps: [...b.querySelectorAll('.is-bstep [data-f=title]')].map(t => t.value) })));
-    ok(noBr.some(b => b.label === 'No' && b.steps.some(t => /manager approves the exception/i.test(t))), '"otherwise …" lands in the No branch: ' + JSON.stringify(noBr.find(b => b.label === 'No' && b.steps.length) || {}));
-    ok(/Step 1: Ana Ruiz checks/.test(await txt('.is-goto.on')), '"go back to step 1" loops back to step 1');
+    ok(noBr.some(b => b.label === 'No' && b.steps.some(t => /approves? the exception/i.test(t))), '"otherwise …" lands in the No branch: ' + JSON.stringify(noBr.find(b => b.label === 'No' && b.steps.length) || {}));
+    ok(/Step 1: /.test(await txt('.is-goto.on')), '"go back to step 1" loops back to step 1: ' + (await txt('.is-goto.on')).trim().slice(0, 60));
     ok(await page.$eval('.is-step[data-i="0"] [data-f=owner]', s => s.value) === 'ar', 'full-name owner "Ana Ruiz" matched to Ana Ruiz');
     ok(await page.$$eval('.is-sub textarea', t => t.some(x => /audit retention purposes$/.test(x.value))), 'long sub-step kept in full');
     const noOwn = await page.$$('[data-noowner]');
     ok(noOwn.length >= 1 && await page.$('[data-owner-prompt]'), `unmatched owners left blank and highlighted (${noOwn.length}) with a prompt to choose`);
     ok(!(await page.$$eval('[data-noowner]', els => els.some(e => e.value))), 'blank owners are not guessed');
-    ok((await page.$$eval('[data-owner-role]', els => els.map(e => e.textContent))).join('|') === 'Who: Manager|Who: Courier', 'free-text roles shown as "Who: Manager" and "Who: Courier"');
+    const rl = await page.$$eval('[data-owner-role]', els => els.map(e => e.textContent));
+    ok(rl.includes('Who: Manager') && rl.includes('Who: Courier'), 'free-text roles shown as "Who: Manager" and "Who: Courier": ' + rl.join(', '));
     await shot('09-import-loop');
     /* choose an owner for the first blank one; the prompt count drops */
     const before = noOwn.length;

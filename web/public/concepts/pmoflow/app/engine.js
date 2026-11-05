@@ -2527,7 +2527,7 @@
     const causing = c.open.filter(w => fc[w.id] && fc[w.id].sched !== 'late' && fc[w.id].causesSlip).map(w => ({ w, n: holding(w) })).sort((a, b) => b.n - a.n);
     causing.forEach(({ w, n }) => schedIssues.push({
       text: capFirst(w.title || 'A task') + ' is delaying ' + (n ? nWord(n, 'other task') : 'other work') + (w.owner ? ' (' + nameOf(docs, w.owner) + ')' : ''),
-      person: w.owner, action: 'Get ' + (w.title || 'the task') + ' back on schedule' }));
+      person: w.owner, action: 'Get “' + (w.title || 'this task') + '” back on schedule' }));
     const rl = c.runningLate.length;
     if (!lateW.length && !causing.length && rl) schedIssues.push({ text: nWord(rl, 'task') + ' ' + isAre(rl) + ' running late', person: project.owner, action: 'Review the tasks that are running late' });
     // Order: unplanned blockers, the deadline miss / schedule issues, then planned blockers.

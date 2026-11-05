@@ -511,3 +511,10 @@ a.d-wi:hover .t{color:var(--accent)}
   .d-prevnext .btn{max-width:100%;flex:1 1 140px}
   .d-conflict-line .btn{margin-left:0}
 }
+/* R8 phone: the map starts sooner (tighter header and gap) */
+@media (max-width:640px){
+  .d-hdr{padding:10px 12px;gap:8px}
+  .d-hdr h1{margin:0}
+  .d-hdr + .grid{margin-top:10px}
+  .d-hdr + .grid > .canvas{padding-top:12px}
+}

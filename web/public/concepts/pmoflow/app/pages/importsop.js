@@ -243,7 +243,7 @@ function stepBody(s, path, label) {
 function kindBody(s, path) {
   const k = KINDS[s.type];
   const procs = store.list('process');
-  const extra = s.type === 'wait' ? `<input class="is-sys" data-f="wait" value="${esc(s.wait || s.duration || '')}" placeholder="How long, e.g. 2 business days" aria-label="Wait duration">`
+  const extra = s.type === 'wait' ? `<label class="is-waitl">Waits for <input class="is-sys is-wait" data-f="wait" value="${esc(s.wait || s.duration || '')}" placeholder="e.g. 2 business days, or the supplier quotes" aria-label="What it waits for"></label>`
     : s.type === 'message' ? `<select data-f="direction" aria-label="Direction"><option value="send" ${s.direction !== 'receive' ? 'selected' : ''}>Send to</option><option value="receive" ${s.direction === 'receive' ? 'selected' : ''}>Receive from</option></select><input class="is-sys" data-f="party" value="${esc(s.party || '')}" placeholder="External party, e.g. Vendor" aria-label="External party">`
     : `<select data-f="calls" aria-label="Process it calls"><option value="">Choose the process it calls…</option>${procs.map(p => `<option value="${esc(p.id)}" ${p.id === (s.calls || s.processId) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
   return `<div class="is-body is-kind" data-path="${esc(path)}" data-kind="${esc(s.type)}"><div class="is-gate-h"><span class="is-kicon" aria-hidden="true">${k.icon}</span><span class="is-kind">${k.label}</span></div>
@@ -255,14 +255,16 @@ function gotoRow(g, b, bpath) {
   const all = targets(ui.draft.nodes).filter(n => n !== g && !b.nodes.includes(n));
   const t = b.goto && all.find(n => n.src === b.goto);
   const num = n => { const i = ui.draft.nodes.indexOf(n); return i >= 0 ? `Step ${i + 1}` : 'Branch step'; };
-  return `<div class="is-goto ${t ? 'on' : ''}" ${t ? `data-loopback="${esc(t.title)}"` : ''}>${t ? `<span class="is-ret" aria-hidden="true">↩</span><span>Goes back to <b>${esc(num(t))}: ${esc(t.title.slice(0, 60))}</b></span>` : ''}
+  /* "otherwise skip to step 4" jumps forward; "return to step 1" goes back */
+  const fwd = t && ui.draft.nodes.indexOf(t) > ui.draft.nodes.indexOf(g);
+  return `<div class="is-goto ${t ? 'on' : ''}" ${t ? `data-loopback="${esc(t.title)}"` : ''}>${t ? `<span class="is-ret" aria-hidden="true">${fwd ? '↷' : '↩'}</span><span>${fwd ? 'Skips to' : 'Goes back to'} <b>${esc(num(t))}: ${esc(t.title.slice(0, 60))}</b></span>` : ''}
     <select data-goto="${esc(bpath)}" aria-label="Go back to an earlier step"><option value="">${t ? 'Don’t go back' : 'Doesn’t go back'}</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>↩ ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
 }
 function gateBody(g, path) {
   return `<div class="is-body is-gate" data-path="${esc(path)}"><div class="is-gate-h"><span class="is-diamond" aria-hidden="true">◆</span><span class="is-kind">${g.type === 'parallel' ? 'At the same time: every path runs' : 'Choice'}</span></div>
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Things done at the same time' : 'Choice question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
-      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Path label"><span class="hint" data-branch-hint>${/^(no|otherwise|else)$/i.test(b.label) && b.nodes.length ? 'Otherwise · ' : ''}${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? 'loops back' : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
+      <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Path label"><span class="hint" data-branch-hint>${/^(no|otherwise|else)$/i.test(b.label) && b.nodes.length ? 'Otherwise · ' : ''}${b.nodes.length ? b.nodes.length + ' step' + (b.nodes.length === 1 ? '' : 's') : b.goto ? (targets(ui.draft.nodes).findIndex(n => n.src === b.goto) > ui.draft.nodes.indexOf(g) ? 'skips ahead' : 'loops back') : g.type === 'parallel' ? 'no steps yet' : 'continues to the next step'}</span></div>
       ${b.nodes.map((s, k) => `<div class="is-bstep">${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
@@ -289,7 +291,7 @@ export function render() {
     ${found}
     ${notesShown().length ? `<div class="note is-notes"><b>Things to check</b><ul>${notesShown().map(x => `<li>${esc(plainNote(x))}</li>`).join('')}</ul></div>` : ''}
     ${noOwner ? `<div class="is-ownerprompt" data-owner-prompt><b>${noOwner} step${noOwner === 1 ? '' : 's'} need${noOwner === 1 ? 's' : ''} someone to do ${noOwner === 1 ? 'it' : 'them'}.</b> The procedure didn't say who, so we left it blank rather than guess. Type a name or a role (like “Manager”) in each highlighted box.</div>` : ''}
-    ${loops ? `<div class="hint" data-loops>${loops} step${loops === 1 ? '' : 's'} that go${loops === 1 ? 'es' : ''} back to an earlier step (“resubmit”, “return to step N”). They're drawn as return arrows on the map.</div>` : ''}
+    ${loops ? `<div class="hint" data-loops>${loops} path${loops === 1 ? '' : 's'} that jump${loops === 1 ? 's' : ''} to another step (“return to step N”, “skip to step N”). They're drawn as arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">What starts it</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
       <span class="is-n">${s.type === 'step' ? i + 1 : KINDS[s.type] ? KINDS[s.type].icon : '◆'}</span>

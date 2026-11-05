@@ -148,7 +148,12 @@ function buSections(prj) {
      or it owns launch-day tasks. */
   const e = E(); const diffs = {};
   projectProcesses(prj).forEach(p => { try { diffs[p.id] = p.tobe && p.tobe.length && e && e.diffProcess ? e.diffProcess(p) : { nodes: {} }; } catch (err) { diffs[p.id] = { nodes: {} }; } });
-  const chg = x => { const st = ((diffs[x.pid] || {}).nodes || {})[x.step.id]; return st === 'new' || st === 'changed'; };
+  /* same rule as the engine's sections: a trigger counts as changed when its title, owner or teams involved differ from Today's */
+  const tch = n => JSON.stringify((n.touches || []).map(String).sort());
+  const chg = x => {
+    if (x.step.type === 'trigger') { const p = store.get('process', x.pid); const a = p && (p.asis || []).find(n => n && n.id === (x.step.from || x.step.id));
+      return !a || a.type !== 'trigger' || (a.title || '') !== (x.step.title || '') || (a.owner || '') !== (x.step.owner || '') || tch(a) !== tch(x.step); }
+    const st = ((diffs[x.pid] || {}).nodes || {})[x.step.id]; return st === 'new' || st === 'changed'; };
   const taskBus = new Set(tasksOf(prj.cutover).map(t => t.bu || (store.person(t.owner) || {}).bu).filter(Boolean).map(b => String(b).toLowerCase()));
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([bu, steps]) => ({ bu, steps, changed: steps.filter(chg), tasks: taskBus.has(bu.toLowerCase()), fromTags: steps.every(x => x.via !== 'owner') }))
     .filter(sec => sec.changed.length || sec.tasks);

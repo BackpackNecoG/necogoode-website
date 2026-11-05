@@ -1536,15 +1536,16 @@ const docsOf = st => st.docs;
     /* phone, Simple: the map starts near the top; the step dialog fits */
     await page.setViewportSize({ width: 390, height: 844 });
     await nav(`/process/${spId}?mode=tobe`);
-    const phS = await page.evaluate(() => document.querySelector('#canvas').getBoundingClientRect().top + scrollY);
-    ok(phS < 300, `Simple phone: map starts near the top (${Math.round(phS)} px)`);
+    /* measured from the top of the page content (the app header above it is shared chrome) */
+    const phS = await page.evaluate(() => document.querySelector('#canvas').getBoundingClientRect().top - document.querySelector('#app').getBoundingClientRect().top);
+    ok(phS < 160, `Simple phone: map starts near the top of the page content (${Math.round(phS)} px)`);
     await overflow('simple process @390'); await shot('simple-phone-process');
     /* R8 §7: map first, side panels folded below it; the first step is on screen without scrolling */
     const ph8 = await page.evaluate(() => { const c = document.querySelector('#canvas').getBoundingClientRect(), s = document.querySelector('aside.side').getBoundingClientRect(), f = document.querySelector('#canvas .node[data-step]').getBoundingClientRect();
       const cards = [...document.querySelectorAll('.d-sidefold > .card')]; return { first: f.top + scrollY, firstBottom: f.bottom, vh: innerHeight, sideBelow: s.top >= c.bottom - 1, folded: cards.every(k => [...k.children].filter(x => x.tagName !== 'H3').every(x => x.offsetParent === null)), n: cards.length }; });
     ok(ph8.firstBottom <= ph8.vh && ph8.sideBelow, `R8 phone: the map comes first and its first step is visible without scrolling (${Math.round(ph8.first)} px), side panels below`);
     ok(ph8.folded && ph8.n >= 3, `R8 phone: the ${ph8.n} side panels are folded to their headings`);
-    await page.click('.d-sidefold > .card:has(h3:has-text("Information")) > h3');
+    await page.click('[data-side-data] > h3');
     ok(await page.isVisible('[data-side-data] [data-hl]'), 'R8 phone: tapping a panel heading opens it');
     await shot('r8-phone-map-first');
     await page.click('[data-mode="edit"]'); await page.waitForURL(/mode=edit/); await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
@@ -1586,9 +1587,9 @@ const docsOf = st => st.docs;
     await nav(`/process/${newPid}?mode=edit&v=tobe`); await page.click('[data-ins="root"] >> nth=0'); await page.waitForSelector('.overlay .d-kinds'); await overflow('insert picker @390'); await page.screenshot({ path: `${OUT}/phone-insert-picker.png` }); await act('cancel');
     console.log('# R5: phone — the map starts near the top; KPIs and controls collapse into a summary row');
     await nav(`/process/${pid}?mode=tobe`);
-    const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top + scrollY, tabs: !!document.querySelector('.d-hdr .d-modes').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, desc: !!(document.querySelector('.d-hdr .d-desc') || {}).offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
+    const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top - document.querySelector('#app').getBoundingClientRect().top, tabs: !!document.querySelector('.d-hdr .d-modes').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, desc: !!(document.querySelector('.d-hdr .d-desc') || {}).offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
     ok(ph.sum && ph.tabs && !ph.kpis && !ph.desc, 'phone: tabs plus one summary row; description and KPIs collapsed');
-    ok(ph.top < 340, `phone (Advanced, five tabs): process map starts near the top (${Math.round(ph.top)} px)`);
+    ok(ph.top < 220, `phone (Advanced, five tabs): process map starts near the top of the page content (${Math.round(ph.top)} px)`);
     ok(/Future · \d+ steps · \d+ changed/.test(await page.textContent('[data-hdr-toggle]')), 'phone summary row: which map, steps, changed');
     await page.click('[data-hdr-toggle]');
     ok(await page.isVisible('.d-hdr .d-desc') && await page.isVisible('.d-hdr .kpis') && await page.getAttribute('[data-hdr-toggle]', 'aria-expanded') === 'true', 'phone: expand shows the description and KPIs');
@@ -1615,7 +1616,7 @@ const docsOf = st => st.docs;
     await nav('/processes'); await overflow('processes @390'); await shot('phone-processes');
     await nav(`/data/${did}`); await page.click('[data-fedit="0"]'); await page.waitForSelector('.overlay .d-fmts'); await overflow('spec builder @390'); await page.screenshot({ path: `${OUT}/phone-spec-builder.png` }); await act('cancel');
     if (stepWithWork) { await nav(`/process/${pid}/step/${stepWithWork.step}`); await page.click('.d-why summary'); await overflow('step why @390'); await shot('phone-step-why'); }
-    await nav(`/process/${impPid}?mode=tobe`); await page.click('[data-start-project]'); await page.waitForSelector('.overlay input[name=target]');
+    await nav(`/process/${impPid}?mode=tobe`); await page.click('.d-sidefold > .card:has([data-start-project]) > h3'); await page.click('[data-start-project]'); await page.waitForSelector('.overlay input[name=target]');
     await overflow('start project modal @390'); await page.screenshot({ path: `${OUT}/phone-start-project.png` }); await act('cancel');
     if (prof) { await nav(`/data/${prof.id}`); await overflow('data profile @390'); await shot('phone-data-profile'); }
   } catch (e) {

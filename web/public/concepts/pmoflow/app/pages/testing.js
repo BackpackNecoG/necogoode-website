@@ -1287,7 +1287,7 @@ async function createDefects(prj, runId, ids, offered) {
   const run = store.get('testRun', runId); if (!run) return;
   const rows = (run.results || []).filter(x => ids.includes(rid(x)) && x.outcome === 'fail' && !x.defectId).map(x => ({ x, t: defectTarget(prj, x) })).filter(y => y.t);
   if (!rows.length) return;
-  const due = addDays(store.state.today, 3);
+  const due = window.PMOEngine.addBusinessDays(store.state.today, 3); /* never a weekend */
   const r = await modal({
     title: offered ? `${rows.length} failure${rows.length === 1 ? '' : 's'}: create defects?` : 'Create defect',
     body: `<p style="margin:0 0 8px">Each defect becomes a work item on the failing step, owned by the step owner (scripts) or the data owner (data cases), due ${esc(fmt(due))}. It starts as <b>new</b>; a passing retest marks it <b>verified</b>. Go-live is blocked while any defect is open.</p>

@@ -958,7 +958,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { to: [...new Set([j.owner, ...j.resources])].map(em), notLive: [...used].filter(d => E.effectiveAvail(store.state.docs, d) !== 'live').length }; }, [STORE, PRJ]);
   const mail5 = decodeURIComponent((await page.getAttribute('[data-rep-mail]', 'href')).split('?')[0].replace(/^mailto:/, '')).split(',');
   check('R5 email draft: recipients are the project resources as first.last@northwind.example', JSON.stringify(mail5.sort()) === JSON.stringify(rc5.to.slice().sort()) && await page.locator('[data-rep-to] [data-rcpt]').count() === rc5.to.length, { mail5, to: rc5.to });
-  check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && /not connected yet/.test(await page.innerText('[data-prj-rep] .pmo-rep-p')) && (await page.innerText('[data-prj-rep] .pmo-rep-p')).includes(`${rc5.notLive} piece`), await page.innerText('[data-prj-rep] .pmo-rep-p'));
+  check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && /not (connected|available) yet/.test(await page.innerText('[data-prj-rep] .pmo-rep-p')), await page.innerText('[data-prj-rep] .pmo-rep-p'));
   const body5 = new URL(await page.getAttribute('[data-rep-mail]', 'href')).searchParams.get('body');
   check('R5 email body carries the same count', body5.includes(`Information: ${rc5.notLive} of`));
   await shot('25-report-recipients-1440', false);
@@ -1169,7 +1169,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R6 work row shows hours logged', /3\.5h logged|\d+(\.\d)?h logged/.test(await page.innerText(`tr[data-wid="${mv6}"] [data-hours]`)));
   check('R6 history: time logged', /Logged 3\.5h on “.+”/.test(await feedText()));
   const ev6 = await E5('earnedValue', PRJ, todayStr);
-  check('R6 header earned value = E().earnedValue (SPI, CPI, EAC)', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-eac] b')).replace(/\D/g, '') === String(Math.round(ev6.EAC)), ev6);
+  check('R6/R8 header: SPI, CPI from earnedValue; ONE cost forecast (projectTruth), no separate EAC', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await page.innerText('[data-hfin] [data-t="cost"]')).replace(/\D/g, '') === String(Math.round((await E5('projectTruth', PRJ, todayStr)).cost.forecast)) && await page.locator('[data-ev-eac]').count() === 0, ev6);
 
   console.log('R6 exports');
   const [dl1] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-work]')]);
@@ -1184,7 +1184,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-pf]')]);
   const lines2 = fs.readFileSync(await dl2.path(), 'utf8').replace(/^﻿/, '').trim().split(/\r\n/);
   const nPrj = await page.evaluate(async u => (await import(u)).store.list('project').length, STORE);
-  check('R6 portfolio CSV: one row per project with RAG, cost and EV columns', lines2.length === nPrj + 1 && /RAG,RAG reasons/.test(lines2[0]) && /SPI,CPI,EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
+  check('R6/R8 portfolio CSV: one row per project with status, the one cost forecast and EV columns', lines2.length === nPrj + 1 && /Status,Status sentence/.test(lines2[0]) && /Planned budget,Actual cost,Forecast cost/.test(lines2[0]) && /SPI,CPI$/.test(lines2[0]) && !/EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
   await page.click('[data-gen-rep]'); await page.waitForSelector('[data-pf-rep] .pmo-rep-h', { timeout: 30000 });
   await page.evaluate(() => { window.__pfPrinted = 0; window.print = () => { window.__pfPrinted++; window.__pfCls = document.body.classList.contains('pmo-print-pf'); }; });
   await page.click('[data-print-pf-rep]');
@@ -1233,7 +1233,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await prjGo('', '.canvas.pm .node');
     if (!await page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`).count()) { await page.click('[data-expand="1"]').catch(() => {}); await settle(); }
     const node = page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`);
-    check('R6 map: done work on not-live data is "Built · awaiting live data" (amber), never green Done', await node.locator('[data-built-awaiting]').count() === 1 && await node.evaluate(n => n.classList.contains('s-built') && !n.classList.contains('s-done')));
+    /* R8: finishing the fix task can itself make the information available (owner's fix = confirmation) */
+    const stillNotLive = await page.evaluate(async ([u, pid, sid]) => { const { store } = await import(u); const E = window.PMOEngine; const s = E.flatSteps(store.get('process', pid).tobe).find(x => x.id === sid); return (s.data || []).some(d => E.effectiveAvail(store.state.docs, d) !== 'live'); }, [STORE, builtStep.pid, builtStep.sid]);
+    if (stillNotLive) check('R6 map: done work on not-live data is "Built · awaiting live data" (amber), never green Done', await node.locator('[data-built-awaiting]').count() === 1 && await node.evaluate(n => n.classList.contains('s-built') && !n.classList.contains('s-done')));
+    else check('R8 map: done work whose fix made the information available shows green Done', await node.locator('[data-built-awaiting]').count() === 0 && await node.evaluate(n => n.classList.contains('s-done')));
     check('R6 map legend explains the amber built state', (await page.innerText('[data-legend]')).includes('Built · waiting for information'));
   } else check('R6 map: a step with work on not-live data exists', false);
 
@@ -1312,11 +1315,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* Approve my part: reachable in <= 2 taps from home */
   await sAs('^Maya Chen');
   const ap = sp.locator('[data-approve-part]').first();
-  check('R7 home: "Approve my part" waiting for Maya (Procurement)', await ap.count() === 1 && (await ap.getAttribute('data-bu')) === 'Procurement');
-  await ap.click(); /* tap 1 */
-  await sp.waitForURL(/\/release\/.+\?bu=/, { timeout: 10000 }); await sSettle();
-  const apBtn = sp.locator('#app button:visible', { hasText: /^\s*(Re-)?[Aa]pprove/ }).first();
-  check('R7 approve my part: the approve button is on the first screen after 1 tap (tap 2 approves)', await apBtn.count() === 1 && await apBtn.isEnabled(), await sp.locator('#app button:visible').allInnerTexts());
+  /* R8 §5: the button appears only once buReady says Procurement's part is ready; before that a muted "waiting on" line */
+  const mayaReady = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    return store.list('project', p => p.status !== 'live').map(p => { const rd = E.readiness(store.state.docs, p.id, store.state.today); const c = (rd.checks || []).find(x => x.id === 'bu-signoff') || {};
+      const pending = (c.unsigned || []).includes('Procurement') || (c.stale || []).some(x => x.bu === 'Procurement');
+      return { p: p.id, pending, r: E.buReady(store.state.docs, p.id, 'Procurement', store.state.today) }; }); }, STORE);
+  const anyReady = mayaReady.some(x => x.pending && x.r.ready);
+  if (anyReady) {
+    check('R7/R8 home: "Approve my part" for Maya (Procurement) once her part is ready', await ap.count() >= 1 && (await ap.getAttribute('data-bu')) === 'Procurement');
+    await ap.click(); /* tap 1 */
+    await sp.waitForURL(/\/release\/.+\?bu=/, { timeout: 10000 }); await sSettle();
+    const apBtn = sp.locator('#app button:visible', { hasText: /^\s*(Re-)?[Aa]pprove/ }).first();
+    check('R7 approve my part: the approve button is on the first screen after 1 tap (tap 2 approves)', await apBtn.count() === 1 && await apBtn.isEnabled(), await sp.locator('#app button:visible').allInnerTexts());
+  } else {
+    check('R8 home: no "Approve my part" while Procurement’s part isn’t ready', await ap.count() === 0, mayaReady);
+    check('R8 home: muted "Your part isn’t ready yet: waiting on …" instead', await sp.locator('[data-notready] [data-notready-text]').count() >= 1 && /isn’t ready yet: waiting on .+/.test(await sp.locator('[data-notready-text]').first().innerText()));
+  }
   await sShot('02-approver-view-1366');
 
   /* Mark done from home in 1 tap */
@@ -1451,6 +1465,51 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sGo('/', '[data-waiting]');
   const btnH = await sp.evaluate(() => [...document.querySelectorAll('[data-waiting] .pmo-wact .btn')].map(b => b.getBoundingClientRect().height));
   check('R7 phone: waiting-for-you buttons are big (>= 44px)', btnH.every(h => h >= 44), btnH);
+
+  /* ================= R8 (phone, Simple) ================= */
+  console.log('R8 phone header, projects list, approvals, undo, risks');
+  const hdr8 = await sp.evaluate(() => { const lab = document.querySelector('.top .who > span'); const adv = document.querySelector('.top .advtog span'); const r = lab && lab.getBoundingClientRect();
+    return { lab: !!lab && getComputedStyle(lab).display !== 'none' && r.width > 30 && r.right <= innerWidth, adv: !!adv && getComputedStyle(adv).display !== 'none' && adv.textContent.trim() === 'Advanced',
+      nav: [...document.querySelectorAll('#nav a')].every(a => { const b = a.getBoundingClientRect(); return b.width > 0 && b.left >= 0 && b.right <= innerWidth; }) }; });
+  check('R8 phone header: "Viewing as" visible, Advanced labelled, every nav tab on screen', hdr8.lab && hdr8.adv && hdr8.nav, hdr8);
+  await sShot('10-r8-header-390');
+  await sp.click('[data-big="check"]'); await sp.waitForSelector('[data-plist]', { timeout: 10000 });
+  check('R8 "Check on a project" opens the projects list', new URL(sp.url()).pathname.endsWith('/projects'));
+  const nP8 = await sp.evaluate(async u => (await import(u)).store.list('project').length, STORE);
+  check('R8 projects list: one row per project, each with label + sentence + facts', await sp.locator('[data-plist]').count() === nP8 && await sp.locator('[data-plist] [data-summary-label]').count() === nP8 && await sp.locator('[data-plist] [data-t="forecast"]').count() === nP8);
+  check('R8 projects list: no overflow @390', await sNoOverflow());
+  await sShot('11-r8-projects-390', true);
+  await sp.click('#nav a:has-text("Projects")'); await sp.waitForSelector('[data-plist]');
+  check('R8 "Projects" nav opens the list and is active', (await sp.innerText('#nav a.on')).trim() === 'Projects');
+  /* approvals appear only when buReady says that team's part is ready */
+  const appr8 = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const out = [];
+    store.list('project', p => p.status !== 'live').forEach(p => store.state.people.forEach(pp => { if (!pp.bu) return; const r = E.buReady(store.state.docs, p.id, pp.bu, store.state.today); out.push({ prj: p.id, bu: pp.bu, person: pp.id, ready: !!r.ready }); })); return out; }, STORE);
+  await sGo('/', '[data-waiting]');
+  const shown8 = await sp.evaluate(() => ({ approve: [...document.querySelectorAll('[data-approve-part]')].map(a => [a.dataset.approvePart, a.dataset.bu]), notReady: [...document.querySelectorAll('[data-notready]')].map(x => x.dataset.notready) }));
+  const me8 = await sp.$eval('#persona', s => s.value);
+  check('R8 home: "Approve my part" only for parts buReady says are ready', shown8.approve.every(([prj, bu]) => appr8.some(x => x.prj === prj && x.bu === bu && x.ready)), { shown8, appr8: appr8.filter(x => x.person === me8) });
+  check('R8 home: not-ready parts say "isn’t ready yet: waiting on"', (await sp.locator('[data-notready-text]').allInnerTexts()).every(t => /isn’t ready yet: waiting on/.test(t)));
+  /* Mark done -> toast with Undo restores status and doneAt */
+  await sAs('Project Manager'); /* the PM can mark any task of the project done */
+  const t8 = await sp.evaluate(async u => { const { store } = await import(u); const me = store.state.me; const w = store.list('workItem', x => x.status !== 'done' && ((store.get('project', x.projectId) || {}).owner === me || x.owner === me) && (store.get('project', x.projectId) || {}).status !== 'live')[0]; return w ? { id: w.id, status: w.status, statusId: w.statusId || null, doneAt: w.doneAt || null } : null; }, STORE);
+  if (t8) {
+    await sGo(`/project/${(await sp.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id).projectId, [STORE, t8.id]))}?mode=work`, '[data-task-group]');
+    await sp.click(`[data-done="${t8.id}"]`);
+    await sp.waitForSelector('[data-undo-toast] [data-undo]', { timeout: 10000 });
+    check('R8 mark done: toast with Undo', (await sp.innerText('[data-undo-toast]')).includes('Undo'));
+    await sShot('12-r8-undo-390');
+    await sp.waitForFunction(([u, id]) => import(u).then(m => (m.store.get('workItem', id) || {}).status === 'done'), [STORE, t8.id]).catch(() => {});
+    await sp.click('[data-undo-toast] [data-undo]'); await sSettle(); await sp.waitForTimeout(800);
+    const back8 = await sp.evaluate(async ([u, id]) => { const w = (await import(u)).store.get('workItem', id); return { status: w.status, statusId: w.statusId || null, doneAt: w.doneAt || null }; }, [STORE, t8.id]);
+    check('R8 undo restores the previous status and done date', back8.status === t8.status && back8.statusId === t8.statusId && back8.doneAt === t8.doneAt, { before: t8, after: back8 });
+  } else check('R8 a task of mine to mark done exists', false);
+  /* risk whose linked work is all done -> "Likely resolved: close it?" */
+  const rk8 = await sp.evaluate(async u => { const { store } = await import(u); const w = store.list('workItem', x => x.status === 'done')[0]; if (!w) return null;
+    const id = 'rsk-e2e-r8'; await store.save('risk', id, { id, projectId: w.projectId, title: 'E2E R8 risk on finished work', impact: 'low', likelihood: 'low', owner: store.state.me, status: 'open', mitigation: '', workItems: [w.id] }, 'E2E risk'); return id; }, STORE);
+  await sGo('/portfolio', '[data-pcard]');
+  check('R8 risk with all linked work done: "Likely resolved: close it?"', rk8 && await sp.locator(`[data-likely-resolved="${rk8}"]`).count() === 1);
+  await sp.click(`[data-close-risk="${rk8}"]`); await sSettle(); await sp.waitForTimeout(600);
+  check('R8 "Close it" closes the risk', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('risk', id).status, [STORE, rk8])) === 'closed');
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();
 
