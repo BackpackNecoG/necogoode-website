@@ -23,10 +23,13 @@ async function http(method, path, body) {
   return j;
 }
 
+/* "Today" is the user's LOCAL calendar date (UTC dates roll over in the evening in the Americas). */
+function localToday() { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+
 const listeners = new Set();
 
 export const store = {
-  state: { ws: null, docs: {}, people: [], today: new Date().toISOString().slice(0, 10), me: null, offline: false, error: null },
+  state: { ws: null, docs: {}, people: [], today: localToday(), me: null, offline: false, error: null },
 
   subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
   emit() { listeners.forEach(fn => { try { fn(store.state); } catch (e) { console.error(e); } }); },
@@ -43,7 +46,7 @@ export const store = {
           st = await http('GET', `/ws/${ws}/state`);
         } else throw e;
       }
-      Object.assign(store.state, { ws, docs: st.docs || {}, people: st.people || [], today: st.today || store.state.today, offline: false, error: null });
+      Object.assign(store.state, { ws, docs: st.docs || {}, people: st.people || [], today: localToday(), offline: false, error: null });
     } catch (e) {
       Object.assign(store.state, { offline: true, error: e.message });
     }
