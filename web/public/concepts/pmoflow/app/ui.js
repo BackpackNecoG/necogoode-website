@@ -62,10 +62,10 @@ export function modal({ title, body, actions }) {
 export async function stepUp(actionLabel, attempt) {
   attempt = attempt || 1;
   const r = await modal({
-    title: 'Verify it’s you',
-    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, confirm with multi-factor authentication.</p>
-      <div class="field"><label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits" maxlength="6" /></div>
-      <span class="sim">Simulated step-up: in production this is Microsoft Entra MFA on a compliant device, checked by the in-tenant API.</span>`,
+    title: 'Extra sign-in check',
+    body: `${attempt > 1 ? '<div class="banner" style="margin:0">That code wasn’t 6 digits. Try again.</div>' : ''}<p style="margin:0">To <b>${esc(actionLabel)}</b>, enter the 6-digit code from your sign-in app.</p>
+      <div class="field"><label>6-digit code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Any 6 digits" maxlength="6" /></div>
+      <span class="sim">Demo only: any 6 digits work. In a real company this is your normal Microsoft sign-in check.</span>`,
     actions: [{ id: 'verify', label: 'Verify', primary: true }],
   });
   if (r.action !== 'verify') return false;

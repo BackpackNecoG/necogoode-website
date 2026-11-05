@@ -1,4 +1,6 @@
-/* E2E for stream D (process / step / data pages), rounds 1 to 6.
+/* E2E for stream D (process / step / data pages), rounds 1 to 7.
+   R7: the main flow runs with Advanced on (every power tool stays covered); a Simple section then checks the
+   plain-language, low-effort defaults (3-field step dialog, quick-add, automatic Future, no jargon, action budget).
    Usage: node tests/pmoflow/e2e-design.js [port]   (dev server must be running on that port) */
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -98,8 +100,11 @@ const docsOf = st => st.docs;
   const getProc = async id => (await state()).docs.process.find(d => d.id === id).data;
   const getData = async id => (await state()).docs.dataElement.find(d => d.id === id).data;
   /* R6: Export opens a dialog (optional External parties pool), then downloads */
+  /* R7: version, compare, save version, undo and the diagram file live in the "⋯ More" menu */
+  const openMore = async () => { if (await page.$('[data-more]:not([open])')) await page.click('[data-more] > summary'); };
+  const tool = async sel => { const el = await page.$(sel); if (!el || !(await el.isVisible())) await openMore(); await page.click(sel); };
   const exportBpmn = async (name, pool) => {
-    await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]');
+    await tool('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]');
     const cb = await page.$('.overlay input[name=pool]');
     if (cb && !(await cb.isDisabled())) { if (pool === false) await cb.uncheck(); else if (pool) await cb.check(); }
     const [dl] = await Promise.all([page.waitForEvent('download'), act('download')]);
@@ -131,6 +136,10 @@ const docsOf = st => st.docs;
     console.log('# boot');
     await nav('/');
     await page.waitForFunction(() => document.querySelectorAll('#persona option').length > 0, null, { timeout: 20000 });
+    /* R7: Simple is the default; the main flow turns Advanced on (the Simple section near the end turns it off) */
+    ok(!(await page.isChecked('#adv')), 'R7: Simple is the default (Advanced off)');
+    await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '1')); await nav('/');
+    ok(await page.isChecked('#adv'), 'R7: Advanced turned on for the power-tool coverage');
     let st = await state();
     const me = await page.$eval('#persona', s => s.value);
     const meName = st.people.find(p => p.id === me).name;
@@ -155,7 +164,7 @@ const docsOf = st => st.docs;
       if (r.ver !== exp.ver || r.steps !== exp.steps || r.diff !== exp.diff || r.data !== exp.data || !r.owner.includes(st.people.find(x => x.id === p.owner).name) || !projs.every(j => r.prj.includes(j.name))) { rowsOk = false; console.log('    row mismatch', r, exp); }
     }
     ok(rowsOk, 'each row: version, owner, steps, new+changed (diffSummary), live/pending/examples/missing (effectiveAvail), projects');
-    ok(await page.getAttribute('[data-new-workflow]', 'href') === '/concepts/pmoflow/new' && await page.getAttribute('[data-import-sop]', 'href') === '/concepts/pmoflow/import' && !!(await page.$('label.d-import [data-bpmn-file]')), '"+ New workflow", "Import BPMN" and "Import SOP" actions');
+    ok(await page.getAttribute('[data-new-workflow]', 'href') === '/concepts/pmoflow/new' && await page.getAttribute('[data-import-sop]', 'href') === '/concepts/pmoflow/import' && !!(await page.$('label.d-import [data-bpmn-file]')), '"+ Map a process", "Import BPMN" (Advanced) and "Paste a procedure" actions');
     await page.fill('[data-psearch]', seedP.name.split(' ')[0].toLowerCase());
     const vis = await page.$$eval('.d-prow', rs => rs.filter(r => !r.hidden).map(r => r.dataset.prow));
     ok(vis.includes(pid) && vis.length < procs.length && /of/.test(await page.textContent('[data-pcount]')), `search filters rows (${vis.length} of ${procs.length})`);
@@ -175,7 +184,8 @@ const docsOf = st => st.docs;
       await shot('process-' + m); await overflow('process ' + m + ' @1440'); await iconCheck('process ' + m);
     }
     const tabOrder = await page.$$eval('.d-modes button', bs => bs.map(b => b.textContent.trim()));
-    ok(tabOrder.join(',') === 'As-is,To-be,Diff,Swimlanes,Impact,Edit', 'mode tabs in order: ' + tabOrder.join(','));
+    ok(tabOrder.join(',') === 'Today,Future,What changed,By person,Who’s affected', 'R7 (Advanced) tabs in order: ' + tabOrder.join(','));
+    ok(await page.isVisible('.d-editbtn[data-mode="edit"]'), 'R7: Edit is a button next to the tabs (editors only)');
 
     console.log('# R3: effective data state on map cards, diffSummary counts');
     await nav(`/process/${pid}?mode=tobe`);
@@ -185,10 +195,10 @@ const docsOf = st => st.docs;
     for (const c of cards) {
       const n = flat(seedP.tobe).find(x => x.id === c.id); const eff = (n.data || []).map(d => ENG.effectiveAvail(D, d));
       const m = eff.filter(a => a === 'missing').length, x = eff.filter(a => a === 'example').length;
-      if ((m ? !c.miss.includes(m + ' missing') : !!c.miss) || (x ? !c.amber.startsWith(x + ' need') : !!c.amber)) { cardOk = false; console.log('    card mismatch', c, m, x); }
+      if ((m ? !c.miss.includes(m + ' not available yet') : !!c.miss) || (x ? !c.amber.startsWith(x + ' sample only') : !!c.amber)) { cardOk = false; console.log('    card mismatch', c, m, x); }
       sawMiss = sawMiss || !!m; sawAmber = sawAmber || !!x;
     }
-    ok(cardOk, `map cards: red "missing" and amber "needs live source" match effectiveAvail on ${cards.length} cards`);
+    ok(cardOk, `map cards: red "not available yet" and amber "sample only" match effectiveAvail on ${cards.length} cards`);
     ok(sawMiss || sawAmber, `seed shows at least one data warning (missing ${sawMiss}, examples ${sawAmber})`);
     const sum = ENG.diffSummary(seedP);
     ok((await page.textContent('[data-kpi-diff] b')).trim() === `${sum.new}+${sum.changed}`, `KPI new+changed = diffSummary ${sum.new}+${sum.changed}`);
@@ -235,7 +245,7 @@ const docsOf = st => st.docs;
     if (!(rp.released || []).length) { rp.released = [{ version: 1, at: new Date(Date.now() - 20 * 86400000).toISOString(), by: 'ta', asis: rp.asis }]; rp.version = Math.max(2, rp.version || 1); ok(await putDoc('process', pid, rp, 'Test fixture: released v1') === 200, 'fixture: release v1 stored'); }
     const rel = rp.released[0];
     await nav(`/process/${pid}?mode=asis`);
-    await page.selectOption('[data-version]', String(rel.version));
+    await openMore(); await page.selectOption('[data-version]', String(rel.version));
     await page.waitForSelector('.d-relbanner');
     const banner = await page.textContent('.d-relbanner');
     ok(new RegExp(`Released .+ by ${(st.people.find(p => p.id === rel.by) || {}).name}`).test(banner), 'release banner: ' + banner.trim().slice(0, 60));
@@ -256,8 +266,8 @@ const docsOf = st => st.docs;
     await page.waitForURL(/\/step\//);
     await page.waitForSelector('.kgrid');
     ok((await page.$$('.kgrid .kc')).length === 5, 'step page KPIs render');
-    ok(await page.isVisible('text=How this step runs') && await page.isVisible('text=Work to deliver it'), 'step page shows sub-steps and work cards');
-    ok(await page.isVisible('text=UAT scripts for this step'), 'step page shows UAT scripts card');
+    ok(await page.isVisible('text=How this step is done') && await page.isVisible('text=Work to deliver it'), 'step page shows sub-steps and work cards');
+    ok(await page.isVisible('text=Business tests for this step'), 'step page shows the business tests card');
     const uatN = (await page.$$('.d-uatc')).length;
     ok(uatN > 0, `changed seed step has UAT scripts (${uatN})`);
     await settle(); await shot('step'); await overflow('step @1440');
@@ -288,30 +298,33 @@ const docsOf = st => st.docs;
     await page.waitForURL(/mode=edit/);
     const newPid = page.url().match(/process\/([\w-]+)/)[1];
     ok(!!newPid, 'created process ' + newPid);
-    ok(/v=asis/.test(page.url()) && await page.isVisible('.d-editbar [data-ver="asis"].on'), 'new process opens edit on the as-is version');
+    ok(/v=asis/.test(page.url()) && await page.isVisible('.d-modes [data-mode="asis"].on') && await page.isVisible('[data-edit-done]'), 'new process opens editing on Today');
+    await page.waitForSelector('.overlay #d-f-title');
+    ok(true, 'R7: the first "Add a step" dialog opens by itself on a new process');
+    await act('cancel');
     const np0 = await getProc(newPid);
     ok(np0.asis[0].type === 'trigger' && np0.asis[0].title === '' && np0.tobe[0].title === '', 'R5: new trigger title is empty (the prompt is a placeholder, not a value)');
-    ok(await page.isVisible('#canvas .node.trigger [data-trigger-empty]:has-text("What starts this process?")'), 'R5: empty trigger shows the prompt as placeholder text');
+    ok(await page.isVisible('#canvas .node.trigger [data-trigger-empty]:has-text("What starts it?")'), 'R7: empty trigger shows "What starts it?" as placeholder text');
     await page.click('#canvas .node.trigger [data-ed="edit"]'); await page.waitForSelector('.overlay input[name=title]');
-    ok(await page.inputValue('.overlay input[name=title]') === '' && /What starts this process\?/.test(await page.getAttribute('.overlay input[name=title]', 'placeholder')), 'R5: trigger dialog: empty value, prompt as placeholder');
+    ok(await page.inputValue('.overlay input[name=title]') === '' && /^e\.g\./.test(await page.getAttribute('.overlay input[name=title]', 'placeholder')) && await page.isVisible('.overlay h2:has-text("What starts it?")'), 'R7: "What starts it" dialog: empty value, an example as placeholder');
     await page.fill('.overlay input[name=title]', 'Requester submits a purchase request');
     await page.fill('.overlay input[name=touches]', 'Kickoff Desk');
     await saving(() => act('save'));
     ok((await getProc(newPid)).asis[0].title === 'Requester submits a purchase request', 'R5: trigger title saved');
-    ok(await page.isVisible('[data-touches] [data-touch="Kickoff Desk"]:has-text("· 1")'), 'R5: kickoff touches count in "Touches across operations"');
-    ok(/Map how it runs today, then fork to-be/.test(await page.textContent('[data-asis-hint]')), 'as-is hint: "Map how it runs today, then fork to-be"');
-    await shot('process-new-asis'); await iconCheck('edit as-is');
-    await page.click('[data-ver="tobe"]'); await page.waitForURL(/v=tobe/);
-    await page.waitForSelector('[data-ins]');
+    ok(await page.isVisible('[data-touches] [data-touch="Kickoff Desk"]:has-text("· 1")'), 'R7: "what starts it" teams count in "Teams involved"');
+    ok(await page.isVisible('[data-addstep]:has-text("+ Add a step")'), 'R7: Today editing shows one big "+ Add a step" button');
+    await shot('process-new-asis'); await iconCheck('edit Today');
+    await page.click('.d-modes [data-mode="tobe"]'); await page.waitForURL(/mode=edit&v=tobe/);
+    await page.waitForSelector('[data-addstep]');
 
-    /* keyboard: focus the insert point, press Enter, choose Step; fill SLA/system/duration */
-    await page.focus('[data-ins="root"]');
+    /* keyboard: focus "+ Add a step", press Enter; tag information by typing; fill time limit/system/duration under More options */
+    await page.focus('[data-addstep]');
     await page.keyboard.press('Enter');
-    await page.waitForSelector('.overlay [data-act="parallel"]');
-    await act('step');
-    await page.waitForSelector('.overlay input[name=title]');
+    await page.waitForSelector('.overlay #d-f-title');
     await page.fill('.overlay input[name=title]', 'Verify identity');
-    await page.click('.overlay [data-picks] .d-pick >> nth=0');
+    const firstData = st.docs.dataElement[0].data;
+    await page.fill('.overlay #d-f-info', firstData.name + ',');
+    ok(await page.isVisible(`.overlay [data-ichip="${firstData.id}"]`), 'R7: typing an existing information name and a comma adds it as a chip');
     await page.fill('.overlay input[name=touches]', 'Compliance, Portal');
     await page.fill('.overlay input[name=sla]', '2 business days');
     await page.fill('.overlay input[name=system]', 'ERP');
@@ -320,7 +333,7 @@ const docsOf = st => st.docs;
     await page.fill('.overlay [data-subrow] input[name=sub_title]', 'Check ID document');
     await page.click('.overlay [data-subrow] .d-pick >> nth=0');
     await saving(() => act('save'));
-    ok((await titles()).includes('Verify identity'), 'inserted step via keyboard');
+    ok((await titles()).includes('Verify identity') && !(await page.$('.overlay')), 'inserted step via keyboard; "Add step" closes the dialog');
     ok((await page.textContent('.node:has-text("Verify identity") .d-ops')).trim() === '⏱ 2 business days · ERP · 4h', 'card shows SLA · system · duration');
 
     /* decision with a loop-back branch */
@@ -332,11 +345,11 @@ const docsOf = st => st.docs;
     ok((await page.$$('.overlay [data-brow]')).length === 3, 'decision modal: added a third branch');
     await page.click('.overlay [data-brow] >> nth=2 >> [data-bdel]');
     await page.fill('.overlay [data-brow] >> nth=1 >> input', 'Needs more info');
-    await page.selectOption('.overlay [data-brow] >> nth=1 >> select[name=bgoto]', { label: '↩ Loop back to Verify identity' });
+    await page.selectOption('.overlay [data-brow] >> nth=1 >> select[name=bgoto]', { label: '↩ Go back to Verify identity' });
     await saving(() => act('save'));
     ok(await page.isVisible('.diamond:has-text("Amount over limit?")'), 'decision inserted');
     ok(await page.isVisible('.blabel:has-text("Needs more info")'), 'renamed branch label shown');
-    ok((await page.textContent('.d-goto')).includes('Loop back to “Verify identity”'), 'loop-back label rendered at branch end');
+    ok((await page.textContent('.d-goto')).includes('Go back to “Verify identity”'), 'loop-back label rendered at branch end');
     const loopCheck = async label => {
       const r = await page.evaluate(() => {
         const lb = document.querySelector('#canvas .d-goto[data-goto]'); const path = document.querySelector(`#canvas svg.d-loops path.d-loop[data-loop="${lb.dataset.goto}"]`);
@@ -351,7 +364,7 @@ const docsOf = st => st.docs;
       });
       ok(!!r && r.curved && r.marker && r.hidden === 'true', `${label}: curved SVG return arrow with an arrowhead, aria-hidden`);
       ok(!!r && r.startOk && r.endOk, `${label}: arrow runs from the end of the branch to the target node`);
-      ok(!!r && /Loop back to/.test(r.labelText), `${label}: text label kept for accessibility`);
+      ok(!!r && /Go back to/.test(r.labelText), `${label}: text label kept for accessibility`);
     };
     await loopCheck('edit map @1440');
     await nav(page.url().replace(BASE, '').replace(/mode=edit.*/, 'mode=tobe'));
@@ -368,6 +381,7 @@ const docsOf = st => st.docs;
     /* step inside the first branch */
     await page.click('[data-ins$="#0"] >> nth=0');
     await act('step');
+    await page.waitForSelector('.overlay #d-f-title');
     await page.fill('.overlay input[name=title]', 'Manager approval');
     await saving(() => act('save'));
     ok(await page.isVisible('.branch .node:has-text("Manager approval")'), 'step added inside a branch');
@@ -379,10 +393,11 @@ const docsOf = st => st.docs;
     await page.fill('.overlay input[name=title]', 'Set up vendor');
     ok((await page.$$('.overlay select[name=bgoto]')).length === 0, 'parallel gateway has no loop-back option');
     await saving(() => act('save'));
-    ok(await page.isVisible('[data-gw="parallel"] .d-par:has-text("Runs in parallel")'), 'parallel gateway shows "Runs in parallel"');
+    ok(await page.isVisible('[data-gw="parallel"] .d-par:has-text("At the same time")'), 'R7: "at the same time" shows its plain label');
     ok((await page.textContent('[data-gw="parallel"] .d-par')).includes('⊕'), 'parallel gateway uses the ⊕ diamond');
     await page.click('[data-gw="parallel"] [data-ins$="#1"]');
     await act('step');
+    await page.waitForSelector('.overlay #d-f-title');
     await page.fill('.overlay input[name=title]', 'Notify treasury');
     await saving(() => act('save'));
     ok(await page.isVisible('[data-gw="parallel"] .node:has-text("Notify treasury")'), 'step added inside a parallel track');
@@ -392,7 +407,7 @@ const docsOf = st => st.docs;
     await page.waitForSelector('.overlay [data-nd-name]');
     await page.fill('.overlay [data-nd-name]', 'E2E ghost element');
     await page.click('.overlay [data-nd-create]');
-    ok(await page.isChecked('.overlay .d-pick:has-text("E2E ghost element") input'), 'inline element tagged in the modal');
+    ok(await page.isVisible('.overlay [data-ichip][data-iname="E2E ghost element"]'), 'inline information added as a chip in the dialog');
     await act('cancel');
     await page.waitForTimeout(400);
     ok(!((await state()).docs.dataElement || []).some(d => d.data.name === 'E2E ghost element'), 'cancelled step modal did not create the data element');
@@ -403,7 +418,7 @@ const docsOf = st => st.docs;
     ok(/already exists/.test(await page.textContent('.overlay [data-nd-msg]')), 'duplicate name (different case) blocked inline');
     await page.fill('.overlay [data-nd-name]', 'E2E identity proof');
     await page.click('.overlay [data-nd-create]');
-    ok(await page.isChecked('.overlay .d-pick:has-text("E2E identity proof") input'), 'inline data element tagged');
+    ok(await page.isVisible('.overlay [data-ichip][data-iname="E2E identity proof"]'), 'inline information added as a chip');
     await saving(() => act('save'));
     await page.waitForTimeout(500);
     st = await state();
@@ -453,23 +468,22 @@ const docsOf = st => st.docs;
     await saving(() => act('yes'));
     ok(((await getProc(newPid)).resources || []).length === 0, 'resource removed after confirmation');
 
-    /* as-is: add a step, fork, then remove the forked copy so diff shows a ghost */
-    await page.click('[data-ver="asis"]');
-    await page.waitForURL(/v=asis/); await page.waitForSelector('[data-ins]');
-    await page.click('[data-ins="root"] >> nth=0');
-    await act('step');
+    /* Today: add a step, start Future again from Today (Advanced), then remove the copy so What changed shows a ghost */
+    await page.click('.d-modes [data-mode="asis"]');
+    await page.waitForURL(/v=asis/); await page.waitForSelector('[data-addstep]');
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
     await page.fill('.overlay input[name=title]', 'Check ID by hand');
     await saving(() => act('save'));
+    await page.click('.d-modes [data-mode="tobe"]'); await page.waitForURL(/v=tobe/);
     await page.click('[data-fork]');
     await saving(() => act('yes'));
-    await page.waitForURL(/v=tobe/); await page.waitForSelector('[data-ins]');
+    await page.waitForURL(/v=tobe/); await page.waitForSelector('[data-addstep]');
     proc = await getProc(newPid);
     const forked = flat(proc.tobe);
     ok(forked.length === 1 && forked[0].title === 'Check ID by hand' && forked[0].from === flat(proc.asis)[0].id && forked[0].id !== flat(proc.asis)[0].id, 'fork copied as-is with fresh ids and from links');
     await page.click('.node:has-text("Check ID by hand") [data-ed="del"]');
     await saving(() => act('yes'));
-    await page.click('[data-ins="root"] >> nth=0');
-    await act('step');
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
     await page.fill('.overlay input[name=title]', 'Automated ID check');
     await page.fill('.overlay input[name=sla]', '1 business day');
     await page.fill('.overlay input[name=system]', 'Approvals');
@@ -482,9 +496,9 @@ const docsOf = st => st.docs;
     ok(await page.isVisible('#canvas .ghost:has-text("Check ID by hand")'), 'diff: removed as-is step shown as ghost');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     const hist = await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent));
-    ok(hist.some(h => /Added step 'Verify identity' to to-be/.test(h)), 'history shows "Added step \'Verify identity\' to to-be"');
-    ok(hist.some(h => /Added parallel gateway 'Set up vendor'/.test(h)), 'history shows parallel gateway');
-    ok(hist.some(h => /Forked to-be from as-is/.test(h)), 'history shows fork');
+    ok(hist.some(h => /Added step 'Verify identity' to Future/.test(h)), 'history shows "Added step \'Verify identity\' to Future"');
+    ok(hist.some(h => /Added “at the same time” 'Set up vendor'/.test(h)), 'history shows "at the same time"');
+    ok(hist.some(h => /Started Future again from Today/.test(h)), 'history shows "Started Future again from Today"');
 
     console.log('# step page shows SLA/system');
     const aid = flat((await getProc(newPid)).tobe).find(s => s.title === 'Automated ID check').id;
@@ -604,25 +618,25 @@ const docsOf = st => st.docs;
     ok(specRows.length === 1 && /Document number/.test(specRows[0]) && /9 digits/.test(specRows[0]), 'spec field add/edit/delete persisted');
     const rules = await page.textContent('.d-spec .d-rule');
     ok((rules.match(/Required/g) || []).length === 1, 'rules column de-duplicated: ' + rules.trim());
-    ok(await page.isVisible('.hdr .chip:has-text("Examples only")'), 'availability edit persisted');
-    ok(await page.isVisible('.hdr .d-sens:has-text("PII")'), 'sensitivity badge shows PII');
+    ok(await page.isVisible('.hdr .chip:has-text("Sample only")'), 'availability edit persisted ("Sample only")');
+    ok(await page.isVisible('.hdr .d-sens:has-text("Personal details")'), 'sensitivity badge shows "Personal details" (PII in the tooltip)');
     ok(await page.isVisible('.d-resolved .d-resnote:has-text("Pattern now allows")'), 'discovered requirement resolved with note');
     ok(((await getData(did)).discovered[0].resolved || {}).by === me, 'resolved saved with author');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /sensitivity unclassified → PII/.test(t)), 'data history shows sensitivity change');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /sensitivity not set → Personal details/.test(t)), 'data history shows sensitivity change');
     await shot('data-new'); await overflow('data @1440');
-    /* another persona sees owner-only controls disabled */
+    /* R7 hide, don't grey: another persona does not see the owner-only controls at all */
     await page.selectOption('#persona', other.id);
-    await page.waitForSelector('[data-dedit][disabled]');
-    ok(await page.isDisabled('[data-fadd]') && await page.isDisabled('[data-fedit="0"]') && await page.isDisabled('[data-dedit]'), 'non-owner: edit, availability, spec and sensitivity controls disabled');
-    ok(await page.isVisible(`.d-only:has-text("Only ${meName} can change this")`), 'non-owner sees "Only <owner> can change this"');
+    await page.waitForSelector('[data-dedit]', { state: 'detached' });
+    ok(!(await page.$('[data-fadd]')) && !(await page.$('[data-fedit]')) && !(await page.$('[data-dedit]')) && !(await page.$('[data-resolve]')), 'R7: non-owner: edit, rule and fix controls are hidden, not greyed');
+    ok(await page.isVisible(`.d-only:has-text("Only ${meName} (the owner) can change this")`), 'non-owner sees "Only <owner> (the owner) can change this"');
     await shot('data-nonowner');
     await page.selectOption('#persona', me);
-    await page.waitForSelector('[data-dedit]:not([disabled])');
+    await page.waitForSelector('[data-dedit]');
 
     const seedData = (st.docs.dataElement || []).map(d => d.data).find(d => d.avail === 'missing') || st.docs.dataElement[0].data;
     await nav(`/data/${seedData.id}`);
-    ok(await page.isVisible('text=Impact: every step that uses this'), 'seed data page renders impact');
+    ok(await page.isVisible('text=Steps that use it'), 'seed data page renders "Steps that use it"');
     await shot('data-seed'); await overflow('data seed @1440');
 
     console.log('# new data element from the process panel (duplicate blocked, then created)');
@@ -640,7 +654,7 @@ const docsOf = st => st.docs;
 
     console.log('# R3: BPMN import round trip (seed to-be), from the process index (creates new processes)');
     await nav(`/process/${pid}?mode=tobe`);
-    ok(await page.isVisible('label.d-import:has-text("Import BPMN as new version")'), 'R5: process page offers "Import BPMN as new version"');
+    ok(!!(await page.$('[data-more] label.d-import:has-text("Import diagram file") [data-bpmn-file]')), 'R7: "⋯ More" offers "Import diagram file" (a new version)');
     await nav('/processes');
     ok(await page.isVisible('label.d-import:has-text("Import BPMN")'), 'process index offers Import BPMN (new process)');
     const impPid = await importFile(`${OUT}/seed-tobe.bpmn`);
@@ -707,17 +721,19 @@ const docsOf = st => st.docs;
 
     console.log('# R3: start a project from this to-be');
     await nav(`/process/${impPid}?mode=tobe`);
+    /* R7: the shared "New project" form (name, which process, deadline; roles under More options) */
     await page.click('[data-start-project]');
     await page.waitForSelector('.overlay input[name=target]');
+    ok(await page.inputValue('.overlay [name=from]') === impPid && /rollout/.test(await page.inputValue('.overlay input[name=name]')), 'R7: start project prefills the process and a name');
     await page.fill('.overlay input[name=name]', '');
     await act('create');
-    await page.waitForSelector('.overlay .d-err');
-    ok(/needs a name/.test(await page.textContent('.overlay .d-err')), 'start project: name required');
+    await page.waitForSelector('.overlay .banner');
+    ok(/name/.test(await page.textContent('.overlay .banner')), 'start project: name required');
     const tgt = new Date(st.today + 'T12:00:00'); tgt.setDate(tgt.getDate() + 45); const target = tgt.toISOString().slice(0, 10);
     await page.fill('.overlay input[name=name]', 'E2E Northwind rollout');
     await page.fill('.overlay input[name=target]', target);
-    ok(await page.inputValue('.overlay select[name=pm]') === me && await page.inputValue('.overlay select[name=rm]') === me, 'R5: start project asks for project manager and release manager (default: you)');
-    await page.selectOption('.overlay select[name=rm]', other1.id);
+    ok(await page.inputValue('.overlay select[name=owner]') === me, 'R7: project manager defaults to you (More options)');
+    await page.selectOption('.overlay select[name=releaseManager]', other1.id);
     await page.screenshot({ path: `${OUT}/start-project-modal.png` });
     await saving(() => act('create'));
     await page.waitForURL(/\/project\/[\w-]+$/);
@@ -731,7 +747,7 @@ const docsOf = st => st.docs;
       ok(d.releaseManager === other1.id, 'R5: project releaseManager saved');
     }
     const pev = await page.evaluate(async id => (await (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/events?ref=project:${id}`)).json()).events || [], prjId);
-    ok(pev.some(e => /Started project 'E2E Northwind rollout' from the to-be/.test(e.summary)), 'project creation event is in history');
+    ok(pev.some(e => /E2E Northwind rollout/.test(e.summary)), 'project creation event is in history');
     await nav(`/process/${impPid}?mode=tobe`);
     ok(await page.isVisible('.side .row:has-text("E2E Northwind rollout")'), 'process side panel lists the new project');
 
@@ -740,54 +756,54 @@ const docsOf = st => st.docs;
     const exId = await mkData('E2E examples-only feed', 'example');
     const msId = await mkData('E2E missing feed', 'missing');
     await nav(`/data/${exId}`);
-    ok(await page.isVisible('[data-resolution="example"] .d-b-amber:has-text("Needs a live source before go-live")'), 'examples-only element: amber "Needs a live source before go-live"');
-    ok(/No resolution plan/.test(await page.textContent('[data-noplan]')), 'examples-only element without resolver: "No resolution plan"');
+    ok(await page.isVisible('[data-resolution="example"] .d-b-amber:has-text("Needs to be connected before launch")'), 'sample-only information: amber "Needs to be connected before launch"');
+    ok(/No fix planned/.test(await page.textContent('[data-noplan]')), 'sample-only information without a fix: "No fix planned"');
     await shot('data-examples-only');
     await nav(`/data/${msId}`);
-    ok(await page.isVisible('[data-resolution="missing"] [data-noplan]') && await page.isVisible('.hdr [data-eff="missing"]'), 'missing element: red "No resolution plan"');
+    ok(await page.isVisible('[data-resolution="missing"] [data-noplan]') && await page.isVisible('.hdr [data-eff="missing"]'), 'not-available information: red "No fix planned"');
     const wid = 'wi-e2e-' + Math.random().toString(36).slice(2, 8);
     ok(await putDoc('workItem', wid, { id: wid, projectId: prjId, pid: impPid, step: flat(imp.tobe)[0].id, title: 'Connect the E2E feed', owner: me, status: 'done', start: st.today, due: st.today, doneAt: st.today, deps: [], resolves: msId, kind: 'access' }, 'Test fixture: resolver done') === 200, 'fixture: done resolver');
     await nav(`/data/${msId}`);
     console.log('# R4: pending until the data owner confirms live');
     ok(ENG.effectiveAvail((await state()).docs, msId) === 'pending', 'engine: resolver done -> pending');
-    ok(await page.isVisible('.hdr [data-eff="pending"]:has-text("Fix done, awaiting owner confirmation")') && !(await page.$('[data-noplan]')), 'resolver done: header shows amber "Fix done, awaiting owner confirmation"');
-    ok(await page.isVisible(`[data-resolution="pending"] .d-b-amber:has-text("awaiting ${meName} to confirm")`), `resolution plan: "awaiting ${meName} to confirm"`);
-    ok(await page.isVisible('[data-confirm-card] [data-confirm-live]:not([disabled])'), 'owner sees "Confirm live"');
+    ok(await page.isVisible('.hdr [data-eff="pending"]:has-text("Waiting for confirmation")') && !(await page.$('[data-noplan]')), 'fix done: header shows amber "Waiting for confirmation"');
+    ok(await page.isVisible(`[data-resolution="pending"] .d-b-amber:has-text("Waiting for ${meName} to confirm")`), `fix card: "Waiting for ${meName} to confirm"`);
+    ok(await page.isVisible('[data-confirm-card] [data-confirm-live]'), 'owner sees "Confirm it’s connected"');
     /* the pending element on a map step: card, step page, side panel, index */
     const ip = await getProc(impPid); const pstep = flat(ip.tobe)[0]; pstep.data = [...new Set([...(pstep.data || []), msId])];
     ok(await putDoc('process', impPid, ip, 'Test fixture: tag pending data') === 200, 'fixture: step uses the pending element');
     await nav(`/process/${impPid}?mode=tobe`);
-    ok(/1 awaiting confirmation/.test(await page.textContent(`#canvas .node[data-step="${pstep.id}"] .d-pend`)), 'map card: amber "1 awaiting confirmation"');
-    ok(await page.isVisible('[data-pend-steps]:has-text("Fix done, awaiting owner confirmation")'), 'process panel: pending section');
-    ok(await page.isVisible(`[data-hl="${msId}"] .r a:has-text("Pending")`), 'process panel data row: Pending');
+    ok(/1 waiting for confirmation/.test(await page.textContent(`#canvas .node[data-step="${pstep.id}"] .d-pend`)), 'map card: amber "1 waiting for confirmation"');
+    ok(await page.isVisible('[data-pend-steps]:has-text("Waiting for confirmation")'), 'process panel: waiting section');
+    ok(await page.isVisible(`[data-hl="${msId}"] .r a:has-text("Waiting for confirmation")`), 'process panel information row: Waiting for confirmation');
     await shot('process-pending');
     await nav(`/process/${impPid}/step/${pstep.id}`);
-    ok(await page.isVisible(`.d-pend-s:has-text("Fix done, awaiting ${meName} to confirm")`) && await page.isVisible('[data-eff="pending"]:has-text("Pending")'), 'step page: pending chip and "awaiting <owner> to confirm"');
+    ok(await page.isVisible(`.d-pend-s:has-text("Waiting for ${meName} to confirm")`) && await page.isVisible('[data-eff="pending"]:has-text("Waiting for confirmation")'), 'step page: waiting chip and "Waiting for <owner> to confirm"');
     await nav('/processes');
     const pcount = await page.getAttribute(`[data-prow="${impPid}"] [data-datacounts]`, 'data-datacounts');
     ok(pcount.split('/')[1] === '1', 'process index: 1 pending element (' + pcount + ')');
     /* non-owner cannot confirm */
     await nav(`/data/${msId}`);
     await page.selectOption('#persona', other.id);
-    await page.waitForSelector('[data-confirm-live][disabled]');
-    ok(await page.isVisible(`.d-only:has-text("Only ${meName} (data owner) can confirm")`), 'non-owner: Confirm live disabled with the owner named');
+    await page.waitForSelector(`.d-only:has-text("Only ${meName} (the owner) can confirm")`);
+    ok(!(await page.$('[data-confirm-live]')), 'R7: non-owner: no confirm button (hidden, not greyed), the owner is named');
     await page.selectOption('#persona', me);
-    await page.waitForSelector('[data-confirm-live]:not([disabled])');
+    await page.waitForSelector('[data-confirm-live]');
     await page.click('[data-confirm-live]');
     await page.waitForSelector('.overlay [data-confprof]');
-    ok(/No profile yet/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog: no profile yet');
+    ok(/No sample data check yet/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog: no sample data check yet');
     console.log('# R5: confirm live needs evidence (profile / connection check / attested link + note)');
     ok(await page.$eval('.overlay input[name=ev][value=profile]', e => e.disabled), 'R5: profile evidence unavailable without a profile');
-    ok(await page.isVisible('.overlay [data-evopt="attested"] .d-ev-weak:has-text("Attested · weaker")'), 'R5: attested option labelled weaker');
+    ok(await page.isVisible('.overlay [data-evopt="attested"] .d-ev-weak:has-text("Weaker proof")'), 'R7: link-and-note option labelled "Weaker proof"');
     await page.fill('.overlay input[name=source]', '');
     await act('confirm');
     await page.waitForSelector('.overlay .d-err');
-    ok(/Name the live source/.test(await page.textContent('.overlay .d-err')), 'confirm live requires a source');
+    ok(/Say where it comes from/.test(await page.textContent('.overlay .d-err')), 'confirm requires where it comes from');
     await page.fill('.overlay input[name=source]', 'Northwind ERP vendor API (read)');
     ok((await page.textContent('.overlay [data-probe-target]')).trim() === 'Northwind ERP vendor API (read)', 'R6: editing the source updates the connection check’s probe target');
     await act('confirm');
     await page.waitForSelector('.overlay .d-err');
-    ok(/Choose the evidence/.test(await page.textContent('.overlay .d-err')), 'R5: confirm live requires evidence: ' + await page.textContent('.overlay .d-err'));
+    ok(/Choose the proof/.test(await page.textContent('.overlay .d-err')), 'R5: confirm requires proof: ' + await page.textContent('.overlay .d-err'));
     /* (b) a connection check that fails (the element is still marked missing) cannot be evidence */
     const ck1 = page.waitForResponse(r => r.url().includes('/check/') && r.request().method() === 'POST');
     await page.click('.overlay [data-run-check]'); const ckr = await ck1; ok(ckr.ok(), 'R5: connection check endpoint answered ' + ckr.status());
@@ -812,8 +828,8 @@ const docsOf = st => st.docs;
     ok(conf.liveEvidence && conf.liveEvidence.type === 'attested' && conf.liveEvidence.ref === 'https://wiki.northwind.example/integrations/erp-vendor-read' && conf.liveEvidence.by === me && !!conf.liveEvidence.at, 'R5: liveEvidence {type: attested, ref, at, by} stored');
     ok(ENG.effectiveAvail((await state()).docs, msId) === 'live', 'engine: confirmed element is live');
     await nav(`/data/${msId}`);
-    ok(await page.isVisible('.hdr [data-eff="live"]') && await page.isVisible(`[data-confirmed]:has-text("Confirmed live by ${meName}")`) && !(await page.$('[data-confirm-card]')), 'after reload: live, "Confirmed live by <owner>", no confirm card');
-    ok(await page.isVisible('.hdr [data-evidence="attested"]:has-text("Attested (weaker)")'), 'R5: data page shows the evidence type (attested, weaker)');
+    ok(await page.isVisible('.hdr [data-eff="live"]') && await page.isVisible(`[data-confirmed]:has-text("Confirmed connected by ${meName}")`) && !(await page.$('[data-confirm-card]')), 'after reload: connected, "Confirmed connected by <owner>", no confirm card');
+    ok(await page.isVisible('.hdr [data-evidence="attested"]:has-text("Link and note (weaker)")'), 'R5: data page shows the proof type (link and note, weaker)');
     ok(conf.source === 'Northwind ERP vendor API (read)' && await page.isVisible('.hdr .res .chip:has-text("Northwind ERP vendor API (read)")'), 'R6: the confirmed source becomes the element source shown in the header');
     await shot('data-attested');
     await nav(`/process/${impPid}?mode=tobe`);
@@ -834,15 +850,11 @@ const docsOf = st => st.docs;
     await nav(`/data/${ckId}`);
     ok(await page.isVisible('.hdr [data-evidence="check"]:has-text("Connection check")'), 'R5: data page shows "Connection check" evidence');
     await nav(`/data/${msId}`);
-    ok(await page.isVisible('.d-resolve .badge.b-done:has-text("Ready")'), 'resolution plan shows Ready');
+    ok(await page.isVisible('.d-resolve .badge.b-done:has-text("Done")'), 'fix card shows Done');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' live \(source: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' is connected \(from: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
     await page.click('[data-dedit]');
-    ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.value).join(',')) === 'live,example,missing', 'edit dialog keeps "live" only for a live element');
-    await act('cancel');
-    await nav(`/data/${exId}`);
-    await page.click('[data-dedit]');
-    ok(!(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.value))).includes('live'), 'edit dialog cannot set live directly (Confirm live only)');
+    ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.textContent).join('|')) === 'Connected (we have this today)|Sample only|Not available yet', 'R7: edit dialog offers the plain states');
     await act('cancel');
     const prof = (st.docs.dataElement || []).map(d => d.data).find(d => d.sampleCsv && (d.fields || []).length);
     ok(!!prof, 'seed has a data element with a sample extract');
@@ -858,10 +870,10 @@ const docsOf = st => st.docs;
       const profD = await getData(prof.id);
       if (ENG.effectiveAvail((await state()).docs, prof.id) !== 'live') {
         await page.selectOption('#persona', profD.owner);
-        await page.waitForSelector('[data-confirm-live]:not([disabled])');
+        await page.waitForSelector('[data-confirm-live]');
         await page.click('[data-confirm-live]');
         await page.waitForSelector('.overlay [data-confprof]');
-        ok(/Latest profile · 40 rows/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog shows the latest profile summary: ' + (await page.textContent('.overlay [data-confprof]')).trim().slice(0, 70));
+        ok(/Latest check · 40 rows/.test(await page.textContent('.overlay [data-confprof]')), 'confirm dialog shows the latest profile summary: ' + (await page.textContent('.overlay [data-confprof]')).trim().slice(0, 70));
         const blk = ENG.specDrift(profD, (await state()).docs.profile.map(d => d.data).filter(x => x.dataId === prof.id).sort((a, b) => b.at.localeCompare(a.at))[0]).filter(d => d.issue !== 'unspecified-column').length;
         const shownBlk = await page.getAttribute('.overlay [data-blocking]', 'data-blocking').catch(() => null);
         ok(String(blk) === String(shownBlk === null ? 0 : shownBlk), `R5: dialog shows ${blk} blocking drift issue(s)`);
@@ -872,7 +884,7 @@ const docsOf = st => st.docs;
       } else ok(true, 'profiled element is already live (confirm dialog profile check skipped)');
     }
     const exStep = flat(seedP.tobe).find(n => (n.data || []).some(d => ENG.effectiveAvail(D0(), d) === 'example'));
-    if (exStep) { await nav(`/process/${pid}/step/${exStep.id}`); ok(await page.isVisible('.d-needlive-s:has-text("Needs a live source before go-live")'), 'step page: examples-only data marked amber'); await iconCheck('step page'); }
+    if (exStep) { await nav(`/process/${pid}/step/${exStep.id}`); ok(await page.isVisible('.d-needlive-s:has-text("Needs to be connected before launch")'), 'step page: sample-only information marked amber'); await iconCheck('step page'); }
 
     console.log('# R5: data element step counts agree everywhere (to-be and as-is, labelled)');
     let S5 = await state();
@@ -886,7 +898,7 @@ const docsOf = st => st.docs;
       if (shownUse !== here) { useOk = false; console.log('    usage mismatch', d, shownUse, here); }
     }
     ok(useOk && useIds.length > 0, `process panel: per-element to-be/as-is counts match usageOf for ${useIds.length} elements`);
-    ok(/\d+ to-be · \d+ as-is/.test(await page.textContent(`[data-hl="${useIds[0]}"] [data-usage]`)), 'process panel counts are labelled "to-be · as-is"');
+    ok(/\d+ Future · \d+ Today/.test(await page.textContent(`[data-hl="${useIds[0]}"] [data-usage]`)), 'process panel counts are labelled "Future · Today"');
     for (const d of useIds.slice(0, 3)) {
       const u = ENG.usageOf(S5.docs, d);
       await nav(`/data/${d}`);
@@ -913,7 +925,7 @@ const docsOf = st => st.docs;
     await nav(`/process/${pid}?mode=edit`);
     ok(await page.isVisible('[data-edit-denied]') && !(await page.$('[data-ins]')) && !(await page.$('.d-editbar')), 'non-editor opening Edit gets the read-only map, no editor controls');
     ok(await page.isVisible(`[data-readonly]:has-text("Ask ${ownerName} for edit access")`), `non-editor sees "Ask ${ownerName} for edit access"`);
-    ok(await page.$eval('.d-modes [data-mode="edit"]', b => b.getAttribute('aria-disabled') === 'true'), 'Edit tab is locked for non-editors');
+    ok(!(await page.$('[data-mode="edit"]')), 'R7: no Edit button for non-editors (hidden, not greyed)');
     ok(!(await page.$('[data-save-version]')) && !(await page.$('[data-draft-restore]')) && !(await page.$('[data-bpmn-file]')), 'no Save version / Restore / Import as version for non-editors');
     await shot('process-readonly'); await iconCheck('process read-only');
     await saving(() => page.click('[data-ask-access]'));
@@ -943,7 +955,7 @@ const docsOf = st => st.docs;
 
     console.log('# R5: versions — save, compare, undo');
     await nav(`/process/${impPid}?mode=tobe`);
-    await page.click('[data-save-version]'); await page.waitForSelector('.overlay input[name=name]');
+    await tool('[data-save-version]'); await page.waitForSelector('.overlay input[name=name]');
     await act('save'); await page.waitForSelector('.overlay .d-err');
     ok(/needs a name|Give the version a name/.test(await page.textContent('.overlay .d-err')), 'Save version needs a name');
     await page.fill('.overlay input[name=name]', 'E2E baseline');
@@ -957,7 +969,7 @@ const docsOf = st => st.docs;
     await page.click(`[data-ed="edit"][data-id="${s0.id}"]`); await page.waitForSelector('.overlay input[name=title]');
     await page.fill('.overlay input[name=title]', s0.title + ' (v2)');
     await saving(() => act('save'));
-    await page.click('[data-compare-open]'); await page.waitForURL(/mode=compare/); await settle();
+    await tool('[data-compare-open]'); await page.waitForURL(/mode=compare/); await settle();
     ipv = await getProc(impPid);
     const dv = ENG.diffVersions(ipv.drafts[0].tobe, ipv.tobe);
     const dvN = Object.values(dv.nodes), dvR = dv.removed.filter(g => g.type !== 'trigger' && g.type !== 'end').length;
@@ -973,7 +985,7 @@ const docsOf = st => st.docs;
     /* the undo snapshot lives in memory for the session: stay in the app (no reload) */
     await page.click('.d-modes [data-mode="tobe"]'); await page.waitForURL(/mode=tobe/); await settle();
     ok(/Edited step/.test(await page.getAttribute('[data-undo]', 'title')), 'Undo last change offered for the edit: ' + await page.getAttribute('[data-undo]', 'title'));
-    await saving(() => page.click('[data-undo]'));
+    await saving(() => tool('[data-undo]'));
     ok(flat((await getProc(impPid)).tobe)[0].title === s0.title, 'Undo restored the previous step title');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Undid: Edited step/.test(t)), 'history shows the undo');
@@ -982,7 +994,7 @@ const docsOf = st => st.docs;
     const ten = Array.from({ length: 10 }, (_, i) => ({ id: 'ver-e2e-' + i, name: 'Fixture ' + i, at: new Date().toISOString(), by: me, asis: [], tobe: [] }));
     ok(await putDoc('process', impPid, Object.assign({}, ipv, { drafts: ten }), 'Test fixture: 10 drafts') === 200, 'fixture: 10 saved versions');
     await nav(`/process/${impPid}?mode=tobe`);
-    await page.click('[data-save-version]'); await page.waitForSelector('.overlay:has-text("Saved versions are full")');
+    await tool('[data-save-version]'); await page.waitForSelector('.overlay:has-text("Saved versions are full")');
     ok(true, 'an 11th saved version is refused with a clear message'); await act('cancel');
     await page.click('[data-draft-del="ver-e2e-9"]'); await page.waitForSelector('.overlay [data-act="yes"]');
     await saving(() => act('yes'));
@@ -1011,10 +1023,10 @@ const docsOf = st => st.docs;
     const ipi = await getProc(impPid);
     /* R6: the header version label and KPIs follow the import, and the KPIs agree with diffSummary */
     const dsI = ENG.diffSummary(ipi);
-    ok(ipi.tobeRev === 2 && (await page.textContent('[data-ver-label]')).trim() === `v${ipi.version || 1} · to-be rev 2` && /imp-revised\.bpmn/.test(await page.textContent('[data-ver-from]')), 'R6: header version label updates to "to-be rev 2" from the imported file');
-    ok(/to-be rev 2/.test(await page.textContent('[data-ver-current]')), 'R6: version picker "Current" shows the new revision');
+    ok(ipi.tobeRev === 2 && (await page.textContent('[data-ver-label]')).trim() === `v${ipi.version || 1} · Future rev 2` && /imp-revised\.bpmn/.test(await page.textContent('[data-ver-from]')), 'R6: header version label updates to "Future rev 2" from the imported file');
+    ok(/Future rev 2/.test(await page.textContent('[data-ver-current]')), 'R6: version picker "Current" shows the new revision');
     ok((await page.textContent('[data-kpi-diff] b')).trim() === `${dsI.new}+${dsI.changed}` && (await page.textContent('.d-hdr .kpi >> nth=0')).includes(String(flat(ipi.tobe).length)), `R6: KPIs agree with diffSummary after import (${dsI.new}+${dsI.changed}, ${flat(ipi.tobe).length} steps)`);
-    ok(new RegExp(`${dsI.new}\\+${dsI.changed} new/changed`).test(await page.textContent('[data-hdr-toggle]')), 'R6: phone summary row agrees too');
+    ok(new RegExp(`${flat(ipi.tobe).length} steps · ${dsI.new + dsI.changed} changed`).test(await page.textContent('[data-hdr-toggle]')), 'R6: phone summary row agrees too');
     const fi = flat(ipi.tobe);
     const keptOk = fl.filter(n => n.id !== ren.id).every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === o.title && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
     ok(keptOk && fi.length === fl.length, 'matched steps keep id, data tags, sub-steps, owners and as-is links');
@@ -1022,7 +1034,7 @@ const docsOf = st => st.docs;
     ok(ipi.id === impPid && ipi.drafts.some(d => d.name === 'Before import of imp-revised.bpmn'), 'still the same process; the previous version was saved first');
     ok((await getProc(impPid)).asis.length === ipv.asis.length, 'as-is untouched by a to-be import');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Imported 'imp-revised.bpmn' as to-be revision 2/.test(t)), 'history shows the version import');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Imported 'imp-revised.bpmn' as Future revision 2/.test(t)), 'history shows the version import');
     await shot('process-import-version');
 
     console.log('# R5: deleting a step that has work');
@@ -1117,8 +1129,8 @@ const docsOf = st => st.docs;
     ok(await page.isVisible(`[data-step-type="wait"]:has-text("Waits ${wN.wait}")`), 'step page of a wait shows the wait');
     console.log('# R6: BPMN export maps the node types and carries PMOFlow data in extensionElements');
     await nav(`/process/${vo.id}?mode=tobe`);
-    await page.click('[data-bpmn]'); await page.waitForSelector('.overlay input[name=pool]');
-    ok(await page.isChecked('.overlay input[name=pool]') && /1 message node|\d+ message nodes/.test(await page.textContent('.overlay .mb')), 'export dialog offers the External parties pool (on when there are message nodes)');
+    await tool('[data-bpmn]'); await page.waitForSelector('.overlay input[name=pool]');
+    ok(await page.isChecked('.overlay input[name=pool]') && /\d+ message steps?/.test(await page.textContent('.overlay .mb')), 'download dialog offers the outside-parties group (on when there are message steps)');
     await act('cancel');
     const xvo = await exportBpmn('r6-seed-pool', true);
     bpmnCheck(xvo, vo.tobe, 'seed to-be with pool');
@@ -1137,7 +1149,7 @@ const docsOf = st => st.docs;
     const insAt = async kind => { const n = (await page.$$('[data-ins="root"]')).length; await page.click(`[data-ins="root"] >> nth=${n - 1}`); await page.waitForSelector('.overlay .d-kinds'); await act(kind); await page.waitForSelector('.overlay input[name=title]'); };
     await page.click('[data-ins="root"] >> nth=0'); await page.waitForSelector('.overlay .d-kinds');
     const kinds = await page.$$eval('.overlay .d-kind', bs => bs.map(b => b.dataset.act).join(','));
-    ok(kinds === 'step,subprocess,wait,message,decision,parallel', 'insert picker offers step, subprocess, wait, message, decision, parallel');
+    ok(kinds === 'step,decision,parallel,wait,message,subprocess', 'insert picker offers a step, a choice, at the same time, then wait, message, another process: ' + kinds);
     await page.screenshot({ path: `${OUT}/r6-insert-picker.png` }); await act('cancel');
     await insAt('subprocess');
     ok(!(await page.isVisible('.overlay [data-subs]')) && await page.isVisible('.overlay select[name=calls]'), 'subprocess dialog: pick the process to call (no sub-steps)');
@@ -1148,7 +1160,7 @@ const docsOf = st => st.docs;
     const spAdded = flat(np.tobe).find(n => n.type === 'subprocess');
     ok(spAdded && spAdded.calls === vo.id && spAdded.title === 'Run ' + vo.name && spAdded.system === 'ERP', `subprocess saved: calls ${vo.name}, default title "${spAdded && spAdded.title}"`);
     await insAt('wait');
-    ok(!(await page.isVisible('.overlay [data-picks]')) && !(await page.isVisible('.overlay input[name=sla]')), 'wait dialog: no data or SLA fields');
+    ok(!(await page.$('.overlay #d-f-info')) && !(await page.$('.overlay input[name=sla]')), 'wait dialog: no information or time-limit fields');
     await page.fill('.overlay input[name=wait]', '2 business days');
     await page.fill('.overlay input[name=title]', 'Wait 2 business days for vendor response');
     await saving(() => act('save'));
@@ -1162,7 +1174,7 @@ const docsOf = st => st.docs;
     await page.selectOption('.overlay [data-nd-owner]', other2.id);
     await page.fill('.overlay [data-nd-source]', 'Vendor portal inbox');
     await page.click('.overlay [data-nd-create]');
-    ok(new RegExp(`owned by ${other2.name}, source Vendor portal inbox`).test(await page.textContent('.overlay [data-nd-msg]')), '"Create and tag" confirms owner and source inline');
+    ok(new RegExp(`owned by ${other2.name}, from Vendor portal inbox`).test(await page.textContent('.overlay [data-nd-msg]')), '"Create and add" confirms owner and source inline');
     await page.screenshot({ path: `${OUT}/r6-message-modal.png` });
     /* two writes: the new data element, then the process */
     const wProc = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 });
@@ -1178,7 +1190,7 @@ const docsOf = st => st.docs;
     ok(await page.isVisible('#canvas .node.d-nt-sub') && await page.isVisible('#canvas .node.d-nt-wait') && await page.isVisible('#canvas .node.d-nt-msg [data-msg="receive"]'), 'authored typed nodes render with their own visuals');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     const h6 = await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent).join('\n'));
-    ok(/Added subprocess 'Run /.test(h6) && /Added wait 'Wait 2 business days/.test(h6) && /Added message 'Receive signed quote'/.test(h6), 'history names each typed node');
+    ok(/Added another process 'Run /.test(h6) && /Added wait 'Wait 2 business days/.test(h6) && /Added message 'Receive signed quote'/.test(h6), 'history names each typed node');
     await shot('r6-authored-tobe');
     await page.reload(); await page.waitForSelector('#canvas .node.d-nt-msg');
     ok(true, 'typed nodes persist after reload');
@@ -1241,7 +1253,7 @@ const docsOf = st => st.docs;
     ok(!!builtStep, 'seed has a step whose work is done but whose data is not live');
     await nav(`/process/${vo.id}/step/${builtStep.id}`);
     const bs = await page.evaluate(() => { const k = document.querySelector('[data-step-status]'); const b = k.querySelector('b'); return { st: k.dataset.stepStatus, txt: b.textContent.trim(), color: getComputedStyle(b).color }; });
-    ok(bs.st === 'built' && bs.txt === 'Built · awaiting live data' && bs.color === 'rgb(180, 83, 9)', `done work + data not live = amber "Built · awaiting live data", never green Done (${bs.txt}, ${bs.color})`);
+    ok(bs.st === 'built' && bs.txt === 'Built · information not connected yet' && bs.color === 'rgb(180, 83, 9)', `done work + information not connected = amber "Built · information not connected yet", never green Done (${bs.txt}, ${bs.color})`);
     await nav(`/data/${builtStep.data[0]}`);
     ok(await page.isVisible(`[data-impact] tr[data-use="tobe"]:has-text("${builtStep.title}") [data-built]`), 'data page impact table shows the same combined status');
     const lateStep = flat(vo.tobe).find(n => n.type === 'step' && ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today).status === 'prog');
@@ -1303,21 +1315,164 @@ const docsOf = st => st.docs;
     await saving(() => act('save'));
     ok((await getData(did)).fields[0].unique === true && /Unique/.test(await page.textContent('.d-spec tr >> nth=1')), 'field.unique saved and shown as a rule');
 
+    console.log('# R7 SIMPLE: plain words, mapping in minutes, automatic Future, hide-don’t-grey');
+    await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+    await nav('/processes');
+    ok(!(await page.isChecked('#adv')), 'R7: back to Simple');
+    /* no jargon on the stream-D pages in Simple mode (process descriptions are user text and are skipped) */
+    const JARGON = /\b(As-is|To-be|Diff|BPMN|SLA|Touches|gateway|Fork)\b/i;
+    const jargonCheck = async label => {
+      const hit = await page.evaluate(src => {
+        const re = new RegExp(src, 'i'); const out = [];
+        const walk = el => { if (el.closest('.d-desc, [data-comments] .cmt, [data-history]') || el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return; for (const n of el.childNodes) { if (n.nodeType === 3 && re.test(n.textContent)) out.push(n.textContent.trim().slice(0, 60)); else if (n.nodeType === 1) walk(n); } };
+        walk(document.getElementById('app')); return out;
+      }, JARGON.source);
+      ok(!hit.length, `${label}: no jargon visible in Simple${hit.length ? ' — found: ' + hit.slice(0, 4).join(' | ') : ''}`);
+    };
+    await jargonCheck('processes');
+    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'impact']) { await nav(`/process/${pid}?mode=${m}`); await jargonCheck('process ' + m); }
+    await nav(`/process/${pid}/step/${flat(seedP.tobe)[0].id}`); await jargonCheck('step');
+    await nav(`/data/${seedData.id}`); await jargonCheck('data');
+    if (prof) { await nav(`/data/${prof.id}`); await jargonCheck('data with a sample check'); }
+
+    /* Simple header: name, description, Today · Future · What changed, "⋯ More"; KPIs hidden */
+    await nav(`/process/${pid}?mode=tobe`);
+    ok((await page.$$eval('.d-modes button', bs => bs.map(b => b.textContent.trim()).join(','))) === 'Today,Future,What changed', 'R7 Simple tabs: Today · Future · What changed');
+    ok(!(await page.isVisible('.d-hdr .kpis')) && await page.isVisible('[data-more] > summary'), 'Simple header: no KPI tiles; a "⋯ More" menu');
+    await openMore();
+    const menu = await page.$$eval('[data-more] .d-menu > *', els => els.map(e => e.textContent.trim().split('\n')[0].trim()));
+    ok(['Version', 'Compare versions', 'Save version', 'By person', 'Who’s affected', 'Download diagram file', 'Import diagram file'].every(x => menu.some(m => m.startsWith(x))), '"⋯ More" holds Version, Compare, Save version, By person, Who’s affected and the diagram file: ' + menu.join(' / '));
+    await shot('simple-more-menu');
+    await page.click('[data-more] [data-mode="lanes"]'); await page.waitForURL(/mode=lanes/);
+    ok(await page.isVisible('.d-lanes'), '"By person" opens from the menu');
+    await nav(`/process/${pid}?mode=tobe`);
+    ok(await page.isVisible('[data-modenote]:has-text("Change steps to show how it should work")'), 'Future shows the one-line hint');
+    ok(await page.isVisible('#canvas .node.trigger .num:has-text("What starts it")'), '"What starts it" label on the first card');
+    await shot('simple-process'); await overflow('simple process @1440');
+
+    /* timed simplicity check: map a 5-step process with owners and information in ≤ 15 actions.
+       An action is one click, or one typed entry into a field (ending with Enter or a comma counts as part of it). */
+    let actions = 0; const A = async fn => { actions++; await fn(); };
+    const t0 = Date.now();
+    await nav('/processes');
+    await A(() => page.click('[data-new-workflow]'));
+    await page.waitForSelector('.overlay #d-np-name');
+    const sp = 'E2E Simple expense claim';
+    await A(() => page.fill('.overlay #d-np-name', sp).then(() => page.press('.overlay #d-np-name', 'Enter')));
+    await page.waitForURL(/mode=edit&v=asis/);
+    await page.waitForSelector('.overlay #d-f-title');
+    const STEPS = [['Submit the claim', 'Employee', 'Receipt, Amount'], ['Attach the receipt photo', null, 'Receipt'], ['Approve the claim', 'Manager', 'Amount, Cost centre'], ['Check the budget', null, 'Cost centre'], ['Pay the employee', null, 'Bank details']];
+    for (let i = 0; i < STEPS.length; i++) {
+      const [title, who, info] = STEPS[i]; const last = i === STEPS.length - 1;
+      await page.waitForSelector('.overlay #d-f-title');
+      await A(() => page.fill('.overlay #d-f-title', title));
+      if (who) await A(() => page.fill('.overlay #d-f-who', who));
+      if (last) { await A(() => page.fill('.overlay #d-f-info', info)); const w = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/')); await A(() => page.click('.overlay [data-act="save"]')); await w; }
+      else { const w = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/')); await A(() => page.fill('.overlay #d-f-info', info).then(() => page.press('.overlay #d-f-info', 'Enter'))); await w; }
+    }
+    await settle();
+    const secs = (Date.now() - t0) / 1000;
+    ok(actions <= 15, `R7: a 5-step process with owners and information took ${actions} actions (≤ 15)`);
+    ok(secs < 60, `R7: … in ${secs.toFixed(1)} s of automation (< 60 s)`);
+    ok(!(await page.$('.overlay')), 'the last "Add step" closes the dialog');
+    const spId = page.url().match(/process\/([\w-]+)/)[1];
+    let spP = await getProc(spId); st = await state();
+    const sSteps = flat(spP.asis);
+    ok(sSteps.map(x => x.title).join('|') === STEPS.map(x => x[0]).join('|'), 'all 5 steps saved in order on Today');
+    ok(sSteps.map(x => x.ownerRole || '').join('|') === 'Employee|Employee|Manager|Manager|Manager', 'who does it: free-text roles stored as ownerRole, carried to the next step: ' + sSteps.map(x => x.ownerRole).join(','));
+    const dnm = id => (st.docs.dataElement.find(d => d.id === id) || { data: {} }).data.name;
+    ok(sSteps.every((x, i) => (x.data || []).map(dnm).join(', ') === STEPS[i][2]), 'information chips saved per step (existing names reused, no duplicates)');
+    const newInfo = ['Receipt', 'Amount', 'Cost centre', 'Bank details'].map(n => st.docs.dataElement.map(d => d.data).filter(d => d.name === n));
+    ok(newInfo.every(l => l.length === 1 && l[0].avail === 'live' && l[0].owner === me), 'new information on Today defaults to Connected, owned by the mapper, created once');
+    ok(await page.isVisible('#canvas .node [data-who][data-role]:has-text("Employee")'), 'the role shows on the card');
+    await shot('simple-mapped-today');
+
+    /* the step dialog: exactly 3 inputs before "More options" */
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
+    const vis3 = await page.$$eval('.overlay .mb input, .overlay .mb select, .overlay .mb textarea', els => els.filter(e => !e.closest('details') && e.type !== 'hidden' && e.offsetParent !== null).map(e => e.id || e.name));
+    ok(vis3.length === 3 && vis3.join(',') === 'd-f-title,d-f-who,d-f-info', 'R7: the step dialog shows exactly 3 inputs before More options: ' + vis3.join(','));
+    ok(await page.isVisible('.overlay label[for="d-f-title"]:has-text("Step name")') && await page.isVisible('.overlay label[for="d-f-who"]:has-text("Who does it")') && await page.isVisible('.overlay label[for="d-f-info"]:has-text("What information it needs")'), 'the 3 fields: Step name · Who does it · What information it needs');
+    ok(!(await page.$eval('.overlay [data-more-options]', d => d.open)) && !(await page.isVisible('.overlay input[name=sla]')) && !(await page.isVisible('.overlay input[name=touches]')), 'time limit, system, duration, teams and sub-steps sit under a closed "More options"');
+    ok(await page.inputValue('.overlay #d-f-who') === 'Manager', '"Who does it" starts from the previous step');
+    await page.screenshot({ path: `${OUT}/simple-step-dialog.png` }); await iconCheck('simple step dialog');
+    await act('cancel');
+
+    /* Future is created automatically the first time it is opened: no fork button, no confirm */
+    ok(!(await page.$('[data-fork]')), 'no fork button in Simple');
+    const wF = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/' + spId));
+    await page.click('.d-modes [data-mode="tobe"]'); await wF; await settle();
+    spP = await getProc(spId);
+    ok(flat(spP.tobe).length === 5 && flat(spP.tobe).every((x, i) => x.from === sSteps[i].id && x.id !== sSteps[i].id) && spP.tobeForked === true, 'R7: opening Future creates it from Today (linked copies, no confirm)');
+    ok(!(await page.$('.overlay')) && await page.isVisible('[data-modenote]:has-text("We’ll highlight what changed")'), 'Future: no dialog, one-line hint');
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
+    await page.fill('.overlay #d-f-title', 'Pay by bank transfer automatically');
+    await page.fill('.overlay #d-f-info', 'Payment batch file');
+    await saving(() => act('save'));
+    await settle(); st = await state();
+    ok((st.docs.dataElement.map(d => d.data).find(d => d.name === 'Payment batch file') || {}).avail === 'missing', 'new information added on Future defaults to "Not available yet"');
+    await page.click('.d-modes [data-mode="diff"]'); await page.waitForURL(/mode=diff/);
+    ok(await page.isVisible('#canvas .node:has-text("Pay by bank transfer automatically") .chip.diff-new'), 'What changed: the new Future step is marked NEW');
+    await jargonCheck('new process, What changed');
+    await shot('simple-what-changed');
+    ok(!!(await page.waitForSelector('[data-history] .ev:has-text("Created the Future version from Today")', { timeout: 10000 }).catch(() => null)), 'history shows the automatic Future');
+
+    /* data page: "Use these columns as the rules to test" after a sample data check */
+    if (prof) {
+      const ucId = 'de-e2e-uc' + Math.random().toString(36).slice(2, 6);
+      ok(await putDoc('dataElement', ucId, { id: ucId, name: 'E2E sampled feed', owner: me, source: 'Northwind ERP', avail: 'example', note: '', fields: [], samples: [], discovered: [] }, 'Test fixture: sampled feed') === 200, 'fixture: information with no rules');
+      const pr2 = await page.evaluate(async ([id, csv]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/profile/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csv, actor: 'x' }) })).status, [ucId, prof.sampleCsv]);
+      ok(pr2 === 200, 'checked sample data for it');
+      await nav(`/data/${ucId}`);
+      ok(!(await page.$('.d-prof')) && await page.isVisible('[data-profile-card] .row'), 'Simple: the sample check reads as plain lines; the statistics table is Advanced only');
+      ok(await page.isVisible('[data-use-columns]:has-text("Use these columns as the rules to test")'), 'R7: "Use these columns as the rules to test" offered after a sample data check');
+      const S8 = await state(); const profDoc = S8.docs.profile.map(d => d.data).filter(x => x.dataId === ucId).sort((a, b) => b.at.localeCompare(a.at))[0];
+      const expF = ENG.specFromProfile(profDoc);
+      await shot('simple-data-use-columns');
+      await saving(() => page.click('[data-use-columns]'));
+      const ucD = await getData(ucId);
+      ok(ucD.fields.length === expF.length && expF.length > 0 && ucD.fields.every((f, i) => f.name === expF[i].name && f.type === expF[i].type), `one click: ${ucD.fields.length} rules from the columns (engine specFromProfile)`);
+      ok((await page.$$('.d-spec tr')).length === expF.length + 1 && !(await page.$('[data-use-columns]')), 'the rules table shows them; the offer is gone');
+      await page.click('[data-fadd]'); await page.waitForSelector('.overlay .d-fmts');
+      ok(!(await page.isVisible('.overlay details[data-adv]')), 'Simple: the rule dialog has no regular-expression section');
+      await act('cancel');
+      await jargonCheck('data after using the columns');
+      await page.selectOption('#persona', other.id); await page.waitForSelector('[data-fadd]', { state: 'detached' });
+      ok(!(await page.$('[data-fedit]')) && !(await page.$('[data-dedit]')), 'hide, don’t grey: a non-owner sees no rule or edit buttons');
+      await page.selectOption('#persona', me); await page.waitForSelector('[data-fadd]');
+    }
+    /* hide, don't grey on the process page */
+    await page.selectOption('#persona', outsider.id); await nav(`/process/${pid}?mode=tobe`);
+    ok(!(await page.$('[data-mode="edit"]')) && !(await page.$('[data-save-version]')) && !(await page.$('[data-bpmn-file]')) && !(await page.$('.d-locked')), 'hide, don’t grey: a non-editor sees no Edit, Save version or Import');
+    await page.selectOption('#persona', me);
+
+    /* phone, Simple: the map starts near the top; the step dialog fits */
+    await page.setViewportSize({ width: 390, height: 844 });
+    await nav(`/process/${spId}?mode=tobe`);
+    const phS = await page.evaluate(() => document.querySelector('#canvas').getBoundingClientRect().top + scrollY);
+    ok(phS < 300, `Simple phone: map starts near the top (${Math.round(phS)} px)`);
+    await overflow('simple process @390'); await shot('simple-phone-process');
+    await page.click('[data-mode="edit"]'); await page.waitForURL(/mode=edit/); await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
+    await overflow('simple step dialog @390'); await page.screenshot({ path: `${OUT}/simple-phone-step-dialog.png` }); await act('cancel');
+    await nav('/processes'); await overflow('simple processes @390'); await shot('simple-phone-processes');
+    if (prof) { await nav(`/data/${prof.id}`); await overflow('simple data @390'); await shot('simple-phone-data'); }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '1'));
+
     console.log('# phone 390');
     await page.setViewportSize({ width: 390, height: 844 });
     for (const m of ['asis', 'tobe', 'diff', 'lanes', 'impact', 'edit', 'compare']) { await nav(`/process/${pid}?mode=${m}`); await overflow(`process ${m} @390`); await shot('phone-process-' + m); }
     await nav(`/process/${vo.id}/step/${sA.id}`); await overflow('step impact @390'); await shot('phone-step-impact');
     await nav(`/process/${newPid}?mode=tobe`); await overflow('typed nodes @390'); await shot('phone-typed');
-    await page.click('[data-hdr-toggle]'); await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]'); await overflow('export dialog @390'); await page.screenshot({ path: `${OUT}/phone-export.png` }); await act('cancel'); await page.click('[data-hdr-toggle]');
+    await openMore(); await overflow('More menu @390'); await page.screenshot({ path: `${OUT}/phone-more-menu.png` }); await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]'); await overflow('export dialog @390'); await page.screenshot({ path: `${OUT}/phone-export.png` }); await act('cancel');
     await nav(`/process/${newPid}?mode=edit&v=tobe`); await page.click('[data-ins="root"] >> nth=0'); await page.waitForSelector('.overlay .d-kinds'); await overflow('insert picker @390'); await page.screenshot({ path: `${OUT}/phone-insert-picker.png` }); await act('cancel');
     console.log('# R5: phone — the map starts near the top; KPIs and controls collapse into a summary row');
     await nav(`/process/${pid}?mode=tobe`);
-    const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top + scrollY, tools: !!document.querySelector('.d-hdr .d-hdrtools').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
-    ok(ph.sum && !ph.tools && !ph.kpis, 'phone: summary row shown, controls and KPIs collapsed');
-    ok(ph.top < 340, `phone: process map starts near the top (${Math.round(ph.top)} px)`);
-    ok(/\d+ steps · \d+\+\d+ new\/changed · \d+\/\d+ data live/.test(await page.textContent('[data-hdr-toggle]')), 'phone summary row: steps, new/changed, data live');
+    const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top + scrollY, tabs: !!document.querySelector('.d-hdr .d-modes').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, desc: !!(document.querySelector('.d-hdr .d-desc') || {}).offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
+    ok(ph.sum && ph.tabs && !ph.kpis && !ph.desc, 'phone: tabs plus one summary row; description and KPIs collapsed');
+    ok(ph.top < 340, `phone (Advanced, five tabs): process map starts near the top (${Math.round(ph.top)} px)`);
+    ok(/Future · \d+ steps · \d+ changed/.test(await page.textContent('[data-hdr-toggle]')), 'phone summary row: which map, steps, changed');
     await page.click('[data-hdr-toggle]');
-    ok(await page.isVisible('.d-hdr .d-hdrtools') && await page.isVisible('.d-hdr .kpis') && await page.getAttribute('[data-hdr-toggle]', 'aria-expanded') === 'true', 'phone: expand shows controls and KPIs');
+    ok(await page.isVisible('.d-hdr .d-desc') && await page.isVisible('.d-hdr .kpis') && await page.getAttribute('[data-hdr-toggle]', 'aria-expanded') === 'true', 'phone: expand shows the description and KPIs');
     await overflow('phone header expanded @390'); await shot('phone-process-expanded');
     await page.click('[data-hdr-toggle]');
     ok(!(await page.isVisible('.d-hdr .kpis')), 'phone: collapse again');
@@ -1329,7 +1484,7 @@ const docsOf = st => st.docs;
     await page.click('[data-ins="root"] >> nth=0');
     ok(await page.isVisible('.overlay [data-act="step"]'), 'insert point usable at 390');
     await act('step');
-    await page.waitForSelector('.overlay input[name=title]');
+    await page.waitForSelector('.overlay #d-f-title');
     await page.screenshot({ path: `${OUT}/phone-step-modal.png` });
     await act('cancel');
     await nav(`/process/${pid}?mode=asis&rel=${rel.version}`); await overflow('released @390');

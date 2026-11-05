@@ -216,6 +216,24 @@ function processes() {
           subs: [sub('Remove access', []), sub('Evidence pack saved for audit', [])] },
         { id: 'e', type: 'end', title: 'Access certified', from: 'e' },
       ] },
+    /* R7: a process with no project yet; its first step is done by a role ("Employee"), not a named person */
+    { id: 'expense-reimbursement', name: 'Expense Reimbursement',
+      desc: 'An employee is paid back for approved business expenses. Not part of a project yet.',
+      owner: 'ar', resources: ['ar', 'lp'], version: 1, released: [],
+      asis: [
+        { id: 'k', type: 'trigger', title: 'Employee has receipts to claim', owner: 'ar', data: [], touches: ['Accounts Payable', 'Email'] },
+        { id: 'x1', type: 'step', title: 'Email receipts to Accounts Payable', ownerRole: 'Employee', data: [], touches: ['Email'] },
+        { id: 'x2', type: 'step', title: 'Check receipts against the expense policy', owner: 'ar', data: [], touches: ['Accounts Payable', 'Spreadsheets'] },
+        { id: 'x3', type: 'step', title: 'Pay in the next payment run', owner: 'lp', data: [], touches: ['Treasury', 'Bank'] },
+        { id: 'e', type: 'end', title: 'Expenses paid back' },
+      ],
+      tobe: [
+        { id: 'k', type: 'trigger', title: 'Employee has receipts to claim', owner: 'ar', data: [], touches: ['Accounts Payable', 'Expense app'], from: 'k' },
+        { id: 'x1', type: 'step', title: 'Submit receipts in the expense app', ownerRole: 'Employee', data: [], touches: ['Expense app'], from: 'x1' },
+        { id: 'x2', type: 'step', title: 'Check receipts against the expense policy', owner: 'ar', data: [], touches: ['Accounts Payable', 'Expense app'], from: 'x2' },
+        { id: 'x3', type: 'step', title: 'Pay in the next payment run', owner: 'lp', data: [], touches: ['Treasury', 'Bank'], from: 'x3' },
+        { id: 'e', type: 'end', title: 'Expenses paid back', from: 'e' },
+      ] },
   ];
 }
 
@@ -265,6 +283,8 @@ function seed(createdAtISODate) {
     desc: 'Move vendor onboarding from email and PDFs to captured data, and unblock downstream invoice approval.',
     owner: 'ta', resources: ['ta', 'mc', 'ps', 'lp', 'ar', 'dk'], target: addDays(day, 41),
     processes: ['vendor-onboarding', 'invoice-approval'], status: 'active',
+    /* R7 §9: a PMO section's only member is the PM, so the process owner approves it (never a deadlock) */
+    approvers: { PMO: 'mc' },
     baselines: [baseline('vendor-modernization', 'Kickoff plan', -30)] });
   add('project', { id: 'access-review-automation', name: 'Quarterly Access Review Automation',
     desc: 'Replace spreadsheet-driven quarterly access certification with an automated campaign and auto-removal.',
@@ -291,7 +311,7 @@ function seed(createdAtISODate) {
   add('approval', { id: 'AP2', projectId: 'access-review-automation', bu: 'IT', approver: 'dk', decision: 'approved',
     at: at(-1, 14), stepUp: true, note: 'Entitlement pull and auto-removal steps approved.' });
 
-  add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract slips past legal review', impact: 'high', likelihood: 'med', owner: 'ps',
+  add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract is held up in legal review', impact: 'high', likelihood: 'med', owner: 'ps',
     mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'open' });
   add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank capture not started; blocks micro-deposits and ERP write', impact: 'high', likelihood: 'high', owner: 'lp',
     mitigation: 'Daily check-in with Treasury; pull Integration Eng. in to pair.', status: 'open' });

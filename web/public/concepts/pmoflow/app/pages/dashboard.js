@@ -10,13 +10,13 @@ import { byProgram, workloadRows } from './portfolio.js';
 const KEY = 'pmoflow.dashboard';
 const ALL = 'all';
 export const WIDGETS = {
-  rag: { title: 'Project health', wide: true, desc: 'Red / amber / green for every project, with the reasons' },
+  rag: { title: 'Project health', wide: true, desc: 'On track / at risk / off track for every project, with the reasons' },
   burndown: { title: 'Burndown', desc: 'Remaining effort over time against the ideal line' },
   ev: { title: 'Earned value', wide: true, desc: 'SPI, CPI and estimate at completion per project' },
   workload: { title: 'Workload', desc: 'Effort in the next 14 days against capacity' },
   risks: { title: 'Top risks', desc: 'Open risks by impact × likelihood' },
-  blockers: { title: 'Top blockers', desc: 'Data that holds the most open work' },
-  golives: { title: 'Upcoming go-lives', desc: 'Active projects by target date, with forecast and gate' },
+  blockers: { title: 'Top blockers', desc: 'Information that holds up the most open tasks' },
+  golives: { title: 'Upcoming launches', desc: 'Active projects by deadline, with expected finish and launch checks' },
 };
 const DEFAULT = { widgets: ['rag', 'ev', 'golives', 'blockers', 'risks', 'workload', 'burndown'], program: ALL, burnPrj: null };
 
@@ -65,7 +65,7 @@ function rollupHTML() {
       <span class="pmo-roll-rag">${['red', 'amber', 'green', 'none', 'live'].filter(k => rc[k]).map(k => `<span class="rag rag-${k}"><i></i>${rc[k]}</span>`).join('')}</span>
       <span class="pmo-roll-n"><span>${planned ? `Budget <b>${esc(money(planned))}</b> · ` : ''}forecast <b class="${planned && fc > planned ? 'fail' : ''}">${esc(money(fc))}</b></span>
         <span>SPI <b class="${idxCls(ev && ev.spi)}">${fmtIdx(ev && ev.spi)}</b> · CPI <b class="${idxCls(ev && ev.cpi)}">${fmtIdx(ev && ev.cpi)}</b></span>
-        <span>${next ? `Next target <b>${esc(fmt(next.target))}</b> · ${esc(next.name)}` : 'No upcoming go-live'}</span></span></button>`;
+        <span>${next ? `Next deadline <b>${esc(fmt(next.target))}</b> · ${esc(next.name)}` : 'No upcoming launch'}</span></span></button>`;
   }).join('')}</section>`;
 }
 
@@ -133,7 +133,7 @@ function blockersW(projects) {
 }
 function goLivesW(projects) {
   const list = projects.filter(p => p.status !== 'live' && p.target).sort((a, b) => String(a.target).localeCompare(String(b.target))).slice(0, 6);
-  if (!list.length) return '<div class="empty">No upcoming go-lives.</div>';
+  if (!list.length) return '<div class="empty">No upcoming launches.</div>';
   return list.map(p => {
     const s = projectStats(p.id), gi = gateInfo(p, s), r = rag(p, s);
     const rd = eng('readiness', null, docs(), p.id, today());
@@ -157,12 +157,15 @@ function widgetHTML(id, i, n, projects) {
 
 /* ---------------------------------------------------------------- page */
 export function render() {
+  if (!store.advanced) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Dashboard</div><h1>Dashboard</h1>
+      <p>The dashboard is one of the advanced tools. For a quick view of every project, open the Portfolio.</p></div></section>
+    <div class="card pmo-adv-note" data-dash-simple style="margin-top:16px"><a class="btn primary" href="${link('/portfolio')}" data-link>Open the Portfolio</a><button class="btn" data-adv-on>Show advanced tools</button></div>`;
   const l = L();
   const groups = byProgram(store.list('project'));
   if (l.program !== ALL && !groups.some(g => g.program === l.program)) l.program = ALL;
   const projects = scope();
   const hidden = Object.keys(WIDGETS).filter(k => !l.widgets.includes(k));
-  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Dashboard</div><h1>Dashboard</h1>
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Dashboard</div><h1>Dashboard</h1>
       <p>Your PMO view: pick the widgets you want, put them in order, and filter by program. The layout is saved in this browser.</p></div>
     <div class="hdr-side"><div class="pmo-dash-ctl">
       <label class="pmo-toggle">Program <select class="pmo-sel" data-dash-program aria-label="Program"><option value="${ALL}" ${l.program === ALL ? 'selected' : ''}>All programs</option>${groups.map(g => `<option value="${esc(g.program)}" ${l.program === g.program ? 'selected' : ''}>${esc(g.program)}</option>`).join('')}</select></label>
@@ -175,6 +178,7 @@ export function render() {
 
 export function bind(root) {
   const on = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', e => { e.preventDefault(); fn(el); }));
+  on('[data-adv-on]', () => store.setAdvanced(true));
   const move = (id, d) => update(l => { const i = l.widgets.indexOf(id), k = i + d; if (i < 0 || k < 0 || k >= l.widgets.length) return; l.widgets.splice(i, 1); l.widgets.splice(k, 0, id); });
   on('[data-w-up]', el => move(el.dataset.wUp, -1));
   on('[data-w-down]', el => move(el.dataset.wDown, 1));

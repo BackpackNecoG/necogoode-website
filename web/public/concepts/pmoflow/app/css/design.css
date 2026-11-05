@@ -400,3 +400,77 @@ a.d-wi:hover .t{color:var(--accent)}
   .d-imptbl td:nth-child(2),.d-imptbl td:nth-child(3){grid-column:1/-1}
   .d-imptbl td:last-child .hint{display:none}
 }
+
+/* == round 7: simplicity == */
+/* header: tabs + Edit + "⋯ More" on one row */
+.d-tabrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.d-modes button{padding:8px 14px;font-size:13px}
+.d-editbtn{font-weight:600}
+.d-more{position:relative}
+.d-more > summary{list-style:none;cursor:pointer;user-select:none;white-space:nowrap}
+.d-more > summary::-webkit-details-marker{display:none}
+.d-more[open] > summary{background:var(--accent-soft);border-color:#c7d2fe}
+.d-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;min-width:230px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 30px rgba(15,16,32,.16);padding:6px;display:flex;flex-direction:column;gap:2px}
+.d-mi{display:block;width:100%;text-align:left;border:0;background:none;border-radius:8px;padding:9px 10px;font:inherit;font-size:14px;color:var(--ink);cursor:pointer}
+.d-mi:hover,.d-mi:focus-visible{background:var(--accent-soft);outline:none}
+.d-mi.on{color:var(--accent);font-weight:600}
+.d-menu .d-verlbl{padding:6px 10px 8px;border-bottom:1px solid #f1f2f5;margin-bottom:2px;justify-content:space-between}
+.d-menu .d-verlbl select{max-width:150px}
+.d-hdr.d-simple .kpis{display:none}
+.d-desc{overflow-wrap:anywhere}
+.d-people{margin-top:8px}
+.d-avs{display:inline-flex}
+.d-avs .av{margin-left:-5px;box-shadow:0 0 0 2px #fff}
+.d-avs .av:first-child{margin-left:0}
+.d-hdropts{margin-top:6px;font-size:13px}
+.d-hdropts > summary{cursor:pointer;color:var(--accent);font-weight:600;width:max-content}
+.d-role small{color:var(--ink3)}
+.person.d-role{padding-left:9px}
+/* edit mode: one big "Add a step" button */
+.d-addwrap{display:flex;justify-content:center;width:100%}
+.d-addstep{font-size:15px;font-weight:650;padding:11px 22px;border-radius:12px;box-shadow:var(--shadow)}
+.d-editbar{justify-content:space-between}
+.d-editbar > span{font-size:13px;color:var(--ink2)}
+/* step dialog: information chips, More options, quick-add hint */
+.d-chipbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:1px solid var(--line);border-radius:8px;background:#fff;padding:5px 6px;min-height:40px;cursor:text}
+.d-chipbox:focus-within{border-color:#a5b4fc;box-shadow:0 0 0 3px #eef2ff}
+.field .d-chipbox input{border:0;padding:4px;flex:1 1 140px;min-width:0;width:auto;outline:none;background:transparent}
+.d-ichip{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:3px 4px 3px 9px;border:1px solid #c7d2fe;border-radius:999px;background:var(--accent-soft);color:var(--ink);max-width:100%}
+.d-ichip > span:not(.dot){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.d-ichip .d-x{font-size:16px;padding:0 5px}
+.d-moreopts{border-top:1px dashed var(--line);padding-top:8px}
+.d-moreopts > summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:13px;width:max-content;padding:4px 0}
+.d-moreopts > summary:focus-visible{outline:3px solid #a5b4fc;outline-offset:2px;border-radius:4px}
+.d-moreopts-b{display:flex;flex-direction:column;gap:10px;margin-top:8px}
+.d-moreopts-b.d-kinds{display:grid}
+.d-quickhint{background:#f5f7ff;border:1px solid #e0e7ff;border-radius:8px;padding:6px 10px;color:#3730a3}
+.d-nogoto .d-goto-sel{display:none}
+.field label[for]{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600;color:var(--ink)}
+.modal .field input,.modal .field select{min-height:40px}
+/* data page: rules from the sample data check */
+.d-suggest{display:flex;flex-direction:column;gap:8px;align-items:flex-start;background:#f5f7ff;border:1px solid #e0e7ff;border-radius:10px;padding:10px 12px}
+@media (max-width:640px){
+  .d-hdr .crumbs{display:none}
+  .d-hdr h1{font-size:18px}
+  .d-hdr .hdr-side{align-items:stretch}
+  .d-tabrow{justify-content:flex-start;flex-wrap:nowrap;gap:6px;width:100%}
+  .d-tabrow .d-modes{flex:1 1 auto;min-width:0;width:auto}
+  .d-modes button{padding:9px 2px;font-size:12.5px}
+  .d-tabrow > .btn,.d-more > summary{padding:8px 9px;font-size:12.5px}
+  .d-editbtn{white-space:nowrap}
+  .d-menu{right:0;min-width:220px;max-width:calc(100vw - 28px)}
+  .d-addstep{width:100%}
+  .modal .field input,.modal .field select{font-size:16px} /* no iOS zoom on focus */
+}
+@media (max-width:640px){.d-long{display:none}}
+.d-addwrap{flex-direction:column;align-items:center;gap:4px}
+.d-addother{font-size:12.5px}
+@media (max-width:640px){
+  /* Advanced has five tabs: they take their own row and may wrap their labels; Edit and More sit below */
+  .d-hdr.d-adv .d-tabrow{flex-wrap:wrap}
+  .d-hdr.d-adv .d-tabrow .d-modes{flex:1 1 100%}
+  .d-hdr.d-adv .d-modes button{white-space:normal;line-height:1.15;padding:7px 2px}
+  .d-hdr > div{min-width:0}
+}
+.d-addother{background:#fff;border-radius:999px;position:relative;z-index:1}
+.d-chipbox input::-webkit-calendar-picker-indicator,#d-f-who::-webkit-calendar-picker-indicator{display:none!important}

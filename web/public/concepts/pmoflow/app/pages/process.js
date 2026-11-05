@@ -32,7 +32,7 @@ export function opsLine(n) {
    The engine treats all three as steps (they have owners, can carry data and can have work). */
 const SVG = d => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 export const NT = {
-  subprocess: { label: 'Subprocess', cls: 'd-nt-sub', icon: SVG('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 9v6M9 12h6"/>') },
+  subprocess: { label: 'Another process', cls: 'd-nt-sub', icon: SVG('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 9v6M9 12h6"/>') },
   wait: { label: 'Wait', cls: 'd-nt-wait', icon: SVG('<path d="M6 3h12M6 21h12M7 3c0 5 10 5 10 9s-10 4-10 9M17 3c0 5-10 5-10 9"/>') },
   message: { label: 'Message', cls: 'd-nt-msg', icon: SVG('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>') },
 };
@@ -79,14 +79,37 @@ export function effAvail(id) {
   return d.avail === 'example' ? 'example' : 'missing';
 }
 export const availOf = effAvail;
-/* R4: availability labels including 'pending' (fix done, awaiting the data owner's confirmation; amber) */
-export const AV = Object.assign({}, AVAIL, { pending: { label: 'Fix done, awaiting owner confirmation', short: 'Pending', color: 'var(--soon)' } });
+/* R7 §2: plain availability words. One label per state on every page: Connected / Sample only / Not available yet /
+   Waiting for confirmation. The engine's availLabel decides when it exists; these are the fallback. */
+export const AV = {
+  live: { label: 'Connected', short: 'Connected', color: 'var(--live)' },
+  example: { label: 'Sample only', short: 'Sample only', color: 'var(--example)' },
+  missing: { label: 'Not available yet', short: 'Not available yet', color: 'var(--missing)' },
+  pending: { label: 'Waiting for confirmation', short: 'Waiting for confirmation', color: 'var(--soon)' },
+};
 export const avOf = k => AV[k] || AV.missing;
-/* "awaiting <owner> to confirm" for a pending element */
-export const awaitingText = id => { const d = dataEl(id); return `Fix done, awaiting ${d && d.owner ? pname(d.owner) : 'the data owner'} to confirm`; };
-/* dot coloured by effective availability */
-export function effDot(id) { const a = avOf(effAvail(id)); return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(a.label)}" aria-hidden="true"></span>`; }
-export const NEEDS_LIVE = 'Needs a live source before go-live';
+const LBL_KEY = { connected: 'live', 'sample only': 'example', 'not available yet': 'missing', 'waiting for confirmation': 'pending' };
+/* {key, label, tone} for a data element: engine availLabel first, the local effective state otherwise */
+export function availInfo(id) {
+  const r = eng('availLabel', [docs(), id], null);
+  const k0 = effAvail(id);
+  if (r && typeof r === 'object' && (r.label || r.key)) {
+    const key = AV[r.key] ? r.key : LBL_KEY[String(r.label || '').toLowerCase()] || k0;
+    return { key, label: r.label || avOf(key).label, tone: r.tone || '' };
+  }
+  return { key: k0, label: avOf(k0).label, tone: '' };
+}
+export const avText = id => availInfo(id).label;
+/* "Waiting for <owner> to confirm" for a pending element */
+export const awaitingText = id => { const d = dataEl(id); return `Waiting for ${d && d.owner ? pname(d.owner) : 'the owner'} to confirm it's connected`; };
+/* dot coloured by the plain state */
+export function effDot(id) { const i = availInfo(id), a = avOf(i.key); return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
+export const NEEDS_LIVE = 'Needs to be connected before launch';
+/* R7: Simple is the default; Advanced shows the power tools */
+export const isAdv = () => !!store.advanced;
+/* R7 §4: who does a step — a person, or a free-text role stored as ownerRole */
+export const whoOf = n => (n && n.ownerRole) ? n.ownerRole : pname(n && n.owner);
+export const whoAv = n => (n && n.ownerRole) ? '' : av(n && n.owner);
 /* R5: process editors are the owner plus the resources; everyone else is read-only */
 export const canEditProc = p => !!p && !!store.state.me && (p.owner === store.state.me || (p.resources || []).includes(store.state.me));
 export const askAccess = p => `Ask ${pname(p && p.owner)} for edit access`;
@@ -103,7 +126,7 @@ export function usage(did, pid) {
   if (pid) { out.tobe = out.tobe.filter(u => u.pid === pid); out.asis = out.asis.filter(u => u.pid === pid); }
   return out;
 }
-export const usageText = u => `${u.tobe.length} to-be · ${u.asis.length} as-is`;
+export const usageText = u => `${u.tobe.length} Future · ${u.asis.length} Today`;
 
 /* ---------- R6 §6: cross-process impact of one to-be step ----------
    shared:    every other to-be step (any process) that uses the same data, with the projects that have open work there
@@ -144,25 +167,25 @@ export const IMPACT = { conflict: { label: 'Conflict', cls: 'b-late' }, overlap:
 export const impactBadge = st => `<span class="badge ${IMPACT[st].cls}" data-impact-badge="${st}">${esc(IMPACT[st].label)}</span>`;
 function impactHTML(p) {
   const rows = flat(p.tobe).map(s => stepImpact(p.id, s.id)).filter(Boolean);
-  if (!rows.length) return '<div class="empty">No to-be steps yet. Design the to-be in Edit to see what it touches.</div>';
+  if (!rows.length) return '<div class="empty">No Future steps yet. Add steps to the Future version to see who they affect.</div>';
   const n = k => rows.filter(r => r.status === k).length;
   const prjs = new Set(rows.flatMap(r => r.projects.map(x => x.prj.id)));
   const shareN = rows.filter(r => r.shared.length).length;
   return `<div class="d-impact" data-impact-tab>
-    <div class="d-impsum d-impkpis" data-impact-sum="${n('conflict')}/${n('overlap')}/${shareN}/${prjs.size}"><span><b class="${n('conflict') ? 'fail' : ''}">${n('conflict')}</b> step${n('conflict') === 1 ? '' : 's'} in conflict</span><span><b>${n('overlap')}</b> overlap${n('overlap') === 1 ? '' : 's'}</span><span><b>${shareN}</b> of ${rows.length} steps share data</span><span><b>${prjs.size}</b> project${prjs.size === 1 ? '' : 's'} with open work</span></div>
-    <div class="tbl-wrap"><table class="d-imptbl"><tr><th>Step</th><th>Shares data with</th><th>Projects with open work</th><th>Status</th></tr>
+    <div class="d-impsum d-impkpis" data-impact-sum="${n('conflict')}/${n('overlap')}/${shareN}/${prjs.size}"><span><b class="${n('conflict') ? 'fail' : ''}">${n('conflict')}</b> step${n('conflict') === 1 ? '' : 's'} in conflict</span><span><b>${n('overlap')}</b> overlap${n('overlap') === 1 ? '' : 's'}</span><span><b>${shareN}</b> of ${rows.length} steps share information</span><span><b>${prjs.size}</b> project${prjs.size === 1 ? '' : 's'} with open work</span></div>
+    <div class="tbl-wrap"><table class="d-imptbl"><tr><th>Step</th><th>Shares information with</th><th>Projects with open work</th><th>Status</th></tr>
     ${rows.map(r => { const procs = new Set(r.shared.map(x => x.pid)).size; return `<tr class="click" data-go="/process/${esc(p.id)}/step/${esc(r.s.id)}" data-impact-row="${esc(r.s.id)}" data-impact-status="${r.status}">
       <td><a href="${link('/process/' + p.id + '/step/' + r.s.id)}" data-link><b>${esc(r.s.title)}</b></a>${isSpecial(r.s) ? ` <span class="chip d-ntchip">${esc(typeLabel(r.s))}</span>` : ''}</td>
-      <td data-shared-n="${r.shared.length}">${r.shared.length ? `<b>${r.shared.length}</b> step${r.shared.length === 1 ? '' : 's'} in ${procs} process${procs === 1 ? '' : 'es'}<div class="hint">${esc(r.shared.slice(0, 3).map(x => x.s.title).join(', '))}${r.shared.length > 3 ? ` +${r.shared.length - 3}` : ''}</div>` : '<span class="hint">No shared data</span>'}</td>
+      <td data-shared-n="${r.shared.length}">${r.shared.length ? `<b>${r.shared.length}</b> step${r.shared.length === 1 ? '' : 's'} in ${procs} process${procs === 1 ? '' : 'es'}<div class="hint">${esc(r.shared.slice(0, 3).map(x => x.s.title).join(', '))}${r.shared.length > 3 ? ` +${r.shared.length - 3}` : ''}</div>` : '<span class="hint">No shared information</span>'}</td>
       <td data-prj-n="${r.projects.length}">${r.projects.length ? r.projects.map(x => `<span class="chip">${esc(x.prj.name)} · ${x.items.length}</span>`).join(' ') : '<span class="hint">None</span>'}</td>
       <td>${impactBadge(r.status)}${r.conflicts.length ? `<div class="hint">${esc(r.conflicts[0].text)}${r.conflicts.length > 1 ? ` +${r.conflicts.length - 1} more` : ''}</div>` : ''}</td></tr>`; }).join('')}</table></div></div>`;
 }
 /* R5: evidence behind a live confirmation. Attested (link + note) is the weaker kind. */
-export const EVID = { profile: { label: 'Profile', long: 'Latest profile, no blocking drift', cls: 'd-ev-ok' }, check: { label: 'Connection check', long: 'Connection check passed', cls: 'd-ev-ok' }, attested: { label: 'Attested', long: 'Evidence link and note (attested, weaker)', cls: 'd-ev-weak' } };
+export const EVID = { profile: { label: 'Sample data check', long: 'Latest sample data check, nothing blocking', cls: 'd-ev-ok' }, check: { label: 'Connection check', long: 'Connection check passed', cls: 'd-ev-ok' }, attested: { label: 'Link and note', long: 'Link and note (weaker proof)', cls: 'd-ev-weak' } };
 export function evidenceTag(x, short) {
   const ev = x && x.liveEvidence; if (!ev || !ev.type) return '';
   const e = EVID[ev.type] || { label: ev.type, long: ev.type, cls: 'd-ev-ok' };
-  return `<span class="badge d-ev ${e.cls}" data-evidence="${esc(ev.type)}" title="Evidence: ${esc(e.long)}">${short ? '' : 'Evidence: '}${esc(e.label)}${ev.type === 'attested' && !short ? ' (weaker)' : ''}</span>`;
+  return `<span class="badge d-ev ${e.cls}" data-evidence="${esc(ev.type)}" title="Proof: ${esc(e.long)}">${short ? '' : 'Proof: '}${esc(e.label)}${ev.type === 'attested' && !short ? ' (weaker)' : ''}</span>`;
 }
 /* drift issues that block a profile from counting as evidence: everything except "a column with no spec" */
 export function blockingDrift(drift) { return (drift || []).filter(d => d && d.issue !== 'unspecified-column'); }
@@ -202,13 +225,13 @@ export function workBadge(w, f) {
   if (w.status === 'done') return badge('Done ' + fmt(w.due), 'b-done');
   const dd = daysTo(w.due); const s0 = schedKey(w, f), k = s0.key, cls = SB_CLS[k] || 'b-ok';
   if (s0.label) return `<span class="badge ${cls}" data-sched="${esc(k)}">${esc(s0.label)}</span>`;
-  const txt = cls === 'b-late' && /caus/i.test(k) ? 'Causing slip' : cls === 'b-late' ? (dd < 0 ? -dd + 'd late' : 'Late') + (f.forecast && f.forecast > w.due ? ' · now ' + fmt(f.forecast) : '')
-    : cls === 'b-slip' ? 'Slipping → ' + fmt(f.forecast) : cls === 'b-soon' ? 'Due in ' + Math.max(0, dd) + 'd' : 'Due ' + fmt(w.due);
+  const txt = cls === 'b-late' && /caus/i.test(k) ? 'Delaying others' : cls === 'b-late' ? (dd < 0 ? -dd + 'd late' : 'Late') + (f.forecast && f.forecast > w.due ? ' · now ' + fmt(f.forecast) : '')
+    : cls === 'b-slip' ? 'Running late → ' + fmt(f.forecast) : cls === 'b-soon' ? 'Due in ' + Math.max(0, dd) + 'd' : 'Due ' + fmt(w.due);
   return `<span class="badge ${cls}" data-sched="${esc(k)}">${esc(txt)}</span>`;
 }
 /* R6 §2: one status that combines work and data. Work done but data not effectively live is
    "Built · awaiting live data" (amber), never green Done. Pass the step node (or its data ids). */
-export const BUILT_LBL = 'Built · awaiting live data';
+export const BUILT_LBL = 'Built · information not connected yet';
 export function stepData(n) { return n ? [...new Set([...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])])] : []; }
 export function combinedStatus(st, node) {
   if (!st || st.status === 'none') return 'none';
@@ -219,9 +242,9 @@ export function stepBadge(st, node) {
   const cs = combinedStatus(st, node);
   if (cs === 'none') return badge('No change', 'b-none');
   if (cs === 'done') return badge('Done', 'b-done');
-  if (cs === 'built') return `<span class="badge d-b-amber" data-built title="The work is done; the data this step needs is not live yet">${esc(BUILT_LBL)}</span>`;
+  if (cs === 'built') return `<span class="badge d-b-amber" data-built title="The work is done; the information this step needs is not connected yet">${esc(BUILT_LBL)}</span>`;
   const sch = st.sched === 'late' ? badge('Late' + (st.forecast && st.forecast > st.due ? ' · now ' + fmt(st.forecast) : ''), 'b-late')
-    : st.sched === 'slip' ? badge('Slipping → ' + fmt(st.forecast), 'b-slip')
+    : st.sched === 'slip' ? badge('Running late → ' + fmt(st.forecast), 'b-slip')
     : st.sched === 'soon' ? badge('Next due in ' + Math.max(0, daysTo(st.next || st.due)) + 'd', 'b-soon') : badge('Due ' + fmt(st.due), 'b-ok');
   return badge(STATUS_LBL[st.status] || st.status, 'b-' + st.status) + ' ' + sch;
 }
@@ -229,8 +252,9 @@ function daysTo(s) { if (!s) return 0; return Math.round((new Date(s + 'T12:00:0
 export const notFound = what => `<div class="card"><h3>Not found</h3><p class="hint" style="margin:0 0 8px">${esc(what || 'This item')} does not exist in your sandbox. It may have been deleted, or the demo data was reset.</p><a href="${link('/')}" data-link style="color:var(--accent)">Back to workspace</a></div>`;
 /* the trigger prompt is a placeholder, never a value (older sandboxes stored it literally) */
 const TRIG_PH = 'What starts this process?';
-const trigTitle = n => (n && n.title && n.title.trim() !== TRIG_PH) ? n.title : '';
-const touchChip = t =>`<span class="chip touch"># ${esc(t)}</span>`;
+const TRIG_PHS = [TRIG_PH, 'What starts it?', 'What starts it'];
+const trigTitle = n => (n && n.title && !TRIG_PHS.includes(n.title.trim())) ? n.title : '';
+const touchChip = t =>`<span class="chip touch" title="Team involved"># ${esc(t)}</span>`;
 const clone = o => JSON.parse(JSON.stringify(o));
 
 /* ---------- tree helpers ---------- */
@@ -261,7 +285,7 @@ function forkNodes(nodes) {
   allNodes(out).forEach(n => isGw(n) && (n.branches || []).forEach(b => { if (b.goto) { if (map[b.goto]) b.goto = map[b.goto]; else delete b.goto; } }));
   return out;
 }
-const VER = { asis: 'as-is', tobe: 'to-be' };
+const VER = { asis: 'Today', tobe: 'Future' };
 
 /* ---------- map rendering ---------- */
 function nodeHTML(n, ctx, idx) {
@@ -273,21 +297,23 @@ function nodeHTML(n, ctx, idx) {
   const diffChip = showDiff ? `<span class="chip diff-${esc(status)}">${status === 'new' ? 'NEW' : 'CHANGED'}</span>` : '';
   let body = '';
   const sp = isSpecial(n) ? NT[n.type] : null;
-  if (trig) body = `<div class="stats">${(n.touches || []).map(touchChip).join('') || '<span class="hint">Kickoff</span>'}</div>`;
+  const tn = (n.touches || []).length;
+  if (trig) body = (n.touches || []).length ? `<div class="stats">${n.touches.map(touchChip).join('')}</div>` : '';
   else if (sp && n.type === 'wait' && !rd.total) {
     body = typeBody(n, ctx) + opsLine(n);
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   } else {
-    const bare = sp && !rd.total && !(n.touches || []).length && !(n.subs || []).length; /* typed node with nothing tagged: no empty stats line */
-    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${sp && !rd.total ? '' : `<span>Data <b>${rd.live}/${rd.total}</b> live</span>`}${rd.missing ? `<span class="d-miss" title="Data with no source yet">${LOCK} ${rd.missing} missing</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the data owner has not confirmed it live yet">${rd.pending} awaiting confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}: examples only">${rd.example} need${rd.example === 1 ? 's' : ''} live source</span>` : ''}<span>${(n.touches || []).length} area${(n.touches || []).length === 1 ? '' : 's'}</span>${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>`) + opsLine(n);
+    const bare = !rd.total && !tn && !(n.subs || []).length; /* nothing tagged: no empty stats line */
+    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>`) + opsLine(n);
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
+  const who = esc(whoOf(n));
   return `<div class="node ${trig ? 'trigger' : ''} ${sp ? sp.cls : ''} ${ctx.edit ? 'd-editing' : ''}" data-node="${esc(n.id)}" ${trig ? '' : `data-step="${esc(n.id)}"`} data-ntype="${esc(n.type || 'step')}" data-data="${esc((n.data || []).join(','))}" ${goAttr}>
     <div class="nh"><span class="ic" ${sp ? `title="${esc(sp.label)}" data-idx="${idx}"` : ''}>${trig ? '⚡' : sp ? sp.icon : idx}</span>
-      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts this process?</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'Kickoff / trigger' : sp ? `<span class="d-ntk">${esc(sp.label)} · ${esc(idx)}</span> · ${esc(pname(n.owner))}` : esc(pname(n.owner))}</div></div>
-      <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diffChip}${n.owner ? av(n.owner) : ''}</div></div>
-    <div class="nb">${body}</div>${ctx.edit ? `<div class="d-tools">${toolbar(n, ctx)}</div>` : ''}</div>`;
+      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts it?</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'What starts it' : sp ? `<span class="d-ntk">${esc(sp.label)} · ${esc(idx)}</span> · <span data-who>${who}</span>` : `<span data-who${n.ownerRole ? ' data-role' : ''}>${who}</span>`}</div></div>
+      <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diffChip}${trig ? '' : whoAv(n)}</div></div>
+    ${body ? `<div class="nb">${body}</div>` : ''}${ctx.edit ? `<div class="d-tools">${toolbar(n, ctx)}</div>` : ''}</div>`;
 }
 function changeNote(n, ctx) {
   const a = ctx.cmp ? null : n.from ? ctx.asisById[n.from] : null;
@@ -296,19 +322,19 @@ function changeNote(n, ctx) {
   if (a) {
     /* readable version of the engine's change list: names instead of ids */
     if ((a.title || '') !== (n.title || '')) lines.push('was: ' + a.title);
-    if ((a.owner || '') !== (n.owner || '')) lines.push('owner: ' + pname(a.owner) + ' → ' + pname(n.owner));
+    if (whoOf(a) !== whoOf(n)) lines.push('who: ' + whoOf(a) + ' → ' + whoOf(n));
     const ad = new Set(a.data || []), nd = new Set(n.data || []);
     const added = [...nd].filter(d => !ad.has(d)), removed = [...ad].filter(d => !nd.has(d));
-    if (added.length) lines.push('+ data: ' + added.map(dataName).join(', '));
-    if (removed.length) lines.push('− data: ' + removed.map(dataName).join(', '));
-    if ((a.sla || '') !== (n.sla || '')) lines.push('SLA: ' + (a.sla || 'none') + ' → ' + (n.sla || 'none'));
+    if (added.length) lines.push('+ information: ' + added.map(dataName).join(', '));
+    if (removed.length) lines.push('− information: ' + removed.map(dataName).join(', '));
+    if ((a.sla || '') !== (n.sla || '')) lines.push('time limit: ' + (a.sla || 'none') + ' → ' + (n.sla || 'none'));
     if ((a.system || '') !== (n.system || '')) lines.push('system: ' + (a.system || 'none') + ' → ' + (n.system || 'none'));
     if ((a.type || 'step') !== (n.type || 'step')) lines.push('type: ' + typeLabel(a) + ' → ' + typeLabel(n));
     else if (isSpecial(n) && typeDetail(a) !== typeDetail(n)) lines.push(typeDetail(a) + ' → ' + typeDetail(n));
     const st = x => (x.subs || []).map(y => y.title).join('|');
     if (st(a) !== st(n)) lines.push('sub-steps: ' + (a.subs || []).length + ' → ' + (n.subs || []).length + ((a.subs || []).length === (n.subs || []).length ? ' (reworded)' : ''));
   }
-  if (!lines.length) lines.push('same step, new method or data');
+  if (!lines.length) lines.push('same step, new way of working or information');
   return `<div class="was d-was">${lines.map(l => `<div>${esc(l)}</div>`).join('')}</div>`;
 }
 function toolbar(n, ctx) {
@@ -319,7 +345,9 @@ function toolbar(n, ctx) {
     <button class="btn sm" data-ed="down" data-id="${esc(n.id)}" aria-label="Move ${lbl} down">↓</button>
     <button class="btn sm danger" data-ed="del" data-id="${esc(n.id)}" aria-label="Delete ${lbl}">Delete</button>` : ''}`;
 }
-const insBtn = (key, pos) => `<div class="conn d-conn"><button class="d-ins" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Insert a step, subprocess, wait, message, decision or parallel gateway here" title="Insert a step, subprocess, wait, message, decision or parallel gateway here">+</button></div>`;
+const insBtn = (key, pos) => `<div class="conn d-conn"><button class="d-ins" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a step or a choice here" title="Add a step or a choice here">+</button></div>`;
+/* R7 §4: the big "Add a step" button at the end of the main list goes straight to the step dialog */
+const addStepBtn = (key, pos) => `<div class="d-addwrap"><button class="btn primary d-addstep" data-addstep data-pos="${pos}">+ Add a step</button><button class="btn sm ghost d-addother" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a choice or something else here">or a choice…</button></div>`;
 function canInsert(nodes, k) { if (k === 0 && nodes[0] && nodes[0].type === 'trigger') return false; if (k === nodes.length && nodes.length && nodes[nodes.length - 1].type === 'end') return false; return true; }
 
 function flowHTML(nodes, ctx, key, counter) {
@@ -327,16 +355,17 @@ function flowHTML(nodes, ctx, key, counter) {
   const parts = [];
   if (ctx.edit && canInsert(nodes, 0)) parts.push(insBtn(key, 0));
   nodes.forEach((n, i) => {
-    if (i > 0) parts.push(ctx.edit && canInsert(nodes, i) ? insBtn(key, i) : '<div class="conn"></div>');
+    if (ctx.edit && key === 'root' && n.type === 'end') { parts.push('<div class="conn"></div>' + addStepBtn(key, i) + '<div class="conn"></div>'); }
+    else if (i > 0) parts.push(ctx.edit && canInsert(nodes, i) ? insBtn(key, i) : '<div class="conn"></div>');
     if (isGw(n)) {
       const bs = n.branches || [], par = n.type === 'parallel';
       const st = ctx.mode === 'diff' && ctx.diff ? (ctx.diff.nodes || {})[n.id] : null;
       const dchip = st === 'new' || st === 'changed' ? ` <span class="chip diff-${st}">${st === 'new' ? 'NEW' : 'CHANGED'}</span>` : '';
-      const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; return `<div class="d-goto" data-goto="${esc(b.goto)}">↩ Loop back to ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
-      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(n.title)}${par ? '<small class="d-parlbl">Runs in parallel</small>' : ''}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
+      const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; return `<div class="d-goto" data-goto="${esc(b.goto)}">↩ Go back to ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
+      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(n.title)}${par ? '<small class="d-parlbl">At the same time</small>' : ''}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
         <div class="branches" style="--bl:${100 / (Math.max(bs.length, 1) * 2)}%;--br:${100 / (Math.max(bs.length, 1) * 2)}%">${bs.map((b, bi) => `<div class="branch"><span class="blabel">${esc(b.label)}</span>
           ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, ctx, n.id + '#' + bi, counter)}${gotoLbl(b)}</div>`
-            : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra in this branch' : 'Continue → next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
+            : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra on this path' : 'Continue → next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
     } else {
       const idx = isStep(n) ? ++counter.n : '';
       parts.push(nodeHTML(n, ctx, idx));
@@ -348,7 +377,7 @@ function flowHTML(nodes, ctx, key, counter) {
 function removedHTML(diff, n, from) {
   const gone = ((diff && diff.removed) || []).filter(g => g && g.type !== 'trigger' && g.type !== 'end');
   const count = n != null ? n : gone.length;
-  return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from ${esc(from || 'as-is')} <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}" data-ntype="${esc(g.type || 'step')}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> ` : isSpecial(g) ? `<span class="d-ghost-ic" title="${esc(NT[g.type].label)}">${NT[g.type].icon}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
+  return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from ${esc(from || 'Today')} <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}" data-ntype="${esc(g.type || 'step')}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> ` : isSpecial(g) ? `<span class="d-ghost-ic" title="${esc(NT[g.type].label)}">${NT[g.type].icon}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
 }
 function lanesHTML(nodes, ctx) {
   /* rows in document order: each step sits in its owner's lane; each gateway gets its own full-width row */
@@ -356,22 +385,24 @@ function lanesHTML(nodes, ctx) {
   const walk = list => (list || []).forEach(n => { if (isGw(n)) { rows.push({ gw: n }); (n.branches || []).forEach(b => walk(b.nodes)); } else if (isStep(n)) rows.push({ s: n }); });
   walk(nodes);
   const steps = rows.filter(r => r.s).map(r => r.s);
-  if (!steps.length) return '<div class="empty">No steps yet. Open Edit to design the process.</div>';
-  const owners = [...new Set(steps.map(s => s.owner || ''))];
+  if (!steps.length) return '<div class="empty">No steps yet. Tap “Edit steps” to add them.</div>';
+  /* one lane per person, or per role for steps done by a role */
+  const laneKey = s => s.ownerRole ? 'role:' + s.ownerRole : (s.owner || '');
+  const owners = [...new Set(steps.map(laneKey))];
   /* R6: message nodes talk to an "External parties" lane on the right */
   const ext = steps.some(s => s.type === 'message');
   const cols = owners.length + (ext ? 1 : 0);
-  let h = `<div class="d-lanewrap" tabindex="0" aria-label="Swimlanes, scroll sideways for more lanes"><div class="lanes d-lanes" data-lanes="${cols}" style="grid-template-columns:repeat(${cols},minmax(220px,1fr));min-width:${cols * 220}px">`;
-  owners.forEach(o => h += `<div class="lane-h">${o ? av(o) + esc(pname(o)) : 'Unassigned'}</div>`);
+  let h = `<div class="d-lanewrap" tabindex="0" aria-label="Steps by person, scroll sideways for more people"><div class="lanes d-lanes" data-lanes="${cols}" style="grid-template-columns:repeat(${cols},minmax(220px,1fr));min-width:${cols * 220}px">`;
+  owners.forEach(o => h += `<div class="lane-h">${o.startsWith('role:') ? esc(o.slice(5)) : o ? av(o) + esc(pname(o)) : 'Unassigned'}</div>`);
   if (ext) h += `<div class="lane-h d-lane-ext" data-ext-lane>${NT.message.icon} External parties</div>`;
   let i = 0;
   rows.forEach(r => {
     if (r.gw) {
       const par = r.gw.type === 'parallel';
       const where = (r.gw.branches || []).map(b => { const first = (b.nodes || [])[0]; const tgt = b.goto && ctx.byId[b.goto]; return `<span class="blabel">${esc(b.label)}</span> ${first ? esc(first.title) : tgt ? '↩ ' + esc(tgt.title) : (par ? 'nothing extra' : 'continue')}`; }).join('<span class="d-sep">·</span>');
-      h += `<div class="d-lane-gw" style="grid-column:1/-1" data-node="${esc(r.gw.id)}" data-gw="${esc(r.gw.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(r.gw.title)}${par ? '<small class="d-parlbl">Runs in parallel</small>' : ''}</span></div><div class="d-lane-br">${where}</div></div>`;
+      h += `<div class="d-lane-gw" style="grid-column:1/-1" data-node="${esc(r.gw.id)}" data-gw="${esc(r.gw.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt">${esc(r.gw.title)}${par ? '<small class="d-parlbl">At the same time</small>' : ''}</span></div><div class="d-lane-br">${where}</div></div>`;
     } else {
-      i++; owners.forEach(o => { h += `<div class="lane-c">${(r.s.owner || '') === o ? nodeHTML(r.s, ctx, i) : ''}</div>`; });
+      i++; owners.forEach(o => { h += `<div class="lane-c">${laneKey(r.s) === o ? nodeHTML(r.s, ctx, i) : ''}</div>`; });
       if (ext) h += `<div class="lane-c d-lane-extc">${r.s.type === 'message' ? `<div class="d-extmsg" data-ext-msg="${esc(r.s.id)}"><b>${esc(r.s.party || 'External party')}</b><span class="d-dir">${r.s.direction === 'receive' ? 'sends: ' : 'receives: '}${esc(r.s.title)}</span></div>` : ''}</div>`;
     }
   });
@@ -404,7 +435,7 @@ const attr = (k, v) => v == null || v === '' ? '' : ` ${k}="${xe(v)}"`;
 function extXml(n, ind) {
   const ref = d => `<pmoflow:data ref="${xe(d)}" name="${xe(dataName(d))}" />`;
   const c = n.type === 'subprocess' ? calledOf(n) : null;
-  const lines = [`<pmoflow:node${attr('nodeType', n.type || 'step')}${attr('owner', n.owner)}${attr('ownerName', n.owner ? pname(n.owner) : '')}${attr('sla', n.sla)}${attr('system', n.system)}${attr('durationHrs', n.durationHrs)}${n.type === 'wait' ? attr('wait', n.wait) : ''}${n.type === 'message' ? attr('direction', n.direction === 'receive' ? 'receive' : 'send') + attr('party', n.party) : ''}${c ? attr('calls', n.calls) + attr('callsName', c.p ? c.p.name : c.name) : ''} />`];
+  const lines = [`<pmoflow:node${attr('nodeType', n.type || 'step')}${attr('owner', n.owner)}${attr('ownerName', n.owner ? pname(n.owner) : '')}${attr('ownerRole', n.ownerRole)}${attr('sla', n.sla)}${attr('system', n.system)}${attr('durationHrs', n.durationHrs)}${n.type === 'wait' ? attr('wait', n.wait) : ''}${n.type === 'message' ? attr('direction', n.direction === 'receive' ? 'receive' : 'send') + attr('party', n.party) : ''}${c ? attr('calls', n.calls) + attr('callsName', c.p ? c.p.name : c.name) : ''} />`];
   (n.data || []).forEach(d => lines.push(ref(d)));
   (n.touches || []).forEach(t => lines.push(`<pmoflow:touch name="${xe(t)}" />`));
   (n.subs || []).forEach(sb => lines.push((sb.data || []).length ? `<pmoflow:sub title="${xe(sb.title)}">\n${sb.data.map(d => `${ind}    ${ref(d)}`).join('\n')}\n${ind}  </pmoflow:sub>` : `<pmoflow:sub title="${xe(sb.title)}" />`));
@@ -431,7 +462,7 @@ export function bpmnXml(p, nodes, label, opts) {
   const connect = (tails, id) => tails.forEach(t => flow(t.id, id, t.name));
   const doc = n => { const bits = [];
     if (isSpecial(n)) bits.push(typeLabel(n) + ': ' + typeDetail(n));
-    if (n.owner) bits.push('Owner: ' + pname(n.owner));
+    if (n.ownerRole) bits.push('Role: ' + n.ownerRole); if (n.owner) bits.push('Owner: ' + pname(n.owner));
     if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + avOf(availOf(d)).short + ')').join(', '));
     if (n.system) bits.push('System: ' + n.system); if (n.sla) bits.push('SLA: ' + n.sla); if (n.durationHrs) bits.push('Duration: ' + n.durationHrs + 'h');
     if ((n.subs || []).length) bits.push('Sub-steps: ' + n.subs.map(x => x.title).join('; '));
@@ -590,7 +621,7 @@ export function parseBpmn(text, people, me) {
   const applyExt = (out, x) => {
     out.data = refs(x.data); out.touches = x.touches.slice();
     if (out.type !== 'trigger') out.subs = x.subs.map(s => ({ title: s.title, data: refs(s.data) }));
-    const a = x.a; if (a.sla) out.sla = a.sla; if (a.system) out.system = a.system; if (a.durationHrs && isFinite(+a.durationHrs)) out.durationHrs = +a.durationHrs;
+    const a = x.a; if (a.ownerRole && out.type !== 'trigger') out.ownerRole = a.ownerRole; if (a.sla) out.sla = a.sla; if (a.system) out.system = a.system; if (a.durationHrs && isFinite(+a.durationHrs)) out.durationHrs = +a.durationHrs;
   };
   const extIds = new Set();
   const emitted = {}; let pendingAlias = [];
@@ -686,7 +717,7 @@ export function parseBpmn(text, people, me) {
   const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
   /* only data a node still references after the walk is created */
   const usedIds = new Set(allNodes(list).flatMap(n => [...(n.data || []), ...(n.subs || []).flatMap(s => s.data || [])]));
-  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], dropped, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
+  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], dropped, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
 }
 /* create the data elements an import references by name but this workspace does not have yet */
 export async function createImportedData(list, fileName) {
@@ -701,15 +732,18 @@ let hl = null;            /* highlighted data element on the map */
 let newOpen = false;      /* /new modal guard (the router re-renders on every store change) */
 let newImport = false;    /* the visitor chose "Import BPMN" on /new: do not re-open the create modal on re-render */
 let hdrOpen = false;      /* phone: header KPIs and controls expanded */
+let autoAdd = null;       /* R7: a process just created opens its first "Add a step" dialog */
+const futureMaking = new Set(); /* R7: processes whose Future version is being created from Today */
+let menuCloser = null;    /* document listener that closes the "⋯ More" menu */
 /* R5 "Undo last change": the previous process snapshot of each save this session, newest last */
 const undoStack = {};
 export const MAX_DRAFTS = 10;
 
 /* R5: every version a process can be compared across: current to-be / as-is, saved drafts, released */
 export function versionSources(p) {
-  const out = [{ key: 'cur-tobe', label: 'Current to-be', nodes: p.tobe || [] }, { key: 'cur-asis', label: `Current as-is (v${p.version || 1})`, nodes: p.asis || [] }];
-  (p.drafts || []).forEach(d => out.push({ key: 'draft:' + d.id, label: `Saved “${d.name}” (to-be)`, nodes: d.tobe || [], draft: d }));
-  (p.released || []).slice().sort((a, b) => b.version - a.version).forEach(r => out.push({ key: 'rel:' + r.version, label: `Released v${r.version} (as-is)`, nodes: r.asis || [] }));
+  const out = [{ key: 'cur-tobe', label: 'Current Future', nodes: p.tobe || [] }, { key: 'cur-asis', label: `Current Today (v${p.version || 1})`, nodes: p.asis || [] }];
+  (p.drafts || []).forEach(d => out.push({ key: 'draft:' + d.id, label: `Saved “${d.name}” (Future)`, nodes: d.tobe || [], draft: d }));
+  (p.released || []).slice().sort((a, b) => b.version - a.version).forEach(r => out.push({ key: 'rel:' + r.version, label: `Released v${r.version} (Today)`, nodes: r.asis || [] }));
   return out;
 }
 function cmpPair(p, q) {
@@ -730,26 +764,30 @@ export function cmpDiff(A, B) {
 }
 
 /* "v1 · to-be rev 2": the released as-is version, plus the to-be revision once a BPMN import has replaced the to-be */
-export const verLabel = p => `v${p.version || 1}${(p.tobeRev || 1) > 1 ? ' · to-be rev ' + p.tobeRev : ''}`;
+export const verLabel = p => `v${p.version || 1}${(p.tobeRev || 1) > 1 ? ' · Future rev ' + p.tobeRev : ''}`;
 /* which node list the page is showing, and its label */
 function shown(p, q) {
-  let mode = ['asis', 'tobe', 'diff', 'lanes', 'impact', 'edit', 'compare'].includes(q.mode) ? q.mode : 'tobe';
+  let mode = ['asis', 'tobe', 'diff', 'lanes', 'impact', 'edit', 'compare'].includes(q.mode) ? q.mode : (flat(p.tobe).length ? 'tobe' : 'asis');
   if (mode === 'edit' && !canEditProc(p)) mode = 'tobe'; /* read-only for non-editors */
   const rel = q.rel ? (p.released || []).find(r => String(r.version) === String(q.rel)) : null;
-  if (rel) return { mode: 'asis', rel, nodes: rel.asis || [], key: 'released', label: 'released v' + rel.version + ' as-is' };
+  if (rel) return { mode: 'asis', rel, nodes: rel.asis || [], key: 'released', label: 'released v' + rel.version + ' Today' };
   if (mode === 'compare') { const c = cmpPair(p, q); return Object.assign({ mode, ver: 'tobe', nodes: c.B.nodes, key: 'compare', label: c.B.label.toLowerCase() }, c); }
   const ver = q.v === 'asis' ? 'asis' : 'tobe';
-  if (mode === 'asis' || (mode === 'edit' && ver === 'asis')) return { mode, ver, nodes: p.asis || [], key: 'asis', label: 'as-is v' + (p.version || 1) };
-  return { mode, ver, nodes: p.tobe || [], key: 'tobe', label: 'to-be' };
+  if (mode === 'asis' || (mode === 'edit' && ver === 'asis')) return { mode, ver, nodes: p.asis || [], key: 'asis', label: 'Today v' + (p.version || 1) };
+  return { mode, ver, nodes: p.tobe || [], key: 'tobe', label: 'Future' };
 }
 
 /* ---------- render ---------- */
+/* R7 §4: has the Future version been made yet? It is created from Today the first time someone opens Future. */
+export const needsFuture = p => !!p && !p.tobeForked && !flat(p.tobe).length && flat(p.asis).length > 0;
+const FUTURE_HINT = 'Change steps to show how it should work. We’ll highlight what changed.';
 export function render(params) {
-  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › New process</div><h1>New process</h1><p>Name it, then design the as-is and to-be maps.</p></div><div class="hdr-side"><div class="d-hdrtools"><button class="btn primary" data-new-open>Start</button>${importBtn()}</div></div></section>`;
+  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › New process</div><h1>Map a process</h1><p>Give it a name, then add the steps as they happen today.</p></div><div class="hdr-side"><div class="d-hdrtools"><button class="btn primary" data-new-open>Start</button>${isAdv() ? importBtn() : ''}</div></div></section>`;
   const pid = params.pid;
   const p = store.get('process', pid);
   if (!p) return notFound('Process “' + pid + '”');
   const q = params.q || {};
+  const adv = isAdv();
   const editor = canEditProc(p);
   const view = shown(p, q);
   const mode = view.mode, ver = view.ver || 'tobe', rel = view.rel;
@@ -763,45 +801,55 @@ export function render(params) {
   const asisById = {}; flat(asis).forEach(a => asisById[a.id] = a);
   const byId = {}; allNodes(view.nodes).forEach(n => byId[n.id] = n);
   const ctx = { pid, mode: mode === 'compare' ? 'diff' : mode, cmp: mode === 'compare', diff, asisById, byId, readonly: !!rel || mode === 'compare', edit: mode === 'edit' && !rel ? { ver } : null };
+  const editing = mode === 'edit' && !rel;
+  const futureView = (mode === 'tobe' || (editing && ver === 'tobe'));
+  const making = futureView && editor && needsFuture(p); /* bind() creates it; show a short note meanwhile */
 
-  /* a released version is read-only: no Edit tab, no authoring buttons. Non-editors see Edit locked. */
-  const modes = [['asis', 'As-is'], ['tobe', 'To-be'], ['diff', 'Diff'], ['lanes', 'Swimlanes'], ['impact', 'Impact'], ['edit', 'Edit']].filter(([k]) => !(rel && k === 'edit'));
+  /* tabs: Today · Future · What changed. Advanced adds By person and Who's affected as tabs; in Simple they sit in "⋯ More". */
+  const tabOn = k => !rel && (k === 'asis' ? (mode === 'asis' || (editing && ver === 'asis')) : k === 'tobe' ? (mode === 'tobe' || (editing && ver === 'tobe')) : mode === k);
+  const modes = [['asis', 'Today'], ['tobe', 'Future'], ['diff', 'What changed']].concat(adv ? [['lanes', 'By person'], ['impact', 'Who’s affected']] : []);
   const rels = (p.released || []).slice().sort((a, b) => b.version - a.version);
   const undo = (undoStack[pid] || []).length ? undoStack[pid][undoStack[pid].length - 1] : null;
   const ownerName = pname(p.owner);
-  const tools = `<div class="d-hdrtools"><label class="d-verlbl">Version <select class="d-sel" data-version aria-label="Version"><option value="" data-ver-current>Current (${esc(verLabel(p))})</option>${rels.map(r => `<option value="${esc(r.version)}" ${rel && rel.version === r.version ? 'selected' : ''}>Released v${esc(r.version)} · ${esc(fmt(String(r.at || '').slice(0, 10)))}</option>`).join('')}</select></label>
-      <button class="btn sm ${mode === 'compare' ? 'primary' : ''}" data-compare-open title="Compare any two of current, saved and released versions">Compare</button>
-      ${editor && !rel ? `<button class="btn sm" data-save-version title="Save the current as-is and to-be as a named version (${(p.drafts || []).length}/${MAX_DRAFTS})">Save version</button>` : ''}
-      ${editor && !rel && undo ? `<button class="btn sm" data-undo title="Undo: ${esc(undo.summary)}">Undo last change</button>` : ''}
-      <button class="btn sm" data-bpmn title="Download BPMN 2.0 XML for the ${esc(view.label)} map">Export BPMN</button>${rel || !editor ? '' : importBtn('Import BPMN as new version', 'Import a BPMN 2.0 file as a new version of this process')}
-      ${editor ? '' : `<span class="d-only d-ro" data-readonly>${LOCK} Read-only · ${esc(askAccess(p))}</span>`}</div>`;
-  const kpis = `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>To-be steps</span></div><div class="kpi" data-kpi-diff><b>${sum.new}+${sum.changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Data live</span></div></div>`;
-  /* phone: KPIs and controls collapse into one summary row so the map starts near the top */
-  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span><b>${steps.length}</b> steps · <b>${sum.new}+${sum.changed}</b> new/changed · <b>${live}/${tdl.length}</b> data live</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
-  const side = `<div class="seg d-modes" role="tablist" aria-label="View mode">${modes.map(([k, l]) => {
-      const on = !rel && mode === k, locked = k === 'edit' && !editor;
-      return `<button role="tab" aria-selected="${on}" data-mode="${k}" class="${on ? 'on' : ''} ${locked ? 'd-locked' : ''}" ${locked ? `aria-disabled="true" title="${esc('Only ' + ownerName + ' and the process resources can edit. ' + askAccess(p))}"` : ''}>${locked ? LOCK + ' ' : ''}${l}</button>`; }).join('')}</div>
-    ${sumrow}<div class="d-collapse" id="d-hdrmore">${tools}${kpis}</div>`;
+  const menuItem = (attrs, label, title, on) => `<button type="button" class="d-mi ${on ? 'on' : ''}" role="menuitem" ${attrs}${title ? ` title="${esc(title)}"` : ''}>${esc(label)}</button>`;
+  const more = `<details class="d-more" data-more><summary class="btn sm" aria-label="More options" data-more-btn>⋯<span class="d-long"> More</span></summary><div class="d-menu" role="menu">
+      <label class="d-verlbl">Version <select class="d-sel" data-version aria-label="Version"><option value="" data-ver-current>Current (${esc(verLabel(p))})</option>${rels.map(r => `<option value="${esc(r.version)}" ${rel && rel.version === r.version ? 'selected' : ''}>Released v${esc(r.version)} · ${esc(fmt(String(r.at || '').slice(0, 10)))}</option>`).join('')}</select></label>
+      ${menuItem('data-compare-open', 'Compare versions', 'Compare any two of the current, saved and released versions', mode === 'compare')}
+      ${editor && !rel ? menuItem('data-save-version', 'Save version', `Keep a named copy of Today and Future (${(p.drafts || []).length}/${MAX_DRAFTS})`) : ''}
+      ${editor && !rel && undo ? menuItem('data-undo', 'Undo last change', 'Undo: ' + undo.summary) : ''}
+      ${adv ? '' : menuItem(`data-mode="lanes"`, 'By person', 'The Future steps grouped by who does them') + menuItem(`data-mode="impact"`, 'Who’s affected', 'Other steps and projects each Future step affects')}
+      ${menuItem('data-bpmn', 'Download diagram file', 'Download this map as a diagram file other tools can open (BPMN 2.0)')}
+      ${rel || !editor ? '' : importBtn('Import diagram file', 'Import a diagram file (BPMN 2.0) as a new version of this process', 'd-mi')}
+    </div></details>`;
+  const editBtn = rel || !editor ? '' : editing ? `<button class="btn sm primary" data-edit-done>✓ Done</button>` : `<button class="btn sm d-editbtn" data-mode="edit" aria-label="Edit steps">✎ Edit<span class="d-long"> steps</span></button>`;
+  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${sum.new}+${sum.changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information connected</span></div></div>` : '';
+  /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
+  const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : 'Who’s affected';
+  const vcount = flat(view.nodes).length;
+  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span><b>${esc(vlabel)}</b> · ${vcount} step${vcount === 1 ? '' : 's'}${sum.new + sum.changed ? ` · ${sum.new + sum.changed} changed` : ''}</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
+  const side = `<div class="d-tabrow"><div class="seg d-modes" role="tablist" aria-label="Which map">${modes.map(([k, l]) => `<button role="tab" aria-selected="${tabOn(k)}" data-mode="${k}" class="${tabOn(k) ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>${editBtn}${more}</div>
+    ${sumrow}<div class="d-collapse" id="d-hdrmore">${editor ? '' : `<span class="d-only d-ro" data-readonly>View only · ${esc(askAccess(p))}</span>`}${kpis}</div>`;
 
   const res = p.resources || [];
   const people = store.state.people;
-  const headLeft = mode === 'edit' && !rel
-    ? `<div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Process › Editing</div>
+  const headLeft = editing
+    ? `<div class="crumbs"><a href="${link('/processes')}" data-link>Processes</a> › Changing the steps</div>
        <input class="title" data-meta="name" value="${esc(p.name)}" aria-label="Process name" />
-       <div class="d-collapse"><textarea data-meta="desc" rows="2" aria-label="Process description" placeholder="What this process does and where it ends">${esc(p.desc || '')}</textarea>
+       <div class="d-collapse"><textarea data-meta="desc" rows="2" aria-label="Process description" placeholder="One line: what this process does">${esc(p.desc || '')}</textarea>
+       <details class="d-hdropts"${adv ? ' open' : ''}><summary>Owner and people who can edit</summary>
        <div class="res"><span class="lbl">Owner</span><select class="d-sel" data-meta="owner" aria-label="Process owner">${people.map(x => `<option value="${esc(x.id)}" ${x.id === p.owner ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
-       <div class="res"><span class="lbl">Resources</span>${res.map(r => `<span class="person">${av(r)}${esc(pname(r))}<button class="d-x" data-res-del="${esc(r)}" aria-label="Remove ${esc(pname(r))}">×</button></span>`).join('')}
-         <select class="d-sel" data-res-add aria-label="Add resource"><option value="">+ Assign</option>${people.filter(x => !res.includes(x.id)).map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></div></div>`
-    : `<div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Process · <span data-ver-label>${esc(verLabel(p))}</span>${p.tobeFrom && (p.tobeRev || 1) > 1 ? ` <span class="hint" data-ver-from>from ${esc(p.tobeFrom)}</span>` : ''}</div><h1>${esc(p.name)}</h1><div class="d-collapse">${p.desc ? `<p>${esc(p.desc)}</p>` : ''}
-       <div class="res"><span class="lbl">Owner</span>${personChip(p.owner) || '<span class="hint">None</span>'}</div>
-       <div class="res"><span class="lbl">Resources</span>${res.map(personChip).join('') || '<span class="hint">None assigned</span>'}</div></div>`;
+       <div class="res"><span class="lbl">Can edit</span>${res.map(r => `<span class="person">${av(r)}${esc(pname(r))}<button class="d-x" data-res-del="${esc(r)}" aria-label="Remove ${esc(pname(r))}">×</button></span>`).join('')}
+         <select class="d-sel" data-res-add aria-label="Add a person who can edit"><option value="">+ Add person</option>${people.filter(x => !res.includes(x.id)).map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></div></details></div>`
+    : `<div class="crumbs"><a href="${link('/processes')}" data-link>Processes</a>${adv ? ` · <span data-ver-label>${esc(verLabel(p))}</span>${p.tobeFrom && (p.tobeRev || 1) > 1 ? ` <span class="hint" data-ver-from>from ${esc(p.tobeFrom)}</span>` : ''}` : ''}</div><h1>${esc(p.name)}</h1><div class="d-collapse">${p.desc ? `<p class="d-desc">${esc(p.desc)}</p>` : ''}
+       <div class="res d-people"><span class="lbl">Owner</span>${personChip(p.owner) || '<span class="hint">None</span>'}${adv ? `<span class="lbl">Can edit</span>${res.map(personChip).join('') || '<span class="hint">Nobody yet</span>'}` : res.length > 1 ? `<span class="d-avs" title="${esc(res.map(pname).join(', '))} can edit">${res.map(av).join('')}</span>` : ''}</div></div>`;
 
   /* canvas */
   let canvas;
-  const modeNote = rel || mode === 'compare' ? '' : { asis: 'How the process runs today. Tap a step to drill in.', tobe: 'The designed process. Tap a step to drill in.', diff: 'To-be compared with as-is: what is new, what changed, and what was removed.', lanes: 'The to-be process grouped by owner. Decisions and parallel gateways get their own row.', impact: 'What else each to-be step touches: steps sharing its data, projects with open work on it, and conflicts.' }[mode];
-  const roBanner = deniedEdit ? `<div class="d-robanner" role="status" data-edit-denied><b>${LOCK} You can view this process but not edit it.</b><span>Only ${esc(ownerName)} (owner) and the process resources can edit it. ${esc(askAccess(p))}.</span><button class="btn sm" data-ask-access>Ask ${esc(ownerName)}</button></div>` : '';
-  if (rel) canvas = `<div class="d-relbanner" role="status"><b>Released ${esc(fmt(String(rel.at || '').slice(0, 10)))} by ${esc(pname(rel.by))}</b><span>Version ${esc(rel.version)} as-is map, read-only. This is how the process ran before the next release.</span><button class="btn sm" data-version-current>Back to current</button></div>
-      ${(rel.asis || []).length ? `<div class="flow">${flowHTML(rel.asis, ctx, 'root')}</div>` : '<div class="empty">This release has no as-is map stored.</div>'}`;
+  const modeNote = rel || mode === 'compare' ? '' : futureView ? FUTURE_HINT
+    : ({ asis: 'How it works today. Tap a step to see its details.', diff: 'Future compared with Today: what is new, what changed, and what was removed.', lanes: 'The Future steps grouped by who does them.', impact: 'For each Future step: other steps that use the same information, and projects with work on it.', })[mode] || '';
+  const roBanner = deniedEdit ? `<div class="d-robanner" role="status" data-edit-denied><b>${LOCK} You can view this process but not change it.</b><span>Only ${esc(ownerName)} (owner) and the people they add can change it. ${esc(askAccess(p))}.</span><button class="btn sm" data-ask-access>Ask ${esc(ownerName)}</button></div>` : '';
+  if (rel) canvas = `<div class="d-relbanner" role="status"><b>Released ${esc(fmt(String(rel.at || '').slice(0, 10)))} by ${esc(pname(rel.by))}</b><span>Version ${esc(rel.version)} of the Today map, view only. This is how the process ran before the next release.</span><button class="btn sm" data-version-current>Back to current</button></div>
+      ${(rel.asis || []).length ? `<div class="flow">${flowHTML(rel.asis, ctx, 'root')}</div>` : '<div class="empty">This release has no Today map stored.</div>'}`;
   else if (mode === 'compare') {
     const v = Object.values(diff.nodes || {}), same = view.A.key === view.B.key;
     const n = { new: v.filter(x => x === 'new').length, changed: v.filter(x => x === 'changed').length, removed: (diff.removed || []).filter(g => g && g.type !== 'trigger' && g.type !== 'end').length };
@@ -812,19 +860,17 @@ export function render(params) {
   }
   else if (mode === 'lanes') canvas = lanesHTML(tobe, ctx);
   else if (mode === 'impact') canvas = impactHTML(p);
-  else if (mode === 'asis') canvas = asis.length ? `<div class="flow">${flowHTML(asis, ctx, 'root')}</div>` : '<div class="empty">No as-is map yet.</div>';
-  else if (mode === 'edit') {
-    canvas = `<div class="d-editbar" role="group" aria-label="Editor">
-        <span class="lbl">Editing</span><div class="seg">${['asis', 'tobe'].map(v => `<button data-ver="${v}" class="${ver === v ? 'on' : ''}" aria-pressed="${ver === v}">${v === 'asis' ? 'As-is' : 'To-be'}</button>`).join('')}</div>
-        <button class="btn sm" data-fork>Fork to-be from as-is</button>
-        <span class="hint">Press + to insert a step, decision or parallel gateway. Every change is saved and logged.</span></div>
-      ${ver === 'asis' && !steps.length ? '<div class="d-firsthint" role="note" data-asis-hint><b>Map how it runs today, then fork to-be.</b> Add the as-is steps first. When they are in, press “Fork to-be from as-is” and redesign the copy.</div>' : ''}
+  else if (mode === 'asis') canvas = flat(asis).length || asis.length ? `<div class="flow">${flowHTML(asis, ctx, 'root')}</div>${editor && !flat(asis).length ? '<div class="d-firsthint" role="note">No steps yet. Tap “✎ Edit steps” to add them.</div>' : ''}` : '<div class="empty">No Today map yet.</div>';
+  else if (editing) {
+    canvas = `<div class="d-editbar" role="group" aria-label="Editor"><span>${ver === 'asis' ? 'Changing <b>Today</b>: how it works now. Tap “+ Add a step”, or + to add one in between.' : 'Changing <b>Future</b>: how it should work.'} Every change is saved.</span>
+        ${adv && ver === 'tobe' ? '<button class="btn sm" data-fork title="Replace the Future map with a fresh copy of Today">Start Future again from Today</button>' : ''}</div>
+      ${making ? '<div class="d-firsthint" role="status" data-future-making>Making the Future version from Today…</div>' : ''}
       <div class="flow">${flowHTML(view.nodes, ctx, 'root')}</div>`;
-  } else canvas = `<div class="flow">${flowHTML(tobe, ctx, 'root')}${mode === 'diff' ? removedHTML(diff, sum.removed) : ''}</div>`;
+  } else canvas = making ? '<div class="d-firsthint" role="status" data-future-making>Making the Future version from Today…</div>' : `<div class="flow">${flowHTML(tobe, ctx, 'root')}${mode === 'diff' ? removedHTML(diff, sum.removed) : ''}</div>`;
 
-  /* side panel: describes the map being shown (as-is, released or to-be) */
+  /* side panel: describes the map being shown (Today, released or Future) */
   const vsteps = flat(view.nodes);
-  const vname = view.key === 'tobe' ? 'to-be' : view.key === 'asis' ? 'as-is' : view.key === 'compare' ? view.B.label.toLowerCase() : 'released as-is';
+  const vname = view.key === 'tobe' ? 'Future' : view.key === 'asis' ? 'Today' : view.key === 'compare' ? view.B.label : 'released Today';
   const dl = [...new Set(vsteps.flatMap(s => s.data || []))];
   const stepGo = s => rel || mode === 'compare' ? '' : `data-go="/process/${esc(pid)}/step/${esc(s.id)}"`;
   const missingSteps = vsteps.filter(s => (s.data || []).some(d => availOf(d) === 'missing'));
@@ -834,30 +880,29 @@ export function render(params) {
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const u = usage(d, pid);
     return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
-      <div><div class="t">${esc(x.name || d)}</div><div class="s">${esc(x.source || 'Source not set')} · ${esc(pname(x.owner))}</div></div>
-      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)">${esc(avOf(effAvail(d)).short)} ›</a>${effAvail(d) === 'live' ? `<div>${evidenceTag(x, true)}</div>` : ''}<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div></div></div>`;
+      <div><div class="t">${esc(x.name || d)}</div><div class="s">${adv ? esc(x.source || 'Source not set') + ' · ' : ''}${esc(pname(x.owner))}</div></div>
+      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(availInfo(d).key)}">${esc(avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
   }).join('');
-  /* touches: the kickoff's tags count too */
+  /* teams involved: the "what starts it" tags count too */
   const touches = {}; [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => touches[t] = (touches[t] || 0) + 1));
   const linked = projectsFor(pid);
   const drafts = (p.drafts || []).slice().reverse();
-  const versionsCard = rel ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} to-be steps</div></div>
-      <div class="r d-draftacts"><button class="btn sm" data-draft-cmp="${esc(d.id)}" aria-label="Compare ${esc(d.name)} with the current to-be">Compare</button>${editor ? `<button class="btn sm" data-draft-restore="${esc(d.id)}" aria-label="Restore ${esc(d.name)}">Restore</button><button class="btn sm danger" data-draft-del="${esc(d.id)}" aria-label="Delete saved version ${esc(d.name)}">Delete</button>` : ''}</div></div>`).join('') : '<div class="s">No saved versions yet. “Save version” keeps a named snapshot you can compare or restore.</div>'}
-      ${editor ? '' : `<div class="d-only" style="margin-top:8px">${LOCK} ${esc(askAccess(p))}</div>`}</div>`;
-  const sideHTML = `
-    <div class="card"><h3>${LOCK} Steps needing missing data <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Needs ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('') : '<div class="s">Every data element has a source.</div>'}
-      ${liveSteps.length ? `<div class="d-needlive-h">${NEEDS_LIVE} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Examples only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}
-      ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Fix done, awaiting owner confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${s.data.filter(d => availOf(d) === 'pending').map(d => esc(awaitingText(d).replace('Fix done, a', 'A') + ': ' + dataName(d))).join(', ')}</div></div><div class="r">${av(s.owner)}</div></div>`).join('')}` : ''}</div>
-    <div class="card" data-side-data="${view.key}"><h3>Data requirements <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">Data the ${esc(vname)} map uses. Tap a row to highlight every step that uses it. Step counts cover this process.</div>${dataRows || '<div class="s">Tag data on steps and this list builds itself.</div>'}
-      ${rel ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New data element</button></div>'}</div>
-    <div class="card" data-touches><h3>Touches across operations</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}"># ${esc(t)} · ${c}</span>`).join('') || '<span class="s">No areas tagged yet.</span>'}</div></div>
+  const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
+      <div class="r d-draftacts"><button class="btn sm" data-draft-cmp="${esc(d.id)}" aria-label="Compare ${esc(d.name)} with the current Future">Compare</button>${editor ? `<button class="btn sm" data-draft-restore="${esc(d.id)}" aria-label="Restore ${esc(d.name)}">Restore</button><button class="btn sm danger" data-draft-del="${esc(d.id)}" aria-label="Delete saved version ${esc(d.name)}">Delete</button>` : ''}</div></div>`).join('') : '<div class="s">No saved versions yet. “Save version” (in ⋯ More) keeps a named copy you can compare or restore.</div>'}</div>`;
+  const blockCard = missingSteps.length || pendSteps.length || liveSteps.length || adv ? `<div class="card" data-side-blocked><h3>${LOCK} Steps waiting for information <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Not available yet: ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('') : '<div class="s">Every step has the information it needs, or a plan to get it.</div>'}
+      ${liveSteps.length ? `<div class="d-needlive-h">Sample only: ${NEEDS_LIVE.toLowerCase()} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Sample only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('')}` : ''}
+      ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Waiting for confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${esc(awaitingText(s.data.find(d => availOf(d) === 'pending')))}: ${s.data.filter(d => availOf(d) === 'pending').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('')}` : ''}</div>` : '';
+  const sideHTML = `${blockCard}
+    <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
+      ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
+    ${Object.keys(touches).length || adv ? `<div class="card" data-touches><h3>Teams involved</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}"># ${esc(t)} · ${c}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
     ${versionsCard}
-    <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · live' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not linked to a project yet.</div>'}
-      ${rel ? '' : `<div class="d-startprj">${steps.length ? `<button class="btn sm primary" data-start-project>Start a project from this to-be</button><span class="hint">Plans the work to close the gap between as-is and to-be.</span>` : '<span class="hint">Design the to-be in Edit, then start a project from it.</span>'}</div>`}</div>
+    <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · launched' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not in a project yet.</div>'}
+      ${rel ? '' : `<div class="d-startprj">${steps.length ? `<button class="btn sm primary" data-start-project>Start a project from the Future version</button><span class="hint">Plans the work to get from Today to Future.</span>` : '<span class="hint">Add the Future steps, then start a project from them.</span>'}</div>`}</div>
     ${activityCard('process:' + pid)}`;
 
-  return `<section class="hdr d-hdr ${hdrOpen ? 'd-hdr-open' : ''}"><div>${headLeft}</div><div class="hdr-side">${side}</div></section>
-    <div class="grid"><section class="canvas ${mode === 'edit' && !rel ? 'd-edit' : ''}" id="canvas" aria-label="Process map">${roBanner}${modeNote ? `<div class="hint d-modenote" style="text-align:center;margin:-8px 0 14px">${modeNote}</div>` : ''}${canvas}</section>
+  return `<section class="hdr d-hdr ${hdrOpen ? 'd-hdr-open' : ''} ${adv ? 'd-adv' : 'd-simple'}"><div>${headLeft}</div><div class="hdr-side">${side}</div></section>
+    <div class="grid"><section class="canvas ${editing ? 'd-edit' : ''}" id="canvas" aria-label="Process map">${roBanner}${modeNote ? `<div class="hint d-modenote" data-modenote style="text-align:center;margin:-8px 0 14px">${esc(modeNote)}</div>` : ''}${canvas}</section>
     <aside class="side">${sideHTML}</aside></div>`;
 }
 
@@ -883,8 +928,9 @@ async function saveProc(p, summary, opts) {
 
 /* ---------- modals ---------- */
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
-/* creating or editing never marks data live directly: only the data owner's "Confirm live" does (R4) */
-const availOpts = sel => Object.entries(AVAIL).filter(([k]) => k !== 'pending' && (k !== 'live' || sel === 'live')).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
+/* R7: plain states. "Connected" means we have it today; the owner's confirmation with proof is still recorded on the data page. */
+const AVAIL_OPT = { live: 'Connected (we have this today)', example: 'Sample only', missing: 'Not available yet' };
+const availOpts = sel => Object.entries(AVAIL_OPT).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
 const allData = () => store.list('dataElement').slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
 const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${avOf(a).color}" title="${esc(avOf(a).label)}"></span>`;
 const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : effDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
@@ -894,66 +940,125 @@ function subRow(s, k) {
     <div class="d-subhead"><input name="sub_title" aria-label="Sub-step ${k + 1} title" placeholder="Sub-step title" value="${esc((s && s.title) || '')}" /><button type="button" class="btn sm danger" data-subdel aria-label="Remove sub-step">Remove</button></div>
     <div class="d-picks d-picks-sm" data-subpicks>${allData().map(d => dataCheck('sub_data', d, sel.has(d.id))).join('')}</div></div>`;
 }
+/* default state for information first added on a map: Today = we have it; Future = not available yet */
+export const defaultAvail = ver => ver === 'asis' ? 'live' : 'missing';
 
 export async function newDataModal(defaults) {
   defaults = defaults || {};
   const r = await modal({
-    title: 'New data element',
+    title: 'New information',
     body: `${defaults.error ? `<div class="banner d-err" role="alert">${esc(defaults.error)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(defaults.name || '')}" placeholder="e.g. Vendor bank account" /></div>
-      <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(defaults.owner || store.state.me)}</select><span class="hint">You own it unless you pick someone else. The owner sets its spec, sensitivity and live confirmation.</span></div>
-      <div class="field"><label>Availability</label><select name="avail">${availOpts(defaults.avail || 'missing')}</select></div></div>
-      <div class="field"><label>Source</label><input name="source" placeholder="e.g. ERP vendor API" value="${esc(defaults.source || '')}" /></div>
+      <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(defaults.owner || store.state.me)}</select><span class="hint">You own it unless you pick someone else. The owner sets its rules and confirms it is connected.</span></div>
+      <div class="field"><label>Do we have it?</label><select name="avail">${availOpts(defaults.avail || 'missing')}</select></div></div>
+      <div class="field"><label>Where it comes from</label><input name="source" placeholder="e.g. Finance system" value="${esc(defaults.source || '')}" /></div>
       <div class="field"><label>Note</label><textarea name="note" placeholder="What exists today, and what is needed">${esc(defaults.note || '')}</textarea></div>`,
     actions: [{ id: 'save', label: 'Create', primary: true }],
   });
   if (r.action !== 'save') return null;
   const name = (r.form.name || '').trim();
-  if (!name) return newDataModal(Object.assign({}, r.form, { error: 'A data element needs a name.' }));
+  if (!name) return newDataModal(Object.assign({}, r.form, { error: 'Give the information a name.' }));
   const dup = dupDataName(name);
-  if (dup) return newDataModal(Object.assign({}, r.form, { error: `A data element called '${dup.name}' already exists. Use it, or choose a different name.` }));
+  if (dup) return newDataModal(Object.assign({}, r.form, { error: `Information called '${dup.name}' already exists. Use it, or choose a different name.` }));
   const id = store.newId('de');
   const data = { id, name, owner: r.form.owner, source: r.form.source.trim(), avail: r.form.avail, note: r.form.note.trim(), fields: [], samples: [], discovered: [] };
-  try { await store.save('dataElement', id, data, `Created data element '${name}'`); toast(`Created '${name}'`); return data; }
+  try { await store.save('dataElement', id, data, `Created information '${name}'`); toast(`Created '${name}'`); return data; }
   catch (e) { toast('Could not save: ' + e.message); return null; }
 }
 
+/* R7 §4: "Who does it" is a person or a free-text role. A typed name that matches a person (full name, or a unique
+   first name) is that person; anything else is a role, stored as ownerRole, with the process owner kept as the
+   accountable person so readiness checks and sign-off still have someone. */
+export function parseWho(text, p) {
+  const t = String(text || '').trim(); const people = store.state.people;
+  const fallback = (p && p.owner) || store.state.me;
+  if (!t) return { owner: fallback };
+  const k = t.toLowerCase().replace(/\s+—\s+.*$/, '');
+  const hit = people.find(x => x.name.toLowerCase() === k) || (people.filter(x => x.name.split(' ')[0].toLowerCase() === k).length === 1 ? people.find(x => x.name.split(' ')[0].toLowerCase() === k) : null);
+  return hit ? { owner: hit.id } : { owner: fallback, ownerRole: t };
+}
+const peopleList = () => `<datalist id="d-people">${store.state.people.map(x => `<option value="${esc(x.name)}">${esc(x.role || '')}</option>`).join('')}</datalist>`;
+const infoList = () => `<datalist id="d-infos">${allData().map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist>`;
+const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" data-iname="${esc(c.name)}">${c.id ? effDot(c.id) : availDot(c.avail)}<span>${esc(c.name)}</span><button type="button" class="d-x" data-ichip-del aria-label="Remove ${esc(c.name)}">×</button></span>`;
+
 /* R6: the step dialog also edits the typed nodes. Subprocess picks the process it calls; wait sets how long;
-   message sets the direction and the external party. Waits carry no data or sub-steps; typed nodes have no sub-steps. */
-const PH = { step: 'e.g. Verify vendor identity', subprocess: 'e.g. Run vendor onboarding', wait: 'e.g. Wait 2 business days for vendor response', message: 'e.g. Notify vendor' };
-async function stepModal(p, ver, node) {
+   message sets the direction and the external party. Waits carry no information or sub-steps.
+   R7: three fields up front (name, who, information); everything else under "More options".
+   Returns { node, next } where next means "Enter: add this step and open the next one". */
+const PH = { step: 'e.g. Check the invoice', subprocess: 'e.g. Run vendor onboarding', wait: 'e.g. Wait 2 business days for the vendor', message: 'e.g. Tell the vendor' };
+async function stepModal(p, ver, node, opts) {
+  opts = opts || {};
+  const adv = isAdv();
   const kind = NT[node.type] ? node.type : 'step', lbl = kind === 'step' ? 'step' : NT[kind].label.toLowerCase();
   const isNew = !node.title;
   const asisSteps = flat(p.asis);
-  const sel = new Set(node.data || []);
-  const pending = []; /* data elements created inline: saved only when the step is saved */
+  const pending = []; /* information created inline (More options): saved only when the step is saved */
   const others = store.list('process', x => x.id !== p.id).sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  const typeFields = kind === 'subprocess' ? `<div class="field"><label>Calls process</label>${others.length ? `<select name="calls" data-calls-sel>${others.map(x => `<option value="${esc(x.id)}" ${x.id === node.calls ? 'selected' : ''}>${esc(x.name)} · ${flat(x.tobe).length} steps</option>`).join('')}</select>` : '<div class="hint fail">There is no other process to call yet. Create it first.</div>'}<span class="hint">Opening this node drills into that process. Its steps stay in that process.</span></div>`
-    : kind === 'wait' ? `<div class="field"><label>Wait for</label><input name="wait" value="${esc(node.wait || '')}" placeholder="e.g. 2 business days" /><span class="hint">How long the flow pauses. A number with minutes, hours, days or weeks exports as a BPMN timer.</span></div>`
-    : kind === 'message' ? `<div class="frow"><div class="field"><label>Direction</label><select name="direction"><option value="send" ${node.direction !== 'receive' ? 'selected' : ''}>Send to the party</option><option value="receive" ${node.direction === 'receive' ? 'selected' : ''}>Receive from the party</option></select></div>
-        <div class="field"><label>External party</label><input name="party" value="${esc(node.party || '')}" placeholder="e.g. Vendor" /></div></div>` : '';
+  const chips = (node.data || []).map(id => ({ id, name: dataName(id) }));
+  const whoVal = node.ownerRole || (node.owner ? pname(node.owner) : opts.who || pname(store.state.me));
+  const typeFields = kind === 'subprocess' ? `<div class="field"><label>Which process it runs</label>${others.length ? `<select name="calls" data-calls-sel>${others.map(x => `<option value="${esc(x.id)}" ${x.id === node.calls ? 'selected' : ''}>${esc(x.name)} · ${flat(x.tobe).length} steps</option>`).join('')}</select>` : '<div class="hint fail">There is no other process to run yet. Create it first.</div>'}<span class="hint">Opening this step opens that process. Its steps stay in that process.</span></div>`
+    : kind === 'wait' ? `<div class="field"><label>How long to wait</label><input name="wait" value="${esc(node.wait || '')}" placeholder="e.g. 2 business days" /></div>`
+    : kind === 'message' ? `<div class="frow"><div class="field"><label>Direction</label><select name="direction"><option value="send" ${node.direction !== 'receive' ? 'selected' : ''}>We send it</option><option value="receive" ${node.direction === 'receive' ? 'selected' : ''}>We receive it</option></select></div>
+        <div class="field"><label>Who outside</label><input name="party" value="${esc(node.party || '')}" placeholder="e.g. Vendor" /></div></div>` : '';
+  const hasData = kind !== 'wait';
+  const moreOpen = adv; /* Advanced users see every option; Simple keeps them folded */
   const pr = modal({
-    title: `${isNew ? 'New' : 'Edit'} ${lbl} in ${VER[ver]}`,
-    body: `${kind !== 'step' ? `<div class="d-ntbanner ${NT[kind].cls}">${NT[kind].icon}<b>${esc(NT[kind].label)}</b></div>` : ''}${typeFields}<div class="field"><label>Title</label><input name="title" value="${esc(node.title || '')}" placeholder="${esc(PH[kind])}" />${kind !== 'step' ? '<span class="hint">Leave blank for a title made from the fields above.</span>' : ''}</div>
-      <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(node.owner || store.state.me)}</select></div>
-      ${ver === 'tobe' ? `<div class="field"><label>Replaces as-is step</label><select name="from"><option value="">None: new in to-be</option>${asisSteps.map(a => `<option value="${esc(a.id)}" ${a.id === node.from ? 'selected' : ''}>${esc(a.title)}</option>`).join('')}</select></div>` : '<div></div>'}</div>
-      ${kind === 'wait' ? '' : `<div class="frow d-frow3"><div class="field"><label>SLA</label><input name="sla" value="${esc(node.sla || '')}" placeholder="e.g. 2 business days" /></div>
-        <div class="field"><label>System</label><input name="system" value="${esc(node.system || '')}" placeholder="e.g. ERP" /></div>
-        <div class="field"><label>Duration (hours)</label><input name="durationHrs" type="number" min="0" step="0.25" inputmode="decimal" value="${esc(node.durationHrs != null ? node.durationHrs : '')}" /></div></div>
-      <div class="field"><label>Data this ${esc(lbl)} needs</label><div class="d-picks" data-picks>${allData().map(d => dataCheck('data', d, sel.has(d.id))).join('') || '<span class="hint">No data elements yet.</span>'}</div>
-        <div class="d-inline-new" data-nd-row><input data-nd-name placeholder="New data element name" aria-label="New data element name" /><select data-nd-avail aria-label="Availability">${availOpts('missing')}</select>
-          <select data-nd-owner aria-label="Owner of the new data element" title="Owner (defaults to you)">${store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === store.state.me ? 'selected' : ''}>${esc(x.name)}${x.id === store.state.me ? ' (me)' : ''}</option>`).join('')}</select>
-          <input data-nd-source placeholder="Source, e.g. ERP vendor API" aria-label="Source of the new data element" />
-          <button type="button" class="btn sm" data-nd-create>Create and tag</button></div>
-        <div class="hint" data-nd-msg aria-live="polite"></div></div>`}
-      <div class="field"><label>Touches (comma separated)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" placeholder="e.g. Compliance, ERP" /></div>
-      ${kind === 'step' ? `<div class="field"><label>Sub-steps: how this step runs</label><div data-subs>${(node.subs || []).map(subRow).join('')}</div><div><button type="button" class="btn sm" data-subadd>+ Add sub-step</button></div></div>` : ''}`,
-    actions: [{ id: 'save', label: isNew ? 'Add ' + lbl : 'Save ' + lbl, primary: true }],
+    title: kind === 'step' ? `${isNew ? 'Add a step' : 'Edit step'} · ${VER[ver]}` : `${isNew ? 'Add' : 'Edit'}: ${NT[kind].label} · ${VER[ver]}`,
+    body: `${kind !== 'step' ? `<div class="d-ntbanner ${NT[kind].cls}">${NT[kind].icon}<b>${esc(NT[kind].label)}</b></div>` : ''}${typeFields}
+      <div class="field"><label for="d-f-title">Step name</label><input id="d-f-title" name="title" value="${esc(node.title || '')}" placeholder="${esc(PH[kind])}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" />${kind !== 'step' ? '<span class="hint">Leave blank for a name made from the fields above.</span>' : ''}</div>
+      <div class="field"><label for="d-f-who">Who does it</label><input id="d-f-who" name="who" list="d-people" value="${esc(whoVal)}" placeholder="A person, or a role such as Manager" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" data-who-input />${peopleList()}</div>
+      ${hasData ? `<div class="field"><label for="d-f-info">What information it needs</label><div class="d-chipbox" data-chipbox>${chips.map(chipHTML).join('')}<input id="d-f-info" list="d-infos" data-info-input placeholder="${chips.length ? 'Add more…' : 'e.g. Invoice number, Due date'}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" aria-describedby="d-f-info-h" /></div>${infoList()}
+        <span class="hint" id="d-f-info-h">Separate several with commas. New information counts as ${ver === 'asis' ? '“Connected” (we have it today)' : '“Not available yet”'}.</span></div>` : ''}
+      ${isNew && opts.quick ? '<div class="hint d-quickhint">Press Enter to add this step and start the next one.</div>' : ''}
+      <details class="d-moreopts" data-more-options${moreOpen ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b">
+      ${ver === 'tobe' ? `<div class="field"><label>Replaces this step from Today</label><select name="from"><option value="">None: new in Future</option>${asisSteps.map(a => `<option value="${esc(a.id)}" ${a.id === node.from ? 'selected' : ''}>${esc(a.title)}</option>`).join('')}</select></div>` : ''}
+      ${kind === 'wait' ? '' : `<div class="frow d-frow3"><div class="field"><label>Time limit</label><input name="sla" value="${esc(node.sla || '')}" placeholder="e.g. 2 business days" /></div>
+        <div class="field"><label>System used</label><input name="system" value="${esc(node.system || '')}" placeholder="e.g. Finance system" /></div>
+        <div class="field"><label>How long (hours)</label><input name="durationHrs" type="number" min="0" step="0.25" inputmode="decimal" value="${esc(node.durationHrs != null ? node.durationHrs : '')}" /></div></div>`}
+      <div class="field"><label>Teams involved (separate with commas)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" placeholder="e.g. Finance, Legal" /></div>
+      ${hasData ? `<div class="field"><label>Add information with a different owner or source</label>
+        <div class="d-inline-new" data-nd-row><input data-nd-name placeholder="Information name" aria-label="New information name" /><select data-nd-avail aria-label="Do we have it?">${availOpts(defaultAvail(ver))}</select>
+          <select data-nd-owner aria-label="Owner of the new information" title="Owner (defaults to you)">${store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === store.state.me ? 'selected' : ''}>${esc(x.name)}${x.id === store.state.me ? ' (me)' : ''}</option>`).join('')}</select>
+          <input data-nd-source placeholder="Where it comes from, e.g. Finance system" aria-label="Where the new information comes from" />
+          <button type="button" class="btn sm" data-nd-create>Create and add</button></div>
+        <div class="hint" data-nd-msg aria-live="polite"></div></div>` : ''}
+      ${kind === 'step' ? `<div class="field"><label>Sub-steps: how this step is done</label><div data-subs>${(node.subs || []).map(subRow).join('')}</div><div><button type="button" class="btn sm" data-subadd>+ Add sub-step</button></div></div>` : ''}
+      </div></details>`,
+    actions: [{ id: 'save', label: isNew ? (kind === 'step' ? 'Add step' : 'Add') : 'Save', primary: true }],
   });
   const m = [...document.querySelectorAll('.overlay .modal')].pop();
+  let next = false;
+  /* information chips */
+  const box = m.querySelector('[data-chipbox]'), infoEl = m.querySelector('[data-info-input]');
+  const chipNames = () => [...m.querySelectorAll('[data-ichip]')].map(c => c.dataset.iname.toLowerCase());
+  const addChip = (name, meta) => {
+    name = String(name || '').trim(); if (!name || !box) return;
+    if (chipNames().includes(name.toLowerCase())) return;
+    const hit = dupDataName(name, null, pending), isPend = !!hit && pending.includes(hit);
+    const c = hit && !isPend ? { id: hit.id, name: hit.name } : { id: '', name: hit ? hit.name : name, avail: hit ? hit.avail : defaultAvail(ver) };
+    infoEl.insertAdjacentHTML('beforebegin', chipHTML(c));
+    const el = infoEl.previousElementSibling; if (isPend) el.dataset.pendingId = hit.id;
+    infoEl.placeholder = 'Add more…';
+  };
+  const flushInfo = () => { if (!infoEl) return; const parts = infoEl.value.split(','); infoEl.value = ''; parts.forEach(x => addChip(x)); };
+  if (infoEl) {
+    infoEl.addEventListener('input', () => { if (infoEl.value.includes(',')) { const parts = infoEl.value.split(','); infoEl.value = parts.pop(); parts.forEach(x => addChip(x)); } });
+    infoEl.addEventListener('change', () => { /* picking a suggestion adds it */ if (allData().some(d => d.name.toLowerCase() === infoEl.value.trim().toLowerCase())) flushInfo(); });
+    infoEl.addEventListener('blur', flushInfo);
+    infoEl.addEventListener('keydown', e => { if (e.key === 'Backspace' && !infoEl.value) { const last = infoEl.previousElementSibling; if (last && last.matches('[data-ichip]')) last.remove(); } });
+    box.addEventListener('click', e => { const b = e.target.closest('[data-ichip-del]'); if (b) { b.closest('[data-ichip]').remove(); infoEl.focus(); } else if (e.target === box) infoEl.focus(); });
+  }
+  /* Enter in the three main fields: add the step (and start the next one when quick-adding) */
+  m.querySelectorAll('#d-f-title, #d-f-who, #d-f-info').forEach(el => el.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault(); flushInfo();
+    next = !!(isNew && opts.quick);
+    const sb = m.parentNode.querySelector('[data-act="save"]'); if (sb) sb.click();
+  }));
+  m.querySelector('#d-f-who').addEventListener('focus', e => e.target.select());
   const subs = m.querySelector('[data-subs]');
   if (subs) m.querySelector('[data-subadd]').onclick = () => {
     subs.insertAdjacentHTML('beforeend', subRow(null, subs.children.length));
-    const box = subs.lastElementChild.querySelector('[data-subpicks]'); pending.forEach(d => box.insertAdjacentHTML('beforeend', dataCheck('sub_data', d, false, true)));
+    const sbox = subs.lastElementChild.querySelector('[data-subpicks]'); pending.forEach(d => sbox.insertAdjacentHTML('beforeend', dataCheck('sub_data', d, false, true)));
     subs.lastElementChild.querySelector('input').focus();
   };
   if (subs) subs.addEventListener('click', e => { const b = e.target.closest('[data-subdel]'); if (b) b.closest('[data-subrow]').remove(); });
@@ -962,27 +1067,40 @@ async function stepModal(p, ver, node) {
   const create = () => {
     const name = nameEl.value.trim(); if (!name) { nameEl.focus(); return; }
     const dup = dupDataName(name, null, pending);
-    if (dup) { msg.textContent = `'${dup.name}' already exists${pending.includes(dup) ? ' in this step' : ''}. Tick it in the list instead.`; msg.className = 'hint fail'; nameEl.focus(); return; }
+    if (dup) { msg.textContent = `'${dup.name}' already exists${pending.includes(dup) ? ' in this step' : ''}. Type it in “What information it needs” instead.`; msg.className = 'hint fail'; nameEl.focus(); return; }
     const d = { id: store.newId('de'), name, avail: m.querySelector('[data-nd-avail]').value, owner: m.querySelector('[data-nd-owner]').value || store.state.me, source: m.querySelector('[data-nd-source]').value.trim() };
     pending.push(d);
-    m.querySelector('[data-picks]').insertAdjacentHTML('beforeend', dataCheck('data', d, true, true));
+    addChip(name, { pid: d.id, avail: d.avail });
     m.querySelectorAll('[data-subpicks]').forEach(b => b.insertAdjacentHTML('beforeend', dataCheck('sub_data', d, false, true)));
     nameEl.value = ''; m.querySelector('[data-nd-source]').value = ''; msg.className = 'hint';
-    msg.textContent = `'${name}' will be created when you save the ${lbl}, owned by ${d.owner === store.state.me ? 'you' : pname(d.owner)}${d.source ? ', source ' + d.source : ''}.`;
+    msg.textContent = `'${name}' will be created when you save the ${lbl}, owned by ${d.owner === store.state.me ? 'you' : pname(d.owner)}${d.source ? ', from ' + d.source : ''}.`;
   };
-  if (nameEl) { m.querySelector('[data-nd-create]').onclick = create; nameEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); create(); } }); }
+  if (nameEl) { m.querySelector('[data-nd-create]').onclick = create; nameEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); create(); } }); }
   const r = await pr;
-  if (r.action !== 'save') return null; /* cancelled: pending data elements are discarded */
+  if (r.action !== 'save') return null; /* cancelled: pending information is discarded */
   const root = r.root;
   const hrs = parseFloat(r.form.durationHrs);
+  const who = parseWho(r.form.who, p);
+  /* chips -> data ids (existing by name, new ones created below) */
+  const chipEls = [...root.querySelectorAll('[data-ichip]')];
+  const created = [];
+  const dataIds = chipEls.map(c => {
+    if (c.dataset.ichip) return c.dataset.ichip;
+    if (c.dataset.pendingId) { const d = pending.find(x => x.id === c.dataset.pendingId); if (d) { created.push(d); return d.id; } }
+    const hit = dupDataName(c.dataset.iname); if (hit) return hit.id;
+    const d = { id: store.newId('de'), name: c.dataset.iname, avail: defaultAvail(ver), owner: store.state.me, source: '' };
+    created.push(d); return d.id;
+  });
   const out = Object.assign({}, node, {
     type: kind,
     title: (r.form.title || '').trim(),
-    owner: r.form.owner,
-    data: [...root.querySelectorAll('[data-picks] input:checked')].map(i => i.value),
+    owner: who.owner,
+    data: [...new Set(dataIds)],
     touches: (r.form.touches || '').split(',').map(x => x.trim()).filter(Boolean),
     subs: [...root.querySelectorAll('[data-subrow]')].map(row => ({ title: row.querySelector('[name=sub_title]').value.trim(), data: [...row.querySelectorAll('input[name=sub_data]:checked')].map(i => i.value) })).filter(s => s.title),
   });
+  if (who.ownerRole) out.ownerRole = who.ownerRole; else delete out.ownerRole;
+  if (kind === 'wait') out.data = [];
   ['sla', 'system'].forEach(k => { const v = (r.form[k] || '').trim(); if (v) out[k] = v; else delete out[k]; });
   if (isFinite(hrs) && hrs > 0) out.durationHrs = hrs; else delete out.durationHrs;
   if (kind === 'wait') { out.wait = (r.form.wait || '').trim() || '1 business day'; if (!out.title) out.title = 'Wait ' + out.wait; }
@@ -990,46 +1108,50 @@ async function stepModal(p, ver, node) {
   if (kind === 'subprocess') { if (r.form.calls) { out.calls = r.form.calls; delete out.callsName; } const cp = calledOf(out); if (!out.title) out.title = 'Run ' + (cp && cp.p ? cp.p.name : 'subprocess'); }
   if (!out.title) out.title = 'Untitled step';
   if (ver === 'tobe') { if (r.form.from) out.from = r.form.from; else delete out.from; }
-  /* create the inline data elements this step (or its sub-steps) actually uses */
+  /* create the new information this step (or its sub-steps) actually uses */
   const used = new Set([...out.data, ...out.subs.flatMap(x => x.data)]);
-  for (const d of pending.filter(x => used.has(x.id))) {
-    if (dupDataName(d.name)) { toast(`'${d.name}' already exists; not created`); out.data = out.data.filter(x => x !== d.id); out.subs.forEach(x => x.data = x.data.filter(y => y !== d.id)); continue; }
-    const doc = { id: d.id, name: d.name, owner: d.owner || store.state.me, source: d.source || '', avail: d.avail, note: `Created from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
-    try { await store.save('dataElement', d.id, doc, `Created data element '${d.name}'`); }
+  pending.filter(x => used.has(x.id) && !created.includes(x)).forEach(x => created.push(x));
+  for (const d of created) {
+    if (dupDataName(d.name)) { const hit = dupDataName(d.name); out.data = out.data.map(x => x === d.id ? hit.id : x); continue; }
+    const doc = { id: d.id, name: d.name, owner: d.owner || store.state.me, source: d.source || '', avail: d.avail, note: `Added from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
+    try { await store.save('dataElement', d.id, doc, `Created information '${d.name}'`); }
     catch (e) { toast('Could not save: ' + e.message); out.data = out.data.filter(x => x !== d.id); }
   }
-  return out;
+  out.data = [...new Set(out.data)];
+  return { node: out, next, who: r.form.who };
 }
 
 function branchRow(b, targets) {
-  return `<div class="d-brow" data-brow><input name="blabel" value="${esc(b ? b.label : '')}" placeholder="Branch label" aria-label="Branch label" data-keep="${b && b.keep != null ? b.keep : ''}" />
-    ${targets ? `<select name="bgoto" aria-label="Loop back to" class="d-goto-sel"><option value="">Continue (no loop)</option>${targets.map(t => `<option value="${esc(t.id)}" ${b && b.goto === t.id ? 'selected' : ''}>↩ Loop back to ${esc(t.title)}</option>`).join('')}</select>` : ''}
-    <button type="button" class="btn sm danger" data-bdel aria-label="Remove branch">Remove</button></div>`;
+  return `<div class="d-brow" data-brow><input name="blabel" value="${esc(b ? b.label : '')}" placeholder="Path name, e.g. Yes" aria-label="Path name" data-keep="${b && b.keep != null ? b.keep : ''}" />
+    ${targets ? `<select name="bgoto" aria-label="Then" class="d-goto-sel"><option value="">Then continue</option>${targets.map(t => `<option value="${esc(t.id)}" ${b && b.goto === t.id ? 'selected' : ''}>↩ Go back to ${esc(t.title)}</option>`).join('')}</select>` : ''}
+    <button type="button" class="btn sm danger" data-bdel aria-label="Remove path">Remove</button></div>`;
 }
 /* decision (exclusive, optional loop-backs) or parallel gateway (all branches run) */
 async function decisionModal(node, kind, versionNodes) {
   const isNew = !node.title, par = kind === 'parallel';
   const targets = par ? null : allNodes(versionNodes || []).filter(n => isStep(n) || n.type === 'trigger').filter(n => !flat([node]).some(x => x.id === n.id));
   const bs = (node.branches && node.branches.length) ? node.branches.map((b, i) => ({ label: b.label, keep: i, goto: b.goto })) : (par ? [{ label: 'Track A' }, { label: 'Track B' }] : [{ label: 'Yes' }, { label: 'No' }]);
-  const what = par ? 'parallel gateway' : 'decision';
+  const what = par ? 'things at the same time' : 'choice';
   const pr = modal({
-    title: (isNew ? 'New ' : 'Edit ') + what,
-    body: `<div class="field"><label>${par ? 'Name (what runs at the same time)' : 'Question'}</label><input name="title" value="${esc(node.title || '')}" placeholder="${par ? 'e.g. Set up vendor in parallel' : 'e.g. Risk tier?'}" /></div>
-      <div class="field"><label>Branches</label><div data-branches>${bs.map(b => branchRow(b, targets)).join('')}</div><div><button type="button" class="btn sm" data-badd>+ Add branch</button></div>
-      <span class="hint">${par ? 'All branches run; the flow continues when every branch is done.' : 'Only one branch runs. A branch can loop back to an earlier step, e.g. “Incomplete → back to Collect information”.'} At least 2 branches. Removing a branch removes the steps inside it.</span></div>`,
-    actions: [{ id: 'save', label: isNew ? 'Add ' + what : 'Save ' + what, primary: true }],
+    title: par ? (isNew ? 'Add things that happen at the same time' : 'Edit: at the same time') : (isNew ? 'Add a choice' : 'Edit choice'),
+    body: `<div class="field"><label>${par ? 'What happens at the same time' : 'The question'}</label><input name="title" value="${esc(node.title || '')}" placeholder="${par ? 'e.g. Set up the vendor' : 'e.g. Is the amount over $5,000?'}" /></div>
+      <div class="field"><label>Paths</label><div data-branches class="${par || isAdv() ? '' : 'd-nogoto'}">${bs.map(b => branchRow(b, targets)).join('')}</div><div><button type="button" class="btn sm" data-badd>+ Add path</button></div>
+      <span class="hint">${par ? 'Every path happens; the process continues when all are done.' : 'Only one path is taken.'} At least 2 paths. Removing a path removes the steps on it.</span></div>
+      ${par ? '' : `<details class="d-moreopts" data-more-options${isAdv() || (node.branches || []).some(b => b.goto) ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b"><label class="d-check"><input type="checkbox" data-show-goto ${isAdv() || (node.branches || []).some(b => b.goto) ? 'checked' : ''} /> A path can go back to an earlier step (e.g. “Incomplete → back to Collect information”)</label></div></details>`}`,
+    actions: [{ id: 'save', label: isNew ? 'Add' : 'Save', primary: true }],
   });
   const m = [...document.querySelectorAll('.overlay .modal')].pop();
   const box = m.querySelector('[data-branches]');
+  const sg = m.querySelector('[data-show-goto]'); const syncGoto = () => box.classList.toggle('d-nogoto', !!sg && !sg.checked); if (sg) { sg.onchange = syncGoto; syncGoto(); }
   m.querySelector('[data-badd]').onclick = () => { box.insertAdjacentHTML('beforeend', branchRow(null, targets)); box.lastElementChild.querySelector('input').focus(); };
-  box.addEventListener('click', e => { const b = e.target.closest('[data-bdel]'); if (!b) return; if (box.children.length <= 2) { toast('A gateway needs at least 2 branches'); return; } b.closest('[data-brow]').remove(); });
+  box.addEventListener('click', e => { const b = e.target.closest('[data-bdel]'); if (!b) return; if (box.children.length <= 2) { toast('A choice needs at least 2 paths'); return; } b.closest('[data-brow]').remove(); });
   const r = await pr;
   if (r.action !== 'save') return null;
   const old = node.branches || [];
   const branches = [...r.root.querySelectorAll('[data-brow]')].map((row, i) => {
     const inp = row.querySelector('input[name=blabel]'), g = row.querySelector('select[name=bgoto]');
-    const b = { label: inp.value.trim() || 'Branch ' + (i + 1), nodes: inp.dataset.keep !== '' && old[+inp.dataset.keep] ? old[+inp.dataset.keep].nodes : [] };
-    if (g && g.value) b.goto = g.value;
+    const b = { label: inp.value.trim() || 'Path ' + (i + 1), nodes: inp.dataset.keep !== '' && old[+inp.dataset.keep] ? old[+inp.dataset.keep].nodes : [] };
+    if (g && g.value && !r.root.querySelector('[data-branches].d-nogoto')) b.goto = g.value;
     return b;
   });
   return Object.assign({}, node, { type: par ? 'parallel' : 'decision', title: (r.form.title || '').trim() || (par ? 'In parallel' : 'Decision'), branches });
@@ -1037,9 +1159,9 @@ async function decisionModal(node, kind, versionNodes) {
 async function simpleNodeModal(node) {
   const trig = node.type === 'trigger';
   const r = await modal({
-    title: trig ? 'Edit trigger' : 'Edit end point',
-    body: `<div class="field"><label>${trig ? 'Trigger' : 'Outcome'}</label><input name="title" value="${esc(trig ? trigTitle(node) : (node.title || ''))}" placeholder="${trig ? esc(TRIG_PH) + ' e.g. Vendor submits a request' : 'e.g. Process complete'}" /></div>
-      ${trig ? `<div class="field"><label>Owner</label><select name="owner">${personOpts(node.owner || store.state.me)}</select></div><div class="field"><label>Touches (comma separated)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" /></div>` : ''}`,
+    title: trig ? 'What starts it?' : 'Edit the end',
+    body: `<div class="field"><label>${trig ? 'What starts it' : 'How it ends'}</label><input name="title" value="${esc(trig ? trigTitle(node) : (node.title || ''))}" placeholder="${trig ? 'e.g. A vendor sends a request' : 'e.g. Process complete'}" /></div>
+      ${trig ? `<details class="d-moreopts"${isAdv() ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b"><div class="field"><label>Owner</label><select name="owner">${personOpts(node.owner || store.state.me)}</select></div><div class="field"><label>Teams involved (separate with commas)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" /></div></div></details>` : ''}`,
     actions: [{ id: 'save', label: 'Save', primary: true }],
   });
   if (r.action !== 'save') return null;
@@ -1050,7 +1172,7 @@ async function simpleNodeModal(node) {
 export const confirmBox = async (title, text, label) => (await modal({ title, body: `<p style="margin:0">${esc(text)}</p>`, actions: [{ id: 'yes', label: label || 'Confirm', danger: true }] })).action === 'yes';
 
 /* ---------- BPMN import + start project ---------- */
-export function importBtn(label, aria) { return `<label class="btn sm d-import">${esc(label || 'Import BPMN')}<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="${esc(aria || 'Import a BPMN 2.0 file (.bpmn or .xml)')}" /></label>`; }
+export function importBtn(label, aria, cls) { return `<label class="${cls || 'btn sm'} d-import">${esc(label || 'Import BPMN')}<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="${esc(aria || 'Import a BPMN 2.0 file (.bpmn or .xml)')}" /></label>`; }
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const droppedHTML = list => `<div class="d-dropped" data-dropped="${list.length}"><b>Dropped elements <span class="n">${list.length}</span></b>${list.length ? `<ul>${list.slice(0, 25).map(d => `<li><b>${esc(d.name)}</b> <span class="hint">${esc(d.type)}: ${esc(d.reason)}</span></li>`).join('')}${list.length > 25 ? `<li class="hint">and ${list.length - 25} more</li>` : ''}</ul>` : '<div class="hint">None: every element in the file maps to PMOFlow.</div>'}</div>`;
 /* bindImport(root): the process index and /new create a new process from the file.
@@ -1093,7 +1215,7 @@ export function mergeImport(oldNodes, newNodes, laneOwned, extIds) {
       idMap[n.id] = o.id; c.id = o.id; if (o.from) c.from = o.from;
       if (n.type === 'trigger') { c.title = trigTitle(n) && trigTitle(n) !== 'Process starts' ? n.title : (o.title || n.title); if (!fromFile(n)) { c.owner = o.owner || n.owner; c.touches = o.touches || []; c.data = o.data || []; } }
       if (isStep(n)) {
-        if (!fromFile(n)) { c.data = o.data || []; c.subs = o.subs || []; c.touches = o.touches || []; }
+        if (!fromFile(n)) { c.data = o.data || []; c.subs = o.subs || []; c.touches = o.touches || []; if (o.ownerRole) c.ownerRole = o.ownerRole; }
         if (!(laneOwned && laneOwned.has(n.id)) || !n.owner) c.owner = o.owner || n.owner; /* a lane naming a real person wins; otherwise keep the owner */
         if (!fromFile(n)) ['sla', 'system', 'durationHrs'].forEach(k => { if (c[k] == null && o[k] != null) c[k] = o[k]; });
         kept.push(c);
@@ -1116,11 +1238,11 @@ async function importVersion(pid, r, fileName) {
   const room = (p0.drafts || []).length < MAX_DRAFTS;
   const res = await modal({
     title: 'Import as a new version of this process',
-    body: `<p style="margin:0">The to-be map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps are matched by name, so matched steps keep their data tags, sub-steps and owners.</p>
-      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> gateway${r.gateways === 1 ? '' : 's'}</span></div>
-      ${m.removed.length ? `<div class="hint">Leaving the to-be: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
+    body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps are matched by name, so matched steps keep their information, sub-steps and owners.</p>
+      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> choice${r.gateways === 1 ? '' : 's'}</span></div>
+      ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
       ${droppedHTML(r.dropped)}
-      ${r.newData.length ? `<div class="hint" data-imp-newdata="${r.newData.length}">New data elements created on import (you own them): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
+      ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (you own it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
       ${r.unknownLanes.length ? `<div class="hint">Lanes that match nobody (new steps there are assigned to you): ${esc(r.unknownLanes.join(', '))}</div>` : ''}
       ${room ? `<label class="d-check"><input type="checkbox" name="snap" value="yes" checked /> Save the current version as “Before import of ${esc(fileName)}” first</label>` : `<div class="hint">You have ${MAX_DRAFTS} saved versions, so the current one is not saved first. “Undo last change” still restores it in this session.</div>`}`,
     actions: [{ id: 'import', label: 'Import as new version', primary: true }],
@@ -1132,52 +1254,65 @@ async function importVersion(pid, r, fileName) {
   /* R6: the header's version label moves with the import: to-be revision n+1, from this file */
   p.tobeRev = (p.tobeRev || 1) + 1; p.tobeFrom = fileName;
   try { await createImportedData(r.newData, fileName); } catch (e) { toast('Could not create the new data elements: ' + e.message); return; }
-  if (await saveProc(p, `Imported '${fileName}' as to-be revision ${p.tobeRev} (${m.kept.length} matched, ${m.added.length} new, ${m.removed.length} removed, ${r.dropped.length} dropped)`)) go(`/process/${pid}?mode=diff`);
+  if (await saveProc(p, `Imported '${fileName}' as Future revision ${p.tobeRev} (${m.kept.length} matched, ${m.added.length} new, ${m.removed.length} removed, ${r.dropped.length} dropped)`)) go(`/process/${pid}?mode=diff`);
 }
-async function startProject(p, err, vals) {
+/* R7: one "New project" form everywhere (stream P's: name, which process, deadline; first plan suggested right after).
+   The local form is the fallback if that module cannot load. */
+async function startProject(p) {
+  try { const m = await import('./project.js'); if (m && typeof m.newProject === 'function') { await m.newProject({ from: p.id, name: p.name + ' rollout' }); return; } }
+  catch (e) { console.warn('New project form unavailable, using the local one:', e && e.message); }
+  return startProjectLocal(p);
+}
+async function startProjectLocal(p, err, vals) {
   vals = vals || {};
   const def = new Date(store.state.today + 'T12:00:00'); def.setDate(def.getDate() + 60);
   const r = await modal({
-    title: 'Start a project from this to-be',
-    body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">The project links <b>${esc(p.name)}</b>. Its work is the gap between the as-is and the to-be.</p>
+    title: 'Start a project',
+    body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">The project changes <b>${esc(p.name)}</b> from Today to Future.</p>
       <div class="field"><label>Project name</label><input name="name" value="${esc(vals.name != null ? vals.name : p.name + ' rollout')}" /></div>
-      <div class="frow"><div class="field"><label>Project manager</label><select name="pm">${personOpts(vals.pm || store.state.me)}</select></div>
-        <div class="field"><label>Release manager</label><select name="rm">${personOpts(vals.rm || vals.pm || store.state.me)}</select></div></div>
-      <div class="hint">The project manager owns the plan and cutover. Only the release manager can go live or roll back, and cannot also sign off as a business-unit approver.</div>
-      <div class="field"><label>Target go-live date</label><input name="target" type="date" min="${esc(store.state.today)}" value="${esc(vals.target || def.toISOString().slice(0, 10))}" /></div>
-      <div class="field"><label>Description</label><textarea name="desc" placeholder="Why this change, and what done looks like">${esc(vals.desc || '')}</textarea></div>`,
+      <div class="field"><label>Deadline</label><input name="target" type="date" min="${esc(store.state.today)}" value="${esc(vals.target || def.toISOString().slice(0, 10))}" /></div>
+      <details class="d-moreopts"><summary>More options</summary><div class="d-moreopts-b"><div class="frow"><div class="field"><label>Project manager</label><select name="pm">${personOpts(vals.pm || store.state.me)}</select></div>
+        <div class="field"><label>Launch owner</label><select name="rm">${personOpts(vals.rm || vals.pm || store.state.me)}</select></div></div>
+      <div class="field"><label>Description</label><textarea name="desc" placeholder="Why this change, and what done looks like">${esc(vals.desc || '')}</textarea></div></div></details>`,
     actions: [{ id: 'create', label: 'Start project', primary: true }],
   });
   if (r.action !== 'create') return;
   const name = (r.form.name || '').trim(), target = r.form.target || '';
-  if (!name) return startProject(p, 'A project needs a name.', r.form);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) return startProject(p, 'Choose a target date.', r.form);
-  if (target < store.state.today) return startProject(p, 'The target date is in the past.', r.form);
+  if (!name) return startProjectLocal(p, 'A project needs a name.', r.form);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) return startProjectLocal(p, 'Choose a deadline.', r.form);
+  if (target < store.state.today) return startProjectLocal(p, 'The deadline is in the past.', r.form);
   const me = store.state.me, id = store.newId('prj');
   const pm = r.form.pm || me, rm = r.form.rm || pm;
   const prj = { id, name, desc: (r.form.desc || '').trim(), owner: pm, releaseManager: rm, resources: [...new Set([pm, rm, me, ...(p.resources || [])])], target, processes: [p.id], status: 'active', baselines: [] };
-  try { await store.save('project', id, prj, `Started project '${name}' from the to-be of '${p.name}'`); toast(`Started '${name}'`); go(`/project/${id}`); }
+  try { await store.save('project', id, prj, `Started project '${name}' from the Future version of '${p.name}'`); toast(`Started '${name}'`); go(`/project/${id}`); }
   catch (e) { toast('Could not create the project: ' + e.message); }
 }
 
 /* ---------- /new ---------- */
 async function openNew() {
   if (newOpen) return; newOpen = true;
-  const r = await modal({
-    title: 'New process',
-    body: `<div class="field"><label>Name</label><input name="name" placeholder="e.g. Purchase Request Approval" /></div>
-      <div class="field"><label>Description</label><textarea name="desc" placeholder="What this process does and where it ends"></textarea></div>
-      <div class="field"><label>Owner</label><select name="owner">${personOpts(store.state.me)}</select></div>`,
-    actions: [{ id: 'import', label: 'Import BPMN…' }, { id: 'create', label: 'Create process', primary: true }],
+  const pr = modal({
+    title: 'Map a process',
+    body: `<div class="field"><label for="d-np-name">Process name</label><input id="d-np-name" name="name" placeholder="e.g. Purchase request approval" autocomplete="off" /></div>
+      <details class="d-moreopts"${isAdv() ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b">
+      <div class="field"><label>One-line description</label><textarea name="desc" rows="2" placeholder="What this process does and where it ends"></textarea></div>
+      <div class="field"><label>Owner</label><select name="owner">${personOpts(store.state.me)}</select></div></div></details>
+      <div class="hint">Next you add the steps as they happen today. Press Enter after each one.</div>`,
+    actions: (isAdv() ? [{ id: 'import', label: 'Import BPMN…' }] : []).concat([{ id: 'create', label: 'Create and add steps', primary: true }]),
   });
+  /* Enter in the name creates the process */
+  const nm = document.querySelector('.overlay #d-np-name');
+  if (nm) nm.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const b = nm.closest('.modal').querySelector('[data-act="create"]'); if (b) b.click(); } });
+  const r = await pr;
   if (r.action === 'import') { newOpen = false; newImport = true; const f = document.querySelector('[data-bpmn-file]'); if (f) f.click(); return; }
   if (r.action !== 'create') { newOpen = false; go('/'); return; }
   const name = (r.form.name || '').trim() || 'Untitled process';
   const id = store.newId('proc');
   const mk = () => { const t = store.newId('n'), e = store.newId('n'); return [{ id: t, type: 'trigger', title: '', owner: r.form.owner, touches: [], data: [] }, { id: e, type: 'end', title: 'Process complete' }]; };
   const asis = mk(), tobe = mk(); tobe[0].from = asis[0].id;
-  const p = { id, name, desc: (r.form.desc || '').trim(), owner: r.form.owner, resources: [r.form.owner], version: 1, asis, tobe, released: [] };
+  const p = { id, name, desc: (r.form.desc || '').trim(), owner: r.form.owner || store.state.me, resources: [r.form.owner], version: 1, asis, tobe, released: [] };
   /* keep the guard up until we have left /new: store.save re-renders this route before go() runs */
+  autoAdd = id; /* open the first "Add a step" dialog straight away */
   try { await store.save('process', id, p, `Created process '${name}'`); toast(`Created '${name}'`); go(`/process/${id}?mode=edit&v=asis`); }
   catch (e) { toast('Could not create: ' + e.message); }
   finally { newOpen = false; }
@@ -1253,7 +1388,7 @@ async function saveVersion(p0, err, name) {
   if (n >= MAX_DRAFTS) { await modal({ title: 'Saved versions are full', body: `<p style="margin:0">This process already has ${MAX_DRAFTS} saved versions, the most it keeps. Delete one in “Saved versions”, then save again.</p>`, actions: [] }); return; }
   const r = await modal({
     title: 'Save version',
-    body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">Keeps a named copy of the current as-is and to-be maps (${n + 1} of ${MAX_DRAFTS}). Compare it with any other version, or restore it later.</p>
+    body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p class="hint" style="margin:0">Keeps a named copy of the current Today and Future maps (${n + 1} of ${MAX_DRAFTS}). Compare it with any other version, or restore it later.</p>
       <div class="field"><label>Name</label><input name="name" value="${esc(name != null ? name : '')}" placeholder="e.g. Before risk-tier redesign" maxlength="80" /></div>`,
     actions: [{ id: 'save', label: 'Save version', primary: true }],
   });
@@ -1290,21 +1425,49 @@ export function bind(root, params) {
     const p = cur(); const view = shown(p, q);
     /* R6: optional "External parties" pool with message flows for the message nodes */
     const msgs = flat(view.nodes).filter(n => n.type === 'message').length;
-    const r = await modal({ title: 'Export BPMN 2.0', body: `<p style="margin:0">Downloads the <b>${esc(view.label)}</b> map of <b>${esc(p.name)}</b> as BPMN 2.0 XML.</p>
-      <label class="d-check"><input type="checkbox" name="pool" value="yes" ${msgs ? 'checked' : 'disabled'} /> Include an “External parties” pool with message flows${msgs ? ` (${msgs} message node${msgs === 1 ? '' : 's'})` : ' (no message nodes in this map)'}</label>
-      <div class="hint">Data tags, SLA, system, touches, sub-steps and node types travel in PMOFlow extension elements, so importing the file back loses nothing. Other BPMN tools ignore them.</div>`, actions: [{ id: 'download', label: 'Download .bpmn', primary: true }] });
+    const r = await modal({ title: 'Download diagram file', body: `<p style="margin:0">Downloads the <b>${esc(view.label)}</b> map of <b>${esc(p.name)}</b> as a diagram file that other process tools can open (BPMN 2.0).</p>
+      <label class="d-check"><input type="checkbox" name="pool" value="yes" ${msgs ? 'checked' : 'disabled'} /> Show people outside the organisation as their own group${msgs ? ` (${msgs} message step${msgs === 1 ? '' : 's'})` : ' (no message steps in this map)'}</label>
+      <div class="hint">Information, time limits, systems, teams and sub-steps are kept in the file, so importing it back loses nothing.</div>`, actions: [{ id: 'download', label: 'Download', primary: true }] });
     if (r.action !== 'download') return;
     const xml = bpmnXml(p, view.nodes, view.label, { pool: (r.form.pool || []).length > 0 });
     const slug = String(p.name || 'process').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([xml], { type: 'application/xml' }));
     a.download = `${slug}-${view.label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.bpmn`; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-    toast('Exported BPMN 2.0 for the ' + view.label + ' map');
+    toast('Downloaded the ' + view.label + ' map');
   };
+  /* tabs: Today / Future switch the map (and keep editing on); What changed, By person and Who's affected leave editing */
+  const inEdit = q.mode === 'edit' && !q.rel && canEditProc(cur());
+  const curView = shown(cur(), q);
   root.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
-    if (b.dataset.mode === 'edit' && !canEditProc(cur())) { toast(deniedMsg(cur())); return; }
-    go(`/process/${pid}?mode=${b.dataset.mode}${b.dataset.mode === 'edit' && q.v ? '&v=' + q.v : ''}`);
+    const m = b.dataset.mode;
+    if (m === 'edit') {
+      if (!canEditProc(cur())) { toast(deniedMsg(cur())); return; }
+      const v = q.v || (curView.mode === 'asis' ? 'asis' : 'tobe');
+      go(`/process/${pid}?mode=edit&v=${v}`); return;
+    }
+    if (inEdit && (m === 'asis' || m === 'tobe')) { go(`/process/${pid}?mode=edit&v=${m}`); return; }
+    go(`/process/${pid}?mode=${m}`);
   });
+  const done = root.querySelector('[data-edit-done]');
+  if (done) done.onclick = () => go(`/process/${pid}?mode=${ver === 'asis' ? 'asis' : 'tobe'}`);
+  /* "⋯ More": close on outside click, Escape, or after choosing an item */
+  const menu = root.querySelector('[data-more]');
+  if (menu) {
+    const close = () => { menu.open = false; };
+    menu.addEventListener('keydown', e => { if (e.key === 'Escape') { close(); menu.querySelector('summary').focus(); } });
+    menu.querySelectorAll('.d-mi:not(.d-import)').forEach(b => b.addEventListener('click', close));
+    if (menuCloser) document.removeEventListener('click', menuCloser);
+    menuCloser = e => { if (menu.isConnected && menu.open && !menu.contains(e.target)) close(); };
+    document.addEventListener('click', menuCloser);
+  }
+  /* R7 §4: Future is created from Today the first time an editor opens it (no fork button, no confirm) */
+  const fv = curView.mode === 'tobe' || (inEdit && curView.ver === 'tobe');
+  if (fv && canEditProc(cur()) && needsFuture(cur()) && !futureMaking.has(pid)) {
+    futureMaking.add(pid);
+    const p = clone(cur()); p.tobe = forkNodes(p.asis || []); p.tobeForked = true;
+    saveProc(p, 'Created the Future version from Today', { quiet: true, noUndo: true }).finally(() => futureMaking.delete(pid));
+  }
   /* phone summary row */
   const ht = root.querySelector('[data-hdr-toggle]');
   if (ht) ht.onclick = () => { hdrOpen = !hdrOpen; const h = root.querySelector('.d-hdr'); h.classList.toggle('d-hdr-open', hdrOpen); ht.setAttribute('aria-expanded', String(hdrOpen)); ht.querySelector('.d-sumtog').textContent = hdrOpen ? 'Less ▴' : 'Details ▾'; };
@@ -1355,7 +1518,7 @@ export function bind(root, params) {
   const nd = root.querySelector('[data-newdata]'); if (nd) nd.onclick = () => newDataModal();
   const sp = root.querySelector('[data-start-project]'); if (sp) sp.onclick = () => startProject(cur());
 
-  if (q.mode !== 'edit' || q.rel || !canEditProc(cur())) return;
+  if (!inEdit) return;
   /* header meta */
   root.querySelectorAll('[data-meta]').forEach(el => el.addEventListener('change', () => {
     const p = clone(cur()); const k = el.dataset.meta; const v = k === 'owner' ? el.value : el.value.trim();
@@ -1369,34 +1532,59 @@ export function bind(root, params) {
   const fork = root.querySelector('[data-fork]');
   if (fork) fork.onclick = async () => {
     const p = clone(cur());
-    if (!await confirmBox('Fork to-be from as-is?', `This replaces the current to-be map (${flat(p.tobe).length} steps) with a copy of the as-is map. Each copied step links back to the as-is step it came from.`, 'Fork to-be')) return;
-    p.tobe = forkNodes(p.asis || []);
-    await saveProc(p, 'Forked to-be from as-is');
+    if (!await confirmBox('Start Future again from Today?', `This replaces the Future map (${flat(p.tobe).length} steps) with a fresh copy of Today. Each copied step remembers the Today step it came from.`, 'Replace Future')) return;
+    p.tobe = forkNodes(p.asis || []); p.tobeForked = true;
+    await saveProc(p, 'Started Future again from Today');
     go(`/process/${pid}?mode=edit&v=tobe`);
   };
 
+  /* R7 §4 quick-add: "+ Add a step" opens the 3-field dialog; Enter adds the step and opens the next one right after it */
+  const quickAdd = async (key, pos, who) => {
+    let saving = null;
+    for (;;) {
+      const p0 = cur();
+      const res = await stepModal(p0, ver, { id: store.newId('n'), type: 'step', data: [], touches: [], subs: [] }, { quick: true, who });
+      if (saving) await saving;
+      if (!res) return;
+      const p = clone(cur()); const list = getList(p[ver] || (p[ver] = []), key);
+      if (!list) { toast('That spot no longer exists'); return; }
+      list.splice(Math.min(pos, list.length), 0, res.node);
+      saving = saveProc(p, `Added step '${res.node.title}' to ${VER[ver]}`);
+      if (!res.next) { await saving; return; }
+      pos = Math.min(pos, list.length - 1) + 1; who = res.who;
+    }
+  };
+  root.querySelectorAll('[data-addstep]').forEach(b => b.onclick = () => {
+    const steps = flat(cur()[ver]); const last = steps[steps.length - 1];
+    quickAdd('root', +b.dataset.pos, last ? whoOf(last) : undefined);
+  });
+  if (autoAdd === pid) { autoAdd = null; const b = root.querySelector('[data-addstep]'); if (b) setTimeout(() => b.click(), 60); }
+
   root.querySelectorAll('[data-ins]').forEach(b => b.onclick = async () => {
     const key = b.dataset.ins, pos = +b.dataset.pos;
-    const KINDS = [['step', '1', 'Step', 'One piece of work with an owner and data.'], ['subprocess', NT.subprocess.icon, 'Subprocess', 'Calls another process; drill in to open it.'], ['wait', NT.wait.icon, 'Wait', 'Pauses the flow, e.g. 2 business days.'],
-      ['message', NT.message.icon, 'Message', 'Sends to or receives from an external party.'], ['decision', '◆', 'Decision', 'Only one branch runs; a branch can loop back.'], ['parallel', '⊕', 'Parallel', 'Every branch runs at the same time.']];
-    const pick = await modal({ title: 'Insert here', body: `<div class="d-kinds" role="group" aria-label="What to insert">${KINDS.map(([k, ic, l, h]) => `<button type="button" class="d-kind d-kind-${k}" data-act="${k}"><span class="d-kic" aria-hidden="true">${ic}</span><span><b>${l}</b><small>${h}</small></span></button>`).join('')}</div>`, actions: [] });
+    const KINDS = [['step', '1', 'A step', 'Someone does something. Say who, and what information they need.'], ['decision', '◆', 'A choice', 'Only one path is taken, e.g. “Approved? Yes / No”.'], ['parallel', '⊕', 'At the same time', 'Several things happen at once.'],
+      ['wait', NT.wait.icon, 'Wait', 'Nothing happens for a while, e.g. 2 business days.'], ['message', NT.message.icon, 'Message', 'We send something to, or get something from, someone outside.'], ['subprocess', NT.subprocess.icon, 'Another process', 'Runs a whole other process here.']];
+    const kindBtn = ([k, ic, l, h]) => `<button type="button" class="d-kind d-kind-${k}" data-act="${k}"><span class="d-kic" aria-hidden="true">${ic}</span><span><b>${esc(l)}</b><small>${esc(h)}</small></span></button>`;
+    const pick = await modal({ title: 'What do you want to add here?', body: `<div class="d-kinds" role="group" aria-label="What to add">${KINDS.slice(0, 3).map(kindBtn).join('')}</div>
+      <details class="d-moreopts"${isAdv() ? ' open' : ''}><summary>More options</summary><div class="d-kinds d-moreopts-b">${KINDS.slice(3).map(kindBtn).join('')}</div></details>`, actions: [] });
     if (!KINDS.some(k => k[0] === pick.action)) return;
     const p0 = cur();
-    const node = isGw({ type: pick.action }) ? await decisionModal({ id: store.newId('d'), type: pick.action }, pick.action, p0[ver]) : await stepModal(p0, ver, { id: store.newId('n'), type: pick.action, data: [], touches: [], subs: [] });
+    if (pick.action === 'step') { quickAdd(key, pos); return; }
+    const node = isGw({ type: pick.action }) ? await decisionModal({ id: store.newId('d'), type: pick.action }, pick.action, p0[ver]) : ((await stepModal(p0, ver, { id: store.newId('n'), type: pick.action, data: [], touches: [], subs: [] })) || {}).node;
     if (!node) return;
     const p = clone(cur()); const list = getList(p[ver] || (p[ver] = []), key);
     if (!list) { toast('That spot no longer exists'); return; }
     list.splice(Math.min(pos, list.length), 0, node);
-    const where = key === 'root' ? '' : (() => { const [did, bi] = key.split('#'); const d = findLoc(p[ver], did); return d ? ` (branch '${d.node.branches[+bi].label}' of '${d.node.title}')` : ''; })();
-    await saveProc(p, `Added ${node.type === 'decision' ? 'decision' : node.type === 'parallel' ? 'parallel gateway' : isSpecial(node) ? NT[node.type].label.toLowerCase() : 'step'} '${node.title}' to ${VER[ver]}${where}`);
+    const where = key === 'root' ? '' : (() => { const [did, bi] = key.split('#'); const d = findLoc(p[ver], did); return d ? ` (path '${d.node.branches[+bi].label}' of '${d.node.title}')` : ''; })();
+    await saveProc(p, `Added ${node.type === 'decision' ? 'choice' : node.type === 'parallel' ? '“at the same time”' : isSpecial(node) ? NT[node.type].label.toLowerCase() : 'step'} '${node.title}' to ${VER[ver]}${where}`);
   });
 
   root.querySelectorAll('[data-ed]').forEach(b => b.onclick = async () => {
     const act = b.dataset.ed, id = b.dataset.id;
     const p = clone(cur()); const loc = findLoc(p[ver] || [], id); if (!loc) return;
-    const n = loc.node; const kind = n.type === 'decision' ? 'decision' : n.type === 'parallel' ? 'parallel gateway' : n.type === 'trigger' ? 'trigger' : n.type === 'end' ? 'end point' : isSpecial(n) ? NT[n.type].label.toLowerCase() : 'step';
+    const n = loc.node; const kind = n.type === 'decision' ? 'choice' : n.type === 'parallel' ? '“at the same time”' : n.type === 'trigger' ? 'what starts it' : n.type === 'end' ? 'end' : isSpecial(n) ? NT[n.type].label.toLowerCase() : 'step';
     if (act === 'edit') {
-      const out = isGw(n) ? await decisionModal(n, n.type, p[ver]) : (n.type === 'trigger' || n.type === 'end') ? await simpleNodeModal(n) : await stepModal(p, ver, n);
+      const out = isGw(n) ? await decisionModal(n, n.type, p[ver]) : (n.type === 'trigger' || n.type === 'end') ? await simpleNodeModal(n) : ((await stepModal(p, ver, n)) || {}).node;
       if (!out) return;
       const p2 = clone(cur()); const l2 = findLoc(p2[ver] || [], id); if (!l2) return;
       l2.list[l2.index] = out;

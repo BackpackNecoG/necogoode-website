@@ -62,7 +62,7 @@ test('POST /workspaces creates a workspace; state has every doc type and people'
   assert.ok(s.body.people.every(p => p.bu));
   assert.equal(s.body.today, new Date().toISOString().slice(0, 10));
   assert.equal(s.body.docs.dataElement.length, 8);
-  assert.equal(s.body.docs.process.length, 3);
+  assert.equal(s.body.docs.process.length, 4);   /* R7: + Expense Reimbursement (no project) */
   assert.equal(s.body.docs.workItem.length, 17);
 });
 
@@ -530,10 +530,11 @@ test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', a
   assert.ok(r.body.facts.stats.finish <= r.body.facts.project.target, 'finish meets target');
   assert.equal(r.body.rag, 'amber');
   assert.equal(r.body.facts.rag.status, 'amber');
-  assert.match(r.body.headline, /^Amber: /);
+  assert.equal(r.body.label, 'At risk');
+  assert.match(r.body.headline, /^At risk: /);
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'green');
-  assert.match(r.body.headline, /^Green: .*on track/);
+  assert.match(r.body.headline, /^On track: /);
   /* amber: under 7 days of buffer, nothing late */
   let st = await state(ws);
   const proj = find(st, 'project', 'access-review-automation').data;
@@ -542,14 +543,13 @@ test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', a
   await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target }) });
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'amber');
-  assert.match(r.body.headline, /^Amber: /);
-  if (!(engine && engine.projectHealth)) assert.ok(/buffer/.test(r.body.summary));
+  assert.match(r.body.headline, /^At risk: /);
   /* R6: Red only when the forecast finish is after the target */
   const before = new Date(Date.parse(finish + 'T12:00:00Z') - 2 * 86400000).toISOString().slice(0, 10);
   await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target: before }) });
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'red');
-  assert.match(r.body.headline, /^Red: .*off track/);
+  assert.match(r.body.headline, /^Off track: /);
   /* risk reconciliation: R1 links W2+W3; finish both */
   for (const id of ['W2', 'W3']) {
     const w = find(st, 'workItem', id).data;
@@ -574,9 +574,10 @@ test('R3 AI path: a headline that contradicts the RAG is corrected (mocked Azure
     assert.equal(r.body.source, 'ai');
     assert.notEqual(r.body.rag, 'green');
     assert.equal(r.body.rag, r.body.facts.rag.status);
-    assert.match(r.body.headline, new RegExp('^' + { red: 'Red', amber: 'Amber' }[r.body.rag] + ': '));
+    assert.match(r.body.headline, new RegExp('^' + { red: 'Off track', amber: 'At risk' }[r.body.rag] + ': '));
+    assert.ok(r.body.summary.startsWith(r.body.sentence), 'the summary leads with the one sentence');
     assert.ok(!r.body.summary.includes('D2') && !r.body.highlights[0].includes('W1'), 'ids scrubbed from AI output');
-    assert.ok(sentBody.messages[0].content.includes('rag status'));
+    assert.ok(sentBody.messages[0].content.includes(`"${r.body.label}:"`));
     assertNoIds(JSON.parse(sentBody.messages[1].content), st.docs, 'facts sent to the model');
   } finally {
     global.fetch = saved;
@@ -664,9 +665,9 @@ test('R4 report wording: late-by is days past due, slip separate, correct plural
   assert.ok(w6.includes(`late by ${pastDue} day${pastDue === 1 ? '' : 's'}`), w6);
   const fcW6 = r.body.facts.atRisk.find(x => x.title === 'Stand up structured bank capture');
   if (fcW6.slipDays && fcW6.slipDays !== pastDue) assert.ok(w6.includes(`${fcW6.slipDays} days behind plan`), 'slip reported separately');
-  const slipping = r.body.risks.filter(x => / is slipping/.test(x));
-  assert.ok(slipping.length >= 1 && slipping.every(x => !/late by/.test(x)));
-  assert.match(r.body.summary, /\b1 item is past due\b/);
+  const running = r.body.risks.filter(x => / is running late/.test(x));
+  assert.ok(running.length >= 1 && running.every(x => !/late by/.test(x)));
+  assert.match(r.body.summary, /\b1 task is past due\b/);
 });
 
 test('R4 SOP parser: otherwise/else -> No, resubmit and return-to-step -> goto, no truncation, no default owner', () => {
@@ -853,7 +854,7 @@ test('R5 status report: not-yet-live count and email recipients', async () => {
     assert.equal(notLive, [...used].filter(id => engine.effectiveAvail(st.docs, id) !== 'live').length);
   }
   assert.ok(notLive >= 5, 'missing + examples + pending');
-  assert.ok(r.body.summary.includes(`${notLive} data elements are not yet live`));
+  assert.ok(r.body.summary.includes(`${notLive} pieces of information are not connected yet`));
   assert.deepEqual(r.body.recipients.map(x => x.email), ['tom.alvarez@northwind.example', 'maya.chen@northwind.example', 'priya.shah@northwind.example',
     'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example']);
 });
@@ -1028,8 +1029,10 @@ test('R6 status report: projectHealth RAG, earned value, hypercare incidents', {
     const k = Object.keys(e).find(x => x.toLowerCase() === 'spi');
     assert.equal(ev.spi, Math.round(e[k] * 100) / 100);
   }
-  assert.match(r.body.summary, /\(SPI\) \d+\.\d\d, cost performance \(CPI\) \d+\.\d\d/);
-  assert.ok(r.body.highlights.some(x => /^Earned value/.test(x)));
+  /* R7: earned value only in the advanced appendix */
+  assert.ok(!/SPI|CPI/.test(r.body.summary + r.body.highlights.join(' ')) && r.body.appendix === undefined);
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', advanced: true });
+  assert.ok(r.body.appendix.some(x => /\(SPI\) \d+\.\d\d, cost performance \(CPI\) \d+\.\d\d/.test(x)), JSON.stringify(r.body.appendix));
   assert.equal(r.body.facts.hypercare, null, 'no hypercare before go-live');
   /* live: hypercare days and incidents; an open sev-1 means "consider rollback" */
   await readyAccessReview(ws);
@@ -1048,9 +1051,9 @@ test('R6 status report: projectHealth RAG, earned value, hypercare incidents', {
   assert.equal(hc.daysRemaining, 10);
   assert.deepEqual(hc.open.map(i => i.title), ['Removal job revoked a manager by mistake'], 'closed incidents are not open');
   assert.equal(hc.considerRollback, true);
-  assert.ok(r.body.risks.some(x => /Severity 1 incident "Removal job revoked a manager by mistake" is open: consider rollback/.test(x)));
+  assert.ok(r.body.risks.some(x => /Serious problem "Removal job revoked a manager by mistake" is still open: consider rolling back/.test(x)), JSON.stringify(r.body.risks));
   assert.ok(r.body.asks.some(x => /roll back/.test(x)));
-  assert.match(r.body.summary, /Hypercare: 10 days left, owner Priya Shah; 1 open incident\./);
+  assert.match(r.body.summary, /Support after launch: 10 days left, led by Priya Shah; 1 open problem\./);
 });
 
 test('R6 SOP parser: no "()" titles; only document/record/field phrases are proposed, each with a stable key', () => {
@@ -1191,4 +1194,164 @@ test('R6 grants: the API never starts a countdown on requested grants; approved 
   assert.equal(r.status, 409);
   st = await state(ws);
   assert.equal(find(st, 'grant', 'G9').data.expires, undefined);
+});
+
+/* ================================ Round 7: SIMPLICITY ================================ */
+const R7_JARGON = /\b(SPI|CPI|EAC|earned value|slip\w*|amber|UAT|SIT|go\/no-go|hypercare|Red|Green)\b/i;
+const reportText = b => [b.headline, b.summary, ...b.highlights, ...b.risks, ...b.asks].join('\n');
+const shiftDay = (d, n) => new Date(Date.parse(d + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+
+test('R7 status report: leads with projectSummary sentence + label, plain words only, advanced appendix, client today', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  for (const prj of ['vendor-modernization', 'access-review-automation']) {
+    const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: prj, today: st.today });
+    assert.equal(r.status, 200);
+    if (typeof engine.projectSummary === 'function') {
+      const s = engine.projectSummary(st.docs, prj, st.today);
+      assert.equal(r.body.label, s.label);
+      assert.equal(r.body.sentence, s.sentence);
+      assert.equal(r.body.facts.summary.source, 'projectSummary');
+    }
+    assert.ok(['On track', 'At risk', 'Off track', 'Not planned'].includes(r.body.label));
+    assert.ok(r.body.headline.startsWith(r.body.label + ': '), r.body.headline);
+    assert.ok(r.body.summary.startsWith(r.body.sentence), 'summary leads with the one sentence');
+    assert.ok(!R7_JARGON.test(reportText(r.body)), 'no jargon in the default report: ' + (reportText(r.body).match(R7_JARGON) || [])[0]);
+    assert.equal(r.body.appendix, undefined);
+    assert.equal(r.body.date, st.today);
+  }
+  /* advanced: earned value and testing terms live in an appendix only */
+  let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', advanced: true });
+  assert.ok(Array.isArray(r.body.appendix) && r.body.appendix.some(x => /SPI/.test(x) && /EAC/.test(x)), JSON.stringify(r.body.appendix));
+  assert.ok(r.body.appendix.some(x => /UAT/.test(x)), 'testing jargon allowed in the appendix');
+  assert.ok(!R7_JARGON.test(reportText(r.body)), 'the body stays plain even in advanced');
+  /* the client's today dates the report (no skew); a date far from the server's is ignored */
+  const yday = shiftDay(st.today, -1);
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', today: yday });
+  assert.equal(r.body.date, yday);
+  assert.equal(r.body.facts.today, yday);
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', today: shiftDay(st.today, -30) });
+  assert.equal(r.body.date, st.today);
+  r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization', today: 'not-a-date' });
+  assert.equal(r.body.date, st.today);
+  assert.equal(fn._internal.clientToday({ today: '2026-02-30' }, '2026-03-01'), '2026-03-01');
+});
+
+test('R7 AI status report: plain-language prompt; jargon from the model is translated or dropped (mocked Azure OpenAI)', async () => {
+  const ws = await newWs();
+  const saved = global.fetch;
+  Object.assign(process.env, { AZURE_OPENAI_ENDPOINT: 'https://example.invalid', AZURE_OPENAI_KEY: 'k', AZURE_OPENAI_DEPLOYMENT: 'd' });
+  let sent = null;
+  try {
+    const st = await state(ws);
+    global.fetch = async (url, opts) => { sent = JSON.parse(opts.body); return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+      headline: 'Bank capture is late', summary: 'Work is moving. UAT starts next week.',
+      highlights: ['3 tasks done', 'SPI is 0.8 and CPI is 1.1'], risks: ['Bank capture is slipping'], asks: ['Leo Park: finish bank capture'] }) } }] }) }; };
+    let r = await ai.run('status-report', { projectId: 'vendor-modernization' }, st.docs, st.today);
+    assert.equal(r.body.source, 'ai');
+    const sys = sent.messages[0].content, facts = JSON.parse(sent.messages[1].content);
+    assert.match(sys, /8th-grade reading level/);
+    assert.match(sys, /non-technical reader/);
+    assert.ok(sys.includes(r.body.sentence), 'the model is told to lead with the sentence');
+    assert.equal(facts.earnedValue, undefined, 'no earned value sent by default');
+    assert.ok(!JSON.stringify(facts).includes('"slip'), 'no slip wording sent by default');
+    assert.equal(r.body.headline, `${r.body.label}: Bank capture is late`);
+    assert.ok(r.body.summary.startsWith(r.body.sentence));
+    assert.match(r.body.summary, /business testing starts next week/);
+    assert.deepEqual(r.body.highlights, ['3 tasks done'], 'an SPI/CPI line is dropped');
+    assert.deepEqual(r.body.risks, ['Bank capture is running late']);
+    assert.ok(!R7_JARGON.test(reportText(r.body)));
+    assert.equal(r.body.date, st.today);
+    r = await ai.run('status-report', { projectId: 'vendor-modernization', advanced: true }, st.docs, st.today);
+    assert.ok(r.body.highlights.some(x => /SPI/.test(x)) && Array.isArray(r.body.appendix), 'advanced keeps earned value');
+  } finally {
+    global.fetch = saved;
+    ['AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_KEY', 'AZURE_OPENAI_DEPLOYMENT'].forEach(k => delete process.env[k]);
+  }
+});
+
+test('R7 approvals: saving an approval is never blocked by other failing checks; go-live still re-checks the gate', { skip: !engine && 'no engine' }, async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  assert.equal(engine.readiness(st.docs, 'vendor-modernization', st.today).pass, false);
+  const at = new Date().toISOString();
+  const r = await call('PUT', `ws/${ws}/doc/approval/AP-r7`, { actor: 'lp', data: { projectId: 'vendor-modernization', bu: 'Treasury', approver: 'lp',
+    decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'I reviewed the changes to Capture banking details and the test results' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  st = await state(ws);
+  const bu = engine.readiness(st.docs, 'vendor-modernization', st.today).checks.find(c => c.id === 'bu-signoff');
+  assert.ok(!bu.unsigned.includes('Treasury'), 'the Treasury part counts as approved while other checks fail');
+  const g = await call('POST', `ws/${ws}/golive/vendor-modernization`, { actor: 'ta' });
+  assert.equal(g.status, 409);
+  assert.ok(g.body.reasons.length > 0);
+});
+
+test('R7 project.approvers: the chosen approver may not be the PM or the launch owner (400); valid choices save', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const vm = find(st, 'project', 'vendor-modernization').data;
+  const put = (approvers, extra) => call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, vm, extra || {}, { approvers }) });
+  let r = await put({ PMO: 'ta' });
+  assert.equal(r.status, 400); assert.match(r.body.error, /Tom Alvarez is the project manager/);
+  r = await put({ PMO: 'lp' }, { releaseManager: 'lp' });
+  assert.equal(r.status, 400); assert.match(r.body.error, /Leo Park is the launch owner/);
+  r = await put({ PMO: 'nobody' });
+  assert.equal(r.status, 400); assert.match(r.body.error, /Choose a person/);
+  r = await put(['mc']);
+  assert.equal(r.status, 400);
+  r = await put({ PMO: 'ps', Treasury: '' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  /* an unchanged choice never blocks other edits (the engine ignores it if it becomes ineligible) */
+  const now = find(await state(ws), 'project', 'vendor-modernization').data;
+  r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, now, { releaseManager: 'ps' }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(fn._internal.approversError(null, { owner: 'ta', approvers: { PMO: 'mc' } }, st.docs), null);
+});
+
+test('R7 SOP rules parser: unknown roles become ownerRole; notes are short and plain', () => {
+  const docs = seed('2026-11-04').docs;
+  const r = ai.sopRules('Expense claims\n1. Employee submits the expense report with receipts.\n2. Manager approves the expense report. If over $5,000, the Finance Director must also approve.\n' +
+    '3. AP clerk pays it in the next payment run.\n4. Send the confirmation email.\n5. Employee bank details are checked by Leo Park.', docs);
+  const steps = r.nodes.filter(n => n.type === 'step');
+  const by = t => r.nodes.concat(r.nodes.flatMap(n => (n.branches || []).flatMap(b => b.nodes))).find(n => n.title && n.title.startsWith(t));
+  assert.equal(by('Employee submits').ownerRole, 'Employee');
+  assert.equal(by('Employee submits').owner, undefined);
+  assert.equal(by('Manager approves').ownerRole, 'Manager');
+  assert.equal(by('The Finance Director').ownerRole, 'Finance director');
+  assert.equal(by('AP clerk').owner, 'ar', 'a role alias still links a person');
+  assert.equal(by('AP clerk').ownerRole, undefined);
+  assert.equal(by('Send the confirmation').ownerRole, undefined, 'a step that starts with a verb names no role');
+  assert.equal(by('Employee bank details').owner, 'lp');
+  assert.equal(by('Employee bank details').ownerRole, undefined);
+  assert.ok(steps.length >= 4);
+  assert.ok(!/node|gateway|trigger|top-level|alias/i.test(r.notes), r.notes);
+  assert.ok(r.notes.length <= 220, 'notes stay short: ' + r.notes.length);
+  assert.match(r.notes, /^Found \d+ steps/);
+  assert.match(r.notes, /Employee, Manager, Finance director are roles/);
+  /* AI path: ownerRole survives sanitising when no supplied person matches */
+  const clean = ai._sanitizeSop({ nodes: [{ type: 'trigger', title: 'Claim made' }, { type: 'step', title: 'Approve claim', ownerRole: 'Line manager' },
+    { type: 'step', title: 'Pay claim', owner: 'lp', ownerRole: 'Treasury' }] }, docs);
+  assert.equal(clean.nodes[1].ownerRole, 'Line manager');
+  assert.deepEqual([clean.nodes[2].owner, clean.nodes[2].ownerRole], ['lp', undefined]);
+  assert.ok(!/node/i.test(clean.notes));
+});
+
+test('R7 seed: a role-owned step in a process with no project; the PMO section has an eligible approver', () => {
+  const s = seed('2026-11-04');
+  const projects = s.docs.project.map(d => d.data);
+  const linked = new Set(projects.flatMap(p => p.processes));
+  const free = s.docs.process.map(d => d.data).filter(p => !linked.has(p.id));
+  assert.ok(free.length >= 1, 'a process with no project');
+  const roleSteps = free.flatMap(p => p.tobe.filter(n => n.type === 'step' && !n.owner && n.ownerRole));
+  assert.deepEqual(roleSteps.map(n => n.ownerRole), ['Employee']);
+  for (const p of s.docs.process.map(d => d.data)) for (const n of p.tobe.concat(p.asis)) {
+    if (n.type === 'step') assert.ok(n.owner || n.ownerRole, `${p.name} / ${n.title} has an owner or a role`);
+  }
+  const vm = projects.find(p => p.id === 'vendor-modernization');
+  for (const [bu, pid] of Object.entries(vm.approvers || {})) {
+    assert.ok(s.people.some(p => p.id === pid), bu);
+    assert.ok(![vm.owner, vm.releaseManager].includes(pid), `${bu} approver is not the PM or launch owner`);
+  }
+  assert.equal(vm.approvers.PMO, 'mc', 'the process owner approves the PMO part');
+  assert.ok(!JSON.stringify(s).match(/Witherite|Filevine|Acumatica/i));
 });

@@ -1,19 +1,20 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
-import { esc, fmt, fmtTime, link, av, personChip, pname, AVAIL, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, NEEDS_LIVE, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl } from './process.js';
+import { E, esc, fmt, fmtTime, link, av, personChip, pname, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, NEEDS_LIVE, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf } from './process.js';
 
 const clone = o => JSON.parse(JSON.stringify(o));
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
-/* "Live" is set only through Confirm live (data owner, with a source); the edit dialog offers it only when already live */
-const availOpts = sel => Object.entries(AVAIL).filter(([k]) => k !== 'pending' && (k !== 'live' || sel === 'live')).map(([k, a]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(a.label)}</option>`).join('');
+/* R7 plain states. "Connected" here means we have it; the owner's confirmation with proof is recorded separately. */
+const AVAIL_OPT = { live: 'Connected (we have this today)', example: 'Sample only', missing: 'Not available yet' };
+const availOpts = sel => Object.entries(AVAIL_OPT).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
 
-export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: { label: 'Internal', cls: 'd-s-internal' }, confidential: { label: 'Confidential', cls: 'd-s-conf' }, pii: { label: 'PII', cls: 'd-s-pii' } };
-export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="Sensitivity: ${esc(v.label)}">${esc(v.label)}</span>` : '<span class="badge b-none" title="Sensitivity not classified">Unclassified</span>'; };
+export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: { label: 'Internal', cls: 'd-s-internal' }, confidential: { label: 'Confidential', cls: 'd-s-conf' }, pii: { label: 'Personal details', cls: 'd-s-pii', title: 'Personal details (PII)' } };
+export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="How sensitive: ${esc(v.title || v.label)}">${esc(v.label)}</span>` : (isAdv() ? '<span class="badge b-none" title="Sensitivity not set">Sensitivity not set</span>' : ''); };
 /* only http(s) links are rendered as links */
 const safeUrl = u => /^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '#';
 const canEdit = x => !!x && store.state.me === x.owner;
-const onlyMsg = x => `Only ${pname(x.owner)} can change this`;
+const onlyMsg = x => `Only ${pname(x.owner)} (the owner) can change this`;
 /* disabled-state attributes for owner-only controls */
 const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(onlyMsg(x))}"`;
 function ruleText(f) {
@@ -32,14 +33,22 @@ const DRIFT = { duplicate: 'has duplicate values; it must be unique', duplicates
   'unexpected-specials': 'has unexpected characters', 'type-mismatch': 'values are not the expected type', 'out-of-range': 'values outside the allowed range', 'pattern-mismatch': 'format differs from the spec' };
 const driftTitle = d => DRIFT[d.issue] || String(d.issue || 'differs from the spec').replace(/[-_]+/g, ' ');
 /* the engine writes plain English; any raw shape code left in a message (e.g. 9{8}) is humanized here as a safety net */
-const plainDetail = t => String(t || '').replace(/\b[9Aax]+(?:\{\d+\})?(?:[ \-./@]?[9Aax]+(?:\{\d+\})?)*/g, m => /\{\d+\}/.test(m) ? humanPat(m) : m);
+const plainDetail = t => String(t || '').replace(/\bthe spec(ification)?\b/gi, 'the rules').replace(/\bspec(ification)?\b/gi, 'rules').replace(/\b[9Aax]+(?:\{\d+\})?(?:[ \-./@]?[9Aax]+(?:\{\d+\})?)*/g, m => /\{\d+\}/.test(m) ? humanPat(m) : m);
+
+/* R7: "Use these columns as the rules to test" — the engine turns a sample-data check into rules (min/max become boundaries) */
+export function rulesFromProfile(profile) {
+  const r = eng('specFromProfile', [profile], null);
+  return Array.isArray(r) ? r.filter(f => f && f.name) : [];
+}
 
 export function render(params) {
   const did = params.did;
   const x = store.get('dataElement', did);
-  if (!x) return notFound('Data element “' + did + '”');
-  const eff = effAvail(did), a = avOf(eff);
-  /* R5: one usage source (engine usageOf) for every count: to-be and as-is, labelled */
+  if (!x) return notFound('Information “' + did + '”');
+  const adv = isAdv();
+  const eff = effAvail(did), info = availInfo(did);
+  const owner = canEdit(x);
+  /* R5: one usage source (engine usageOf) for every count: Future and Today, labelled */
   const use = usage(did);
   const rowsOf = (list, ver) => list.map(u => { const p = store.get('process', u.pid); const s = p && flat(p[ver]).find(y => y.id === u.stepId); return s ? { pid: u.pid, p, s, ver } : null; }).filter(Boolean);
   const users = rowsOf(use.tobe, 'tobe'), asisUsers = rowsOf(use.asis, 'asis');
@@ -53,59 +62,66 @@ export function render(params) {
   const profile = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
   const drift = profile ? eng('specDrift', [x, profile], []) : [];
   const fields = x.fields || [];
+  const suggested = profile && !fields.length ? rulesFromProfile(profile) : [];
+  const noRule = drift.filter(d => d && d.issue === 'unspecified-column');
 
   const amber = eff === 'example' || eff === 'pending';
-  const resolution = (eff !== 'live' || resolver) ? `<div class="card d-resolve ${ready ? '' : amber ? 'd-resolve-amber' : 'd-resolve-open'}" style="margin-top:16px" data-resolution="${eff}"><h3>${LOCK} Resolution plan ${ready ? '<span class="badge b-done">Ready</span>' : eff === 'pending' ? `<span class="badge d-b-amber">${esc(awaitingText(did))}</span>` : eff === 'example' ? `<span class="badge d-b-amber">${NEEDS_LIVE}</span>` : ''}</h3>
-    ${resolver ? `<a class="wi" href="${link('/project/' + resolver.projectId + '?mode=work')}" data-link>${av(resolver.owner)}<div style="flex:1;min-width:0"><div class="t" style="font-weight:600">${esc(resolver.title)}</div><div class="dep">${esc(pname(resolver.owner))} · planned ${esc(fmt(resolver.start))} → ${esc(fmt(resolver.due))}${fc[resolver.id] && fc[resolver.id].forecast ? ' · forecast ' + esc(fmt(fc[resolver.id].forecast)) : ''}</div></div>${workBadge(resolver, fc[resolver.id])}</a>
-      ${downstream.length ? `<div class="hint" style="margin:10px 0 4px">These work items move with it:</div>${downstream.map(w => `<div class="row click" data-go="/process/${esc(w.pid)}/step/${esc(w.step)}"><div><div class="t">${esc(w.title)}</div><div class="s">${esc((store.get('process', w.pid) || {}).name || w.pid)} · ${esc(pname(w.owner))}</div></div><div class="r">${workBadge(w, fc[w.id])}</div></div>`).join('')}` : '<div class="hint" style="margin-top:8px">No other work items depend on it.</div>'}`
-      : eff === 'example' ? `<div class="s d-noplan d-noplan-amber" data-noplan>No resolution plan. Only examples exist, so the go-live gate's live-data check fails until a work item connects a live source. Add a resolver work item on the project page.</div>`
-      : '<div class="s d-noplan" data-noplan>No resolution plan. No work item resolves this yet, so every step that needs it has no real date. Add a resolver work item on the project page.</div>'}</div>` : '';
+  const resolution = (eff !== 'live' || resolver) ? `<div class="card d-resolve ${ready ? '' : amber ? 'd-resolve-amber' : 'd-resolve-open'}" style="margin-top:16px" data-resolution="${eff}"><h3>${LOCK} Fix ${ready ? '<span class="badge b-done">Done</span>' : eff === 'pending' ? `<span class="badge d-b-amber">${esc(awaitingText(did))}</span>` : eff === 'example' ? `<span class="badge d-b-amber">${NEEDS_LIVE}</span>` : ''}</h3>
+    ${resolver ? `<a class="wi" href="${link('/project/' + resolver.projectId + '?mode=work')}" data-link>${av(resolver.owner)}<div style="flex:1;min-width:0"><div class="t" style="font-weight:600">${esc(resolver.title)}</div><div class="dep">${esc(pname(resolver.owner))} · planned ${esc(fmt(resolver.start))} → ${esc(fmt(resolver.due))}${fc[resolver.id] && fc[resolver.id].forecast ? ' · expected ' + esc(fmt(fc[resolver.id].forecast)) : ''}</div></div>${workBadge(resolver, fc[resolver.id])}</a>
+      ${downstream.length ? `<div class="hint" style="margin:10px 0 4px">These work items move with it:</div>${downstream.map(w => `<div class="row click" data-go="/process/${esc(w.pid)}/step/${esc(w.step)}"><div><div class="t">${esc(w.title)}</div><div class="s">${esc((store.get('process', w.pid) || {}).name || w.pid)} · ${esc(pname(w.owner))}</div></div><div class="r">${workBadge(w, fc[w.id])}</div></div>`).join('')}` : '<div class="hint" style="margin-top:8px">No other work items wait for it.</div>'}`
+      : eff === 'example' ? `<div class="s d-noplan d-noplan-amber" data-noplan>No fix planned. Only a sample exists, so the launch check fails until someone connects it. Add a work item for it on the project page.</div>`
+      : '<div class="s d-noplan" data-noplan>No fix planned. Nobody is working on getting this yet, so the steps that need it have no real date. Add a work item for it on the project page.</div>'}</div>` : '';
 
-  /* R4/R5: only the data owner's confirmation, with a source and evidence, makes an element live */
+  /* R4/R5: only the owner's confirmation, with a source and proof, counts as connected for launch */
   const ev = x.liveEvidence || null;
-  const evDetail = ev ? (ev.type === 'attested' ? `${ev.ref ? ` · <a href="${esc(safeUrl(ev.ref))}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">evidence link</a>` : ''}${ev.note ? ' · “' + esc(ev.note) + '”' : ''}` : ev.type === 'check' ? (x.check && x.check.detail ? ' · ' + esc(x.check.detail) : '') : ev.type === 'profile' ? (() => { const pr = store.get('profile', ev.ref); return pr ? ` · profile of ${esc(pr.rows)} rows, ${esc(fmtTime(pr.at))}` : ''; })() : '') : '';
-  const confirmedBy = x.liveConfirmedBy ? `Confirmed live by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${x.liveSource ? ' · source: ' + esc(x.liveSource) : ''} ${evidenceTag(x)}${evDetail}` : '';
+  const evDetail = ev ? (ev.type === 'attested' ? `${ev.ref ? ` · <a href="${esc(safeUrl(ev.ref))}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">proof link</a>` : ''}${ev.note ? ' · “' + esc(ev.note) + '”' : ''}` : ev.type === 'check' ? (x.check && x.check.detail ? ' · ' + esc(x.check.detail) : '') : ev.type === 'profile' ? (() => { const pr = store.get('profile', ev.ref); return pr ? ` · sample data check of ${esc(pr.rows)} rows, ${esc(fmtTime(pr.at))}` : ''; })() : '') : '';
+  const confirmedBy = x.liveConfirmedBy ? `Confirmed connected by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${x.liveSource ? ' · from ' + esc(x.liveSource) : ''} ${evidenceTag(x)}${evDetail}` : '';
   const confirm = eff === 'live'
-    ? (confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : '')
-    : `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Confirm live</h3>
-      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The resolver work is done. ${esc(pname(x.owner))}, as the data owner, confirms the live source before the go-live gate counts it.` : `When a live source is connected, the data owner confirms it here. Until then the go-live gate's live-data check fails.`} Confirming needs evidence: a clean profile, a passing connection check, or a link and note (attested, the weaker kind).</p>
-      ${x.check ? `<div class="d-checkres ${x.check.ok ? 'pass' : 'fail'}" data-last-check>Last connection check ${esc(fmtTime(x.check.at))}: ${x.check.ok ? 'ok' : 'failed'}. ${esc(x.check.detail || '')}</div>` : ''}
-      <div class="d-ownerrow" style="margin-top:0"><button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live ${gate(x)}>Confirm live…</button>${canEdit(x) ? '' : `<span class="d-only">${LOCK} Only ${esc(pname(x.owner))} (data owner) can confirm</span>`}</div></div>`;
+    ? ''
+    : `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Confirm it’s connected</h3>
+      <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${esc(pname(x.owner))}, as the owner, confirms where it now comes from before launch counts it.` : `When it is connected, the owner confirms it here. Until then the launch check fails.`} You need proof: a clean sample data check, a passing connection check, or a link and a note (weaker).</p>
+      ${x.check ? `<div class="d-checkres ${x.check.ok ? 'pass' : 'fail'}" data-last-check>Last connection check ${esc(fmtTime(x.check.at))}: ${x.check.ok ? 'passed' : 'failed'}. ${esc(x.check.detail || '')}</div>` : ''}
+      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn ${eff === 'pending' ? 'primary' : ''}" data-confirm-live>Confirm it’s connected…</button>` : `<span class="d-only">${LOCK} Only ${esc(pname(x.owner))} (the owner) can confirm</span>`}</div></div>`;
 
-  const spec = `<div class="card"><h3>Specification <span class="n">${fields.length} field${fields.length === 1 ? '' : 's'}</span></h3>
-    ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Field</th><th>Format</th><th>Rules</th><th><span class="d-sr">Actions</span></th></tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td data-fsum>${esc(specSummary(f))}</td><td class="d-rule">${esc(ruleText(f))}</td>
-      <td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit field ${esc(f.name)}" ${gate(x)}>Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete field ${esc(f.name)}" ${gate(x)}>Delete</button></td></tr>`).join('')}</table></div>` : '<div class="s">No fields specified yet. Describe each field so test cases can be generated.</div>'}
-    <div class="d-ownerrow"><button class="btn sm" data-fadd ${gate(x)}>+ Add field</button>${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}</div></div>`;
+  const spec = `<div class="card" data-rules><h3>Rules to test <span class="n">${fields.length}</span></h3>
+    ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Name</th><th>Looks like</th><th>Rules</th>${owner ? '<th><span class="d-sr">Actions</span></th>' : ''}</tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td data-fsum>${esc(specSummary(f))}</td><td class="d-rule">${esc(ruleText(f))}</td>
+      ${owner ? `<td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit rule ${esc(f.name)}">Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete rule ${esc(f.name)}">Delete</button></td>` : ''}</tr>`).join('')}</table></div>`
+      : suggested.length ? `<div class="d-suggest" data-suggest-rules="${suggested.length}"><div class="s">The sample data check found <b>${suggested.length} column${suggested.length === 1 ? '' : 's'}</b>: ${esc(suggested.map(f => f.name).join(', '))}.</div>
+        ${owner ? `<button class="btn primary" data-use-columns>Use these columns as the rules to test</button><div class="hint">The smallest and largest values seen become tests at the edges. You can change any rule after.</div>` : `<div class="d-only">${LOCK} ${esc(pname(x.owner))} (the owner) can turn them into rules</div>`}</div>`
+      : `<div class="s">No rules yet. Describe what each piece should look like so tests can be made${testPrj ? ', or check a sample of the real data first' : ''}.</div>`}
+    ${owner ? `<div class="d-ownerrow"><button class="btn sm" data-fadd>+ Add a rule</button></div>` : fields.length ? '' : `<div class="d-only" style="margin-top:8px">${LOCK} ${esc(onlyMsg(x))}</div>`}</div>`;
 
-  const examples = `<div class="card"><h3>Examples on file <span class="n">${(x.samples || []).length}</span></h3>${(x.samples || []).length ? x.samples.map(f => `<div class="row"><span>📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample artifact (concept, not downloadable)</div></div></div>`).join('') : '<div class="s">None. Nobody has produced a real example of this data yet.</div>'}
-    ${x.sampleCsv ? '<div class="hint" style="margin-top:8px">A synthetic sample extract is on file for profiling.</div>' : ''}</div>`;
+  const examples = `<div class="card"><h3>Samples on file <span class="n">${(x.samples || []).length}</span></h3>${(x.samples || []).length ? x.samples.map(f => `<div class="row"><span>📄</span><div><div class="t">${esc(f)}</div><div class="s">Sample file (demo, not downloadable)</div></div></div>`).join('') : '<div class="s">None. Nobody has shared a real example yet.</div>'}
+    ${x.sampleCsv ? '<div class="hint" style="margin-top:8px">A made-up sample extract is on file for checking.</div>' : ''}</div>`;
 
   const allUsers = [...users, ...asisUsers];
-  const impact = `<div class="card" style="margin-top:16px" data-impact><h3>Impact: every step that uses this <span class="n" data-usage-total="${users.length}/${asisUsers.length}">${users.length} to-be · ${asisUsers.length} as-is</span></h3>${allUsers.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Map</th><th>Process</th><th>Owner</th><th>Project</th></tr>
-    ${allUsers.map(u => { const prj = u.ver === 'tobe' ? projectsFor(u.pid)[0] : null; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}" data-use="${u.ver}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td><span class="chip ${u.ver === 'asis' ? '' : 'd-chip-tobe'}">${u.ver === 'asis' ? 'As-is' : 'To-be'}</span></td><td>${esc(u.p.name)}</td><td>${esc(pname(u.s.owner))}</td><td class="d-nowrap">${u.ver === 'asis' ? '<span class="hint">Today’s process</span>' : prj ? stepBadge(st, u.s) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No step uses this data element yet.</div>'}</div>`;
-  /* R5: test cases, labelled TC<n> */
+  const impact = `<div class="card" style="margin-top:16px" data-impact><h3>Steps that use it <span class="n" data-usage-total="${users.length}/${asisUsers.length}">${users.length} Future · ${asisUsers.length} Today</span></h3>${allUsers.length ? `<div class="tbl-wrap"><table><tr><th>Step</th><th>Map</th><th>Process</th><th>Who</th><th>Project</th></tr>
+    ${allUsers.map(u => { const prj = u.ver === 'tobe' ? projectsFor(u.pid)[0] : null; const st = prj ? eng('stepState', [docs(), prj.id, u.pid, u.s.id, today()], null) : null; return `<tr class="click" data-go="/process/${esc(u.pid)}/step/${esc(u.s.id)}" data-use="${u.ver}"><td><a href="${link('/process/' + u.pid + '/step/' + u.s.id)}" data-link><b>${esc(u.s.title)}</b></a></td><td><span class="chip ${u.ver === 'asis' ? '' : 'd-chip-tobe'}">${u.ver === 'asis' ? 'Today' : 'Future'}</span></td><td>${esc(u.p.name)}</td><td>${esc(whoOf(u.s))}</td><td class="d-nowrap">${u.ver === 'asis' ? '<span class="hint">How it works today</span>' : prj ? stepBadge(st, u.s) : '<span class="hint">No project</span>'}</td></tr>`; }).join('')}</table></div>` : '<div class="s">No step uses this yet.</div>'}</div>`;
+  /* R5: tests, labelled TC<n> */
   const cases = store.list('testCase', c => c.dataId === did);
   const uncovered = fields.filter(f => !cases.some(c => String(c.field || '').toLowerCase() === String(f.name).toLowerCase()));
-  const tcards = `<div class="card" data-cases><h3>Test cases <span class="n">${cases.length}</span></h3>${cases.length ? `<div class="tbl-wrap"><table class="d-cases"><tr><th>Case</th><th>Field</th><th>Kind</th><th>Input</th><th>Expect</th></tr>${cases.slice(0, 8).map(c => `<tr data-case="${esc(c.id)}"><td><b class="d-tc">${esc(caseLbl(c))}</b></td><td>${esc(c.field || '—')}</td><td>${esc(c.kind || '')}</td><td><code class="d-code">${esc(c.input === '' ? '(empty)' : c.input)}</code></td><td class="${c.expect === 'reject' ? 'fail' : 'pass'}">${esc(c.expect || '')}</td></tr>`).join('')}</table></div>${cases.length > 8 ? `<div class="hint" style="margin-top:6px">and ${cases.length - 8} more${testPrj ? ` in <a href="${link('/testing/' + testPrj.id)}" data-link style="color:var(--accent)">Testing</a>` : ''}</div>` : ''}` : '<div class="s">No test cases yet. Generate them from the specification in Testing.</div>'}
-    ${fields.length ? (uncovered.length ? `<div class="hint fail" style="margin-top:8px" data-uncovered>${uncovered.length} spec field${uncovered.length === 1 ? ' has' : 's have'} no case: ${esc(uncovered.map(f => f.name).join(', '))}</div>` : '<div class="hint pass" style="margin-top:8px">Every spec field has at least one case.</div>') : ''}</div>`;
+  const tcards = `<div class="card" data-cases><h3>Tests <span class="n">${cases.length}</span></h3>${cases.length ? `<div class="tbl-wrap"><table class="d-cases"><tr><th>Test</th><th>Rule</th><th>Kind</th><th>Input</th><th>Expect</th></tr>${cases.slice(0, 8).map(c => `<tr data-case="${esc(c.id)}"><td><b class="d-tc">${esc(caseLbl(c))}</b></td><td>${esc(c.field || '—')}</td><td>${esc(c.kind || '')}</td><td><code class="d-code">${esc(c.input === '' ? '(empty)' : c.input)}</code></td><td class="${c.expect === 'reject' ? 'fail' : 'pass'}">${esc(c.expect || '')}</td></tr>`).join('')}</table></div>${cases.length > 8 ? `<div class="hint" style="margin-top:6px">and ${cases.length - 8} more${testPrj ? ` in <a href="${link('/testing/' + testPrj.id)}" data-link style="color:var(--accent)">Testing</a>` : ''}</div>` : ''}` : `<div class="s">No tests yet. ${fields.length ? 'Make them from the rules in Testing.' : 'Add rules first (or use your sample data).'}</div>`}
+    ${fields.length ? (uncovered.length ? `<div class="hint fail" style="margin-top:8px" data-uncovered>${uncovered.length} rule${uncovered.length === 1 ? ' has' : 's have'} no test: ${esc(uncovered.map(f => f.name).join(', '))}</div>` : '<div class="hint pass" style="margin-top:8px">Every rule has at least one test.</div>') : ''}</div>`;
 
-  const prof = `<div class="card" style="margin-top:16px"><h3>Latest profile ${profile ? `<span class="n">${esc(profile.rows)} rows · ${esc(fmtTime(profile.at))}</span>` : ''}</h3>
-    ${profile ? `<div class="hint" style="margin:-4px 0 8px">Statistics only. Examples are masked: digits become 9, letters x/X, first and last character kept.</div>
-      <div class="tbl-wrap"><table class="d-prof"><tr><th>Column</th><th>Nulls</th><th>Distinct</th><th>Length</th><th>Range</th><th>Top patterns</th><th>Masked examples</th></tr>${(profile.columns || []).map(c => `<tr><td><b>${esc(c.name)}</b>${(c.specials || []).length ? `<div class="hint">specials ${esc(c.specials.join(' '))}</div>` : ''}</td><td>${esc(c.nulls)}</td><td>${esc(c.distinct)}</td><td>${esc(c.minLen)}–${esc(c.maxLen)}</td><td>${c.min != null ? esc(c.min) + ' – ' + esc(c.max) : '—'}</td>
-        <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>
-      <h3 style="margin-top:14px">Spec drift <span class="n">${drift.length}</span></h3>${drift.length ? drift.map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : '<div class="s pass">The profile matches the specification.</div>'}`
-    : '<div class="s">No profile yet. Profiling computes column statistics from a sample extract and compares them with the specification.</div>'}
-    ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id)}" data-link>Run profiling in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Link a process that uses this data to a project to run profiling.</div>'}</div>`;
+  /* sample data check: plain summary in Simple; the full column statistics in Advanced */
+  const simpleCols = profile ? (profile.columns || []).map(c => `<div class="row"><div style="min-width:0"><div class="t">${esc(c.name)}</div><div class="s">${(+c.nulls || 0) ? `${esc(c.nulls)} empty · ` : 'never empty · '}${c.min != null ? `from ${esc(c.min)} to ${esc(c.max)}` : `${esc(c.minLen)}–${esc(c.maxLen)} characters`}${(c.patterns || [])[0] ? ` · usually ${esc(humanPat(c.patterns[0].pattern))}` : ''}</div></div></div>`).join('') : '';
+  const prof = `<div class="card" style="margin-top:16px" data-profile-card><h3>Check sample data ${profile ? `<span class="n">${esc(profile.rows)} rows · ${esc(fmtTime(profile.at))}</span>` : ''}</h3>
+    ${profile ? (adv ? `<div class="hint" style="margin:-4px 0 8px">Statistics only. Examples are masked: digits become 9, letters x/X, first and last character kept.</div>
+      <div class="tbl-wrap"><table class="d-prof"><tr><th>Column</th><th>Empty</th><th>Distinct</th><th>Length</th><th>Range</th><th>Top patterns</th><th>Masked examples</th></tr>${(profile.columns || []).map(c => `<tr><td><b>${esc(c.name)}</b>${(c.specials || []).length ? `<div class="hint">special characters ${esc(c.specials.join(' '))}</div>` : ''}</td><td>${esc(c.nulls)}</td><td>${esc(c.distinct)}</td><td>${esc(c.minLen)}–${esc(c.maxLen)}</td><td>${c.min != null ? esc(c.min) + ' – ' + esc(c.max) : '—'}</td>
+        <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${simpleCols}`)
+      + `<h3 style="margin-top:14px">Differences from the rules <span class="n">${blockingDrift(drift).length}</span></h3>${noRule.length ? `<div class="s" data-norule="${noRule.length}">${noRule.length} column${noRule.length === 1 ? ' has' : 's have'} no rule yet: ${esc(noRule.map(d => d.field).join(', '))}.</div>` : ''}${blockingDrift(drift).length ? blockingDrift(drift).map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : fields.length ? '<div class="s pass">The sample matches the rules.</div>' : ''}`
+    : '<div class="s">Not checked yet. A check reads a sample of the real data and shows what it looks like, so the rules and tests match reality.</div>'}
+    ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id)}" data-link>Check sample data in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Add a process that uses this to a project to check sample data.</div>'}</div>`;
 
   const dlist = x.discovered || [], open = dlist.filter(d => !d.resolved).length;
-  const disc = `<div class="card"><h3>Discovered requirements <span class="n">${open} open · ${dlist.length - open} resolved</span></h3>${dlist.length ? dlist.map((d, i) => `<div class="row d-disc ${d.resolved ? 'd-resolved' : ''}"><span aria-hidden="true">${d.resolved ? '✓' : '🔎'}</span><div style="flex:1;min-width:0"><div class="t">${esc(d.text)}</div><div class="s">${d.fromRun ? 'Found in test run ' + esc(d.fromRun) + ' · ' : ''}${esc(fmtTime(d.at))}</div>
-      ${d.resolved ? `<div class="d-resnote"><b>Resolved</b> by ${esc(pname(d.resolved.by))} · ${esc(fmtTime(d.resolved.at))}${d.resolved.note ? ': ' + esc(d.resolved.note) : ''}</div>` : ''}</div>
-      ${d.resolved ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}" ${gate(x)}>Resolve</button></div>`}</div>`).join('') + (open && !canEdit(x) ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing discovered yet. Requirements found during testing land here.</div>'}</div>`;
+  const disc = `<div class="card"><h3>Found during testing <span class="n">${open} open · ${dlist.length - open} fixed</span></h3>${dlist.length ? dlist.map((d, i) => `<div class="row d-disc ${d.resolved ? 'd-resolved' : ''}"><span aria-hidden="true">${d.resolved ? '✓' : '🔎'}</span><div style="flex:1;min-width:0"><div class="t">${esc(d.text)}</div><div class="s">${d.fromRun ? 'Found in test run ' + esc(d.fromRun) + ' · ' : ''}${esc(fmtTime(d.at))}</div>
+      ${d.resolved ? `<div class="d-resnote"><b>Fixed</b> by ${esc(pname(d.resolved.by))} · ${esc(fmtTime(d.resolved.at))}${d.resolved.note ? ': ' + esc(d.resolved.note) : ''}</div>` : ''}</div>
+      ${d.resolved || !owner ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}">Mark fixed</button></div>`}</div>`).join('') + (open && !owner ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing yet. Anything testing finds that the rules missed lands here.</div>'}</div>`;
 
-  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Data element</div><h1>${esc(x.name)}</h1>${x.note ? `<p>${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}">${effDot(did)}${esc(a.label)}</span>${eff === 'live' ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
-    <div class="hdr-side"><div class="d-ownerrow d-right">${canEdit(x) ? '' : `<span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span>`}<button class="btn" data-dedit ${gate(x)}>Edit</button></div><div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>To-be steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>As-is steps</span></div><div class="kpi"><b>${procCount}</b><span>Processes</span></div><div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work items waiting</span></div></div></div></section>
-  ${eff === 'live' ? '' : confirm}
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Information</div><h1>${esc(x.name)}</h1>${x.note ? `<p>${esc(x.note)}</p>` : ''}
+    <div class="res"><span class="lbl">Owner</span>${personChip(x.owner) || '<span class="hint">None</span>'}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
+    <div class="hdr-side">${owner ? '<div class="d-ownerrow d-right"><button class="btn" data-dedit>Edit</button></div>' : `<div class="d-ownerrow d-right"><span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span></div>`}<div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>Today steps</span></div>${adv ? `<div class="kpi"><b>${procCount}</b><span>Processes</span></div>` : ''}<div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work waiting for it</span></div></div></div></section>
+  ${confirm}
   ${resolution}
   <div class="two">${spec}${examples}</div>
   ${impact}
@@ -227,9 +243,9 @@ async function fieldModal(f, siblings, st, err) {
   const others = (siblings || []).filter(n => n && n !== (f && f.name));
   const radio = (name, val, label, on, hint) => `<label class="d-fmt ${on ? 'on' : ''}"${hint ? ` title="${esc(hint)}"` : ''}><input type="radio" name="${name}" value="${esc(val)}" ${on ? 'checked' : ''} /><span>${esc(label)}</span></label>`;
   const pr = modal({
-    title: f && f.name ? `Edit field '${f.name}'` : 'Add field',
+    title: f && f.name ? `Edit rule '${f.name}'` : 'Add a rule to test',
     body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}
-      <div class="field"><label>Field name</label><input name="name" value="${esc(st.name)}" placeholder="e.g. Routing number" /></div>
+      <div class="field"><label>Name</label><input name="name" value="${esc(st.name)}" placeholder="e.g. Routing number" /></div>
       <div class="field"><label id="d-fmt-l">What does it look like?</label><div class="d-fmts" role="radiogroup" aria-labelledby="d-fmt-l">${FORMATS.map(([k, l, h]) => radio('fmt', k, l, st.fmt === k, h)).join('')}</div></div>
       <div class="field" data-sec="len"><label id="d-len-l">Length</label><div class="d-lenrow" role="radiogroup" aria-labelledby="d-len-l">${radio('lenMode', 'any', 'Any length', st.lenMode === 'any')}${radio('lenMode', 'exact', 'Exactly', st.lenMode === 'exact')}${radio('lenMode', 'range', 'Between', st.lenMode === 'range')}</div>
         <div class="d-lenin" data-sec="len-exact"><input name="len" inputmode="numeric" aria-label="Exact length" value="${esc(st.len)}" placeholder="e.g. 9" /> <span class="hint" data-unit>characters</span></div>
@@ -237,14 +253,14 @@ async function fieldModal(f, siblings, st, err) {
       <div class="frow" data-sec="money"><div class="field"><label>Smallest amount</label><input name="amtMin" inputmode="decimal" value="${esc(st.amtMin)}" placeholder="e.g. 0" /></div><div class="field"><label>Largest amount</label><input name="amtMax" inputmode="decimal" value="${esc(st.amtMax)}" placeholder="e.g. 25000" /></div></div>
       <div class="field" data-sec="list"><label>Allowed values (separate with commas)</label><input name="values" value="${esc(st.values)}" placeholder="e.g. Checking, Savings" /></div>
       <label class="d-check"><input type="checkbox" name="required" value="yes" ${st.required ? 'checked' : ''} /> Required: it can never be left empty</label>
-      <label class="d-check"><input type="checkbox" name="unique" value="yes" ${st.unique ? 'checked' : ''} /> Unique: no two records share a value (profiling flags duplicates)</label>
-      <div class="frow"><div class="field"><label>Must match another field</label><select name="matches"><option value="">No</option>${[...new Set([...others, ...(st.matches && !others.includes(st.matches) ? [st.matches] : [])])].map(n => `<option value="${esc(n)}" ${n === st.matches ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+      <label class="d-check"><input type="checkbox" name="unique" value="yes" ${st.unique ? 'checked' : ''} /> Unique: no two records share a value (the sample data check flags duplicates)</label>
+      <div class="frow"><div class="field"><label>Must match another rule’s value</label><select name="matches"><option value="">No</option>${[...new Set([...others, ...(st.matches && !others.includes(st.matches) ? [st.matches] : [])])].map(n => `<option value="${esc(n)}" ${n === st.matches ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
         <div class="field"><label>Other rule (plain words)</label><input name="rule" value="${esc(st.rule)}" placeholder="e.g. Must be before the due date" /></div></div>
       <div class="d-specsum" data-specsum aria-live="polite"></div>
-      <details class="d-adv" data-adv data-custom="${st.customPattern ? '1' : ''}"><summary>Advanced</summary>
+      <details class="d-adv" data-adv data-custom="${st.customPattern ? '1' : ''}"${isAdv() ? '' : ' hidden'}><summary>Advanced</summary>
         <div class="field" style="margin-top:8px"><label>Pattern (regular expression, generated for you)</label><input name="pattern" value="${esc(st.pattern)}" spellcheck="false" autocomplete="off" /></div>
         <div class="hint" data-advnote></div></details>`,
-    actions: [{ id: 'save', label: f && f.name ? 'Save field' : 'Add field', primary: true }],
+    actions: [{ id: 'save', label: f && f.name ? 'Save rule' : 'Add rule', primary: true }],
   });
   const m = [...document.querySelectorAll('.overlay .modal')].pop();
   const adv = m.querySelector('[data-adv]'), patEl = m.querySelector('[name=pattern]');
@@ -273,7 +289,7 @@ async function fieldModal(f, siblings, st, err) {
   const b = readBuilder(r.root);
   const { field, errs } = buildField(b);
   if (errs.length) return fieldModal(f, siblings, b, errs.join(' '));
-  if ((siblings || []).some(n => n && n !== (f && f.name) && n.trim().toLowerCase() === field.name.toLowerCase())) return fieldModal(f, siblings, b, `A field called '${field.name}' already exists.`);
+  if ((siblings || []).some(n => n && n !== (f && f.name) && n.trim().toLowerCase() === field.name.toLowerCase())) return fieldModal(f, siblings, b, `A rule called '${field.name}' already exists.`);
   return field;
 }
 
@@ -282,7 +298,7 @@ async function fieldModal(f, siblings, st, err) {
 async function confirmLive(did, cur, save) {
   let err = '', vals = {}, check = null;
   for (;;) {
-    const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (data owner) can confirm`); return; }
+    const x = cur(); if (!canEdit(x)) { toast(`Only ${pname(x.owner)} (the owner) can confirm`); return; }
     const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
     const drift = prof ? eng('specDrift', [x, prof], []) : [];
     const blk = blockingDrift(drift);
@@ -290,18 +306,18 @@ async function confirmLive(did, cur, save) {
     const sel = vals.ev || (prof && !blk.length ? 'profile' : '');
     const opt = (v, dis, inner) => `<label class="d-evopt ${dis ? 'd-evdis' : ''}" data-evopt="${v}"><input type="radio" name="ev" value="${v}" ${sel === v && !dis ? 'checked' : ''} ${dis ? 'disabled' : ''} /><div>${inner}</div></label>`;
     const pr = modal({
-      title: `Confirm '${x.name}' is live`,
-      body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p style="margin:0">You are confirming, as the data owner, that steps can now read <b>${esc(x.name)}</b> from a live source.</p>
-        <div class="field"><label>Live source</label><input name="source" value="${esc(vals.source != null ? vals.source : (x.liveSource || x.source || ''))}" placeholder="e.g. ERP vendor master API (read)" /></div>
-        <div class="field"><label id="d-ev-l">Evidence</label><div class="d-evs" role="radiogroup" aria-labelledby="d-ev-l">
-          ${opt('profile', !prof || blk.length, `<b>Latest profile</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest profile · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} drift issue${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : '<span class="pass">matches the specification</span>'}
-            ${blk.length ? `<ul class="d-blklist">${blk.slice(0, 5).map(d => `<li>${esc(d.field)}: ${esc(plainDetail(d.detail))}</li>`).join('')}</ul><div class="fail">Blocked: fix the blocking drift and profile again, or use other evidence.</div>` : drift.length ? '<div class="hint">Only columns with no spec differ; they do not block.</div>' : ''}` : '<span class="hint">No profile yet. Profile a real extract in Testing to use this.</span>'}</div>`)}
-          ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated in-tenant probe of <b data-probe-target>${esc(vals.source != null ? vals.source : (x.liveSource || x.source || '')) || 'the source above'}</b>. It must pass.</div>
+      title: `Confirm '${x.name}' is connected`,
+      body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p style="margin:0">You are confirming, as the owner, that the steps can now get <b>${esc(x.name)}</b> from where it really comes from.</p>
+        <div class="field"><label>Where it comes from</label><input name="source" value="${esc(vals.source != null ? vals.source : (x.liveSource || x.source || ''))}" placeholder="e.g. ERP vendor master API (read)" /></div>
+        <div class="field"><label id="d-ev-l">Proof</label><div class="d-evs" role="radiogroup" aria-labelledby="d-ev-l">
+          ${opt('profile', !prof || blk.length, `<b>Latest sample data check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest check · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} difference${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : '<span class="pass">matches the rules</span>'}
+            ${blk.length ? `<ul class="d-blklist">${blk.slice(0, 5).map(d => `<li>${esc(d.field)}: ${esc(plainDetail(d.detail))}</li>`).join('')}</ul><div class="fail">Blocked: fix the differences and check again, or use other proof.</div>` : drift.length ? '<div class="hint">Only columns with no rule differ; they do not block.</div>' : ''}` : '<span class="hint">No sample data check yet. Run one in Testing to use this.</span>'}</div>`)}
+          ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated check that we can reach <b data-probe-target>${esc(vals.source != null ? vals.source : (x.liveSource || x.source || '')) || 'the source above'}</b>. It must pass.</div>
             <div class="d-checkrow"><button type="button" class="btn sm" data-run-check>Run connection check</button><span data-check-result aria-live="polite" class="${lastCheck ? (lastCheck.ok ? 'pass' : 'fail') : 'hint'}">${lastCheck ? `${lastCheck.ok ? '✓ Passed' : '✗ Failed'} ${esc(fmtTime(lastCheck.at))}: ${esc(lastCheck.detail || '')}` : 'Not run yet.'}</span></div>`)}
-          ${opt('attested', false, `<b>Evidence link and note</b> <span class="badge d-ev d-ev-weak">Attested · weaker</span><div class="hint">The gate shows attested evidence as a warning.</div>
-            <div class="frow d-evattest"><div class="field"><label>Evidence link</label><input name="evlink" value="${esc(vals.evlink || '')}" placeholder="https://…" inputmode="url" /></div><div class="field"><label>Note</label><input name="evnote" value="${esc(vals.evnote || '')}" placeholder="What the link shows" /></div></div>`)}
+          ${opt('attested', false, `<b>A link and a note</b> <span class="badge d-ev d-ev-weak">Weaker proof</span><div class="hint">The launch check shows this as a warning.</div>
+            <div class="frow d-evattest"><div class="field"><label>Proof link</label><input name="evlink" value="${esc(vals.evlink || '')}" placeholder="https://…" inputmode="url" /></div><div class="field"><label>Note</label><input name="evnote" value="${esc(vals.evnote || '')}" placeholder="What the link shows" /></div></div>`)}
         </div></div>`,
-      actions: [{ id: 'confirm', label: 'Confirm live', primary: true }],
+      actions: [{ id: 'confirm', label: 'Confirm connected', primary: true }],
     });
     const m = [...document.querySelectorAll('.overlay .modal')].pop();
     const rc = m.querySelector('[data-run-check]'), out = m.querySelector('[data-check-result]');
@@ -335,29 +351,29 @@ async function confirmLive(did, cur, save) {
     const r = await pr;
     if (r.action !== 'confirm') return;
     vals = { source: (r.form.source || '').trim(), ev: (r.root.querySelector('input[name=ev]:checked') || {}).value || '', /* formValues does not read radio groups */ evlink: (r.form.evlink || '').trim(), evnote: (r.form.evnote || '').trim() };
-    if (!vals.source) { err = 'Name the live source you are confirming.'; continue; }
+    if (!vals.source) { err = 'Say where it comes from.'; continue; }
     const by = store.state.me, at = new Date().toISOString();
     let evidence = null;
     if (vals.ev === 'profile') {
-      if (!prof) { err = 'There is no profile yet. Choose other evidence.'; continue; }
-      if (blk.length) { err = `The latest profile has ${blk.length} blocking drift issue${blk.length === 1 ? '' : 's'}. Choose other evidence.`; continue; }
+      if (!prof) { err = 'There is no sample data check yet. Choose other proof.'; continue; }
+      if (blk.length) { err = `The latest sample data check has ${blk.length} blocking difference${blk.length === 1 ? '' : 's'}. Choose other proof.`; continue; }
       evidence = { type: 'profile', ref: prof.id, at, by };
     } else if (vals.ev === 'check') {
       const c = check || cur().check;
       if (!c) { err = 'Run the connection check first.'; continue; }
-      if (!c.ok) { err = 'The connection check did not pass, so it cannot be the evidence.'; continue; }
+      if (!c.ok) { err = 'The connection check did not pass, so it cannot be the proof.'; continue; }
       if (c.source && c.source !== vals.source) { err = `The last check probed ${c.source}, not ${vals.source}. Run the check again.`; check = null; continue; }
       evidence = { type: 'check', ref: c.at, at, by };
     } else if (vals.ev === 'attested') {
-      if (!/^https?:\/\/\S+\.\S+/i.test(vals.evlink)) { err = 'Add an evidence link that starts with https://'; continue; }
-      if (!vals.evnote) { err = 'Add a note that says what the evidence link shows.'; continue; }
+      if (!/^https?:\/\/\S+\.\S+/i.test(vals.evlink)) { err = 'Add a proof link that starts with https://'; continue; }
+      if (!vals.evnote) { err = 'Add a note that says what the link shows.'; continue; }
       evidence = { type: 'attested', ref: vals.evlink, note: vals.evnote, at, by };
-    } else { err = 'Choose the evidence for this confirmation.'; continue; }
+    } else { err = 'Choose the proof for this confirmation.'; continue; }
     const d = clone(cur());
     if (check) d.check = check;
     Object.assign(d, { avail: 'live', liveConfirmedBy: by, liveConfirmedAt: at, liveSource: vals.source, liveEvidence: evidence });
     d.source = vals.source; /* the confirmed live source is the element's source: the header shows it */
-    await save(d, `Confirmed '${d.name}' live (source: ${vals.source}; evidence: ${EVID[evidence.type].long.toLowerCase()})`);
+    await save(d, `Confirmed '${d.name}' is connected (from: ${vals.source}; proof: ${EVID[evidence.type].long.toLowerCase()})`);
     return;
   }
 }
@@ -373,53 +389,64 @@ export function bind(root, params) {
     let err = '', vals = x;
     for (;;) {
     const r = await modal({
-      title: 'Edit data element',
+      title: 'Edit information',
       body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(vals.name)}" /></div>
-        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(vals.owner)}</select></div><div class="field"><label>Availability</label><select name="avail">${availOpts(vals.avail)}</select></div></div>
-        <div class="frow"><div class="field"><label>Sensitivity</label><select name="sensitivity"><option value="">Not classified</option>${Object.entries(SENS).map(([k, v]) => `<option value="${k}" ${k === vals.sensitivity ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>Source</label><input name="source" value="${esc(vals.source || '')}" /></div></div>
+        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(vals.owner)}</select></div><div class="field"><label>Do we have it?</label><select name="avail">${availOpts(vals.avail)}</select></div></div>
+        <div class="frow"><div class="field"><label>How sensitive</label><select name="sensitivity"><option value="">Not set</option>${Object.entries(SENS).map(([k, v]) => `<option value="${k}" ${k === vals.sensitivity ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Where it comes from</label><input name="source" value="${esc(vals.source || '')}" /></div></div>
         <div class="field"><label>Note</label><textarea name="note">${esc(vals.note || '')}</textarea></div>
-        <span class="hint">To mark it live, use “Confirm live” on this page: it records the live source and who confirmed it.</span><span class="hint">Handing ownership to someone else means only they can edit this element afterwards.</span>`,
+        <span class="hint">To prove it is connected for launch, use “Confirm it’s connected” on this page: it records where it comes from and who confirmed it.</span><span class="hint">If you hand it to another owner, only they can change it afterwards.</span>`,
       actions: [{ id: 'save', label: 'Save', primary: true }],
     });
     if (r.action !== 'save') return;
     const name = (r.form.name || '').trim() || x.name;
     const dup = dupDataName(name, did);
-    if (dup) { err = `A data element called '${dup.name}' already exists. Choose a different name.`; vals = Object.assign({}, x, r.form); continue; }
+    if (dup) { err = `Information called '${dup.name}' already exists. Choose a different name.`; vals = Object.assign({}, x, r.form); continue; }
     const d = clone(cur()); const before = d.avail, sBefore = d.sensitivity || '';
     Object.assign(d, { name, owner: r.form.owner, avail: r.form.avail, source: r.form.source.trim(), note: r.form.note.trim() });
     if (r.form.sensitivity) d.sensitivity = r.form.sensitivity; else delete d.sensitivity;
     if (d.avail !== 'live') { delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource; delete d.liveEvidence; } /* no longer live: the confirmation no longer stands */
     const parts = [];
-    if (before !== d.avail) parts.push(`availability ${avOf(before).short} → ${avOf(d.avail).short}`);
-    if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'unclassified'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'unclassified'}`);
+    if (before !== d.avail) parts.push(`status ${avOf(before).label} → ${avOf(d.avail).label}`);
+    if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
     if (x.owner !== d.owner) parts.push(`owner → ${pname(d.owner)}`);
-    await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited data element '${d.name}'`);
+    await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited information '${d.name}'`);
     return;
     }
+  };
+  /* R7: turn the latest sample data check into rules to test, in one click */
+  const uc = root.querySelector('[data-use-columns]');
+  if (uc) uc.onclick = async () => {
+    if (!owner()) return;
+    const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
+    const fields = prof ? rulesFromProfile(prof) : [];
+    if (!fields.length) { toast('The sample data check has no columns to use'); return; }
+    const d = clone(cur()); if ((d.fields || []).length) { toast('This already has rules'); return; }
+    d.fields = fields;
+    await save(d, `Used ${fields.length} columns from the sample data check as the rules to test`);
   };
   const cl = root.querySelector('[data-confirm-live]');
   if (cl) cl.onclick = () => confirmLive(did, cur, save);
   root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {
     const x = cur(); if (!canEdit(x)) { toast(onlyMsg(x)); return; }
     const i = +b.dataset.resolve; const item = (x.discovered || [])[i]; if (!item) return;
-    const r = await modal({ title: 'Resolve discovered requirement', body: `<div class="note">${esc(item.text)}</div><div class="field"><label>Resolution note</label><textarea name="note" placeholder="e.g. Added a max-length rule to the specification"></textarea></div>`, actions: [{ id: 'save', label: 'Resolve', primary: true }] });
+    const r = await modal({ title: 'Mark as fixed', body: `<div class="note">${esc(item.text)}</div><div class="field"><label>How it was fixed</label><textarea name="note" placeholder="e.g. Added a maximum length to the rules"></textarea></div>`, actions: [{ id: 'save', label: 'Mark fixed', primary: true }] });
     if (r.action !== 'save') return;
-    const note = (r.form.note || '').trim(); if (!note) { toast('Add a note that says how it was resolved'); return; }
+    const note = (r.form.note || '').trim(); if (!note) { toast('Add a note that says how it was fixed'); return; }
     const d = clone(cur()); if (!d.discovered || !d.discovered[i]) return;
     d.discovered[i].resolved = { by: store.state.me, at: new Date().toISOString(), note };
-    await save(d, `Resolved discovered requirement on '${d.name}': ${note.slice(0, 60)}`);
+    await save(d, `Fixed something found during testing on '${d.name}': ${note.slice(0, 60)}`);
   });
   const add = root.querySelector('[data-fadd]');
   const owner = () => { const x = cur(); if (canEdit(x)) return true; toast(onlyMsg(x)); return false; };
-  if (add) add.onclick = async () => { if (!owner()) return; const f = await fieldModal(null, (cur().fields || []).map(x => x.name)); if (!f) return; const d = clone(cur()); d.fields = [...(d.fields || []), f]; await save(d, `Added field '${f.name}' to the specification`); };
+  if (add) add.onclick = async () => { if (!owner()) return; const f = await fieldModal(null, (cur().fields || []).map(x => x.name)); if (!f) return; const d = clone(cur()); d.fields = [...(d.fields || []), f]; await save(d, `Added rule '${f.name}' to test`); };
   root.querySelectorAll('[data-fedit]').forEach(b => b.onclick = async () => { if (!owner()) return;
     const i = +b.dataset.fedit; const f = await fieldModal((cur().fields || [])[i], (cur().fields || []).map(x => x.name)); if (!f) return;
-    const d = clone(cur()); if (!d.fields || !d.fields[i]) return; d.fields[i] = f; await save(d, `Edited field '${f.name}' in the specification`);
+    const d = clone(cur()); if (!d.fields || !d.fields[i]) return; d.fields[i] = f; await save(d, `Edited rule '${f.name}'`);
   });
   root.querySelectorAll('[data-fdel]').forEach(b => b.onclick = async () => { if (!owner()) return;
     const i = +b.dataset.fdel; const f = (cur().fields || [])[i]; if (!f) return;
-    if (!await confirmBox('Delete field?', `Delete '${f.name}' from the specification? Generated test cases for it will no longer be produced.`, 'Delete')) return;
-    const d = clone(cur()); d.fields.splice(i, 1); await save(d, `Deleted field '${f.name}' from the specification`);
+    if (!await confirmBox('Delete rule?', `Delete the rule '${f.name}'? Tests for it will no longer be made.`, 'Delete')) return;
+    const d = clone(cur()); d.fields.splice(i, 1); await save(d, `Deleted rule '${f.name}'`);
   });
 }

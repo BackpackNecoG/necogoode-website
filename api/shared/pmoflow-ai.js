@@ -37,6 +37,8 @@ async function chat(system, user, maxTokens) {
   } finally { clearTimeout(timer); }
 }
 
+/* R7 plain words for test environments */
+const ENV_PLAIN = { uat: 'business testing', sit: 'system testing', dev: 'build testing' };
 const list = (docs, type) => ((docs && docs[type]) || []).map(d => d.data);
 const strArr = (a, n) => (Array.isArray(a) ? a : []).filter(x => typeof x === 'string').map(s => s.slice(0, 400)).slice(0, n || 8);
 
@@ -48,7 +50,7 @@ function labeler(docs) {
   ['dataElement', 'process', 'project', 'workItem', 'risk'].forEach(t => list(docs, t).forEach(d => put(d.id, d.name || d.title)));
   list(docs, 'grant').forEach(g => put(g.id, 'the access request'));
   list(docs, 'testCase').forEach(c => put(c.id, `the "${c.field}" test case`));
-  list(docs, 'testRun').forEach(r => put(r.id, `the ${String(r.env || '').toUpperCase()} test run`));
+  list(docs, 'testRun').forEach(r => put(r.id, `the ${ENV_PLAIN[String(r.env || '').toLowerCase()] || 'test'} run`));
   const people = Object.fromEntries(list(docs, 'person').map(p => [p.id, p.name]));
   const ids = Object.keys(m).sort((a, b) => b.length - a.length).map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const re = ids.length ? new RegExp('(?<![\\w-])(' + ids.join('|') + ')(?![\\w-])', 'g') : null;
@@ -111,6 +113,8 @@ function statusFacts(docs, projectId, today, engine) {
     });
   /* R6: one RAG truth — the engine's projectHealth (Red only when the finish date is at risk) */
   facts.rag = healthOf(docs, projectId, today, engine, facts);
+  /* R7: the one plain sentence and its label (engine.projectSummary), shared with the project header */
+  facts.summary = summaryOf(docs, projectId, today, engine, facts, L);
   facts.earnedValue = evOf(docs, projectId, today, engine, project);
   facts.hypercare = hypercareOf(project, today, L);
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
@@ -130,6 +134,36 @@ function healthOf(docs, projectId, today, engine, facts) {
   }
   return ragOf(facts);
 }
+/* R7: {sentence, label, rag, who} from engine.projectSummary; the fallback keeps the same rule and plain words. */
+const LABELS = { red: 'Off track', amber: 'At risk', green: 'On track', grey: 'Not planned' };
+function normRag(v) { return ({ red: 'red', amber: 'amber', green: 'green', grey: 'grey', gray: 'grey', r: 'red', a: 'amber', g: 'green' })[String(v || '').toLowerCase()] || null; }
+function summaryOf(docs, projectId, today, engine, facts, L) {
+  if (engine && typeof engine.projectSummary === 'function') {
+    try {
+      const s = engine.projectSummary(docs, projectId, today) || {};
+      const byLabel = Object.keys(LABELS).find(k => LABELS[k].toLowerCase() === String(s.label || '').toLowerCase());
+      const rag = normRag(s.rag) || byLabel || facts.rag.status;
+      if (typeof s.sentence === 'string' && s.sentence.trim()) {
+        return { sentence: L.scrub(s.sentence.trim()), label: LABELS[byLabel || rag] || LABELS[rag], rag: byLabel || rag,
+          who: (Array.isArray(s.who) ? s.who : []).map(w => ({ person: L.person(w && w.person) === 'unassigned' ? String((w && w.person) || '') : L.person(w.person), action: L.scrub(String((w && w.action) || '')) })),
+          source: 'projectSummary' };
+      }
+    } catch (e) { /* fall through to the rules sentence */ }
+  }
+  const rag = facts.rag.status, st = facts.stats || {};
+  const fin = st.actualFinish || st.finish, target = facts.project.target;
+  const gap = fin && target ? dayDiff(String(fin).slice(0, 10), target) : null;
+  const when = gap == null ? (target ? `The deadline is ${fd(target)}, but there is no expected finish yet.` : 'There is no deadline yet.')
+    : gap >= 0 ? `Expected ${fd(fin)}, ${gap === 0 ? 'right on' : `${plural(gap, 'day')} before`} the ${fd(target)} deadline.`
+      : `Expected ${fd(fin)}, ${plural(-gap, 'day')} after the ${fd(target)} deadline.`;
+  const late = (facts.atRisk || []).filter(w => w.daysPastDue > 0);
+  const why = rag === 'grey' ? 'No tasks are planned yet.'
+    : late.length ? `${late.length === 1 ? `"${late[0].title}" is late` : `${plural(late.length, 'task')} are late`}${late[0].owner && late.length === 1 ? ` (${late[0].owner})` : ''}.`
+      : rag === 'amber' ? 'There is little spare time before the deadline.' : '';
+  return { sentence: [rag === 'grey' ? '' : when, why].filter(Boolean).join(' '), label: LABELS[rag], rag,
+    who: late.map(w => ({ person: w.owner, action: `finish "${w.title}"` })), source: 'rules' };
+}
+
 /* R6: earned value from engine.earnedValue(docs, prj, today); keys normalised to lower case. */
 function evOf(docs, projectId, today, engine, project) {
   let raw = null;
@@ -200,64 +234,89 @@ function businessDaysBetween(a, b) {
   return n;
 }
 const RAG_WORD = { red: 'Red', amber: 'Amber', green: 'Green', grey: 'Not planned' };
-const RAG_PHRASE = { red: 'off track', amber: 'at risk', green: 'on track', grey: 'not planned yet' };
 
 const money = n => '$' + Math.round(Number(n) || 0).toLocaleString('en-US');
 function fd(d) { return d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : d; }
-/* R4: "late by N days" = days past due; slip against plan is reported separately */
+/* R4/R7: "late by N days" = days past due; days behind plan are reported separately, in plain words */
 function atRiskLine(w) {
-  const fc = w.forecast ? `forecast ${fd(w.forecast)}` : '';
-  const slip = w.slipDays ? `${plural(w.slipDays, 'day')} behind plan` : '';
+  const exp = w.forecast ? `expected ${fd(w.forecast)}` : '';
+  const behind = w.slipDays ? `${plural(w.slipDays, 'day')} behind plan` : '';
   const why = w.cause ? `waiting on ${w.cause}` : '';
   if (w.daysPastDue > 0) {
-    return `"${w.title}" (${w.owner}) is late by ${plural(w.daysPastDue, 'day')} (was due ${fd(w.due)})` + [fc && slip ? `${fc}, ${slip}` : fc || slip, why].filter(Boolean).map(x => `; ${x}`).join('');
+    return `"${w.title}" (${w.owner}) is late by ${plural(w.daysPastDue, 'day')} (was due ${fd(w.due)})` + [exp && behind ? `${exp}, ${behind}` : exp || behind, why].filter(Boolean).map(x => `; ${x}`).join('');
   }
-  return `"${w.title}" (${w.owner}) is slipping${slip ? ` ${slip}` : ''}` + [fc, why].filter(Boolean).map(x => `; ${x}`).join('');
+  return `"${w.title}" (${w.owner}) is running late${behind ? `, ${behind}` : ''}` + [exp, why].filter(Boolean).map(x => `; ${x}`).join('');
 }
-function lateSlip(f) {
-  const late = (f.atRisk || []).filter(w => w.daysPastDue > 0).length, slip = (f.atRisk || []).length - late;
+function lateLine(f) {
+  const late = (f.atRisk || []).filter(w => w.daysPastDue > 0).length, behind = (f.atRisk || []).length - late;
   const verb = n => (n === 1 ? 'is' : 'are');
-  return `${plural(late, 'item')} ${verb(late)} past due and ${plural(slip, 'more item', 'more items')} ${verb(slip)} slipping;`;
+  if (!late && !behind) return 'Nothing is late.';
+  return [late ? `${plural(late, 'task')} ${verb(late)} past due` : '', behind ? `${plural(behind, late ? 'more task' : 'task', late ? 'more tasks' : 'tasks')} ${verb(behind)} running late` : ''].filter(Boolean).join(' and ') + '.';
 }
 const notLiveN = f => (f.notLive || f.blockers || []).length;
 /* R5: email-draft recipients = project resources as first.last@northwind.example (fictional domain) */
 function recipientsOf(docs, project) {
   const people = Object.fromEntries(list(docs, 'person').map(p => [p.id, p]));
   return [...new Set(project.resources || [])].map(id => people[id]).filter(Boolean).map(p => ({ name: p.name,
-    email: p.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z\s-]/g, '').trim().split(/\s+/).join('.') + '@northwind.example' }));
+    email: p.name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s-]/g, '').trim().split(/\s+/).join('.') + '@northwind.example' }));
 }
-function statusRules(f) {
+/* R7: the advanced appendix (earned value and testing terms) — only when the caller asks for it */
+function appendixOf(f) {
+  const ev = f.earnedValue, out = [];
+  if (ev && (ev.spi != null || ev.cpi != null)) out.push(`Earned value: schedule performance (SPI) ${ev.spi != null ? ev.spi.toFixed(2) : 'n/a'}, cost performance (CPI) ${ev.cpi != null ? ev.cpi.toFixed(2) : 'n/a'}` +
+    (ev.ac != null && ev.ev != null ? `; ${money(ev.ev)} of work earned for ${money(ev.ac)} spent` : '') + (ev.eac != null ? `; estimate at completion (EAC) ${money(ev.eac)}` : '') +
+    (ev.bac != null ? ` against a ${money(ev.bac)} budget` : '') + '.');
+  if (f.rag && f.rag.reasons) out.push(`Health (${RAG_WORD[f.rag.status]}): ${f.rag.reasons.join('; ')}.`);
+  ((f.readiness && f.readiness.failing) || []).forEach(c => out.push(`${c.label}: ${c.detail}`));
+  const behind = (f.atRisk || []).filter(w => w.slipDays);
+  if (behind.length) out.push(`Schedule slip: ${behind.map(w => `"${w.title}" ${plural(w.slipDays, 'day')}`).join(', ')}.`);
+  return out;
+}
+/* R7: every late task, then at most 3 that are running late (most days behind first); the rest as one line */
+function lateFirst(items) {
+  const late = items.filter(w => w.daysPastDue > 0), behind = items.filter(w => !(w.daysPastDue > 0)).sort((a, b) => (b.slipDays || 0) - (a.slipDays || 0));
+  const more = behind.length - 3;
+  return late.concat(behind.slice(0, 3)).map(atRiskLine).concat(more > 0 ? [`${plural(more, 'more task')} ${more === 1 ? 'is' : 'are'} running late`] : []);
+}
+const pendingWord = n => (n === 1 ? 'piece of information is' : 'pieces of information are');
+function statusRules(f, opts) {
   const s = f.stats || {};
-  const rag = f.rag || ragOf(f);
-  const finish = s.finish ? `forecast finish ${fd(s.finish)}` : 'no forecast yet';
-  const ev = f.earnedValue, hc = f.hypercare;
-  const lc = t => (/^[A-Z][a-z]/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t);
-  const evLine = ev && (ev.spi != null || ev.cpi != null)
-    ? `Earned value: schedule performance (SPI) ${ev.spi != null ? ev.spi.toFixed(2) : 'n/a'}, cost performance (CPI) ${ev.cpi != null ? ev.cpi.toFixed(2) : 'n/a'}` +
-      (ev.ac != null && ev.ev != null ? `; ${money(ev.ev)} of work earned for ${money(ev.ac)} spent` : '') + (ev.eac != null ? `; estimate at completion ${money(ev.eac)}` : '') +
-      (ev.bac != null ? ` against a ${money(ev.bac)} budget` : '') : null;
-  const hcLine = hc ? `Hypercare: ${hc.daysRemaining != null ? `${plural(hc.daysRemaining, 'day')} left` : 'in progress'}${hc.owner ? `, owner ${hc.owner}` : ''}; ${plural(hc.open.length, 'open incident')}` : null;
-  return {
-    rag: rag.status,
-    headline: `${RAG_WORD[rag.status]}: ${f.project.name} is ${RAG_PHRASE[rag.status]}, ${s.pct || 0}% done, ${finish} vs target ${fd(f.project.target)}`,
-    summary: `Status is ${RAG_WORD[rag.status]} because ${rag.reasons.map(lc).join('; ')}. ${s.done || 0} of ${s.total || 0} work items are done; ${finish} against a target of ${fd(f.project.target)}. ` +
-      `${lateSlip(f)} ${plural(notLiveN(f), 'data element')} ${notLiveN(f) === 1 ? 'is' : 'are'} not yet live.` + (evLine ? ` ${evLine}.` : '') + (hcLine ? ` ${hcLine}.` : ''),
-    highlights: [`${s.done || 0} of ${plural(s.total || 0, 'work item')} complete`]
-      .concat(f.readiness ? [f.readiness.pass ? 'Go-live gate passes' : `Go-live gate: ${plural(f.readiness.failing.length, 'check')} open`] : [])
-      .concat(evLine ? [evLine] : []).concat(hcLine ? [hcLine] : []),
-    risks: (hc ? hc.open.map(i => `Severity ${i.severity} incident "${i.title}" is open${i.severity === 1 ? ': consider rollback' : ''}`) : [])
-      .concat((f.atRisk || []).map(atRiskLine))
-      .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (impact ${r.impact}, likelihood ${r.likelihood}, owner ${r.owner})`))
+  const sum = f.summary || { sentence: '', label: LABELS[(f.rag || {}).status] || 'Not planned', rag: (f.rag || {}).status || 'grey' };
+  const hc = f.hypercare;
+  const nl = notLiveN(f);
+  const hcLine = hc ? `Support after launch: ${hc.daysRemaining != null ? `${plural(hc.daysRemaining, 'day')} left` : 'in progress'}${hc.owner ? `, led by ${hc.owner}` : ''}; ${plural(hc.open.length, 'open problem')}` : null;
+  const left = f.readiness ? f.readiness.failing.length : null;
+  const out = {
+    rag: sum.rag, label: sum.label, sentence: sum.sentence, date: f.today,
+    headline: `${sum.label}: ${f.project.name}`,
+    summary: [sum.sentence, `${s.done || 0} of ${plural(s.total || 0, 'task')} ${s.total === 1 ? 'is' : 'are'} done.`, lateLine(f),
+      nl ? `${nl} ${pendingWord(nl)} not connected yet.` : 'All the information it needs is connected.', hcLine ? hcLine + '.' : ''].filter(Boolean).join(' '),
+    highlights: [`${s.done || 0} of ${plural(s.total || 0, 'task')} done`]
+      .concat(left == null ? [] : [left ? `Not ready to launch: ${plural(left, 'thing')} left` : 'Ready to launch'])
+      .concat(hcLine ? [hcLine] : []),
+    risks: (hc ? hc.open.map(i => `${i.severity === 1 ? 'Serious problem' : 'Problem'} "${i.title}" is still open${i.severity === 1 ? ': consider rolling back the launch' : ''}`) : [])
+      .concat(lateFirst(f.atRisk || []))
+      .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (high impact; ${r.owner} is watching it)`))
       .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `${r.title}: all linked work is done, so it is likely mitigated. ${r.owner}: confirm and close.`)),
     asks: (f.blockers || []).map(b => b.state === 'pending'
-        ? `${b.owner}: confirm ${b.name} is live (the fix is done and awaits your confirmation)`
+        ? `${b.owner}: confirm ${b.name} is connected (the fix is done and waits for your confirmation)`
         : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
-      .concat((f.notLive || []).filter(b => b.state === 'example').map(b => `${b.owner}: provide a live source for ${b.name} (examples only today)`))
-      .concat((f.openDiscovered || []).map(x => `Resolve the discovered requirement on ${x.data}: ${x.requirement}`))
-      .concat((f.pendingGrants || []).map(g => `Decide on ${String(g.env).toUpperCase()} ${g.access} access to ${g.data} requested by ${g.requestedBy}`))
-      .concat(hc && hc.considerRollback ? [`${hc.owner || 'Hypercare owner'}: a severity 1 incident is open; decide whether to roll back`] : []),
+      .concat((f.notLive || []).filter(b => b.state === 'example').map(b => `${b.owner}: connect ${b.name} (only sample data today)`))
+      .concat((f.openDiscovered || []).map(x => `Settle the open question on ${x.data}: ${x.requirement}`))
+      .concat((f.pendingGrants || []).map(g => `Decide on temporary ${g.access} access to ${g.data} for ${ENV_PLAIN[String(g.env).toLowerCase()] || 'testing'}, requested by ${g.requestedBy}`))
+      .concat(hc && hc.considerRollback ? [`${hc.owner || 'The support lead'}: a serious problem is open; decide whether to roll back`] : []),
   };
+  if (opts && opts.advanced) out.appendix = appendixOf(f);
+  return out;
 }
+/* R7: the default report never uses jargon. AI text is mapped to plain words; a line that still needs jargon is dropped. */
+const JARGON = /\b(SPI|CPI|EAC|earned value|slip\w*|amber|UAT|SIT|go\/no-go|hypercare|RAG)\b/i;
+function plainWords(t) {
+  return String(t).replace(/\bUAT\b/g, 'business testing').replace(/\bSIT\b/g, 'system testing').replace(/\bhypercare\b/gi, 'support after launch')
+    .replace(/\bgo\/no-go\b/gi, 'final yes/no check').replace(/\bamber\b/gi, 'at risk').replace(/\bis slipping\b/gi, 'is running late')
+    .replace(/\bslipping\b/gi, 'running late').replace(/\bslipped\b/gi, 'ran late').replace(/\bslip(s)?\b/gi, 'delay$1');
+}
+const plainOk = t => !JARGON.test(t);
 
 /* ---------- SOP import (R2 rules parser) ---------- */
 const MAX_SOP = 20000;
@@ -413,12 +472,31 @@ function sopRules(text, docs) {
     const viaAlias = alias && people.find(p => p.bu === alias.bu);
     return viaAlias ? viaAlias.id : undefined;
   };
+  /* R7: a role nobody in the directory matches ("Employee", "Hiring manager") becomes the step's ownerRole */
+  const roleOf = (line) => {
+    const words = String(line).replace(/[^\w'&/ -]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length && DET.test(words[i])) i++;
+    for (let k = i; k < Math.min(words.length, i + 3); k++) {
+      const w = words[k].replace(/'s$/i, '');
+      if (VERBS.test(w) || STOP.has(w.toLowerCase())) return undefined;
+      if (ROLE_WORD.test(w) && !/^(department|desk|payable|receivable)$/i.test(w)) {
+        const nxt = words[k + 1] ? words[k + 1].toLowerCase() : '';
+        if (ROLE_WORD.test(nxt)) continue;                            /* "Finance director", "hiring manager" */
+        /* the role must be doing something: "Employee submits", "Manager must approve"; not "Employee bank details" */
+        if (!(VERBS.test(nxt) || /^(must|should|will|shall|may|can|needs|has|then|also|signs|pays)$/.test(nxt) || /[^s]s$|ed$/.test(nxt))) return undefined;
+        const role = words.slice(i, k + 1).map(x => (/^[A-Z]{2,4}$/.test(x) ? x : x.toLowerCase())).join(' ').replace(/'s$/i, '');
+        return role.length <= 40 ? cap(role) : undefined;
+      }
+    }
+    return undefined;
+  };
   const systemOf = (line) => { const m = SYSTEMS.find(x => new RegExp('\\b' + x + '\\b').test(line)); return m || undefined; };
   let seq = 0;
   const makeStep = (title, line) => {
     /* R4: titles are never truncated */
     const n = { id: 's' + (++seq), type: 'step', title: cap(tidy(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, ''))) };
-    const o = ownerOf(line); if (o) n.owner = o;
+    const o = ownerOf(line); if (o) n.owner = o; else { const r = roleOf(line); if (r) n.ownerRole = r; }
     const d = linkData(line, n); if (d.length) n.data = d;
     const sys = systemOf(line); if (sys) n.system = sys;
     return n;
@@ -451,7 +529,7 @@ function sopRules(text, docs) {
   };
   const newDecision = (title, yes) => ({ id: 'd' + (++seq), type: 'decision', title, branches: [{ label: 'Yes', nodes: yes }, { label: 'No', nodes: [] }] });
   const newParallel = branches => ({ id: 'p' + (++seq), type: 'parallel', title: 'In parallel', branches });
-  const branchLabel = (step, i) => { const p = people.find(x => x.id === step.owner); return (p && p.bu) || 'Branch ' + (i + 1); };
+  const branchLabel = (step, i) => { const p = people.find(x => x.id === step.owner); return (p && p.bu) || step.ownerRole || 'Branch ' + (i + 1); };
   /* R4: "return to step N" / "resubmit" -> goto on the branch */
   const gotoOf = (sen) => {
     const m = GOTO_RE.exec(sen);
@@ -557,11 +635,21 @@ function sopRules(text, docs) {
   }
   for (const pg of pendingGoto) { if (lineFirst[pg.num]) pg.branch.goto = lineFirst[pg.num]; }
   nodes.unshift({ id: 'k', type: 'trigger', title: trigger });
-  const decisions = nodes.filter(n => n.type === 'decision').length, parallels = nodes.filter(n => n.type === 'parallel').length;
-  return { nodes, newData,
-    notes: `Parsed ${plural(nodes.length - 1, 'top-level node')} after the trigger "${trigger}"${decisions ? `, ${plural(decisions, 'decision')}` : ''}${parallels ? `, ${plural(parallels, 'parallel gateway')}` : ''}. ` +
-      'Title, purpose and scope lines were skipped; sub-items were nested. Owners link only on a full name, business unit or role alias; data links only on a strong match. ' +
-      'Unmatched data is listed as proposals. Review before saving.' };
+  return { nodes, newData, notes: sopNotes(nodes) };
+}
+/* R7: short, plain parser notes (no "nodes", "gateways" or "trigger") */
+function sopNotes(nodes) {
+  const all = [];
+  const walk = ns => (ns || []).forEach(n => { all.push(n); (n.branches || []).forEach(b => walk(b.nodes)); });
+  walk(nodes);
+  const steps = all.filter(n => n.type === 'step');
+  const choices = all.filter(n => n.type === 'decision').length, together = all.filter(n => n.type === 'parallel').length;
+  const nobody = steps.filter(n => !n.owner && !n.ownerRole).length;
+  const roles = [...new Set(steps.filter(n => !n.owner && n.ownerRole).map(n => n.ownerRole))];
+  return [`Found ${plural(steps.length, 'step')}${choices ? `, ${plural(choices, 'choice')}` : ''}${together ? ` and ${plural(together, 'set')} of steps done at the same time` : ''}.`,
+    roles.length ? `${roles.join(', ')} ${roles.length === 1 ? 'is a role, not a named person' : 'are roles, not named people'}.` : '',
+    nobody ? `${plural(nobody, 'step')} ${nobody === 1 ? 'has' : 'have'} no one assigned yet.` : '',
+    'Check each step before saving.'].filter(Boolean).join(' ');
 }
 
 function sanitizeSop(out, docs) {
@@ -611,6 +699,7 @@ function sanitizeSop(out, docs) {
     if (!title) return null;
     const node = { id: idFor(n, 's'), type: 'step', title: title.slice(0, 300) };
     if (typeof n.owner === 'string' && peopleIds.has(n.owner)) node.owner = n.owner;
+    else if (typeof n.ownerRole === 'string' && n.ownerRole.trim()) node.ownerRole = tidy(n.ownerRole).slice(0, 40);
     const data = cleanData(n.data); if (data.length) node.data = data;
     const touches = strArr(n.touches, 4).map(x => x.slice(0, 40)); if (touches.length) node.touches = touches;
     if (typeof n.system === 'string' && n.system.trim()) node.system = n.system.trim().slice(0, 40);
@@ -622,7 +711,7 @@ function sanitizeSop(out, docs) {
   };
   const nodes = (Array.isArray(out && out.nodes) ? out.nodes : []).slice(0, 40).map(n => cleanNode(n, 0)).filter(Boolean);
   gotos.forEach(b => { if (!used.has(b.goto)) delete b.goto; });   /* drop loop-backs to unknown steps */
-  return { nodes, newData: props, notes: typeof (out && out.notes) === 'string' ? out.notes.slice(0, 600) : '' };
+  return { nodes, newData: props, notes: sopNotes(nodes) };
 }
 
 /* ---------- entry point ---------- */
@@ -639,13 +728,14 @@ async function run(kind, body, docs, today) {
       const people = list(docs, 'person').map(p => ({ id: p.id, name: p.name, role: p.role, bu: p.bu }));
       const data = list(docs, 'dataElement').map(d => ({ id: d.id, name: d.name, source: d.source, note: d.note }));
       const out = await chat(RULES + ' Convert the SOP into ordered process steps. Return {"nodes":[node],"newData":[{"name","reason"}],"notes"}. ' +
-        'A node is {"type":"step","title","owner"?,"data"?,"touches"?,"subs"?:[{"title","data"}]} or, for a condition such as an amount threshold or "approval required", ' +
+        'A node is {"type":"step","title","owner"?,"ownerRole"?,"data"?,"touches"?,"subs"?:[{"title","data"}]} or, for a condition such as an amount threshold or "approval required", ' +
         '{"type":"decision","title":"<condition>?","branches":[{"label":"Yes","nodes":[step]},{"label":"No","nodes":[]}]}. ' +
         'The first node is {"type":"trigger","title"} naming the SOP\'s stated start event, or "Process starts" if none is stated (never a copy of step 1). ' +
         'Work done "at the same time", "in parallel" or "simultaneously" becomes {"type":"parallel","title","branches":[{"label","nodes":[step]}]}. ' +
         '"Otherwise", "else" or "if not" goes in the No branch of the preceding decision. Every node has a short unique "id". ' +
         '"Resubmit" or "return to step N" sets "goto": <id of that step> on the branch (a loop-back). Never truncate titles. ' +
-        'Leave owner out unless a full name, business unit or role alias (e.g. AP clerk = Accounts Payable) matches; never default it. A step with an inline condition ' +
+        'Leave owner out unless a full name, business unit or role alias (e.g. AP clerk = Accounts Payable) matches; never default it. ' +
+        'When the SOP names a role that matches no supplied person (e.g. "Employee", "Manager"), set "ownerRole" to that role as written instead. A step with an inline condition ' +
         '("Manager approves. If over $5,000, Finance Director also approves.") becomes the main step followed by a decision whose Yes branch holds the conditional action. ' +
         'Steps may carry "system" when a named system (e.g. ERP, Concur, NetSuite, Workday, SharePoint, Teams, Outlook, DocuSign, Salesforce) is used. ' +
         'Skip title, purpose, scope, owner and revision lines. Lettered or indented sub-items become subs of the step above them. ' +
@@ -668,26 +758,45 @@ async function run(kind, body, docs, today) {
   const engine = loadEngine();
 
   if (kind === 'status-report') {
+    const advanced = body.advanced === true;
     const facts = statusFacts(docs, projectId, today, engine);
     const L = labeler(docs);
     const recipients = recipientsOf(docs, list(docs, 'project').find(p => p.id === projectId));
-    const fallback = Object.assign(L.scrub(statusRules(facts)), { recipients });
+    const fallback = Object.assign(L.scrub(statusRules(facts, { advanced })), { recipients });
     if (!configured()) return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) };
     try {
-      const out = await chat(RULES + ' Write a concise project status report for executives. Return ' +
-        '{"headline": string, "summary": string (2-3 sentences), "highlights": [string], "risks": [string], "asks": [string]}. ' +
-        'Refer to work, data and people only by the names and titles given; never output identifiers. ' +
-        'The headline MUST start with the supplied rag status word (Red, Amber or Green) and must not contradict it. ' +
-        'Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close". The rag reasons are the only reasons for the status: do not call the project off track or red for any other reason. ' +
-        'Mention earnedValue (SPI and CPI) when supplied, and when hypercare is supplied report days remaining and open incidents; an open severity 1 incident means "consider rollback".',
-        JSON.stringify(facts), 900);
+      /* the model gets plain facts only: no earned value, "behind" instead of "slip" (unless the reader asked for advanced) */
+      const sent = JSON.parse(JSON.stringify(facts));
+      if (!advanced) {
+        delete sent.earnedValue; delete sent.rag;
+        (sent.atRisk || []).forEach(w => { w.sched = w.sched === 'late' ? 'late' : 'running late'; w.daysBehindPlan = w.slipDays; delete w.slipDays; });
+        if (sent.stats) { sent.stats.runningLate = sent.stats.slip; delete sent.stats.slip; }
+        if (sent.readiness) sent.readiness.failing = sent.readiness.failing.map(c => ({ label: plainWords(c.label), detail: plainWords(c.detail) }));
+      }
+      const sum = facts.summary;
+      const out = await chat(RULES + ' Write a short project status report for a busy, non-technical reader. Use plain, everyday words at about an 8th-grade reading level: ' +
+        'short sentences, no acronyms and no project-management jargon (never say SPI, CPI, EAC, earned value, slip, amber, RAG, UAT, SIT, go/no-go or hypercare). ' +
+        'Return {"headline": string, "summary": string (2-3 sentences), "highlights": [string], "risks": [string], "asks": [string]}. ' +
+        'Refer to work, information and people only by the names and titles given; never output identifiers. ' +
+        `The headline MUST start with "${sum.label}:" and must not contradict it. The summary MUST start with this exact sentence: "${sum.sentence}" ` +
+        'Each ask names the person who needs to act and what to do. Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close". ' +
+        'When hypercare (support after launch) is supplied, report days left and open problems; an open severity 1 problem means "consider rolling back".' +
+        (advanced ? ' The reader asked for advanced detail: you may add earned value (SPI, CPI) in one highlight.' : ''),
+        JSON.stringify(sent), 900);
       if (typeof out.headline !== 'string' || typeof out.summary !== 'string') throw new Error('shape');
-      /* the headline must agree with the computed RAG (R3) */
-      const want = facts.rag.status, other = Object.keys(RAG_WORD).filter(k => k !== want);
-      const conflicts = other.some(k => new RegExp('\\b(' + RAG_WORD[k] + '|' + RAG_PHRASE[k] + ')\\b', 'i').test(out.headline));
-      out.headline = conflicts ? fallback.headline : (new RegExp('^' + RAG_WORD[want] + '\\b').test(out.headline) ? out.headline : `${RAG_WORD[want]}: ${out.headline}`);
-      return { status: 200, body: Object.assign(L.scrub({ headline: out.headline.slice(0, 200), summary: out.summary.slice(0, 1200),
-        highlights: strArr(out.highlights), risks: strArr(out.risks), asks: strArr(out.asks) }), { rag: facts.rag.status, recipients, source: 'ai', facts }) };
+      /* the headline must agree with the label (R3/R7) and the summary leads with the sentence */
+      const others = Object.values(LABELS).filter(x => x !== sum.label).concat(['Red', 'Amber', 'Green']);
+      let headline = plainWords(out.headline.trim());
+      if (others.some(x => new RegExp('\\b' + x + '\\b', 'i').test(headline)) || !plainOk(headline)) headline = fallback.headline;
+      else if (!headline.toLowerCase().startsWith(sum.label.toLowerCase())) headline = `${sum.label}: ${headline}`;
+      let summary = plainWords(out.summary.trim());
+      if (!advanced && !plainOk(summary)) summary = fallback.summary;
+      else if (!summary.startsWith(sum.sentence)) summary = `${sum.sentence} ${summary.replace(sum.sentence, '').trim()}`.trim();
+      const arr = a => strArr(a).map(plainWords).filter(x => advanced || plainOk(x));
+      const res = L.scrub({ headline: headline.slice(0, 200), summary: summary.slice(0, 1200), highlights: arr(out.highlights), risks: arr(out.risks), asks: arr(out.asks) });
+      Object.assign(res, { rag: sum.rag, label: sum.label, sentence: sum.sentence, date: today, recipients, source: 'ai', facts });
+      if (advanced) res.appendix = fallback.appendix;
+      return { status: 200, body: res };
     } catch (e) { return { status: 200, body: Object.assign(fallback, { source: 'rules', facts }) }; }
   }
 
@@ -708,4 +817,4 @@ async function run(kind, body, docs, today) {
   return { status: 400, body: { error: 'unknown ai kind' } };
 }
 
-module.exports = { run, KINDS, configured, sopRules, statusRules, statusFacts, labeler };
+module.exports = { run, KINDS, configured, sopRules, statusRules, statusFacts, labeler, _sanitizeSop: sanitizeSop };

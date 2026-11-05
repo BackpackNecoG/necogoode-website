@@ -574,6 +574,53 @@
     return sm;
   }
 
+  // BU sections: a step belongs to its owner's BU plus every BU named (case-insensitive) in its touches tags;
+  // trigger touches count too. Known BU names include those of people plus KNOWN_BUS (a BU may have no person).
+  // R7: role-only steps (ownerRole, no owner) belong to no section.
+  function sectionHelpers(people) {
+    const buOf = pid => people[pid] && people[pid].bu || null;
+    const peopleBus = [...new Set(Object.keys(people).map(k => people[k] && people[k].bu).filter(Boolean))];
+    const allBus = [...new Set(peopleBus.concat(KNOWN_BUS))];
+    const stepBus = st => {
+      const set = new Set();
+      if (!st.owner && String(st.ownerRole || '').trim()) return [];
+      const ob = buOf(st.owner); if (ob) set.add(ob);
+      (st.touches || []).forEach(tag => { const tl = String(tag || '').trim().toLowerCase(); allBus.forEach(b => { if (b.toLowerCase() === tl) set.add(b); }); });
+      return [...set];
+    };
+    return { buOf, peopleBus, allBus, stepBus };
+  }
+  // R7: a runbook task belongs to the section of its owner's BU (or task.bu when set).
+  function taskBu(people, t) { return (t && t.bu) || (t && people[t.owner] && people[t.owner].bu) || null; }
+  function hashStr(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
+  // R7 per-section fingerprint for re-approval scoping. Save it on the approval (approval.fingerprint) when a
+  // section is approved; readiness then makes that section stale only when ITS OWN steps, information
+  // definitions, tests or launch-day tasks changed. Format "s:<h>;d:<h>;t:<h>;c:<h>".
+  function sectionParts(docs, project, bu) {
+    const people = personMap(docs);
+    const { stepBus } = sectionHelpers(people);
+    const stepsOut = [];
+    linkedProcesses(docs, project).forEach(p => allNodes(p.tobe).forEach(n => {
+      if (!n || isGateway(n) || n.type === 'end') return;
+      if (!stepBus(n).includes(bu)) return;
+      stepsOut.push({ pid: p.id, id: n.id, title: n.title || '', type: n.type || '', owner: n.owner || '', data: stepData(n).slice().sort(),
+        touches: (n.touches || []).map(String).sort(), subs: (n.subs || []).map(x => x && x.title || ''), sla: n.sla == null ? '' : n.sla, system: n.system || '', calls: n.calls || '' });
+    }));
+    const dataIds = [...new Set(stepsOut.flatMap(x => x.data))].sort();
+    const dataOut = dataIds.map(id => { const d = get(docs, 'dataElement', id) || {}; return { id, name: d.name || '', fields: d.fields || [] }; });
+    const testsOut = list(docs, 'testCase').filter(c => dataIds.includes(c.dataId)).map(c => ({ id: c.id, dataId: c.dataId, field: c.field || '', kind: c.kind || '', input: c.input == null ? '' : c.input, expect: c.expect || '' }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const tasks = (project.cutover && Array.isArray(project.cutover.tasks) ? project.cutover.tasks.filter(Boolean) : []).filter(t => taskBu(people, t) === bu)
+      .map(t => ({ id: t.id || '', task: t.task || t.title || '', owner: t.owner || '', gonogo: !!t.gonogo, order: t.order == null ? '' : t.order, plannedStart: t.plannedStart || '', durationMins: t.durationMins == null ? '' : t.durationMins }));
+    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)) };
+  }
+  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c; }
+  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtc]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function sectionFingerprint(docs, projectId, bu) {
+    const project = get(docs, 'project', projectId);
+    return project ? fpString(sectionParts(docs, project, bu)) : '';
+  }
+
   function readiness(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
     if (!project) {
@@ -598,17 +645,7 @@
     const workIdx = byId(work);
     const wt = id => (workIdx[id] && workIdx[id].title) || 'a deleted work item';
     const checks = [];
-    const buOf = pid => people[pid] && people[pid].bu || null;
-    // BU sections: a step belongs to its owner's BU plus every BU named (case-insensitive) in its touches tags;
-    // trigger touches count too. Known BU names include those of people plus KNOWN_BUS (a BU may have no person).
-    const peopleBus = [...new Set(Object.keys(people).map(k => people[k] && people[k].bu).filter(Boolean))];
-    const allBus = [...new Set(peopleBus.concat(KNOWN_BUS))];
-    const stepBus = st => {
-      const set = new Set();
-      const ob = buOf(st.owner); if (ob) set.add(ob);
-      (st.touches || []).forEach(tag => { const tl = String(tag || '').trim().toLowerCase(); allBus.forEach(b => { if (b.toLowerCase() === tl) set.add(b); }); });
-      return [...set];
-    };
+    const { buOf, peopleBus, stepBus } = sectionHelpers(people);
     const stepBuIdx = {};
     steps.forEach(x => { stepBuIdx[x.pid + '/' + x.s.id] = stepBus(x.s); });
     const workBus = w => stepBuIdx[w.pid + '/' + w.step] || [buOf(w.owner)].filter(Boolean);
@@ -655,7 +692,7 @@
       const where = ' in ' + (p.name || 'a linked process');
       // R6: wait and message nodes need no owner; a subprocess must call an existing (other) process.
       flatSteps(p.tobe).forEach(s => {
-        if (!s.owner && s.type !== 'wait' && s.type !== 'message') problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || 'untitled') + '"' + where + ' has no owner' });
+        if (!s.owner && !String(s.ownerRole || '').trim() && s.type !== 'wait' && s.type !== 'message') problems.push({ pid: p.id, node: s.id, problem: 'Step "' + (s.title || 'untitled') + '"' + where + ' has no owner' });
         if (s.type === 'subprocess') {
           if (!s.calls || !procExists(s.calls)) problems.push({ pid: p.id, node: s.id, problem: 'Subprocess "' + (s.title || 'untitled') + '"' + where + (s.calls ? ' calls a process that does not exist' : ' does not say which process it calls') });
           else if (s.calls === p.id) problems.push({ pid: p.id, node: s.id, problem: 'Subprocess "' + (s.title || 'untitled') + '"' + where + ' calls its own process' });
@@ -668,7 +705,7 @@
       });
     });
     checks.push({ id: 'process-valid', label: 'Process design is valid', pass: problems.length === 0,
-      detail: problems.length ? problems.map(x => x.problem).join('. ') + '.' : 'Every step has an owner and every gateway is well formed.',
+      detail: problems.length ? problems.map(x => x.problem).join('. ') + '.' : 'Every step has an owner (a person or a role) and every gateway is well formed.',
       items: problems.map(x => x.pid + ':' + x.node), problems });
 
     // tests-passed (environments dev | sit | uat | prod-verify):
@@ -755,40 +792,87 @@
     // bu-signoff: latest approval per BU approved with step-up and not stale.
     // The project owner's approvals never count (independence of evidence).
     // The release manager (defaults to the owner) is excluded too (separation of duties).
+    // R7: approvals count any time (no lock behind the other checks); staleness is scoped per section.
     const releaseManager = project.releaseManager || project.owner || null;
     const excluded = [...new Set([project.owner, releaseManager].filter(Boolean))];
     const allApprovals = list(docs, 'approval').filter(a => a.projectId === projectId);
     const approvals = allApprovals.filter(a => !excluded.includes(a.approver));
     const ownerApprovals = allApprovals.length - approvals.length;
     const bus = [...new Set(steps.flatMap(x => stepBus(x.s)).concat(procs.flatMap(p => triggers(p).flatMap(stepBus))))].sort();
-    const noPerson = bus.filter(b => !peopleBus.includes(b));
-    const validFor = bu => {
+    // R7 eligibility: BU members other than the PM and launch owner, plus project.approvers[bu] (never the PM or
+    // launch owner). A section with nobody eligible needs an approver chosen; suggestion = the process owner.
+    const validForRaw = bu => {
       const latest = latestBy(approvals.filter(a => a.bu === bu), 'at');
       return latest && latest.decision === 'approved' && latest.stepUp === true ? latest : null;
     };
+    const overrides = project.approvers && typeof project.approvers === 'object' ? project.approvers : {};
+    const eligible = {};
+    bus.forEach(bu => {
+      const e = Object.keys(people).filter(id => people[id] && people[id].bu === bu && !excluded.includes(id));
+      const o = overrides[bu];
+      if (o && people[o] && !excluded.includes(o) && !e.includes(o)) e.push(o);
+      eligible[bu] = e;
+    });
+    const needsApprover = bus.filter(bu => !eligible[bu].length && !validForRaw(bu));
+    const suggestions = {};
+    needsApprover.forEach(bu => {
+      const p = procs.find(pp => allNodes(pp.tobe).some(n => n && !isGateway(n) && stepBus(n).includes(bu)));
+      const cand = [p && p.owner].concat(procs.map(pp => pp.owner)).find(id => id && people[id] && !excluded.includes(id));
+      suggestions[bu] = cand || null;
+    });
+    const noPerson = needsApprover;
+    const validFor = bu => validForRaw(bu);
     const apprAt = a => String(a.snapshotAt || a.at || '');
+    const coTasks = Array.isArray((project.cutover || {}).tasks) ? project.cutover.tasks.filter(Boolean) : [];
+    const taskStamps = coTasks.some(t => t.updatedAt);
+    const PART_LABEL = { s: 'its steps', d: 'its information', t: 'its tests', c: 'its launch-day tasks' };
     const changedSince = bu => {
       const a = validFor(bu); if (!a) return [];
       const t = apprAt(a), out = [];
-      if (project.cutoverUpdatedAt && String(project.cutoverUpdatedAt) > t) out.push({ ref: 'project:' + project.id + '#cutover', label: 'the cutover plan' });
       work.forEach(w => { if (w.updatedAt && String(w.updatedAt) > t && workBus(w).includes(bu)) out.push({ ref: 'workItem:' + w.id, label: w.title || 'untitled item' }); });
-      procs.forEach(p => { if (p.updatedAt && String(p.updatedAt) > t && procBus(p).includes(bu)) out.push({ ref: 'process:' + p.id, label: 'the ' + (p.name || 'linked') + ' process' }); });
+      if (a.fingerprint) {
+        // R7 exact scope: compare the section's own content with what was approved.
+        const was = fpParse(a.fingerprint), now = sectionParts(docs, project, bu);
+        ['s', 'd', 't'].forEach(k => { if (was[k] != null && was[k] !== now[k]) out.push({ ref: 'section:' + bu + '#' + k, label: PART_LABEL[k] }); });
+        if (was.c != null && was.c !== now.c) out.push({ ref: 'project:' + project.id + '#cutover', label: 'the launch-day plan' });
+        return out;
+      }
+      // Timestamps (approvals without a fingerprint). Launch-day plan: only sections owning affected tasks.
+      const mine = coTasks.filter(x => taskBu(people, x) === bu);
+      const coChanged = taskStamps ? mine.some(x => x.updatedAt && String(x.updatedAt) > t)
+        : !!(project.cutoverUpdatedAt && String(project.cutoverUpdatedAt) > t && mine.length);
+      if (coChanged) out.push({ ref: 'project:' + project.id + '#cutover', label: 'the launch-day plan' });
+      procs.forEach(p => {
+        if (!(p.updatedAt && String(p.updatedAt) > t)) return;
+        const nodes = allNodes(p.tobe).filter(n => n && !isGateway(n));
+        // Step-level stamps scope the change to the sections of the changed steps; else the whole process.
+        const hit = nodes.some(n => n.updatedAt) ? nodes.some(n => n.updatedAt && String(n.updatedAt) > t && stepBus(n).includes(bu)) : procBus(p).includes(bu);
+        if (hit) out.push({ ref: 'process:' + p.id, label: 'the ' + (p.name || 'linked') + ' process' });
+      });
       return out;
     };
-    const unsigned = bus.filter(bu => !noPerson.includes(bu) && !validFor(bu));
+    const unsigned = bus.filter(bu => !needsApprover.includes(bu) && !validFor(bu));
     const stale = bus.filter(bu => validFor(bu)).map(bu => ({ bu, changed: changedSince(bu) })).filter(x => x.changed.length);
     const staleSet = new Set(stale.map(x => x.bu));
+    const pnSafe = id => (people[id] && people[id].name) || null;
     const buDetail = [];
     if (!bus.length) buDetail.push('No business units own steps in the linked processes.');
-    noPerson.forEach(b => buDetail.push('No approver in ' + b + ': assign one.'));
+    needsApprover.forEach(b => buDetail.push('No approver in ' + b + ': assign one.' + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
     if (unsigned.length) buDetail.push('Waiting for sign-off from ' + joinList(unsigned) + '.');
     stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + ' changed after sign-off.'));
-    if (bus.length && !unsigned.length && !stale.length && !noPerson.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
+    if (bus.length && !unsigned.length && !stale.length && !needsApprover.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
     const exclNames = joinList(excluded.map(pn));
     const exclRole = excluded.length > 1 ? 'the project owner and release manager' : releaseManager === project.owner ? 'the project owner' : 'the release manager';
     if (ownerApprovals) buDetail.push('Approvals by ' + exclRole + ' (' + exclNames + ') do not count.');
-    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0 && stale.length === 0 && noPerson.length === 0,
-      detail: buDetail.join(' '), items: noPerson.concat(unsigned, stale.map(x => x.bu)), unsigned, noPerson, sections: bus, excludedApprover: project.owner || null, excludedApprovers: excluded, releaseManager,
+    // Launch owner's own check: the launch-day plan changed after the latest current approval (informational).
+    const currentAts = bus.filter(bu => validFor(bu) && !staleSet.has(bu)).map(bu => apprAt(validFor(bu))).sort();
+    const coAt = [project.cutoverUpdatedAt].concat(coTasks.map(x => x.updatedAt)).filter(Boolean).map(String).sort().pop() || null;
+    const launchOwnerReview = { person: releaseManager, needed: !!(coAt && currentAts.length && coAt > currentAts[currentAts.length - 1]) };
+    const sectionStatus = bus.map(bu => ({ bu, approved: !!validFor(bu), approval: validFor(bu) ? validFor(bu).id || null : null, stale: staleSet.has(bu),
+      needsApprover: needsApprover.includes(bu), eligible: eligible[bu].slice(), suggestion: suggestions[bu] || null, override: overrides[bu] || null }));
+    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: bus.length > 0 && unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0,
+      detail: buDetail.join(' '), items: needsApprover.concat(unsigned, stale.map(x => x.bu)), unsigned, noPerson, needsApprover, eligible, suggestions, sectionStatus, launchOwnerReview,
+      sections: bus, excludedApprover: project.owner || null, excludedApprovers: excluded, releaseManager,
       stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)) })) });
 
     // two-person: approved, non-stale approvals only (matches the sign-off panel).
@@ -824,7 +908,8 @@
     }));
     const excList = [...excRefs.values()];
     const excW = excList.filter(c => c.ref.startsWith('workItem:')), excP = excList.filter(c => c.ref.startsWith('process:'));
-    const excNames = excW.map(c => '"' + c.label + '"').concat(excP.map(c => c.label));
+    const excS = excList.filter(c => c.ref.startsWith('section:'));
+    const excNames = excW.map(c => '"' + c.label + '"').concat(excP.map(c => c.label), excS.map(c => c.ref.slice(8, c.ref.indexOf('#')) + "'s " + c.label.replace(/^its /, '')));
     const exDetail = [];
     if (excNames.length) exDetail.push(capFirst(joinList(excNames, 5)) + (excNames.length === 1 ? ' was' : ' were') + ' changed after sign-off; ' + (excNames.length === 1 ? 'its section needs' : 'those sections need') + ' re-approval.');
     if (cutoverBus.length) exDetail.push('Cutover plan changed after ' + joinList(cutoverBus.slice().sort()) + ' sign-off.');
@@ -839,11 +924,11 @@
     if (overdueTasks.length) exDetail.push(nWord(overdueTasks.length, 'runbook task') + ' ' + isAre(overdueTasks.length) + ' overdue: ' + joinList(overdueTasks.map(t => '"' + (t.task || t.title || 'untitled task') + '"'), 3) + '.');
     checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: excNames.length === 0 && cutoverBus.length === 0 && overdueTasks.length === 0, warning: true,
       detail: exDetail.length ? exDetail.join(' ') : 'No work or process changed after sign-off.',
-      items: excW.map(c => c.ref.slice('workItem:'.length)).concat(excP.map(c => c.ref), cutoverBus.length ? ['cutover'] : [], overdueTasks.map(t => 'task:' + (t.id || t.task || ''))),
+      items: excW.map(c => c.ref.slice('workItem:'.length)).concat(excP.map(c => c.ref), excS.map(c => c.ref), cutoverBus.length ? ['cutover'] : [], overdueTasks.map(t => 'task:' + (t.id || t.task || ''))),
       cutoverBus, overdueTasks: overdueTasks.map(t => t.id || t.task || '') });
 
     checks.forEach(finishCheck);
-    // Sign-off opens only when every other blocking check passes.
+    // R7: signoffOpen is informational only (every other blocking check passes); approvals count any time.
     const signoffOpen = checks.filter(c => !c.warning && c.id !== 'bu-signoff' && c.id !== 'two-person').every(c => c.pass);
     return { pass: checks.filter(c => !c.warning).every(c => c.pass), checks, summary: summarize(checks), signoffOpen };
   }
@@ -1394,6 +1479,11 @@
       // Profile edge cases
       const col = columnFor(f, cols);
       if (!col) continue;
+      // R7: observed numeric min/max become boundary tests where the spec sets no bound on that side (a spec bound
+      // already has its own boundary cases). Min/max are profile statistics, never row values of id-like columns.
+      const numF = sp.type === 'number' || sp.type === 'currency';
+      if (numF && sp.minVal == null && col.min != null && isFinite(+col.min)) { const v = sp.type === 'currency' ? (+col.min).toFixed(2) : String(+col.min); add(f, 'boundary', v, ok(v), 'profile', 'Smallest value seen in the sample (' + v + ')'); }
+      if (numF && sp.maxVal == null && col.max != null && isFinite(+col.max)) { const v = sp.type === 'currency' ? (+col.max).toFixed(2) : String(+col.max); add(f, 'boundary', v, ok(v), 'profile', 'Largest value seen in the sample (' + v + ')'); }
       if (isFreeText(sp)) (col.specials || []).forEach(c => {   // R6: free text only (no "1-2-3456789" for an EIN)
         const base = chars(valid);
         const input = base.length > 1 ? base[0] + c + base.slice(1).join('') : base.join('') + c;
@@ -1423,6 +1513,31 @@
       if (col.nulls > 0) add(f, 'edge', '', ok(''), 'profile', 'Empty values observed (' + col.nulls + ')');
     }
     return out;
+  }
+
+  // R7 "Use these columns as the rules to test": spec fields from a profile (profileCsv columns or a profile doc).
+  // type: currency (numbers with 2 decimals) | number | date (YYYY-MM-DD) | digits (digit strings, e.g. codes) | text;
+  // required when the column has no empty values; digits: exact length when every value has the same length,
+  // else min/max length; text: min/max length; number/currency: min/max value. All from observed values.
+  function specFromProfile(profile) {
+    return columnsOf(profile).filter(c => c && c.name).map(c => {
+      const pats = (c.patterns || []).map(p => String(p.pattern || ''));
+      const present = (c.rows != null ? +c.rows : 0) - (+c.nulls || 0);
+      const cls = c.charClasses || [];
+      let type = 'text';
+      if (c.min != null && c.max != null && isFinite(+c.min) && isFinite(+c.max)) type = pats.length && pats.every(p => /\.(9\{2\}|99)$/.test(p)) ? 'currency' : 'number';
+      else if (pats.length && pats.every(p => p === '9{4}-9{2}-9{2}')) type = 'date';
+      else if (cls.length === 1 && cls[0] === 'digits') type = 'digits';
+      const f = { name: String(c.name), type, required: (+c.nulls || 0) === 0 && (c.rows == null || present > 0), origin: 'profile' };
+      if (type === 'number' || type === 'currency') { f.min = +c.min; f.max = +c.max; f.format = type; }
+      else if (type === 'digits') {
+        if (c.minLen && c.minLen === c.maxLen) { f.length = +c.minLen; f.format = c.minLen + ' digits'; }
+        else { if (c.minLen) f.min = +c.minLen; if (c.maxLen) f.max = +c.maxLen; f.format = 'digits'; }
+      } else if (type === 'date') f.format = 'date';
+      else { if (c.minLen) f.min = +c.minLen; if (c.maxLen) f.max = +c.maxLen; f.format = 'text'; }
+      f.rule = f.required ? 'Required' : '';
+      return f;
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -2069,7 +2184,189 @@
     return out;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* R7 SIMPLICITY: plain-language summaries. No internal ids in text.   */
+  /* ------------------------------------------------------------------ */
+  function projOf(docs, prj) { return typeof prj === 'string' ? get(docs, 'project', prj) : (prj && prj.id ? get(docs, 'project', prj.id) || prj : null); }
+  function nameOf(docs, id) { const p = personMap(docs)[id]; return (p && p.name) || 'someone'; }
+  function dataName(docs, id) { const d = get(docs, 'dataElement', id); return (d && d.name) || 'some information'; }
+
+  // R7 one label set for information state, used on every page.
+  const AVAIL_LABELS = {
+    live: { key: 'connected', label: 'Connected', tone: 'green' },
+    example: { key: 'sample', label: 'Sample only', tone: 'amber' },
+    missing: { key: 'notyet', label: 'Not available yet', tone: 'red' },
+    pending: { key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' },
+  };
+  function availLabel(docs, dataId) { return Object.assign({}, AVAIL_LABELS[effectiveAvail(docs, dataId)] || AVAIL_LABELS.missing); }
+
+  // Rough plain distance between two dates: "3 days", "about 2 weeks", "about 3 months".
+  function roughGap(days) {
+    days = Math.abs(days);
+    if (days < 10) return nWord(days, 'day');
+    if (days < 60) return 'about ' + nWord(Math.round(days / 7), 'week');
+    return 'about ' + nWord(Math.round(days / 30), 'month');
+  }
+  const RAG_LABEL = { green: 'On track', amber: 'At risk', red: 'Off track', grey: 'Not planned' };
+
+  // R7 "Are we on track?" in plain words, consistent with projectHealth (same rag, same rule).
+  // who: [{person (person id), name, action}] — the people who need to act, most important first.
+  function projectSummary(docs, prj, today) {
+    const project = projOf(docs, prj);
+    if (!project) return { sentence: 'This project could not be found.', rag: 'grey', label: RAG_LABEL.grey, who: [] };
+    const items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    const fc = forecastAll(docs, today);
+    const allDone = items.length > 0 && items.every(w => w.status === 'done');
+    const finish = allDone ? maxDate(items.map(w => w.doneAt || w.due)) : maxDate(items.filter(w => w.status !== 'done').map(w => fc[w.id].forecast));
+    const h = healthOf(docs, project, items, fc, finish, allDone, today);
+    const rag = h.rag, label = RAG_LABEL[rag];
+    const who = [];
+    const addWho = (person, action) => { if (person && !who.some(x => x.person === person && x.action === action)) who.push({ person, name: nameOf(docs, person), action }); };
+    if (rag === 'grey') {
+      addWho(project.owner, 'Add the work or accept a suggested plan');
+      return { sentence: 'No work has been planned yet, so there is nothing to track. Next: add the work or accept a suggested plan.', rag, label, who };
+    }
+    const target = isDate(project.target) ? project.target : null;
+    let timing;
+    if (allDone) timing = 'All work is done' + (finish ? ', finished ' + fmtDay(finish) : '') + '.';
+    else if (!finish) timing = 'The work has no dates yet.';
+    else if (!target) timing = 'Expected ' + fmtDay(finish) + '. No deadline is set.';
+    else if (finish === target) timing = 'Expected ' + fmtDay(finish) + ', right on the deadline.';
+    else if (finish < target) timing = 'Expected ' + fmtDay(finish) + ', ' + roughGap(diffDays(target, finish)) + ' before the ' + fmtDay(target) + ' deadline.';
+    else timing = 'Expected ' + fmtDay(finish) + ', ' + roughGap(diffDays(finish, target)) + ' after the ' + fmtDay(target) + ' deadline.';
+    if (rag === 'green') return { sentence: timing + (allDone ? '' : ' Nothing needs attention right now.'), rag, label, who };
+
+    // What needs attention, most important first.
+    const issues = [];
+    if (rag === 'red') {
+      unplannedMissing(docs, project).forEach(id => {
+        const d = get(docs, 'dataElement', id);
+        const person = (d && d.owner) || project.owner;
+        issues.push({ text: dataName(docs, id) + ' is not available yet and no work is planned to get it' + (person ? ' (' + nameOf(docs, person) + ')' : ''), person, action: 'Plan work to get ' + dataName(docs, id) });
+      });
+    }
+    const open = items.filter(w => w.status !== 'done');
+    const openIds = new Set(open.map(w => w.id));
+    const holding = w => dependents(docs, w.id).filter(id => openIds.has(id)).length;
+    const late = open.filter(w => fc[w.id] && fc[w.id].sched === 'late').map(w => ({ w, n: holding(w) })).sort((a, b) => b.n - a.n);
+    late.forEach(({ w, n }) => issues.push({
+      text: capFirst(w.title || 'A task') + ' is late' + (n ? ' and holding up ' + nWord(n, 'other task') : '') + (w.owner ? ' (' + nameOf(docs, w.owner) + ')' : ''),
+      person: w.owner, action: 'Finish ' + (w.title || 'the late task') + (isDate(w.due) ? ' (was due ' + fmtDay(w.due) + ')' : '') }));
+    const causing = open.filter(w => fc[w.id] && fc[w.id].sched !== 'late' && fc[w.id].causesSlip).map(w => ({ w, n: holding(w) })).sort((a, b) => b.n - a.n);
+    causing.forEach(({ w, n }) => issues.push({
+      text: capFirst(w.title || 'A task') + ' is delaying ' + (n ? nWord(n, 'other task') : 'other work') + (w.owner ? ' (' + nameOf(docs, w.owner) + ')' : ''),
+      person: w.owner, action: 'Speed up ' + (w.title || 'the task') }));
+    const runningLate = open.filter(w => fc[w.id] && fc[w.id].sched === 'slip').length;
+    if (!late.length && !causing.length && runningLate) issues.push({ text: nWord(runningLate, 'task') + ' ' + (runningLate === 1 ? 'is' : 'are') + ' running late', person: project.owner, action: 'Review the tasks that are running late' });
+    const buffer = target && finish && !allDone ? businessDaysBetween(finish, target) : null;
+    if (rag === 'amber' && buffer != null && buffer < 5) issues.push({ text: 'There ' + (buffer === 1 ? 'is' : 'are') + ' only ' + nWord(buffer, 'working day') + ' to spare before the deadline', person: project.owner, action: 'Look for work that can finish sooner' });
+    if (!issues.length) issues.push({ text: rag === 'red' ? 'The work will not finish by the deadline' : 'Some work needs attention', person: project.owner, action: 'Review the plan' });
+    issues.forEach(x => addWho(x.person, x.action));
+    const more = issues.length - 1;
+    const sentence = timing + ' ' + capFirst(issues[0].text) + '.' + (more > 0 ? ' ' + nWord(more, 'other thing') + ' also need' + (more === 1 ? 's' : '') + ' attention.' : '');
+    return { sentence, rag, label, who };
+  }
+
+  // R7 "Is testing finished?" in one line. done mirrors the tests-passed gate check.
+  function testingSummary(docs, prj) {
+    const project = projOf(docs, prj);
+    if (!project) return { done: false, sentence: 'This project could not be found.', nextAction: { key: 'none', label: 'Nothing to do' } };
+    const r = readiness(docs, project.id, null);
+    const c = (r.checks || []).find(x => x.id === 'tests-passed');
+    if (r.released) return { done: true, sentence: 'Yes: testing was finished before launch.', nextAction: { key: 'none', label: 'Nothing left to test' } };
+    if (!c) return { done: false, sentence: 'Not yet: no tests have been set up.', nextAction: { key: 'generate', label: 'Generate the tests' } };
+    const n = a => (a || []).length;
+    if (c.pass) {
+      const passed = c.byEnv && c.byEnv.uat ? c.byEnv.uat.pass : 0;
+      return { done: true, sentence: 'Yes: all ' + nWord(passed, 'business test') + ' passed and no problems are open.', nextAction: { key: 'none', label: 'Nothing left to test' } };
+    }
+    const parts = [];
+    const noDevRun = /\bNo dev\b/.test(String(c.detail || ''));
+    if (n(c.unrun)) parts.push(nWord(n(c.unrun), 'business test') + ' ' + (n(c.unrun) === 1 ? "hasn't" : "haven't") + ' been run');
+    if (n(c.failing)) parts.push(nWord(n(c.failing), 'test') + ' failed');
+    if (n(c.blocked)) parts.push(nWord(n(c.blocked), 'business test') + ' ' + (n(c.blocked) === 1 ? 'is' : 'are') + ' blocked');
+    if (n(c.uncoveredFields)) parts.push(nWord(n(c.uncoveredFields), 'rule') + ' ' + (n(c.uncoveredFields) === 1 ? 'has' : 'have') + ' no test');
+    if (n(c.noCases)) parts.push(nWord(n(c.noCases), 'piece') + ' of information ' + (n(c.noCases) === 1 ? 'has' : 'have') + ' no tests');
+    if (n(c.defects)) parts.push(nWord(n(c.defects), 'problem') + ' ' + (n(c.defects) === 1 ? 'is' : 'are') + ' still open');
+    if (n(c.noEvidence)) parts.push(nWord(n(c.noEvidence), 'passed business test') + ' ' + (n(c.noEvidence) === 1 ? 'needs' : 'need') + ' evidence');
+    if (noDevRun) parts.push('the build tests have not been run');
+    let next;
+    if (n(c.uncoveredFields) || n(c.noCases)) next = { key: 'generate', label: 'Generate the missing tests' };
+    else if (n(c.failing)) next = { key: 'fix', label: 'Fix the failed tests' };
+    else if (n(c.defects)) next = { key: 'problems', label: 'Close the open problems' };
+    else if (n(c.unrun) || n(c.blocked)) next = { key: 'run', label: 'Run the business tests' };
+    else if (n(c.noEvidence)) next = { key: 'evidence', label: 'Add evidence to the passed tests' };
+    else if (noDevRun) next = { key: 'run-build', label: 'Run the build tests' };
+    else next = { key: 'review', label: 'Review the test results' };
+    if (!parts.length) parts.push('some tests still need attention');
+    return { done: false, sentence: 'Not yet: ' + joinList(parts) + '. Next: ' + next.label.charAt(0).toLowerCase() + next.label.slice(1) + '.', nextAction: next };
+  }
+
+  // R7 "Steps to launch": the readiness checks as an ordered plain checklist.
+  // [{key, label, done, who: [personId], action, next}] — `next` marks the first step not done.
+  function launchSteps(docs, prj, today) {
+    const project = projOf(docs, prj);
+    if (!project) return [];
+    const r = readiness(docs, project.id, today);
+    const ck = id => (r.checks || []).find(c => c.id === id) || { pass: !!r.released };
+    const owner = project.owner || null;
+    const lo = project.releaseManager || project.owner || null;
+    const live = project.status === 'live' || !!r.released;
+    const items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    const people = personMap(docs);
+    const uniq = a => [...new Set(a.filter(Boolean))];
+    const steps = [];
+    // 1. Plan the work
+    const pv = ck('process-valid');
+    const planned = live || items.length > 0;
+    const noOwner = (pv.problems || []).length;
+    steps.push({ key: 'plan', label: 'Plan the work', done: live || (planned && pv.pass), who: uniq([owner]),
+      action: !planned ? 'Add the work or accept a suggested plan' : !pv.pass ? 'Fix ' + nWord(noOwner || 1, 'problem') + ' in the process map' + (noOwner ? ' (for example, a step with nobody doing it)' : '') : 'Done' });
+    // 2. Finish the work
+    const open = items.filter(w => w.status !== 'done');
+    steps.push({ key: 'work', label: 'Finish the work', done: live || (planned && open.length === 0), who: uniq(open.map(w => w.owner)).slice(0, 5),
+      action: !planned ? 'Plan the work first' : open.length ? nWord(open.length, 'task') + ' still open' : 'Done' });
+    // 3. Information connected (data-live + discovered requirements)
+    const dl = ck('data-live'), dr = ck('discovered-resolved');
+    const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || []));
+    const dataOwners = uniq(notLive.map(id => { const d = get(docs, 'dataElement', id); return d && d.owner; }));
+    const nDr = (dr.items || []).length;
+    steps.push({ key: 'information', label: 'Information connected', done: live || (!!dl.pass && !!dr.pass), who: dataOwners.length ? dataOwners : (dl.pass && dr.pass ? [] : uniq([owner])),
+      action: dl.pass && dr.pass ? 'Done' : [notLive.length ? nWord(notLive.length, 'piece') + ' of information ' + (notLive.length === 1 ? 'is' : 'are') + ' not connected yet: ' + joinList(notLive.map(id => dataName(docs, id)), 3) : '',
+        nDr ? nWord(nDr, 'new requirement') + ' found during the work ' + (nDr === 1 ? 'needs' : 'need') + ' a decision' : ''].filter(Boolean).join('; ') });
+    // 4. Tests passed
+    const ts = live ? { done: true, nextAction: { label: 'Done' } } : testingSummary(docs, project);
+    steps.push({ key: 'tests', label: 'Tests passed', done: !!ts.done, who: ts.done ? [] : uniq([owner]), action: ts.done ? 'Done' : ts.nextAction.label });
+    // 5. Each team approved its part (bu-signoff + two-person)
+    const bu = ck('bu-signoff'), tp = ck('two-person');
+    const waiting = uniq([].concat(bu.unsigned || [], (bu.stale || []).map(x => x.bu)));
+    const needs = bu.needsApprover || bu.noPerson || [];
+    const elig = bu.eligible || {};
+    const apprWho = uniq(waiting.flatMap(b => elig[b] || Object.keys(people).filter(id => people[id] && people[id].bu === b && id !== owner && id !== lo)));
+    const apprActs = [];
+    if (needs.length) apprActs.push('Choose who approves ' + joinList(needs) + "'s part");
+    if ((bu.unsigned || []).length) apprActs.push('Waiting for ' + joinList(bu.unsigned) + ' to approve ' + ((bu.unsigned || []).length === 1 ? 'its' : 'their') + ' part');
+    if ((bu.stale || []).length) apprActs.push(joinList(bu.stale.map(x => x.bu)) + ' must approve again after changes');
+    if (!apprActs.length && !tp.pass) apprActs.push('Two different people need to approve');
+    steps.push({ key: 'approvals', label: 'Each team approved its part', done: live || (!!bu.pass && !!tp.pass), who: (bu.pass && tp.pass) ? [] : (needs.length ? uniq([owner]).concat(apprWho) : apprWho),
+      action: (bu.pass && tp.pass) ? 'Done' : apprActs.join('; ') });
+    // 6. Launch-day plan ready (cutover-plan)
+    const co = ck('cutover-plan');
+    steps.push({ key: 'launch-plan', label: 'Launch-day plan ready', done: live || !!co.pass, who: co.pass ? [] : uniq([lo]),
+      action: co.pass ? 'Done' : 'Finish the launch-day plan: who undoes it if needed, how, who supports after launch, and the launch-day tasks' });
+    // 7. Launch (also needs temporary data access closed)
+    const gc = ck('grants-closed');
+    const blockers = steps.filter(s => !s.done).length;
+    steps.push({ key: 'launch', label: 'Launch', done: live, who: live ? [] : uniq([lo]),
+      action: live ? 'Launched' : !gc.pass ? 'Close the open temporary data access requests' : blockers ? 'Waiting for the steps above' : 'Ready: give the final yes and launch' });
+    const first = steps.find(s => !s.done);
+    steps.forEach(s => { s.next = s === first; });
+    return steps;
+  }
+
   return {
+    // R7
+    availLabel, projectSummary, testingSummary, launchSteps, specFromProfile, sectionFingerprint,
     // contract section 4
     flatSteps, diffProcess, forecastAll, stepState, dataReady, dependents, impactOfData,
     projectStats, readiness, profileCsv, specDrift, generateTests, workload, baselineVariance, suggestWorkFromDiff,

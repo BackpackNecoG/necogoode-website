@@ -42,3 +42,9 @@
 - Exportable traceability report.
 - Incidents linked to defects/work.
 - `.docx` SOP upload (read in the browser).
+
+## From R7 stream reports
+- **Today-map information** shows "Waiting for confirmation" because the engine requires proof. Design decision: on the **Today** map, information is descriptive. Show "We have this today" (neutral), and reserve Connected/Waiting for the Future map and the launch check.
+- **Engine wording:** "Speed up <title>" → "Get <title> back on schedule"; Advanced health reasons still say "slipping"/"target".
+- The data page should open its confirm flow from `?confirm=1` (home deep link).
+- The seed description still says "To-be design".

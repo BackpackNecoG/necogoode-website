@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf } from './project.js';
+import { isSimple, summaryOf, summaryHTML, whoActs, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -24,17 +24,17 @@ function projectRow(j) {
   /* Gate-aware: never "Finished · Nd early" while go-live is still pending the readiness gate. */
   const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">target ${esc(fmt(j.target))}</div>`
     : !s.total ? `<b class="pmo-muted">Not planned</b><div class="hint">target ${esc(fmt(j.target))}</div>`
-    : gi.k === 'awaiting' ? `<b>Work done ${esc(fmt(fi.date))}</b><div class="hint"><a href="${link('/release/' + encodeURIComponent(j.id))}" data-link class="${gi.blocking ? 'fail' : ''}">Awaiting go-live${gi.blocking ? ` · ${gi.blocking} blocking` : ''} ›</a></div>`
+    : gi.k === 'awaiting' ? `<b>All tasks done ${esc(fmt(fi.date))}</b><div class="hint"><a href="${link('/release/' + encodeURIComponent(j.id))}" data-link class="${gi.blocking ? 'fail' : ''}">Waiting to launch${gi.blocking ? ` · ${gi.blocking} blocking` : ''} ›</a></div>`
     : `<b style="color:${buf != null && buf < 0 ? 'var(--late)' : 'inherit'}">${esc(fmt(fi.date))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${buf == null ? '—' : buf < 0 ? `<span class="fail">${-buf}d over</span>` : `${buf}d buffer`}</div>`;
   const rel = store.list('release', x => x.projectId === j.id && x.kind !== 'rollback' && x.status !== 'failed').sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
   const rm = relMgr(j);
   return `<tr class="click" data-go="/project/${esc(j.id)}" data-prow="${esc(j.id)}">
-    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · release ${esc(pname(rm))}` : ''}</div></td>
+    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · launch owner ${esc(pname(rm))}` : ''}</div></td>
     <td>${ragBadge(r)}</td>
     <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
     <td class="pmo-nowrap" data-when>${when}</td>
-    <td class="pmo-nowrap"><span class="${s.late ? 'fail' : ''}"><b>${s.late}</b> late</span> · <span class="${s.slip ? 'warn' : ''}"><b>${s.slip}</b> slipping</span></td>
-    <td>${j.status === 'live' ? `<span class="badge b-done">Live</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not released ›</a>`}</td></tr>`;
+    <td class="pmo-nowrap"><span class="${s.late ? 'fail' : ''}"><b>${s.late}</b> late</span> · <span class="${s.slip ? 'warn' : ''}"><b>${s.slip}</b> running late</span></td>
+    <td>${j.status === 'live' ? `<span class="badge b-done">Launched</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not launched ›</a>`}</td></tr>`;
 }
 function projectsHTML(projects) {
   if (!projects.length) return '<div class="card"><h3>Projects</h3><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>';
@@ -43,11 +43,11 @@ function projectsHTML(projects) {
     const fin = g.projects.map(financials);
     const planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
     const rc = {}; g.projects.forEach(p => { const k = rag(p, projectStats(p.id)).k; rc[k] = (rc[k] || 0) + 1; });
-    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · forecast cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} red</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} amber</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
+    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · forecast cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} off track</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} at risk</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
   }).join('');
   return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><span class="pmo-h3acts"><button class="btn sm" data-export-pf title="Download every project's status, schedule, cost and earned value as CSV">Export CSV</button><button class="btn sm primary" data-new-project>+ New project</button></span></h3>
-    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Forecast / target</th><th>Schedule</th><th>Release</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="pmo-rule"><span class="rag rag-red"><i></i>Red</span><span class="rag rag-amber"><i></i>Amber</span><span class="rag rag-green"><i></i>Green</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
+    <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Expected / deadline</th><th>Schedule</th><th>Launch</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="pmo-rule"><span class="rag rag-red"><i></i>Off track</span><span class="rag rag-amber"><i></i>At risk</span><span class="rag rag-green"><i></i>On track</span><span class="rag rag-none"><i></i>Not planned</span><span class="hint">${esc(RAG_RULE)}</span></div></div>`;
 }
 
 /* ---------------------------------------------------------------- financials (R5) */
@@ -266,7 +266,7 @@ async function deleteRisk(r) {
 /* ---------------------------------------------------------------- baseline variance */
 function varianceHTML(projects) {
   const withBl = projects.filter(p => (p.baselines || []).length);
-  if (!withBl.length) return `<div class="card"><h3>Baseline variance</h3><div class="empty">No baselines yet. Open a project and use “Save baseline” to snapshot the plan, then compare forecasts here.</div></div>`;
+  if (!withBl.length) return `<div class="card"><h3>Changes since the saved plan</h3><div class="empty">No saved plans yet. Open a project and use “Save plan” to keep a copy of its dates, then compare here.</div></div>`;
   const j = withBl.find(p => p.id === st.blPrj) || withBl[0];
   const bls = j.baselines;
   const bl = bls.find(b => b.id === st.blId) || bls[bls.length - 1];
@@ -282,13 +282,13 @@ function varianceHTML(projects) {
   const wt = id => (store.get('workItem', id) || {}).title || 'Deleted work item';
   const worstItem = rows.reduce((a, r) => Math.max(a, r.varianceDays || 0), 0);
   const worst = rows.slice().sort((a, b) => (b.varianceDays || 0) - (a.varianceDays || 0));
-  return `<div class="card"><h3>Baseline variance</h3>
+  return `<div class="card"><h3>Changes since the saved plan</h3>
     <div class="pmo-tlbar"><select class="pmo-sel" data-bl-prj aria-label="Project">${withBl.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-      <select class="pmo-sel" data-bl-id aria-label="Baseline">${bls.map(b => `<option value="${esc(b.id)}" ${b.id === bl.id ? 'selected' : ''}>${esc(b.label || 'Baseline')} · ${esc(fmt(b.at))}</option>`).join('')}</select></div>
-    <div class="pmo-var-kpis"><div class="kpi" data-proj-slip><b class="${projSlip > 0 ? 'fail' : projSlip < 0 ? 'pass' : ''}">${projSlip > 0 ? '+' : ''}${projSlip}d</b><span>Project slip (finish vs baseline)</span></div><div class="kpi"><b>${rows.filter(r => r.varianceDays > 0).length}/${rows.length}</b><span>Items later than plan</span></div><div class="kpi"><b>${worstItem ? '+' + worstItem + 'd' : '0d'}</b><span>Worst single item</span></div></div>
+      <select class="pmo-sel" data-bl-id aria-label="Saved plan">${bls.map(b => `<option value="${esc(b.id)}" ${b.id === bl.id ? 'selected' : ''}>${esc(b.label || 'Saved plan')} · ${esc(fmt(b.at))}</option>`).join('')}</select></div>
+    <div class="pmo-var-kpis"><div class="kpi" data-proj-slip><b class="${projSlip > 0 ? 'fail' : projSlip < 0 ? 'pass' : ''}">${projSlip > 0 ? '+' : ''}${projSlip}d</b><span>Finish moved (vs saved plan)</span></div><div class="kpi"><b>${rows.filter(r => r.varianceDays > 0).length}/${rows.length}</b><span>Items later than plan</span></div><div class="kpi"><b>${worstItem ? '+' + worstItem + 'd' : '0d'}</b><span>Worst single item</span></div></div>
     <div class="hint" style="margin:-4px 0 8px">Item slips overlap through dependencies, so they are not added up. The headline is how far the project’s finish has moved.</div>
-    ${rows.length ? `<div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Work item</th><th>Planned due</th><th>Forecast</th><th>Variance</th></tr></thead><tbody>
-      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap">${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap">${esc(fmt(r.forecast))}</td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${r.varianceDays > 0 ? '+' : ''}${r.varianceDays || 0}d</span>` : '<span class="pmo-var">added after baseline</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This baseline has no items that still exist.</div>'}</div>`;
+    ${rows.length ? `<div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Task</th><th>Planned due</th><th>Expected</th><th>Moved</th></tr></thead><tbody>
+      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap">${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap">${esc(fmt(r.forecast))}</td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${r.varianceDays > 0 ? '+' : ''}${r.varianceDays || 0}d</span>` : '<span class="pmo-var">added after the plan was saved</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This saved plan has no tasks that still exist.</div>'}</div>`;
 }
 
 /* ---------------------------------------------------------------- status report */
@@ -337,15 +337,41 @@ async function copyText(text) {
 }
 
 /* ---------------------------------------------------------------- page */
+/* R7 Simple: each project's one sentence and label, plus who needs to act. Money, earned value, workload detail,
+   burndown, saved-plan changes and the CSV export are Advanced. */
+function simpleCard(j) {
+  const s = projectStats(j.id), sm = summaryOf(j), who = j.status === 'live' ? [] : whoActs(j, 3);
+  return `<a class="card pmo-pcard" href="${link('/project/' + encodeURIComponent(j.id))}" data-link data-pcard="${esc(j.id)}">
+    <h4>${esc(j.name)}</h4>${summaryHTML(sm)}
+    ${s.total ? `<div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done · deadline ${esc(fmt(j.target))}</span></div>` : ''}
+    ${who.length ? `<div class="pmo-who" data-who><span class="lbl">Who needs to act</span>${who.map(x => `<span class="pmo-who-r">${av(x.person)}<span><b>${esc(pname(x.person))}</b>${x.action ? ': ' + esc(x.action) : ''}</span></span>`).join('')}</div>` : j.status === 'live' ? '' : '<div class="pmo-who" data-who><span class="hint">Nobody is blocked right now.</span></div>'}</a>`;
+}
+function simpleRender(projects) {
+  const k = { red: 0, amber: 0, green: 0, none: 0, live: 0 };
+  const sums = projects.map(p => { const sm = summaryOf(p); k[sm.k] = (k[sm.k] || 0) + 1; return sm; });
+  const order = { red: 0, amber: 1, none: 2, green: 3, live: 4 };
+  const sorted = projects.map((p, i) => ({ p, sm: sums[i] })).sort((a, b) => (order[a.sm.k] ?? 5) - (order[b.sm.k] ?? 5)).map(x => x.p);
+  const over = workloadRows().filter(r => r.overloaded);
+  return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Portfolio</div><h1>Portfolio</h1>
+      <p>How every project is doing, and who needs to act.</p></div>
+    <div class="hdr-side"><div class="kpis" data-kpi-rag><div class="kpi"><b class="fail">${k.red}</b><span>Off track</span></div><div class="kpi"><b class="warn">${k.amber}</b><span>At risk</span></div><div class="kpi"><b class="pass">${k.green}</b><span>On track</span></div>${k.none ? `<div class="kpi"><b>${k.none}</b><span>Not planned</span></div>` : ''}${k.live ? `<div class="kpi"><b>${k.live}</b><span>Launched</span></div>` : ''}</div>
+      <button class="btn primary" data-new-project>+ New project</button></div></section>
+    ${projects.length ? `<div class="pmo-pcards">${sorted.map(simpleCard).join('')}</div>` : '<div class="card" style="margin-top:14px"><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>'}
+    ${over.length ? `<div class="card pmo-stack" data-overloaded><h3>Too much work</h3><div class="s pmo-inl">${over.map(r => `${av(r.pid)} <b>${esc(pname(r.pid))}</b>`).join(', ')} ${over.length === 1 ? 'has' : 'have'} more work in the next two weeks than time to do it.</div></div>` : ''}
+    <div class="pmo-stack">${reportHTML(projects)}</div>
+    <div class="pmo-stack">${risksHTML(projects)}</div>
+    <div class="pmo-adv-note hint">Money, earned value, workload, burndown and spreadsheet export are in the advanced tools. <button class="btn sm" data-adv-on>Show advanced tools</button></div>`;
+}
 export function render() {
   const projects = store.list('project');
+  if (isSimple()) return simpleRender(projects);
   const totals = projects.map(p => ({ p, s: projectStats(p.id) }));
   const rc = { red: 0, amber: 0, green: 0, live: 0, none: 0 }; totals.forEach(({ p, s }) => rc[rag(p, s).k]++);
   const openWork = totals.reduce((a, x) => a + (x.s.total - x.s.done), 0);
   const openRisks = store.list('risk', r => r.status !== 'closed').length;
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Portfolio</div><h1>Portfolio</h1>
-      <p>Every project’s health in one place, grouped by program: progress, forecast against target, cost against budget, burndown, who is overloaded, what could go wrong, and how far the plan has drifted from its baseline.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>Red · amber · green${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
+      <p>Every project’s health in one place, grouped by program: progress, expected finish against the deadline, cost against budget, burndown, who is overloaded, what could go wrong, and how far the plan has moved since it was saved.</p></div>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>Off track · at risk · on track${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
     <div class="pmo-stack">${projectsHTML(projects)}</div>
     <div class="two pmo-top">${financialsHTML(projects)}${burnHTML(projects)}</div>
     <div class="two pmo-top">${workloadHTML()}${reportHTML(projects)}</div>
@@ -356,6 +382,7 @@ export function render() {
 export function bind(root) {
   const on = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', e => { e.preventDefault(); fn(el); }));
   on('[data-new-project]', () => newProject());
+  on('[data-adv-on]', () => store.setAdvanced(true));
   on('[data-add-risk]', () => editRisk(null));
   on('[data-edit-risk]', el => { const r = store.get('risk', el.dataset.editRisk); if (r) editRisk(r); });
   on('[data-del-risk]', el => { const r = store.get('risk', el.dataset.delRisk); if (r) deleteRisk(r); });

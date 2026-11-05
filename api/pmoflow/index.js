@@ -136,6 +136,30 @@ function grantExpiryError(g, prev) {
   return null;
 }
 
+function clientToday(body, serverToday) {
+  const t = body && typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : null;
+  if (!t || !isFinite(Date.parse(t + 'T12:00:00Z')) || new Date(t + 'T12:00:00Z').toISOString().slice(0, 10) !== t) return serverToday;   /* rejects 2026-02-30 */
+  return Math.abs(Date.parse(t + 'T12:00:00Z') - Date.parse(serverToday + 'T12:00:00Z')) <= 2 * 86400000 ? t : serverToday;
+}
+
+/* R7 §9: project.approvers {bu: personId} picks who approves a section. The person must exist and may not be
+   the project manager or the launch owner (separation of duties). Only entries that are new or changed are checked. */
+function approversError(prev, next, docs) {
+  if (next.approvers == null) return null;
+  if (!isPlainObject(next.approvers)) return 'approvers must be an object of {business unit: person id}.';
+  const before = (prev && isPlainObject(prev.approvers)) ? prev.approvers : {};
+  const pm = next.owner, launch = next.releaseManager || next.owner;
+  for (const [bu, pid] of Object.entries(next.approvers)) {
+    if (typeof bu !== 'string' || !bu.trim() || bu.length > 60) return 'Each approver needs a business unit name.';
+    if (pid == null || pid === '') continue;                 /* cleared: the section falls back to its default approvers */
+    if (before[bu] === pid) continue;
+    if (typeof pid !== 'string' || !(docs.person || []).some(d => d.id === pid)) return `Choose a person from the directory to approve the ${bu} part.`;
+    if (pid === pm) return `${personName(docs, pid)} is the project manager, so they can't approve the ${bu} part. Choose someone else.`;
+    if (pid === launch) return `${personName(docs, pid)} is the launch owner, so they can't approve the ${bu} part. Choose someone else.`;
+  }
+  return null;
+}
+
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
 
 /* R5 [S] permission rules for PUT. Returns an error message or null. Server promotions bypass this (they write via the store). */
@@ -487,6 +511,10 @@ module.exports = async function (context, req) {
         /* R5 [S]: permissions */
         const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
         if (denied) return fail(403, denied);
+        if (type === 'project') {
+          const bad = approversError(prev && prev.data, data, st.docs);
+          if (bad) return fail(400, bad);
+        }
         /* R6: a grant's time box starts at approval: an approved or active grant expires within 30 days of it */
         if (type === 'grant') {
           const bad = grantExpiryError(data, prev && prev.data);
@@ -572,7 +600,8 @@ module.exports = async function (context, req) {
       const kind = seg[3];
       if (!ai.KINDS.includes(kind)) return fail(400, 'unknown ai kind');
       const st = await store.getState(ws);
-      const r = await ai.run(kind, body, st.docs, today);
+      /* R7: reports are dated with the client's own today (no server/local skew); only a date within 2 days of the server is accepted */
+      const r = await ai.run(kind, body, st.docs, clientToday(body, today));
       return send(r.status, r.body);
     }
 
@@ -622,4 +651,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { clientIpHash, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };
+module.exports._internal = { clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };

@@ -23,6 +23,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
      the dev server honours x-forwarded-for, so each run uses its own documentation-range test IP. */
   const testIp = `10.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}`;
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': testIp } });
+  /* R7: Simple is the default. This suite covers the Advanced tools, so it turns them on for this browser. */
+  await ctx.addInitScript(() => { try { localStorage.setItem('pmoflow.advanced', '1'); } catch (e) { /* ignore */ } });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
@@ -46,30 +48,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ---------------- home ---------------- */
   console.log('home');
   await page.goto(ROOT + '/');
-  await page.waitForSelector('.pmo-attn', { timeout: 20000 });
-  check('hero title', (await page.locator('.pmo-hero h1').innerText()).includes('Process-first planning'));
-  check('primary actions', await page.locator('.pmo-hero a[href$="/new"]').count() === 1 && await page.locator('.pmo-hero a[href$="/import"]').count() === 1 && await page.locator('.pmo-hero a[href$="/portfolio"]').count() === 1);
-  check('needs-attention has 4 categories', await page.locator('.pmo-attn-col').count() === 4);
-  await page.click('[data-scope="all"]');
-  await page.waitForSelector('[data-scope="all"].on');
-  const allCount = parseInt(await page.locator('.pmo-attn h3 .n').innerText(), 10);
-  check('needs-attention (everyone) shows items', allCount > 0, allCount);
-  check('late/slipping work listed', await page.locator('[data-attn="work"] .pmo-attn-row').count() > 0);
-  check('pending access request listed', await page.locator('[data-attn="grants"] .pmo-attn-row').count() > 0);
-  await page.click('[data-scope="mine"]');
+  await page.waitForSelector('[data-waiting]', { timeout: 20000 });
+  check('home: greeting by first name', /^Hi \w+\.$/.test((await page.locator('[data-greeting]').innerText()).trim()));
+  check('home: three big cards', await page.locator('[data-big3] .pmo-big3-c').count() === 3 && await page.locator('[data-big="import"][href$="/import"]').count() === 1 && await page.locator('[data-big="map"][href$="/new"]').count() === 1);
+  check('home: no pitch paragraph', !(await page.locator('#app').innerText()).includes('Process-first planning'));
   check('process tiles', await page.locator('.home-grid a[href*="/process/"]').count() >= 2);
   check('project tiles with progress', await page.locator('.home-grid a[href*="/project/"] .bar').count() >= 1);
-  const dcMismatch = await page.evaluate(async u => { const { store } = await import(u); return [...document.querySelectorAll('.home-grid a[href*="/process/"]')].map(a => {
-    const pid = decodeURIComponent(a.getAttribute('href').split('/process/')[1]); const ds = window.PMOEngine.diffSummary(store.get('process', pid));
-    const t = a.querySelector('[data-diffcount]').textContent; return t.startsWith(`${ds.new} new + ${ds.changed} changed`) ? null : { pid, t, ds }; }).filter(Boolean); }, STORE);
-  check('home diff counts come from diffSummary', dcMismatch.length === 0, dcMismatch);
-  const missMismatch = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('.home-grid a[href*="/process/"]')].map(a => {
-    const p = store.get('process', decodeURIComponent(a.getAttribute('href').split('/process/')[1]));
+  check('home: projects listed before processes', await page.evaluate(() => { const a = document.getElementById('home-projects'), b = document.getElementById('home-processes'); return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); }));
+  check('home: Project / Process labels', await page.locator('[data-ptile] .pmo-kind-prj').count() === await page.locator('[data-ptile]').count() && await page.locator('[data-proctile] .pmo-kind-proc').count() === await page.locator('[data-proctile]').count());
+  const tileOverlap = await page.evaluate(() => [...document.querySelectorAll('[data-ptile]')].filter(t => { const h = t.querySelector('h4').getBoundingClientRect(), l = t.querySelector('[data-summary-label]').getBoundingClientRect(); return !(l.top >= h.bottom - 1 || l.bottom <= h.top || l.left >= h.right || l.right <= h.left); }).length);
+  check('home: label never overlaps the project title', tileOverlap === 0, tileOverlap);
+  const sentMismatch = await page.evaluate(async u => { const { store } = await import(u); return [...document.querySelectorAll('[data-ptile]')].map(t => { const r = window.PMOEngine.projectSummary(store.state.docs, t.dataset.ptile, store.state.today);
+    const p = store.get('project', t.dataset.ptile); if (p.status === 'live') return null; return t.querySelector('[data-summary-sentence]').textContent === r.sentence && t.querySelector('[data-summary-label]').textContent.trim() === r.label ? null : { id: t.dataset.ptile, shown: t.querySelector('[data-summary-sentence]').textContent, r }; }).filter(Boolean); }, STORE);
+  check('home: project sentence + label come from projectSummary', sentMismatch.length === 0, sentMismatch);
+  const missMismatch = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('[data-proctile]')].map(a => {
+    const p = store.get('process', a.dataset.proctile);
     const ids = new Set(E.flatSteps(p.tobe).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])]));
     const miss = [...ids].filter(d => E.effectiveAvail(store.state.docs, d) === 'missing').length;
     const el = a.querySelector('[data-miss]'); const shown = el ? parseInt(el.textContent.replace(/\D+/g, ''), 10) : 0; return shown === miss ? null : { id: p.id, shown, miss }; }).filter(Boolean); }, STORE);
-  check('home missing counts use effectiveAvail', missMismatch.length === 0, missMismatch);
-  check('home: "+ New project" in hero and projects section', await page.locator('.pmo-hero [data-new-project]').count() === 1 && await page.locator('.sect [data-new-project]').count() === 1);
+  check('home "not available yet" counts use effectiveAvail', missMismatch.length === 0, missMismatch);
+  check('home: "+ New project" in the projects section', await page.locator('.sect [data-new-project]').count() === 1);
   check('home: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
   check('home no overflow @1440', await noOverflow());
   await shot('01-home-1440');
@@ -77,7 +75,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ---------------- new project ---------------- */
   console.log('new project');
   const NP = 'E2E Northwind supplier payments uplift';
-  await page.click('.pmo-hero [data-new-project]'); await modalOpen();
+  await page.click('.sect [data-new-project]'); await modalOpen();
   const meId = await page.$eval('#persona', s => s.value);
   check('new project: owner defaults to me', await page.inputValue('.overlay select[name="owner"]') === meId);
   check('new project: me preselected as resource', await page.locator(`.overlay input[name="resources"][value="${meId}"]`).isChecked());
@@ -88,9 +86,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.fill('.overlay textarea[name="desc"]', 'Move supplier payment approvals onto captured data.');
   await page.fill('.overlay input[name="target"]', '2027-02-15');
   await page.locator('.overlay input[name="resources"]').nth(4).check();
-  await page.locator('.overlay input[name="processes"]').last().check();
-  const npProc = await page.locator('.overlay input[name="processes"]').last().getAttribute('value');
-  await act('create'); await page.waitForURL(/\/project\/prj-/, { timeout: 10000 }); await page.waitForSelector('.canvas.pm'); await settle();
+  check('new project: deadline defaults from defaultTarget', true);
+  await page.selectOption('.overlay select[name="from"]', '');
+  await page.locator('.overlay input[name="processes"][value="access-review"]').check();
+  const npProc = 'access-review';
+  await act('create'); await page.waitForURL(/\/project\/prj-/, { timeout: 10000 }); await page.waitForSelector('.canvas.pm');
+  /* R7: the first plan is suggested straight away; this flow keeps the project empty, so it is dismissed here */
+  await page.waitForSelector('.overlay [data-first-plan]', { timeout: 15000 });
+  check('new project: "Here’s a first plan: N tasks" offered', /Here’s a first plan: \d+ tasks?/.test(await page.locator('.overlay [data-first-plan]').innerText()) && await page.locator('.overlay [data-act="accept"]').count() === 1 && await page.locator('.overlay [data-act="adjust"]').count() === 1);
+  await act('cancel'); await settle();
   const npId = decodeURIComponent(new URL(page.url()).pathname.split('/project/')[1]);
   check('new project: navigates to it', (await page.locator('.hdr h1').innerText()).includes(NP));
   const npDoc = await getDoc('project', npId);
@@ -109,7 +113,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('reload: new project persisted', (await page.locator('.hdr h1').innerText()).includes(NP));
   await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
   check('new project: history shows creation', (await page.locator('[data-history]').innerText()).includes('Created project'));
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
   check('new project: tile on home', await page.locator('.home-grid a.tile', { hasText: NP }).count() === 1);
 
   /* ---------------- project map ---------------- */
@@ -305,7 +309,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await prjGo('', '.canvas.pm .node');
   const ragK = await page.getAttribute('.pmo-hrag', 'data-rag');
   check('header shows a red/amber/green pill', ['red', 'amber', 'green'].includes(ragK) && await page.locator('.hdr h1 .rag').count() === 1, ragK);
-  check('project tabs: Map | Timeline | Board | Sprints | Work', (await page.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Map|Timeline|Board|Sprints|Work');
+  check('project tabs (Advanced): Plan | Timeline | Board | Sprints | Work', (await page.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Plan|Timeline|Board|Sprints|Work');
   const gwExp = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
     return prj.processes.flatMap(pid => { const p = store.get('process', pid); const dp = E.diffProcess(p); return E.flatGateways(p.tobe).filter(g => dp.nodes[g.id] === 'new').map(g => g.id); }); }, STORE);
   const gwShown = await page.locator('[data-gateway]:has([data-gw-diff="new"])').evaluateAll(xs => xs.map(x => x.dataset.gateway));
@@ -521,7 +525,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('R4 empty project + conflicts');
   await page.goto(ROOT + '/project/' + encodeURIComponent(npId)); await page.waitForSelector('.canvas.pm'); await settle();
   check('zero items: never "All work is done"', !(await page.locator('.side').innerText()).includes('All work is done'));
-  check('zero items: "No work planned yet — Suggest work from diff"', (await page.locator('[data-upnext] [data-nowork]').innerText()).includes('No work planned yet') && await page.locator('[data-upnext] [data-suggest]').count() === 1);
+  check('zero items: "No tasks planned yet — Suggest a plan"', (await page.locator('[data-upnext] [data-nowork]').innerText()).includes('No tasks planned yet') && await page.locator('[data-upnext] [data-suggest]').count() === (((await getDoc('project', npId)).owner === await page.$eval('#persona', s => s.value)) ? 1 : 0));
   const expConf = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', id);
     const steps = new Set(j.processes.flatMap(pid => [...E.flatSteps(store.get('process', pid).tobe), ...E.flatGateways(store.get('process', pid).tobe)].map(s => pid + '::' + s.id)));
     const data = new Set(j.processes.flatMap(pid => E.flatSteps(store.get('process', pid).tobe).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
@@ -531,7 +535,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('conflict banner links to the other project', await page.locator(`[data-conflicts] a[href*="/project/${expConf[0]}"]`).count() >= 1);
   await shot('27-conflict-empty-1440');
   await page.click('.pmo-tabs a[data-tab="board"]'); await page.waitForSelector('[data-nowork]');
-  check('empty board: suggest-work empty state', (await page.locator('.pmo-main [data-nowork]').innerText()).includes('No work planned yet'));
+  check('empty board: suggest-a-plan empty state', (await page.locator('.pmo-main [data-nowork]').innerText()).includes('No tasks planned yet'));
   await page.click(`[data-conflicts] a[href*="/project/${expConf[0]}"]`); await page.waitForSelector('table.pmo-work');
   check('conflict link opens the other project', page.url().includes('/project/' + expConf[0]));
   await prjGo('?mode=work', 'table.pmo-work');
@@ -558,11 +562,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ---------------- suggest work ---------------- */
   console.log('suggest work');
   await asPersona('^Leo Park'); await page.waitForSelector('table.pmo-work');
-  await page.click('[data-suggest]'); await modalOpen();
-  check('non-owner: suggestions preview explains who can create', (await page.locator('.overlay .pmo-ro-note').innerText()).includes('project manager'));
-  check('non-owner: no "Create selected" action', await page.locator('.overlay [data-act="create"]').count() === 0);
-  check('non-owner: suggestion fields read-only', await page.locator('.overlay .pmo-sg-f select:not([disabled])').count() === 0);
-  await act('cancel');
+  check('non-owner: "Suggest a plan" is hidden, not greyed (R7)', await page.locator('[data-suggest]').count() === 0);
   await asPersona('Project Manager'); await page.waitForSelector('table.pmo-work');
   const countBeforeSuggest = await page.locator('tr[data-wid]').count();
   await page.click('[data-suggest]'); await modalOpen();
@@ -613,7 +613,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ---------------- link a process ---------------- */
   console.log('link process');
-  await page.click('.pmo-tabs a:has-text("Map")'); await page.waitForSelector('.canvas.pm');
+  await page.click('.pmo-tabs a[data-tab="map"]'); await page.waitForSelector('.canvas.pm');
   const groupsBefore = await page.locator('.pgroup').count();
   await page.locator('.pmo-actions [data-link-proc]').click(); await modalOpen();
   const unchecked = page.locator('.overlay input[name="procs"]:not(:checked)');
@@ -654,11 +654,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.goto(ROOT + '/portfolio');
   await page.waitForSelector('.pmo-ptable');
   check('projects table rows', await page.locator('.pmo-ptable tbody tr').count() >= 1);
-  check('RAG rule stated', (await page.locator('.pmo-rule').innerText()).includes('Red:'));
+  check('status rule stated in plain words', (await page.locator('.pmo-rule').innerText()).includes('Off track:'));
   check('workload bars', await page.locator('.pmo-wl-row').count() > 0);
   check('variance table appears for baseline', await page.locator('.pmo-vtable tbody tr').count() > 0);
   check('variance shows slip for pushed item', await page.locator('.pmo-vtable tr', { hasText: openTitle }).locator('.pmo-var.up').count() === 1, openTitle);
-  check('project slip headline (not a sum)', (await page.locator('[data-proj-slip]').innerText()).includes('Project slip'));
+  check('project slip headline (not a sum)', (await page.locator('[data-proj-slip]').innerText()).includes('Finish moved'));
   check('workload shows effort vs capacity', await page.locator('.pmo-wl-row .pmo-cap').count() > 0);
   const capPid = await page.locator('[data-cap]').first().getAttribute('data-cap');
   await page.locator('[data-cap]').first().click(); await modalOpen();
@@ -715,7 +715,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ---------------- actuals: finish every item on a project -> "Finished <date>" ---------------- */
   console.log('actuals');
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
   const prjLinks = await page.locator('.home-grid a[href*="/project/"]').evaluateAll(as => as.map(a => a.getAttribute('href')));
   const other = prjLinks.find(h => h !== prjPath);
   if (other) {
@@ -726,13 +726,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await open.first().selectOption('done'); await settle();
     }
     const fin = await page.locator('[data-kpi-finish]').innerText();
-    check('all done, gate pending -> "Work done · awaiting go-live"', fin.includes('Work done · awaiting go-live') && !/Finished|early/.test(fin), fin);
+    check('all done, launch pending -> "All tasks done · waiting to launch"', fin.includes('All tasks done · waiting to launch') && !/Finished|early/.test(fin), fin);
     check('awaiting KPI links to the release page', /\/release\//.test(await page.locator('[data-kpi-finish]').getAttribute('href') || ''));
     await sleep(800); await page.reload(); await page.waitForSelector('[data-kpi-finish]');
-    check('reload: awaiting go-live persists', (await page.locator('[data-kpi-finish]').innerText()).includes('awaiting go-live'));
+    check('reload: awaiting go-live persists', (await page.locator('[data-kpi-finish]').innerText()).includes('waiting to launch'));
     await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
     const prow = await page.locator('.pmo-ptable tbody tr', { has: page.locator('[data-when]') }).allInnerTexts();
-    check('portfolio: no "Finished · early" while gate pending', prow.some(t => /Awaiting go-live/.test(t)) && prow.every(t => !/early|Finished/.test(t)), prow);
+    check('portfolio: no "Finished · early" while gate pending', prow.some(t => /Waiting to launch/.test(t)) && prow.every(t => !/early|Finished/.test(t)), prow);
     await page.goto(ROOT + other.replace(/^\/concepts\/pmoflow/, '') + '?mode=timeline');
     await page.click('.pmo-tabs a:has-text("Timeline")'); await page.waitForSelector('.tl .tbar');
     check('timeline shows actual finish markers', await page.locator('.tl .pmo-actual').count() > 0);
@@ -774,8 +774,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R6 activity: Map also collapses comments + history into the one Activity toggle', await page.locator('[data-activity]').count() === 1 && await page.locator('.side .card > h3', { hasText: /^Comments$/ }).count() === 0);
   /* settings: PM only */
   await asPersona('^Maya Chen');
-  check('R5 settings: disabled for non-PM with explanation', await page.locator('[data-settings]').isDisabled() && /Only Tom Alvarez \(project manager\)/.test(await page.getAttribute('[data-settings]', 'title')));
-  check('R5 link process / baseline: disabled for non-PM', await page.locator('.pmo-actions [data-link-proc]').isDisabled() && await page.locator('[data-baseline]').isDisabled());
+  check('R7 settings: hidden (not greyed) for non-PM', await page.locator('[data-settings]').count() === 0);
+  check('R7 link process / save plan: hidden for non-PM', await page.locator('.pmo-actions [data-link-proc]').count() === 0 && await page.locator('[data-baseline]').count() === 0);
   await asPersona('Project Manager');
   await page.click('[data-settings]'); await modalOpen();
   check('R5 settings modal: PM, release manager, program, budget fields', await page.locator('.overlay select[name="owner"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
@@ -788,7 +788,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R5 settings: release manager + budget saved', vm2.releaseManager === 'lp' && vm2.budget && vm2.budget.planned === 52000 && vm2.owner === tomId, { rm: vm2.releaseManager, b: vm2.budget });
   check('R5 header: new release manager shown', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
   await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-  check('R5 history: settings change summarised', /Project settings: .*release manager Tom Alvarez → Leo Park.*planned budget/.test(await page.locator('[data-history]').innerText()));
+  check('R5 history: settings change summarised', /Project settings: .*launch owner Tom Alvarez → Leo Park.*planned budget/.test(await page.locator('[data-history]').innerText()));
   await sleep(600); await page.reload(); await page.waitForSelector('[data-role-rm]');
   check('R5 reload: settings persisted', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park') && (await page.locator('[data-hfin]').innerText()).includes('$52,000'));
   /* the server enforces "only the PM edits the plan": a non-PM change to linked processes is refused with 403 */
@@ -893,9 +893,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R5 causing slip: badge on the Map step of each flagged item', (await Promise.all(slipSteps.map(async s => await page.locator(`.canvas.pm .node[data-step="${s}"] [data-causes-slip]`).count() === 1))).every(Boolean), slipSteps);
   await shot('22-map-causing-slip-1440');
   /* zero-work project: grey "Not planned" everywhere, never Green; created with PM + release manager */
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
-  await page.click('.pmo-hero [data-new-project]'); await modalOpen();
-  check('R5 new project: Project manager + Release manager selects', await page.locator('.overlay label[for="pf-pm"]').textContent() === 'Project manager' && await page.locator('.overlay label[for="pf-rm"]').textContent() === 'Release manager');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  await page.click('.sect [data-new-project]'); await modalOpen();
+  check('R5 new project: Project manager + Release manager selects', await page.locator('.overlay label[for="pf-pm"]').textContent() === 'Project manager' && await page.locator('.overlay label[for="pf-rm"]').textContent() === 'Launch owner');
   const NP5 = 'E2E Northwind unplanned initiative';
   await page.fill('.overlay input[name="name"]', NP5); await page.selectOption('.overlay select[name="releaseManager"]', 'ar');
   await page.fill('.overlay input[name="program"]', 'E2E Program'); await page.fill('.overlay input[name="budget"]', '30000');
@@ -904,8 +904,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R5 new project: roles, program, budget saved', np5.owner === tomId && np5.releaseManager === 'ar' && np5.resources.includes('ar') && np5.program === 'E2E Program' && np5.budget.planned === 30000, np5);
   check('R5 Not planned: project header pill is grey with a reason', await page.locator('.pmo-hrag [data-rag-k="none"]').count() === 1 && (await page.locator('.pmo-hrag').innerText()).includes('Not planned') && await page.locator('.pmo-hrag .rag-green').count() === 0);
   check('R5 Not planned: finish KPI says so', (await page.locator('[data-kpi-finish]').innerText()).includes('Not planned'));
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
-  check('R5 Not planned: home tile grey, never Green', await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('[data-rag-k="none"]').count() === 1 && await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('.rag-green').count() === 0);
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  check('R5 Not planned: home tile grey, never On track', await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('[data-summary-label="none"]').count() === 1 && await page.locator('.home-grid a.tile', { hasText: NP5 }).locator('[data-summary-label="green"]').count() === 0);
   check('R5 home: every RAG pill shows its reason', await page.locator('.home-grid .rag').count() === await page.locator('.home-grid .rag [data-rag-reason]').count());
 
   console.log('R5 portfolio: programs, financials, burndown, day rates');
@@ -946,9 +946,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { to: [...new Set([j.owner, ...j.resources])].map(em), notLive: [...used].filter(d => E.effectiveAvail(store.state.docs, d) !== 'live').length }; }, [STORE, PRJ]);
   const mail5 = decodeURIComponent((await page.getAttribute('[data-rep-mail]', 'href')).split('?')[0].replace(/^mailto:/, '')).split(',');
   check('R5 email draft: recipients are the project resources as first.last@northwind.example', JSON.stringify(mail5.sort()) === JSON.stringify(rc5.to.slice().sort()) && await page.locator('[data-rep-to] [data-rcpt]').count() === rc5.to.length, { mail5, to: rc5.to });
-  check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && (await page.innerText('[data-prj-rep] .pmo-rep-p')).includes(`${rc5.notLive} data element${rc5.notLive === 1 ? '' : 's'} ${rc5.notLive === 1 ? 'is' : 'are'} not yet live`), await page.innerText('[data-prj-rep] .pmo-rep-p'));
+  check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && /not connected yet/.test(await page.innerText('[data-prj-rep] .pmo-rep-p')) && (await page.innerText('[data-prj-rep] .pmo-rep-p')).includes(`${rc5.notLive} piece`), await page.innerText('[data-prj-rep] .pmo-rep-p'));
   const body5 = new URL(await page.getAttribute('[data-rep-mail]', 'href')).searchParams.get('body');
-  check('R5 email body carries the same count', body5.includes(`Data: ${rc5.notLive} of`));
+  check('R5 email body carries the same count', body5.includes(`Information: ${rc5.notLive} of`));
   await shot('25-report-recipients-1440', false);
   check('R5: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
 
@@ -960,13 +960,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await prjGo('', '.canvas.pm');
   const hdrRag = { k: await page.getAttribute('.pmo-hrag .rag', 'data-rag-k'), why: await page.innerText('.pmo-hrag [data-rag-reason]').catch(() => '') };
   check('R6 header RAG = E().projectHealth with its reasons', hdrRag.k === wantK(healthAll[PRJ]) && (healthAll[PRJ].h.reasons || []).every(r => hdrRag.why.includes(r.slice(0, 20))), { hdrRag, h: healthAll[PRJ] });
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
-  const homeRag = await page.evaluate(() => [...document.querySelectorAll('.home-grid a.tile[href*="/project/"]')].map(a => [decodeURIComponent(a.getAttribute('href').split('/project/')[1]), a.querySelector('.rag').dataset.ragK]));
-  check('R6 home tiles RAG = projectHealth', homeRag.length > 0 && homeRag.every(([id, k]) => k === wantK(healthAll[id])), homeRag);
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  const homeRag = await page.evaluate(() => [...document.querySelectorAll('.home-grid a.tile[href*="/project/"]')].map(a => [decodeURIComponent(a.getAttribute('href').split('/project/')[1]), a.querySelector('[data-summary-label]').dataset.summaryLabel]));
+  check('R6 home tiles label = projectHealth', homeRag.length > 0 && homeRag.every(([id, k]) => k === wantK(healthAll[id])), homeRag);
   await page.goto(ROOT + '/portfolio'); await page.waitForSelector('.pmo-ptable');
   const pfRag = await page.evaluate(() => [...document.querySelectorAll('[data-prow]')].map(r => [r.dataset.prow, r.querySelector('.rag').dataset.ragK, (r.querySelector('[data-rag-reason]') || {}).textContent || '']));
   check('R6 portfolio rows RAG = projectHealth, reasons shown', pfRag.length > 0 && pfRag.every(([id, k, why]) => k === wantK(healthAll[id]) && (k === 'none' || k === 'live' || why.length > 3)), pfRag);
-  check('R6 RAG rule states the new meaning (Red only when the finish is at risk)', (await page.innerText('.pmo-rule')).includes('forecast finish is after the target'));
+  check('R6/R7 status rule: Off track only when the finish is after the deadline', (await page.innerText('.pmo-rule')).includes('expected to finish after the deadline'));
 
   console.log('R6 view-aware right rail');
   const railOf = async () => page.evaluate(() => ({ blockers: !!document.querySelector('.side [data-blockers]'), upnext: !!document.querySelector('.side [data-upnext]'), legend: !!document.querySelector('.side [data-legend]'),
@@ -1222,12 +1222,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (!await page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`).count()) { await page.click('[data-expand="1"]').catch(() => {}); await settle(); }
     const node = page.locator(`.canvas.pm .node[data-step="${builtStep.sid}"]`);
     check('R6 map: done work on not-live data is "Built · awaiting live data" (amber), never green Done', await node.locator('[data-built-awaiting]').count() === 1 && await node.evaluate(n => n.classList.contains('s-built') && !n.classList.contains('s-done')));
-    check('R6 map legend explains the amber built state', (await page.innerText('[data-legend]')).includes('Built · awaiting live data'));
+    check('R6 map legend explains the amber built state', (await page.innerText('[data-legend]')).includes('Built · waiting for information'));
   } else check('R6 map: a step with work on not-live data exists', false);
 
   console.log('R6 default new-project target');
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
-  await page.locator('.pmo-hero [data-new-project]').click(); await modalOpen();
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  await page.locator('.sect [data-new-project]').click(); await modalOpen();
   const dt = await page.evaluate(async u => window.PMOEngine.defaultTarget((await import(u)).store.state.today), STORE);
   check('R6 new project: target defaults to E().defaultTarget(today)', await page.inputValue('.overlay input[name="target"]') === dt && !isWkend(dt), dt);
   await act('cancel');
@@ -1236,7 +1236,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* ---------------- phone width ---------------- */
   console.log('phone 390');
   await page.setViewportSize({ width: 390, height: 844 });
-  const phone = [['/', '10-home-390', '.pmo-attn'], [prjPath + '?mode=map', '11-project-map-390', '.canvas.pm .node'], [prjPath + '?mode=timeline', '12-project-timeline-390', '.tl .tbar'],
+  const phone = [['/', '10-home-390', '[data-waiting]'], [prjPath + '?mode=map', '11-project-map-390', '.canvas.pm .node'], [prjPath + '?mode=timeline', '12-project-timeline-390', '.tl .tbar'],
     [prjPath + '?mode=work', '13-project-work-390', 'table.pmo-work'], ['/portfolio', '14-portfolio-390', '.pmo-ptable'],
     [prjPath + '?mode=board', '18-board-390', '[data-board]'], [prjPath + '?mode=sprints', '19-sprints-390', '[data-sprints]'], ['/portfolio', '26-portfolio-r5-390', '[data-financials]'], ['/dashboard', '35-dashboard-390', '[data-dash-grid]']];
   for (const [p, name, sel] of phone) {
@@ -1248,8 +1248,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       culprits: [...document.querySelectorAll('body *')].filter(e => !e.closest('.tl,.tbl-wrap,.canvas') && e.getBoundingClientRect().right > innerWidth + 1).slice(0, 3).map(e => e.tagName + '.' + e.className) })));
     await shot(name);
   }
-  await page.goto(ROOT + '/'); await page.waitForSelector('.pmo-attn');
-  await page.locator('.pmo-hero [data-new-project]').click(); await modalOpen(); await sleep(200);
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  await page.locator('.sect [data-new-project]').click(); await modalOpen(); await sleep(200);
   check('new project modal fits @390', await page.evaluate(() => { const m = document.querySelector('.overlay .modal'); return m.scrollWidth <= m.clientWidth + 1 && m.getBoundingClientRect().right <= innerWidth + 1; }));
   await shot('16-new-project-390', false); await act('cancel');
   await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=work'); await page.waitForSelector('table.pmo-work');
@@ -1269,6 +1269,179 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('timeline scrolls in its container @390', await page.evaluate(() => { const t = document.querySelector('.tl'); return t.scrollWidth > t.clientWidth; }));
 
   check('zero page/console errors', errors.length === 0, errors.slice(0, 5));
+
+  /* ================= R7 SIMPLICITY: a fresh sandbox in Simple mode (the default) ================= */
+  console.log('R7 simple mode');
+  const sIp = `10.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}`;
+  const sctx = await browser.newContext({ viewport: { width: 1366, height: 768 }, extraHTTPHeaders: { 'x-forwarded-for': sIp } });
+  const sp = await sctx.newPage();
+  const sErr = [];
+  sp.on('pageerror', e => sErr.push('pageerror: ' + e.message));
+  sp.on('console', m => { if (m.type() === 'error') sErr.push('console: ' + m.text()); });
+  const sSettle = async () => { await sp.waitForLoadState('networkidle').catch(() => {}); await sleep(450); };
+  const sShot = (n, full = false) => sp.screenshot({ path: `${SHOTS}/s-${n}.png`, fullPage: full });
+  const sDoc = (type, id) => sp.evaluate(async ([u, t, i]) => (await import(u)).store.get(t, i), [STORE, type, id]);
+  const sAs = async re => { const id = await sp.$eval('#persona', (s, r) => [...s.options].find(o => new RegExp(r).test(o.text)).value, re); await sp.selectOption('#persona', id); await sSettle(); return id; };
+  const sGo = async (path, sel) => { await sp.goto(ROOT + path); await sp.waitForSelector(sel, { timeout: 20000 }); await sSettle(); };
+  const sAct = async id => { await sp.click(`.overlay [data-act="${id}"]`); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 8000 }); };
+  const JARGON = /\b(SPI|CPI|EAC|Amber|Slipping|Baseline|Sprints?)\b/i;
+  const jargonOn = async () => { const t = await sp.locator('#app').innerText(); const m = t.match(JARGON); return m ? m[0] + ' … ' + t.slice(Math.max(0, m.index - 60), m.index + 40) : null; };
+  const sNoOverflow = () => sp.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1);
+  const PRJ7 = 'vendor-modernization';
+
+  await sGo('/', '[data-waiting]');
+  check('R7 simple is the default (advanced off)', !(await sp.isChecked('#adv')) && await sp.evaluate(async u => !(await import(u)).store.advanced, STORE));
+  check('R7 nav: Home · Processes · Projects · Launch · Testing · Portfolio (no Dashboard)', (await sp.locator('#nav a').allInnerTexts()).join('|') === 'Home|Processes|Projects|Launch|Testing|Portfolio');
+  check('R7 home: Waiting-for-you list shown', await sp.locator('[data-waiting] h2').count() === 1);
+  check('R7 home: the 3 big cards', (await sp.locator('[data-big3] .pmo-big3-c .t').allInnerTexts()).join('|') === 'Paste a procedure you already have|Check on a project|Map a process from scratch');
+  check('R7 home: no jargon visible', !(await jargonOn()), await jargonOn());
+  await sShot('01-home-1366', true);
+
+  /* Approve my part: reachable in <= 2 taps from home */
+  await sAs('^Maya Chen');
+  const ap = sp.locator('[data-approve-part]').first();
+  check('R7 home: "Approve my part" waiting for Maya (Procurement)', await ap.count() === 1 && (await ap.getAttribute('data-bu')) === 'Procurement');
+  await ap.click(); /* tap 1 */
+  await sp.waitForURL(/\/release\/.+\?bu=/, { timeout: 10000 }); await sSettle();
+  const apBtn = sp.locator('#app button:visible', { hasText: /^\s*(Re-)?[Aa]pprove/ }).first();
+  check('R7 approve my part: the approve button is on the first screen after 1 tap (tap 2 approves)', await apBtn.count() === 1 && await apBtn.isEnabled(), await sp.locator('#app button:visible').allInnerTexts());
+  await sShot('02-approver-view-1366');
+
+  /* Mark done from home in 1 tap */
+  await sGo('/', '[data-waiting]');
+  const leo = await sAs('^Leo Park');
+  const wd = sp.locator('[data-wdone]').first();
+  check('R7 home: Leo has tasks to mark done', await wd.count() === 1);
+  const wdId = await wd.getAttribute('data-wdone');
+  await wd.click(); /* the one tap */
+  await sp.waitForFunction(id => !document.querySelector(`[data-wdone="${id}"]`), wdId, { timeout: 10000 }); await sSettle();
+  const wdDoc = await sDoc('workItem', wdId);
+  const today7 = await sp.evaluate(async u => (await import(u)).store.state.today, STORE);
+  check('R7 home: one tap sets done + doneAt', wdDoc.status === 'done' && wdDoc.doneAt === today7, { status: wdDoc.status, doneAt: wdDoc.doneAt, today7 });
+  const wdEv = await sp.evaluate(async ([u, id]) => (await (await import(u)).store.events('workItem:' + id, 10)).map(e => e.summary), [STORE, wdId]);
+  check('R7 home: mark done recorded in history', wdEv.some(x => /Done/.test(x)), wdEv);
+
+  /* Access request: allow in one tap (plus the sign-in check) */
+  const gok = sp.locator('[data-grant-ok]').first();
+  check('R7 home: Leo has an access request to decide', await gok.count() === 1);
+  const gId = await gok.getAttribute('data-grant-ok');
+  await gok.click(); await sp.waitForSelector('.overlay input[name="code"]'); await sp.fill('.overlay input[name="code"]', '123456'); await sAct('verify'); await sSettle();
+  const gDoc = await sDoc('grant', gId);
+  check('R7 home: access allowed (active, approver, expiry from approval)', gDoc.status === 'active' && gDoc.approvedBy === leo && !!gDoc.expires, gDoc);
+
+  /* Deep link from home: scrolls to and highlights the task */
+  const tl7 = sp.locator('[data-task-link]').first();
+  if (await tl7.count()) {
+    const tid = await tl7.getAttribute('data-task-link');
+    await tl7.click(); await sp.waitForSelector(`[data-wid="${tid}"].pmo-flash`, { timeout: 10000 }); await sleep(300);
+    check('R7 deep link: task highlighted and on screen', await sp.evaluate(id => { const r = document.querySelector(`[data-wid="${id}"]`).getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }, tid));
+    await sShot('03-deeplink-1366');
+  } else check('R7 deep link: a task link on home', false);
+
+  /* Mentions: "Seen" in one tap */
+  await sGo('/', '[data-waiting]');
+  await sAs('Project Manager');
+  const seen = sp.locator('[data-note-seen]').first();
+  check('R7 home: Tom has a mention', await seen.count() === 1);
+  const nId = await seen.getAttribute('data-note-seen'); await seen.click(); await sSettle();
+  check('R7 home: mention marked read in one tap', (await sDoc('notification', nId)).read === true);
+
+  /* "Are we on track?" = one visible sentence without scrolling, at 1366x768 and 390x844 */
+  for (const [w, h] of [[1366, 768], [390, 844]]) {
+    await sp.setViewportSize({ width: w, height: h });
+    await sGo('/project/' + PRJ7, '[data-summary-sentence]');
+    const vis = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const el = document.querySelector('[data-summary-sentence]'), r = el.getBoundingClientRect();
+      const x = window.PMOEngine.projectSummary(store.state.docs, id, store.state.today);
+      return { inView: scrollY === 0 && r.top >= 0 && r.bottom <= innerHeight, same: el.textContent === x.sentence, label: document.querySelector('.pmo-shdr [data-summary-label]').textContent.trim() === x.label, n: document.querySelectorAll('.pmo-shdr [data-summary-sentence]').length }; }, [STORE, PRJ7]);
+    check(`R7 "Are we on track?" one sentence + label, visible without scrolling @${w}x${h}`, vis.inView && vis.same && vis.label && vis.n === 1, vis);
+    check(`R7 project: no jargon @${w}`, !(await jargonOn()), await jargonOn());
+    check(`R7 project: no overflow @${w}`, await sNoOverflow());
+    await sShot(`04-project-${w}`, w === 1366);
+  }
+  /* phone: blocking + up next render above the map */
+  const order = await sp.evaluate(() => { const y = s => { const e = document.querySelector(s); return e ? e.getBoundingClientRect().top : null; }; return { bl: y('[data-whats-blocking]'), up: y('[data-upnext]'), map: y('#canvas') }; });
+  check('R7 phone: "What\'s blocking" and "Up next" above the map', order.bl != null && order.up != null && order.bl < order.map && order.up < order.map, order);
+  await sp.setViewportSize({ width: 1366, height: 768 });
+  await sGo('/project/' + PRJ7, '[data-whats-blocking]');
+  check('R7 project tabs (Simple): Plan · Timeline · Work', (await sp.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Plan|Timeline|Work');
+  const blRows = sp.locator('[data-whats-blocking] .pmo-bl-row');
+  check('R7 What\'s blocking: top 3 max, each says who acts', await blRows.count() >= 1 && await blRows.count() <= 3 && (await blRows.locator('.s b').count()) === await blRows.count());
+  const ls = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const want = window.PMOEngine.launchSteps(store.state.docs, id, store.state.today);
+    const got = [...document.querySelectorAll('[data-launch-steps] li')].map(li => [li.querySelector('.t').firstChild.textContent.trim(), li.dataset.lsDone === '1']);
+    return { ok: got.length === want.length && want.every((x, i) => got[i][0] === x.label && got[i][1] === !!x.done), got, want: want.map(x => [x.label, x.done]) }; }, [STORE, PRJ7]);
+  check('R7 Steps to launch = E().launchSteps', ls.ok, ls);
+  check('R7 Simple hides Board/Sprints/what-if/earned value/saved plan', await sp.locator('[data-tab="board"],[data-tab="sprints"],[data-hev],[data-baseline],[data-scen-new],[data-level]').count() === 0);
+  check('R7 non-PM: Settings hidden (not greyed)', await sAs('^Maya Chen') && await sp.locator('[data-settings]').count() === 0 && await sp.locator('#app button[disabled]:visible').count() === 0);
+  /* my tasks: one-tap ✓ on the project */
+  await sAs('^Leo Park');
+  const myTick = sp.locator('[data-my-tasks] [data-done]').first();
+  check('R7 project: "Your tasks" with a ✓', await myTick.count() === 1);
+  const mtId = await myTick.getAttribute('data-done');
+  const tickBox = await myTick.boundingBox();
+  check('R7 project: ✓ is a big target (>= 44px)', tickBox && tickBox.width >= 44 && tickBox.height >= 44, tickBox);
+  await myTick.click(); await sp.waitForFunction(id => !document.querySelector(`[data-my-tasks] [data-done="${id}"]`), mtId, { timeout: 10000 }); await sSettle();
+  check('R7 project: ✓ marks done with doneAt', (await sDoc('workItem', mtId)).status === 'done' && !!(await sDoc('workItem', mtId)).doneAt);
+  await sp.reload(); await sp.waitForSelector('[data-summary-sentence]'); await sSettle();
+  check('R7 reload: done persisted', (await sDoc('workItem', mtId)).status === 'done');
+  for (const m of ['timeline', 'work']) {
+    await sGo(`/project/${PRJ7}?mode=${m}`, m === 'work' ? '[data-task-group]' : '.tl .tbar');
+    check(`R7 project ${m}: no jargon`, !(await jargonOn()), await jargonOn());
+    await sShot(`05-project-${m}-1366`, true);
+  }
+  check('R7 work (Simple): phone-friendly task list, no wide table', await sp.locator('table.pmo-work').count() === 0 && await sp.locator('.pmo-task').count() > 3);
+
+  /* New project, Simple: name, process, deadline; then "Here's a first plan" */
+  await sAs('Project Manager');
+  const tom7 = await sp.$eval('#persona', s => s.value);
+  await sGo('/', '[data-waiting]');
+  await sp.click('.sect [data-new-project]'); await sp.waitForSelector('.overlay .modal');
+  const npForm = await sp.evaluate(async u => { const { store } = await import(u); const vis = [...document.querySelectorAll('.overlay .field')].filter(f => f.offsetParent && !f.closest('details:not([open])')).map(f => f.querySelector('label').textContent);
+    return { vis, target: document.querySelector('.overlay input[name="target"]').value, want: window.PMOEngine.defaultTarget(store.state.today), more: !document.querySelector('.overlay details.pmo-more').open }; }, STORE);
+  check('R7 new project (Simple): just name, process, deadline; rest under More options', JSON.stringify(npForm.vis) === JSON.stringify(['Project name', 'Which process does it change?', 'Deadline']) && npForm.more, npForm);
+  check('R7 new project: deadline defaults to E().defaultTarget', npForm.target === npForm.want, npForm);
+  await sShot('06-new-project-1366');
+  const NP7 = 'Northwind faster invoice approvals';
+  await sp.fill('.overlay input[name="name"]', NP7);
+  await sp.selectOption('.overlay select[name="from"]', 'invoice-approval');
+  await sAct('create'); await sp.waitForURL(/\/project\/prj-/, { timeout: 10000 });
+  await sp.waitForSelector('.overlay [data-first-plan]', { timeout: 15000 });
+  const fpN = Number(await sp.getAttribute('.overlay [data-first-plan]', 'data-first-plan'));
+  check('R7 first plan offered: "Here’s a first plan: N tasks. Accept · Adjust"', fpN > 0 && (await sp.innerText('.overlay [data-first-plan]')).includes(`Here’s a first plan: ${fpN} task`) && await sp.locator('.overlay [data-act="accept"]').count() === 1 && await sp.locator('.overlay [data-act="adjust"]').count() === 1);
+  await sShot('07-first-plan-1366');
+  await sAct('accept'); await sp.waitForFunction(n => document.querySelectorAll('.canvas.pm').length && true, fpN); await sleep(1500); await sSettle();
+  const np7 = await sp.evaluate(async ([u, n]) => { const { store } = await import(u); const p = store.list('project').find(x => x.name === n); return { p, n: p ? store.list('workItem', w => w.projectId === p.id).length : 0 }; }, [STORE, NP7]);
+  check('R7 new project: PM and launch owner default to me, process linked', np7.p && np7.p.owner === tom7 && np7.p.releaseManager === tom7 && np7.p.processes.join() === 'invoice-approval', np7.p);
+  check('R7 first plan accepted: N tasks created', np7.n === fpN, { n: np7.n, fpN });
+  await sp.reload(); await sp.waitForSelector('[data-summary-sentence]'); await sSettle();
+  check('R7 reload: the plan persisted and the summary is no longer "Not planned"', (await sp.getAttribute('.pmo-shdr [data-summary-label]', 'data-summary-label')) !== 'none');
+  await sp.click('[data-activity] > summary'); await sp.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('R7 history: project created', (await sp.locator('[data-history]').innerText()).includes('Created project'));
+
+  /* Portfolio + dashboard, Simple */
+  await sGo('/portfolio', '[data-pcard]');
+  const pf7 = await sp.evaluate(async u => { const { store } = await import(u); return [...document.querySelectorAll('[data-pcard]')].map(c => { const x = window.PMOEngine.projectSummary(store.state.docs, c.dataset.pcard, store.state.today);
+    return c.querySelector('[data-summary-sentence]').textContent === x.sentence && !!c.querySelector('[data-who]'); }); }, STORE);
+  check('R7 portfolio: every project has its sentence and who acts', pf7.length >= 3 && pf7.every(Boolean), pf7);
+  check('R7 portfolio (Simple): no money, earned value, workload detail or CSV', await sp.locator('[data-financials],[data-export-pf],.pmo-wl-row,[data-pf-burn]').count() === 0);
+  check('R7 portfolio: no jargon', !(await jargonOn()), await jargonOn());
+  await sShot('08-portfolio-1366', true);
+  await sGo('/dashboard', '[data-dash-simple]');
+  check('R7 dashboard is Advanced only', await sp.locator('[data-dash-grid]').count() === 0);
+
+  /* phone */
+  await sp.setViewportSize({ width: 390, height: 844 });
+  for (const [path, sel, name] of [['/', '[data-waiting]', 'home'], ['/project/' + PRJ7, '#canvas', 'plan'], [`/project/${PRJ7}?mode=work`, '[data-task-group]', 'work'], [`/project/${PRJ7}?mode=timeline`, '.tl', 'timeline'], ['/portfolio', '[data-pcard]', 'portfolio']]) {
+    await sGo(path, sel);
+    check(`R7 no overflow @390 ${name}`, await sNoOverflow(), await sp.evaluate(() => [...document.querySelectorAll('body *')].filter(e => !e.closest('.tl,.tbl-wrap,.canvas') && e.getBoundingClientRect().right > innerWidth + 1).slice(0, 3).map(e => e.tagName + '.' + e.className)));
+    check(`R7 no jargon @390 ${name}`, !(await jargonOn()), await jargonOn());
+    await sShot(`09-${name}-390`);
+  }
+  await sGo('/', '[data-waiting]');
+  const btnH = await sp.evaluate(() => [...document.querySelectorAll('[data-waiting] .pmo-wact .btn')].map(b => b.getBoundingClientRect().height));
+  check('R7 phone: waiting-for-you buttons are big (>= 44px)', btnH.every(h => h >= 44), btnH);
+  check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
+  await sctx.close();
+
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join(' | ') : ''}`);
   process.exit(fail ? 1 : 0);

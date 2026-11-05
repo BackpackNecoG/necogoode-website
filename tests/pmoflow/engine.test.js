@@ -824,10 +824,11 @@ test('R4 sign-off: sections from touches, project owner excluded, signoffOpen', 
   let d = readyDocs();
   d.process[0].data.tobe.find(n => n.id === 's1').touches = ['Procurement', 'pmo'];   // PMO named in a tag (case-insensitive)
   let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
-  assert.ok(bu.sections.includes('PMO')); assert.deepEqual(bu.unsigned, ['PMO']);
+  // R7 (deliberate change): PMO's only member is the PM, so the section needs an approver chosen (was: unsigned)
+  assert.ok(bu.sections.includes('PMO')); assert.deepEqual(bu.unsigned, []); assert.deepEqual(bu.needsApprover, ['PMO']);
   d.approval.push({ id: 'AP7', data: { id: 'AP7', projectId: PRJ, bu: 'PMO', approver: 'ta', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true } });
   let r = E.readiness(d, PRJ, TODAY);
-  assert.deepEqual(check(r, 'bu-signoff').unsigned, ['PMO']);      // ta is the project owner: doesn't count
+  assert.deepEqual(check(r, 'bu-signoff').needsApprover, ['PMO']);      // ta is the project owner: doesn't count
   assert.match(check(r, 'bu-signoff').detail, /Approvals by the project owner \(Tom Alvarez\) do not count\./);
   assert.equal(check(r, 'bu-signoff').excludedApprover, 'ta');
   d.approval.find(a => a.id === 'AP7').data.approver = 'ps';
@@ -1059,15 +1060,19 @@ test('R5 sign-off: trigger touches, BU without a person, release manager exclude
   d = readyDocs(); d.project[0].data.releaseManager = 'ar';          // ar approved Compliance and Accounts Payable
   const r = E.readiness(d, PRJ, TODAY);
   bu = check(r, 'bu-signoff');
-  assert.deepEqual(bu.unsigned, ['Accounts Payable', 'Compliance']);
+  // R7 (deliberate change): ar is AP's only member, so AP needs an approver chosen (suggested: process owner Maya Chen)
+  assert.deepEqual(bu.unsigned, ['Compliance']); assert.deepEqual(bu.needsApprover, ['Accounts Payable']);
+  assert.equal(bu.suggestions['Accounts Payable'], 'mc');
   assert.deepEqual(bu.excludedApprovers, ['ta', 'ar']);
   assert.match(bu.detail, /Approvals by the project owner and release manager \(Tom Alvarez and Ana Ruiz\) do not count\./);
   assert.equal(check(r, 'two-person').pass, false);
-  // cutover edits after approval make every approval stale
+  // R7 (deliberate change): a launch-day plan edit makes stale only the sections owning runbook tasks (CT1: dk, IT),
+  // not every section; the launch owner gets their own review flag.
   d = readyDocs(); d.project[0].data.cutoverUpdatedAt = '2026-11-03T00:00:00Z';
   bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
-  assert.equal(bu.stale.length, 5);
-  assert.ok(bu.stale.every(x => /the cutover plan/.test(x.reason)));
+  assert.deepEqual(bu.stale.map(x => x.bu), ['IT']);
+  assert.ok(bu.stale.every(x => /the launch-day plan/.test(x.reason)));
+  assert.deepEqual(bu.launchOwnerReview, { person: 'ta', needed: true });
 });
 
 test('R5 cutover check: tasks present, go/no-go tasks owned', () => {
@@ -1407,7 +1412,7 @@ test('R6 exceptions share the bu-signoff staleness (cutover edits included); run
   const ex = check(r, 'exceptions'), bu = check(r, 'bu-signoff');
   assert.equal(ex.pass, false); assert.equal(ex.warning, true);
   assert.deepEqual(ex.items, ['cutover']);
-  assert.equal(ex.detail, 'Cutover plan changed after Accounts Payable, Compliance, IT, Procurement and Treasury sign-off.');
+  assert.equal(ex.detail, 'Cutover plan changed after IT sign-off.');     // R7 (deliberate): only the task-owning section
   assert.deepEqual(bu.items.slice().sort(), ex.cutoverBus.slice().sort());     // same truth
   // work edit: both checks agree on the BU and the item
   d = readyDocs(); d.workItem[5].data.updatedAt = '2026-11-02T08:00:00Z';
@@ -1476,4 +1481,265 @@ test('R6 profileCsv duplicates; specDrift uses the spec unit and flags duplicate
   assert.equal(drift.find(x => x.issue === 'length-mismatch').detail, '1 of 4 tax IDs has 9 characters; the spec requires 10 characters.');
   assert.equal(drift.find(x => x.issue === 'duplicates').detail, '2 of 4 invoice nos repeat an earlier value; the spec says each invoice no must be unique.');
   assert.ok(!E.specDrift({ fields: [{ name: 'Invoice no', type: 'text' }] }, { rows: 4, columns: prof }).some(x => x.issue === 'duplicates'));   // not unique: no flag
+});
+
+/* ======================= R7 SIMPLICITY ======================= */
+// Internal ids must never appear in plain-language text.
+function assertNoIds(text, docs) {
+  const ids = [];
+  Object.keys(docs).forEach(t => (Array.isArray(docs[t]) ? docs[t] : []).forEach(e => { if (e && e.id) ids.push(String(e.id)); }));
+  ids.push(PRJ, 'vendor-onboarding', 'invoice-approval');
+  const words = new Set(String(text).split(/[^A-Za-z0-9_-]+/).filter(Boolean));
+  ids.filter(id => id.length > 1).forEach(id => assert.ok(!words.has(id), 'id "' + id + '" leaked into: ' + text));
+}
+const JARGON = /\b(SPI|CPI|EAC|slip|slipping|amber|UAT|SIT|spec|cutover|runbook|go\/no-go|BU)\b/i;
+
+test('R7 availLabel: one label set from effectiveAvail', () => {
+  const d = baseDocs();
+  d.workItem.find(e => e.id === 'W2').data.status = 'done';      // resolver of D5 done -> pending
+  deepFreeze(d);
+  assert.deepEqual(E.availLabel(d, 'D4'), { key: 'connected', label: 'Connected', tone: 'green' });
+  assert.deepEqual(E.availLabel(d, 'D1'), { key: 'sample', label: 'Sample only', tone: 'amber' });
+  assert.deepEqual(E.availLabel(d, 'D2'), { key: 'notyet', label: 'Not available yet', tone: 'red' });
+  assert.deepEqual(E.availLabel(d, 'D5'), { key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' });
+  assert.deepEqual(E.availLabel(d, 'nope'), { key: 'notyet', label: 'Not available yet', tone: 'red' });
+  ['D1', 'D2', 'D4', 'D5'].forEach(id => assertNoIds(E.availLabel(d, id).label, d));
+});
+
+test('R7 projectSummary: label matches projectHealth; At risk says what; red/grey/green plain', () => {
+  // red: D9 missing with nothing planned
+  let d = deepFreeze(baseDocs());
+  let s = E.projectSummary(d, PRJ, TODAY);
+  assert.equal(s.rag, E.projectHealth(d, PRJ, TODAY).rag);
+  assert.equal(s.rag, 'red'); assert.equal(s.label, 'Off track');
+  assert.match(s.sentence, /Payment hold list is not available yet and no work is planned to get it \(Ana Ruiz\)/);
+  assert.ok(s.who.some(x => x.person === 'ar' && x.name === 'Ana Ruiz' && /Plan work to get Payment hold list/.test(x.action)));
+  // amber: finishes before the deadline but W6 is late and holds up 3 tasks
+  d = deepFreeze(withHoldResolver(baseDocs()));
+  s = E.projectSummary(d, PRJ, TODAY);
+  assert.equal(E.projectHealth(d, PRJ, TODAY).rag, 'amber');
+  assert.equal(s.rag, 'amber'); assert.equal(s.label, 'At risk');
+  assert.match(s.sentence, /^Expected [A-Z][a-z]{2} \d+, about \d weeks before the Dec 15 deadline\. Stand up structured bank capture is late and holding up 3 other tasks \(Leo Park\)\./);
+  assert.equal(s.who[0].person, 'lp'); assert.match(s.who[0].action, /^Finish Stand up structured bank capture \(was due Nov 3\)$/);
+  // green
+  d = withHoldResolver(baseDocs());
+  d.workItem.forEach(e => { if (e.data.status !== 'done') { e.data.status = 'idle'; e.data.deps = []; delete e.data.resolves; e.data.start = '2026-11-20'; e.data.due = '2026-11-25'; } });
+  d.dataElement.forEach(e => { e.data.avail = 'live'; e.data.check = { ok: true }; });
+  s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
+  assert.equal(E.projectHealth(d, PRJ, TODAY).rag, 'green');
+  assert.deepEqual([s.rag, s.label], ['green', 'On track']);
+  assert.equal(s.sentence, 'Expected Nov 25, about 3 weeks before the Dec 15 deadline. Nothing needs attention right now.');
+  // off track by date
+  d = withHoldResolver(baseDocs()); d.project[0].data.target = '2026-11-20';
+  s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
+  assert.equal(s.label, 'Off track'); assert.match(s.sentence, /after the Nov 20 deadline\./);
+  // grey
+  d = baseDocs(); d.workItem = [];
+  s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
+  assert.deepEqual([s.rag, s.label], ['grey', 'Not planned']);
+  assert.match(s.sentence, /No work has been planned yet/);
+  // project object accepted; unknown project
+  assert.equal(E.projectSummary(baseDocs(), { id: PRJ }, TODAY).rag, 'red');
+  assert.equal(E.projectSummary(baseDocs(), 'nope', TODAY).label, 'Not planned');
+});
+
+test('R7 projectSummary: no jargon, no ids, never contradicts itself', () => {
+  const variants = [baseDocs(), withHoldResolver(baseDocs()), readyDocs()];
+  const tight = withHoldResolver(baseDocs()); tight.project[0].data.target = '2026-12-02'; variants.push(tight);
+  variants.forEach(d => {
+    const s = E.projectSummary(d, PRJ, TODAY);
+    assert.ok(!JARGON.test(s.sentence), s.sentence);
+    assertNoIds(s.sentence, d); s.who.forEach(x => { assertNoIds(x.action, d); assertNoIds(x.name, d); });
+    assert.equal(s.label, { green: 'On track', amber: 'At risk', red: 'Off track', grey: 'Not planned' }[E.projectHealth(d, PRJ, TODAY).rag]);
+    if (s.rag === 'amber') { assert.ok(!/after the .* deadline/.test(s.sentence)); assert.ok(!/Nothing needs attention/.test(s.sentence)); assert.ok(s.sentence.split('. ').length >= 2); }
+    if (s.rag === 'green') assert.ok(!/late|after the/.test(s.sentence));
+  });
+  // amber from a thin buffer only names the buffer
+  const s = E.projectSummary(tight, PRJ, TODAY);
+  assert.equal(s.rag, E.projectHealth(tight, PRJ, TODAY).rag);
+});
+
+test('R7 testingSummary: plain one line with a next action', () => {
+  let d = deepFreeze(readyDocs());
+  let t = E.testingSummary(d, PRJ);
+  assert.equal(t.done, true);
+  assert.match(t.sentence, /^Yes: all \d+ business tests passed and no problems are open\.$/);
+  assert.equal(t.nextAction.key, 'none');
+  // one rule without a test, one business test not run
+  d = readyDocs();
+  d.dataElement.find(e => e.id === 'D2').data.fields.push({ name: 'Swift code', type: 'text' });
+  d.testCase.push({ id: 'CZ', data: { id: 'CZ', dataId: 'D4', field: 'g', kind: 'valid', input: 'x', expect: 'accept', origin: 'user' } });
+  t = E.testingSummary(deepFreeze(d), PRJ);
+  assert.equal(t.done, false);
+  assert.equal(t.sentence, "Not yet: 1 business test hasn't been run and 1 rule has no test. Next: generate the missing tests.");
+  assert.deepEqual(t.nextAction, { key: 'generate', label: 'Generate the missing tests' });
+  // a failed test -> fix
+  d = readyDocs(); d.testRun[1].data.results[0].outcome = 'fail';
+  t = E.testingSummary(deepFreeze(d), PRJ);
+  assert.equal(t.nextAction.key, 'fix'); assert.match(t.sentence, /1 test failed/);
+  // nothing run yet
+  d = baseDocs(); t = E.testingSummary(deepFreeze(d), PRJ);
+  assert.equal(t.done, false);
+  [readyDocs(), baseDocs(), d].forEach(x => { const s = E.testingSummary(x, PRJ); assert.ok(!JARGON.test(s.sentence), s.sentence); assertNoIds(s.sentence, x); assertNoIds(s.nextAction.label, x); });
+  // done mirrors the gate check
+  assert.equal(E.testingSummary(readyDocs(), PRJ).done, check(E.readiness(readyDocs(), PRJ, TODAY), 'tests-passed').pass);
+});
+
+test('R7 launchSteps: ordered plain checklist from the readiness checks', () => {
+  let steps = E.launchSteps(deepFreeze(baseDocs()), PRJ, TODAY);
+  assert.deepEqual(steps.map(s => s.label), ['Plan the work', 'Finish the work', 'Information connected', 'Tests passed', 'Each team approved its part', 'Launch-day plan ready', 'Launch']);
+  assert.deepEqual(steps.map(s => s.key), ['plan', 'work', 'information', 'tests', 'approvals', 'launch-plan', 'launch']);
+  assert.equal(steps[0].done, true); assert.equal(steps[1].done, false); assert.equal(steps[1].next, true);
+  assert.equal(steps.filter(s => s.next).length, 1);
+  assert.ok(steps[2].who.includes('ar'));                         // D9 owner acts
+  steps.forEach(s => { assert.ok(Array.isArray(s.who)); assertNoIds(s.label, baseDocs()); assertNoIds(s.action, baseDocs()); assert.ok(!JARGON.test(s.label + ' ' + s.action), s.action); });
+  // ready project: everything but Launch done, Launch is next with the launch owner
+  steps = E.launchSteps(deepFreeze(readyDocs()), PRJ, TODAY);
+  assert.deepEqual(steps.map(s => s.done), [true, true, true, true, true, true, false]);
+  assert.equal(steps[6].next, true); assert.deepEqual(steps[6].who, ['ta']);
+  assert.match(steps[6].action, /Ready/);
+  // the checklist agrees with readiness: all but launch done <=> gate passes
+  assert.equal(E.readiness(readyDocs(), PRJ, TODAY).pass, true);
+  // no work yet
+  const d = baseDocs(); d.workItem = [];
+  steps = E.launchSteps(deepFreeze(d), PRJ, TODAY);
+  assert.equal(steps[0].done, false); assert.equal(steps[0].next, true); assert.deepEqual(steps[0].who, ['ta']);
+  // released
+  const r = readyDocs(); r.project[0].data.status = 'live';
+  assert.ok(E.launchSteps(r, PRJ, TODAY).every(s => s.done));
+});
+
+test('R7 approvals count any time; signoffOpen is informational only', () => {
+  const d = baseDocs();                       // most checks fail
+  d.approval = wrap([{ id: 'A1', projectId: PRJ, bu: 'Treasury', approver: 'lp', decision: 'approved', at: '2026-11-04T09:00:00Z', stepUp: true }]);
+  const r = E.readiness(deepFreeze(d), PRJ, TODAY);
+  const bu = check(r, 'bu-signoff');
+  assert.equal(r.signoffOpen, false);
+  assert.ok(!bu.unsigned.includes('Treasury'));                 // counted although other checks fail
+  assert.equal(bu.sectionStatus.find(s => s.bu === 'Treasury').approved, true);
+  assert.equal(bu.sectionStatus.find(s => s.bu === 'IT').approved, false);
+});
+
+test('R7 re-approval scope: one owner change stales only the sections it touches (fingerprint)', () => {
+  const d = readyDocs();
+  const fp = bu => E.sectionFingerprint(d, PRJ, bu);
+  d.approval.forEach(e => { e.data.fingerprint = fp(e.data.bu); });
+  assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
+  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+$/);
+  // s3 moves from Leo Park (Treasury) to Ana Ruiz (Accounts Payable); the process is stamped as a whole
+  d.process[0].data.tobe.find(n => n.id === 's3').owner = 'ar';
+  d.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
+  const bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.stale.map(x => x.bu).sort(), ['Accounts Payable', 'Treasury']);
+  assert.ok(bu.stale.every(x => x.reason === 're-approval needed: its steps'));
+  assert.ok(bu.stale.every(x => x.changed.every(c => /^section:/.test(c))));
+  const ex = check(E.readiness(d, PRJ, TODAY), 'exceptions');
+  assert.equal(ex.pass, false); assert.match(ex.detail, /Accounts Payable's steps/);
+  // a test case change on D2 stales only the sections using D2 (Treasury, Accounts Payable: s3/s4/i1/i3)
+  const t = readyDocs(); t.approval.forEach(e => { e.data.fingerprint = E.sectionFingerprint(t, PRJ, e.data.bu); });
+  t.testCase.find(e => e.id === 'T1').data.input = '021000021';
+  const st = check(E.readiness(t, PRJ, TODAY), 'bu-signoff').stale;
+  assert.deepEqual(st.map(x => x.bu).sort(), ['Accounts Payable', 'Treasury']);
+  assert.ok(st.every(x => /its tests/.test(x.reason)));
+  // legacy approvals (no fingerprint) with step stamps: only the stamped step's section
+  const l = readyDocs();
+  l.process[0].data.tobe.forEach(n => { n.updatedAt = '2026-10-01T00:00:00Z'; });
+  l.process[0].data.tobe.find(n => n.id === 's2').updatedAt = '2026-11-03T00:00:00Z';
+  l.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
+  assert.deepEqual(check(E.readiness(l, PRJ, TODAY), 'bu-signoff').stale.map(x => x.bu), ['Compliance']);
+});
+
+test('R7 re-approval scope: launch-day plan edits stale only task-owning sections plus the launch owner check', () => {
+  const d = readyDocs();
+  d.project[0].data.cutover.tasks.push({ id: 'CT2', order: 2, task: 'Confirm bank feed', owner: 'lp', gonogo: false });
+  d.approval.forEach(e => { e.data.fingerprint = E.sectionFingerprint(d, PRJ, e.data.bu); });
+  let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.equal(bu.pass, true); assert.equal(bu.launchOwnerReview.needed, false);
+  // change Leo's task only
+  d.project[0].data.cutover.tasks[1].task = 'Confirm bank feed and limits';
+  d.project[0].data.cutoverUpdatedAt = '2026-11-03T00:00:00Z';
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.stale.map(x => x.bu), ['Treasury']);
+  assert.equal(bu.stale[0].reason, 're-approval needed: the launch-day plan');
+  assert.deepEqual(bu.launchOwnerReview, { person: 'ta', needed: true });
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'exceptions').cutoverBus, ['Treasury']);
+  // timestamps with per-task stamps (no fingerprint): only the stamped task's section
+  const t = readyDocs();
+  t.project[0].data.cutover.tasks.push({ id: 'CT2', task: 'Confirm bank feed', owner: 'lp', updatedAt: '2026-11-03T00:00:00Z' });
+  t.project[0].data.cutover.tasks[0].updatedAt = '2026-10-01T00:00:00Z';
+  t.project[0].data.cutoverUpdatedAt = '2026-11-03T00:00:00Z';
+  assert.deepEqual(check(E.readiness(t, PRJ, TODAY), 'bu-signoff').stale.map(x => x.bu), ['Treasury']);
+});
+
+test('R7 eligible approvers: project.approvers override, never the PM or launch owner, needsApprover + suggestion', () => {
+  let d = readyDocs();
+  d.process[0].data.tobe.find(n => n.id === 's1').touches = ['Procurement', 'PMO'];   // PMO: only the PM (ta) is in it
+  let bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.needsApprover, ['PMO']);
+  assert.equal(bu.suggestions.PMO, 'mc');                        // the process owner
+  assert.equal(bu.sectionStatus.find(s => s.bu === 'PMO').needsApprover, true);
+  assert.match(bu.detail, /No approver in PMO: assign one\. Suggested: Maya Chen\./);
+  assert.equal(bu.pass, false);
+  // override: Priya approves PMO's part
+  d.project[0].data.approvers = { PMO: 'ps' };
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.needsApprover, []); assert.deepEqual(bu.unsigned, ['PMO']);
+  assert.deepEqual(bu.eligible.PMO, ['ps']);
+  d.approval.push({ id: 'AP9', data: { id: 'AP9', projectId: PRJ, bu: 'PMO', approver: 'ps', decision: 'approved', at: '2026-11-01T10:00:00Z', stepUp: true } });
+  assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
+  // the PM or the launch owner as override is ignored
+  d = readyDocs(); d.process[0].data.tobe.find(n => n.id === 's1').touches = ['PMO'];
+  d.project[0].data.approvers = { PMO: 'ta' };
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'bu-signoff').needsApprover, ['PMO']);
+  d.project[0].data.releaseManager = 'dk'; d.project[0].data.approvers = { PMO: 'dk', IT: 'dk' };
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.ok(!bu.eligible.IT.includes('dk')); assert.ok(bu.needsApprover.includes('PMO'));
+  // override for a BU nobody is in (HR)
+  d = readyDocs(); d.process[0].data.tobe[0].touches = ['HR'];
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'bu-signoff').needsApprover, ['HR']);
+  d.project[0].data.approvers = { HR: 'ps' };
+  bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.needsApprover, []); assert.deepEqual(bu.unsigned, ['HR']);
+  // launchSteps shows the choose-approver action
+  d = readyDocs(); d.process[0].data.tobe.find(n => n.id === 's1').touches = ['PMO'];
+  const st = E.launchSteps(d, PRJ, TODAY).find(s => s.key === 'approvals');
+  assert.equal(st.done, false); assert.match(st.action, /Choose who approves PMO's part/);
+});
+
+test('R7 ownerRole: role-only steps are valid and ignored by sign-off sections', () => {
+  const d = readyDocs();
+  const s6 = d.process[0].data.tobe.find(n => n.id === 's6');   // Dev Kumar (IT)
+  delete s6.owner; s6.ownerRole = 'Employee';
+  d.process[1].data.tobe.find(n => n.id === 'i2').owner = '';   // the other IT step
+  d.process[1].data.tobe.find(n => n.id === 'i2').ownerRole = 'Manager';
+  const r = E.readiness(d, PRJ, TODAY);
+  assert.equal(check(r, 'process-valid').pass, true);
+  assert.ok(!check(r, 'bu-signoff').sections.includes('IT'));
+  // blank role is still "no owner"
+  s6.ownerRole = '  ';
+  assert.equal(check(E.readiness(d, PRJ, TODAY), 'process-valid').pass, false);
+});
+
+test('R7 specFromProfile: types, required, bounds; generateTests uses observed min/max', () => {
+  const prof = E.profileCsv('Amount,Qty,Paid on,Branch code,Payee,Memo\n12.50,3,2026-01-05,0012,Ana Li,a\n1200.00,10,2026-02-01,0099,Bo Chen,\n', {});
+  const f = E.specFromProfile(prof);
+  const by = n => f.find(x => x.name === n);
+  assert.deepEqual(by('Amount'), { name: 'Amount', type: 'currency', required: true, origin: 'profile', min: 12.5, max: 1200, format: 'currency', rule: 'Required' });
+  assert.equal(by('Qty').type, 'number'); assert.deepEqual([by('Qty').min, by('Qty').max], [3, 10]);
+  assert.equal(by('Paid on').type, 'date');
+  assert.equal(by('Branch code').type, 'digits'); assert.equal(by('Branch code').length, 4); assert.equal(by('Branch code').format, '4 digits');
+  assert.equal(by('Payee').type, 'text'); assert.deepEqual([by('Payee').min, by('Payee').max], [6, 7]);
+  assert.equal(by('Memo').required, false); assert.equal(by('Memo').rule, '');
+  assert.deepEqual(E.specFromProfile({ columns: prof }), f);       // a profile doc works too
+  assert.deepEqual(E.specFromProfile(null), []);
+  // the generated spec validates its own sample
+  const de = { id: 'DX', name: 'Payments', fields: f };
+  const cases = E.generateTests(de, prof);
+  cases.filter(c => !c.context).forEach(c => assert.equal(E.validate(E.fieldSpec(f.find(x => x.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
+  assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '12.50' && c.expect === 'accept'));
+  assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '1200.01' && c.expect === 'reject'));
+  // no spec bounds: observed min/max still become boundary cases (profile origin)
+  const loose = E.generateTests({ id: 'DY', fields: [{ name: 'Qty', type: 'number' }] }, prof);
+  assert.ok(loose.some(c => c.kind === 'boundary' && c.origin === 'profile' && c.input === '3' && /Smallest value seen/.test(c.note)));
+  assert.ok(loose.some(c => c.kind === 'boundary' && c.origin === 'profile' && c.input === '10' && /Largest value seen/.test(c.note)));
 });

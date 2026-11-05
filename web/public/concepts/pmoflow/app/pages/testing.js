@@ -24,7 +24,9 @@ const OUT_TXT = o => o === 'not-run' ? 'skipped' : o;
 const rid = x => x.caseId || x.scriptId;
 /* R5 environments, everywhere */
 const ENVS = ['dev', 'sit', 'uat', 'prod-verify'];
-const ENV_TXT = { dev: 'Dev', sit: 'SIT', uat: 'UAT', 'prod-verify': 'Prod verify' };
+const ENV_TXT = { dev: 'Build testing', sit: 'System testing', uat: 'Business testing', 'prod-verify': 'Check after launch' };
+/* engine-written script text names environments by their professional terms; Simple mode shows the plain ones */
+const plainEnv = t => String(t || '').replace(/\bUAT\b/g, 'business testing').replace(/\bSIT\b/g, 'system testing');
 const envTxt = e => ENV_TXT[e] || String(e || '').toUpperCase();
 const ENV_TIP = { dev: 'Development: where the build is made', sit: 'SIT (system integration testing): the systems tested together', uat: 'UAT (user acceptance testing): the people who run the process confirm it works', 'prod-verify': 'A check in production right after go-live' };
 const envOpts = v => ENVS.map(e => `<option value="${e}" ${e === v ? 'selected' : ''}>${ENV_TXT[e]}</option>`).join('');
@@ -146,6 +148,7 @@ export function render(params) {
   const projects = store.list('project');
   if (!prj) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · Testing</div><h1>Testing</h1><p>Project not found.</p></div></section>
     <div class="home-grid">${projects.map(p => `<a class="tile" href="${link('/testing/' + p.id)}" data-link><h4>${esc(p.name)}</h4><p>${esc(p.desc || '')}</p></a>`).join('') || '<div class="empty">No projects yet.</div>'}</div>`;
+  if (!store.advanced) return simpleRender(prj);
   const des = projectData(prj);
   let did = params.q && params.q.de && des.some(d => d.id === params.q.de) ? params.q.de : ui.sel[prjId];
   if (!des.some(d => d.id === did)) did = des[0] && des[0].id;
@@ -548,11 +551,131 @@ function discoveredCard(de) {
       : '<div class="hint">Failures that reveal a rule nobody documented get logged here and sent to the data owner. Go-live needs every one resolved.</div>'}</div>`;
 }
 
+
+/* ======================================================================================================
+   R7 SIMPLE MODE (default): "Is testing finished?" in one sentence, one next-action button, and a 3-step guide:
+   Check sample data -> Create tests -> Record results. Coverage matrix, cycles, JUnit, end-to-end tests,
+   build testing and the defect lifecycle detail live under "Show advanced tools".
+   ====================================================================================================== */
+function eng(name, ...args) { const e = E(); if (!e || typeof e[name] !== 'function') return undefined; try { return e[name](...args); } catch (err) { return undefined; } }
+const TONE = { green: 'ok', amber: 'warn', red: 'bad' };
+function availOf(dataId) {
+  const l = eng('availLabel', store.state.docs, dataId);
+  if (l && l.label) return { label: l.label, tone: TONE[l.tone] || 'warn' };
+  return { live: { label: 'Connected', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[effAvail(dataId)] || { label: 'Not available yet', tone: 'bad' };
+}
+function summaryOf(prj) {
+  const s = eng('testingSummary', store.state.docs, prj.id);
+  if (s && s.sentence) return s;
+  const tc = testsCheck(prj.id);
+  return { done: !!(tc && tc.pass), sentence: tc ? (tc.pass ? 'Yes: testing is finished.' : 'Not yet: ' + (tc.detail || 'some tests still need attention.')) : 'Not yet: no tests have been set up.', nextAction: { key: tc && tc.pass ? 'none' : 'generate', label: tc && tc.pass ? 'Nothing left to test' : 'Generate the tests' } };
+}
+const TIP = { profile: 'Check sample data (profile): count lengths, blanks and characters in a sample file, never keeping the values.', rules: 'Rules to test (spec fields): what each column of the information must look like.', uat: 'Business testing (UAT): the people who run the process confirm it works.', dev: 'Build testing (Dev): checks made while the change is being built.', sit: 'System testing (SIT): the systems tested together.' };
+const gt = (word, k) => `<span class="ts-g" title="${esc(TIP[k])}">${esc(word)}</span>`;
+
+function simpleRender(prj) {
+  const prjId = prj.id;
+  const projects = store.list('project');
+  const des = projectData(prj);
+  const sum = summaryOf(prj);
+  const na = sum.nextAction || { key: 'none', label: '' };
+  const sc = scriptsFor(prj);
+  const allCases = des.reduce((n, d) => n + casesFor(d.id).length, 0);
+  const noRules = des.filter(d => !(d.fields || []).length);
+  const by = latestBy(prjId, 'uat');
+  const items = [].concat(...des.map(d => casesFor(d.id).map(c => c.id))).concat(sc.adopted ? uatItems(prj).map(x => x.id) : []);
+  const passN = items.filter(id => by[id] && by[id].outcome === 'pass').length;
+  const failN = items.filter(id => by[id] && by[id].outcome === 'fail').length;
+  const step1Done = des.length > 0 && des.every(d => latestProfile(d.id) || !d.sampleCsv);
+  const fold = (rows, n, label) => rows.length ? `<details class="ts-fold" ${ui.fold && ui.fold[label] ? 'open' : ''} data-fold="${label}"><summary>See each piece of information (${n})</summary><ul class="ts-srs">${rows.join('')}</ul></details>` : '';
+  const need1 = des.filter(d => d.sampleCsv && !latestProfile(d.id) || latestProfile(d.id) && !(d.fields || []).length);
+  const step2Done = des.length > 0 && des.every(d => casesFor(d.id).length && !fieldCoverage(d).missing.length) && (sc.adopted || !sc.list.length);
+  const step3Done = !!sum.done;
+  const problems = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done');
+  const btn = na.key && na.key !== 'none' ? `<button class="btn primary rs-big" data-next-action="${esc(na.key)}">${esc(na.label)}</button>` : '';
+  const row1 = d => { const p = latestProfile(d.id); const a = availOf(d.id); const nr = !(d.fields || []).length;
+    return `<li class="ts-sr" data-s1="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><span class="rs-st ${a.tone}">${esc(a.label)}</span>
+        <small>${p ? `Sample checked ${esc(fmt(p.at))}: ${esc(rowsOf(p))} rows` : d.sampleCsv ? 'A sample file is ready to check.' : 'No sample file yet.'}</small></div>
+      <div class="ts-sr-a">${p ? (nr ? `<button class="btn primary" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : '<span class="ts-okt">✓ Checked</span>')
+        : d.sampleCsv ? `<button class="btn" data-s-prof="${esc(d.id)}" ${ui.busy ? 'disabled' : ''}>Check sample data</button>` : `<label class="btn ts-file">Upload a sample file<input type="file" accept=".csv,text/csv" data-s-file="${esc(d.id)}" hidden></label>`}</div></li>`; };
+  const row2 = d => { const n = casesFor(d.id).length; const f = (d.fields || []).length; const miss = fieldCoverage(d).missing.length;
+    return `<li class="ts-sr" data-s2="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><small>${f ? `${f} ${f === 1 ? 'rule' : 'rules'} to test` : 'No rules to test yet'} · ${n} test${n === 1 ? '' : 's'}${miss ? ` · ${miss} rule${miss === 1 ? '' : 's'} without a test` : ''}</small></div>
+      <div class="ts-sr-a">${!f ? (latestProfile(d.id) ? `<button class="btn" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : `<a class="rl-go" href="${link('/data/' + d.id)}" data-link>Add rules ›</a>`) : miss || !n ? `<button class="btn" data-s-gen="${esc(d.id)}">Create tests</button>` : '<span class="ts-okt">✓ Ready</span>'}</div></li>`; };
+  const stepCard = (n, title, done, body, open) => `<li class="ts-step ${done ? 'done' : ''} ${open ? 'cur' : ''}" data-guide-step="${n}"><div class="ts-step-h"><span class="ts-num">${done ? '✓' : n}</span><b>${title}</b>${done ? '<span class="ts-okt">Done</span>' : ''}</div>${body}</li>`;
+  const cur = !step1Done ? 1 : !step2Done ? 2 : 3;
+  return `<section class="hdr rs-hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
+      <div class="rl-title"><h1>Testing</h1>${projects.length > 1 ? `<select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}</div></div></section>
+    <div class="rs-wrap" data-simple-testing>
+      <div class="rs-status ${sum.done ? 'ready' : 'notready'} ts-sum" data-testing-summary="${sum.done ? 'done' : 'open'}" role="status"><span class="rs-status-ic" aria-hidden="true">${sum.done ? '✓' : '!'}</span>
+        <div><span class="ts-q">Is testing finished?</span><b data-testing-sentence>${esc(sum.sentence)}</b></div></div>
+      ${btn ? `<div class="ts-next">${btn}</div>` : ''}
+      <ol class="ts-guide" data-guide>
+        ${stepCard(1, `${gt('Check sample data', 'profile')}`, step1Done, `<p class="ts-help">See what real information looks like (lengths, blanks, characters) without keeping any of the values.</p>${des.length ? `${need1.length ? `<ul class="ts-srs">${need1.map(row1).join('')}</ul>` : ''}${fold(des.filter(d => !need1.includes(d)).map(row1), des.length - need1.length, 's1')}` : '<div class="hint">This project’s steps use no information yet.</div>'}`, cur === 1)}
+        ${stepCard(2, 'Create tests', step2Done, `<p class="ts-help">Tests are made for you from the ${gt('rules to test', 'rules')} and the sample data. One tap creates them all.</p>
+          <div class="ts-step-a"><button class="btn ${cur === 2 ? 'primary' : ''}" data-s-genall>Create all tests</button><span class="hint">${allCases} information test${allCases === 1 ? '' : 's'} · ${sc.adopted ? sc.list.length : 0} business test${(sc.adopted ? sc.list.length : 0) === 1 ? '' : 's'}${noRules.length ? ` · ${noRules.length} without rules yet` : ''}</span></div>
+          ${des.length ? fold(des.map(row2), des.length, 's2') : ''}`, cur === 2)}
+        ${stepCard(3, 'Record results', step3Done, `<p class="ts-help">Run each test and mark it passed or failed. Failed tests become problems for the owner to fix.</p>
+          <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record>Record ${gt('business testing', 'uat')} results</button><span class="hint" data-s-progress>${passN} of ${items.length} passed${failN ? ` · ${failN} failed` : ''}</span></div>`, cur === 3)}
+      </ol>
+      <div class="card rs-card" id="problems" data-problems><h3>Problems found<span class="n">${problems.length} open</span></h3>
+        ${problems.map(w => `<div class="ts-prob" data-problem="${esc(w.id)}"><b>${esc(w.title)}</b><span class="hint">${av(w.owner)} ${esc(pname(w.owner))} fixes it · due ${esc(fmt(w.due))}</span></div>`).join('') || '<div class="hint">No open problems.</div>'}</div>
+      <div class="rs-adv"><button class="btn rs-link" data-show-adv>Show advanced tools</button></div>
+    </div>`;
+}
+
+async function generateAll(prj) {
+  const des = projectData(prj);
+  const withRules = des.filter(d => (d.fields || []).length || latestProfile(d.id));
+  let made = 0;
+  for (const d of withRules) made += await generateFor(d, true);
+  const cur = store.get('project', prj.id) || prj;
+  let scripts = 0;
+  if (!Array.isArray(cur.uatScripts) && generated(prj.id).length) { scripts = generated(prj.id).length; await adoptScripts(prj, false, true); }
+  else if (Array.isArray(cur.uatScripts)) { const fresh = generated(prj.id).filter(g => !cur.uatScripts.some(h => h.id === g.id)); if (fresh.length) { scripts = fresh.length; await adoptScripts(prj, true, true); } }
+  const skipped = des.length - withRules.length;
+  if (!made && !scripts) toast(skipped ? 'Add rules first (or use your sample data)' : 'Every test already exists.');
+  else toast(`Created ${made} information test${made === 1 ? '' : 's'}${scripts ? ` and ${scripts} business test${scripts === 1 ? '' : 's'}` : ''}${skipped ? `. ${skipped} without rules: add rules first (or use your sample data)` : ''}`);
+}
+async function useColumns(dataId) {
+  const de = store.get('dataElement', dataId); const prof = latestProfile(dataId);
+  if (!de || !prof) { toast('Check sample data first.'); return; }
+  const fields = eng('specFromProfile', prof);
+  if (!Array.isArray(fields) || !fields.length) { toast('The sample data has no columns to use.'); return; }
+  await store.save('dataElement', dataId, Object.assign({}, de, { fields }), `Used the ${fields.length} sample-data columns of ${de.name} as its rules to test`);
+  toast(`${fields.length} rules to test added to ${de.name}. Next: create tests.`);
+}
+function bindSimple(root, prj) {
+  const adv = root.querySelector('[data-show-adv]'); if (adv) adv.onclick = () => { store.setAdvanced(true); toast('Advanced tools shown'); };
+  root.querySelectorAll('details[data-fold]').forEach(d => d.addEventListener('toggle', () => { ui.fold = ui.fold || {}; ui.fold[d.dataset.fold] = d.open; }));
+  const prof = async (d, csv, label) => {
+    if (!csv || !csv.trim()) { toast('That file is empty.'); return; }
+    ui.busy = true; store.emit();
+    try { const p = await store.api('/profile/' + d.id, { csv }); await store.load(); toast(`Checked ${label}: ${p && p.rows != null ? p.rows + ' rows' : 'done'}. No values were kept.`); }
+    catch (e) { toast('Could not check the sample: ' + e.message); } finally { ui.busy = false; store.emit(); }
+  };
+  root.querySelectorAll('[data-s-prof]').forEach(b => b.onclick = () => { const d = store.get('dataElement', b.dataset.sProf); if (d) prof(d, d.sampleCsv, 'the sample data of ' + d.name); });
+  root.querySelectorAll('[data-s-file]').forEach(f => f.onchange = () => { const d = store.get('dataElement', f.dataset.sFile); const file = f.files[0]; if (!d || !file) return; if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB.'); return; } const rd = new FileReader(); rd.onload = () => prof(d, String(rd.result), file.name); rd.readAsText(file); });
+  root.querySelectorAll('[data-use-cols]').forEach(b => b.onclick = () => useColumns(b.dataset.useCols));
+  root.querySelectorAll('[data-s-gen]').forEach(b => b.onclick = () => { const d = store.get('dataElement', b.dataset.sGen); if (d) generateFor(d); });
+  const ga = root.querySelector('[data-s-genall]'); if (ga) ga.onclick = () => generateAll(prj);
+  const rec = root.querySelector('[data-s-record]'); if (rec) rec.onclick = () => recordRun(prj, { simple: true, env: 'uat' });
+  const nx = root.querySelector('[data-next-action]');
+  if (nx) nx.onclick = () => {
+    const k = nx.dataset.nextAction;
+    if (k === 'generate') return generateAll(prj);
+    if (k === 'fix') return retestIds(prj.id, 'uat').length ? recordRun(prj, { simple: true, retestEnv: 'uat' }) : recordRun(prj, { simple: true, env: 'uat' });
+    if (k === 'run' || k === 'evidence') return recordRun(prj, { simple: true, env: 'uat' });
+    if (k === 'run-build') return recordRun(prj, { simple: true, env: 'dev' });
+    const t = root.querySelector(k === 'problems' ? '#problems' : '[data-guide]'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+}
+
 /* ---------- bind ---------- */
 export function bind(root, params) {
   const prjId = params.prj;
   const sw = root.querySelector('[data-switch]'); if (sw) sw.onchange = () => go('/testing/' + sw.value);
   const prj = store.get('project', prjId); if (!prj) return;
+  if (!store.advanced) { bindSimple(root, prj); return; }
   const did = ui.sel[prjId]; const de = did && store.get('dataElement', did);
   root.querySelectorAll('[data-de]').forEach(a => a.onclick = e => { e.preventDefault(); ui.sel[prjId] = a.dataset.de; history.replaceState({}, '', link('/testing/' + prjId)); store.emit(); });
   bindProject(root, prj);
@@ -649,8 +772,10 @@ function bindProject(root, prj) {
 /* R6: one press generates every case at once. All new cases go into the store together and the page re-renders
    immediately (the count is never stale), then they are persisted and the page re-renders again after the last save.
    Default tester: the data owner. */
-async function generateFor(de) {
+async function generateFor(de, quiet) {
   const e = E(); if (!e || !e.generateTests) { toast('Test generator unavailable.'); return 0; }
+  const noRules = !(de.fields || []).length;
+  if (noRules && !latestProfile(de.id)) { if (!quiet) toast('Add rules first (or use your sample data)'); return 0; }
   ui.genBusy = ui.genBusy || {}; if (ui.genBusy[de.id]) { toast('Still saving the cases just generated.'); return 0; } ui.genBusy[de.id] = true;
   try {
     let made = [];
@@ -660,11 +785,11 @@ async function generateFor(de) {
     const t0 = Date.now(); const docs = [];
     made.forEach(c => { if (have.has(key(c))) return; have.add(key(c)); const id = store.newId('tc');
       docs.push(Object.assign({ note: '' }, c, { id, dataId: de.id, tester: c.tester || de.owner || undefined, createdAt: new Date(t0 + docs.length).toISOString() })); });
-    if (!docs.length) { toast('No new test cases — all already exist'); return 0; }
+    if (!docs.length) { if (!quiet) toast(noRules ? 'Add rules first (or use your sample data)' : 'No new test cases — all already exist'); return 0; }
     const arr = store.state.docs.testCase || (store.state.docs.testCase = []);
     docs.forEach(d => arr.push({ id: d.id, data: d }));
     store.emit();
-    toast(`Generated ${docs.length} test case${docs.length === 1 ? '' : 's'} for ${de.name}`);
+    if (!quiet) toast(`Generated ${docs.length} test case${docs.length === 1 ? '' : 's'} for ${de.name}`);
     for (let i = 0; i < docs.length; i += 6) await Promise.all(docs.slice(i, i + 6).map(d => store.save('testCase', d.id, d, `Generated ${d.kind} test for ${de.name}.${d.field}`)));
     store.emit();
     return docs.length;
@@ -769,13 +894,13 @@ async function recordRun(prj, opts) {
   const pick = (k, label) => `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
   const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const t = `${d.name} ${caseLbl(c.id)} · ${c.field}`; return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t">${pick(k, t)}<b>${esc(d.name)} ${esc(caseLbl(c.id))} · ${esc(c.field)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small>expect ${esc(c.expect)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small></div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
-  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}><div class="ts-case-t">${pick(k, s.title)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'Scenario' : 'Script'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(s.given)}</div>` : ''}</div>
-    <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(x.action)}<small>Expected: ${esc(x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
+  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}><div class="ts-case-t">${pick(k, s.title)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
+    <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(opts.simple ? plainEnv(x.action) : x.action)}<small>Expected: ${esc(opts.simple ? plainEnv(x.expected) : x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence (required to pass): link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({
-    title: prev ? `Retest failures · ${envTxt(prev.env)} retest ${(prev.cycle || 1) + 1}` : 'Record test run',
-    body: `<div class="frow"><div class="field"><label>Environment</label><select name="env" data-env ${prev ? 'disabled' : ''}>${envOpts(env0)}</select></div>
-      <div class="field"><label>Test cycle</label><select name="cycleId" data-cycle-sel><option value="">No planned cycle</option>${cycles.map(c => `<option value="${esc(c.id)}" data-cenv="${esc(c.env)}" ${c.id === cyc0 ? 'selected' : ''}>${esc(c.name)} · ${esc(envTxt(c.env))}</option>`).join('')}</select></div></div>
+    title: prev ? `Retest failures · ${envTxt(prev.env)} retest ${(prev.cycle || 1) + 1}` : opts.simple ? 'Record results' : 'Record test run',
+    body: `<div class="frow"><div class="field"><label>${opts.simple ? 'Which testing' : 'Environment'}</label><select name="env" data-env ${prev ? 'disabled' : ''}>${opts.simple ? ENVS.filter(e => e === 'uat' || e === 'sit' || e === env0).map(e => `<option value="${e}" ${e === env0 ? 'selected' : ''}>${ENV_TXT[e]}</option>`).join('') : envOpts(env0)}</select></div>
+      <div class="field" ${opts.simple ? 'hidden style="display:none"' : ''}><label>Test cycle</label><select name="cycleId" data-cycle-sel><option value="">No planned cycle</option>${cycles.map(c => `<option value="${esc(c.id)}" data-cenv="${esc(c.env)}" ${c.id === cyc0 ? 'selected' : ''}>${esc(c.name)} · ${esc(envTxt(c.env))}</option>`).join('')}</select></div></div>
       <div class="ts-bulk" data-bulk><label class="ts-pick"><input type="checkbox" data-pick-all aria-label="Select every row"> All</label>
         <input data-bulk-ev placeholder="Evidence note for the selected rows" aria-label="Evidence note for the selected rows"><button type="button" class="btn sm primary" data-bulk-pass>Mark selected as passed</button><button type="button" class="btn sm" data-reset>Reset to not run</button>
         <span class="ts-bulk-hint" data-bulk-hint role="status" aria-live="polite" hidden></span></div>
@@ -783,8 +908,8 @@ async function recordRun(prj, opts) {
       ${prev ? `<div class="hint">Only the ${only.size} item${only.size === 1 ? '' : 's'} whose latest ${esc(envTxt(prev.env))} result failed or was blocked. Earlier passes still count toward coverage.</div>` : ''}
       <div class="ts-cov-live hint" data-cov-live></div><div class="ts-err" data-err hidden></div>
       <div class="ts-cases">
-        ${cases.length ? `<div class="ts-grp">Data cases · ${cases.length}</div>${cases.map(caseRow).join('')}` : ''}
-        <div data-scripts-block ${scriptEnv(env0) ? '' : 'hidden'}>${scripts.length ? `<div class="ts-grp">UAT scripts and scenarios · ${scripts.length} · every step must pass; a pass needs evidence</div>${scripts.map(scriptRow).join('')}` : ''}</div>
+        ${cases.length ? `<div class="ts-grp">Information tests · ${cases.length}</div>${cases.map(caseRow).join('')}` : ''}
+        <div data-scripts-block ${scriptEnv(env0) ? '' : 'hidden'}>${scripts.length ? `<div class="ts-grp">Business tests · ${scripts.length} · every step must pass; a pass needs evidence</div>${scripts.map(scriptRow).join('')}` : ''}</div>
       </div>`,
     actions: [{ id: 'save', label: 'Save run', primary: true }],
   });
@@ -1117,18 +1242,18 @@ async function closeDefect(prj, wid) {
 }
 
 /* ---------- UAT scripts ---------- */
-async function adoptScripts(prj, onlyNew) {
+async function adoptScripts(prj, onlyNew, quiet) {
   const cur = store.get('project', prj.id) || prj;
   const gen = generated(prj.id);
   const have = Array.isArray(cur.uatScripts) ? cur.uatScripts : [];
   const add = onlyNew ? gen.filter(g => !have.some(h => h.id === g.id)) : gen;
-  if (!add.length) { toast('No generated scripts to add.'); return; }
+  if (!add.length) { if (!quiet) toast('No generated scripts to add.'); return; }
   const next = (onlyNew ? have : []).concat(add.map(s => { const x = { id: s.id, pid: s.pid, step: s.step, title: s.title, given: s.given, when: s.when, then: s.then, data: (s.data || []).slice() };
     if (Array.isArray(s.steps) && s.steps.length) x.steps = s.steps.map((y, i) => ({ n: i + 1, action: String(y.action || ''), expected: String(y.expected || '') }));
     const owner = s.tester || stepLabel(s.pid, s.step).owner || (store.get('dataElement', (s.data || [])[0]) || {}).owner;
     if (owner) x.tester = owner; return x; }));
   await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), onlyNew ? `Added ${add.length} generated UAT script${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} generated UAT scripts for ${prj.name}`);
-  toast(onlyNew ? `${add.length} script${add.length === 1 ? '' : 's'} added` : `${add.length} UAT scripts adopted. You can edit them now.`);
+  if (!quiet) toast(onlyNew ? `${add.length} script${add.length === 1 ? '' : 's'} added` : `${add.length} business test scripts adopted. You can edit them now.`);
 }
 
 async function editScript(prj, sid) {
