@@ -115,16 +115,21 @@ async function createWorkspace(ipHash, opts) {
   await db().upsert(T.limits, { PartitionKey: pk, RowKey: rk, count: count + 1, app: APP });
   const id = opts.id || newWorkspaceId();
   const now = new Date().toISOString();
-  await db().upsert(T.ws, { PartitionKey: 'ws', RowKey: id, createdAt: now, seedDate: now.slice(0, 10), ipHash: rk, app: APP });
-  return { id, createdAt: now, seedDate: now.slice(0, 10) };
+  /* R8 §2: the seed is dated with the visitor's own today (already validated by the caller), else the server's UTC date */
+  const seedDate = validDay(opts.seedDate) || now.slice(0, 10);
+  await db().upsert(T.ws, { PartitionKey: 'ws', RowKey: id, createdAt: now, seedDate, ipHash: rk, app: APP });
+  return { id, createdAt: now, seedDate };
 }
 
 async function listOverrides(wsId) {
   return db().list(T.docs, `PartitionKey eq '${q(wsId)}'`);
 }
 
-/* ws: object from getWorkspace (or a wsId string). Returns {docs, people, today}. */
-async function getState(ws) {
+const validDay = d => (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && isFinite(Date.parse(d + 'T12:00:00Z')) &&
+  new Date(d + 'T12:00:00Z').toISOString().slice(0, 10) === d ? d : null);
+
+/* ws: object from getWorkspace (or a wsId string). Returns {docs, people, today}; today is the caller's (client) date when given. */
+async function getState(ws, clientDay) {
   if (typeof ws === 'string') ws = await getWorkspace(ws);
   const base = seed(ws.seedDate);
   const docs = base.docs;
@@ -138,7 +143,7 @@ async function getState(ws) {
     if (i >= 0) arr[i] = { id: r.docId, data }; else arr.push({ id: r.docId, data });
   }
   const people = docs.person.map(d => d.data);
-  return { docs, people, today: today() };
+  return { docs, people, today: validDay(clientDay) || today() };
 }
 
 async function putDoc(wsId, type, id, data) {
@@ -174,13 +179,13 @@ async function listEvents(ws, opts) {
   return stored.concat(seeded).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit);
 }
 
-async function resetWorkspace(ws) {
+async function resetWorkspace(ws, clientDay) {
   if (typeof ws === 'string') ws = await getWorkspace(ws);
   const b = db();
   const docs = await listOverrides(ws.id);
   const evs = await b.list(T.events, `PartitionKey eq '${q(ws.id)}'`);
   await Promise.all(docs.map(r => b.del(T.docs, r.PartitionKey, r.RowKey)).concat(evs.map(r => b.del(T.events, r.PartitionKey, r.RowKey))));
-  const seedDate = today();
+  const seedDate = validDay(clientDay) || today();
   const rows = await b.list(T.ws, `PartitionKey eq 'ws' and RowKey eq '${q(ws.id)}'`);
   const row = rows[0] || {};
   await b.upsert(T.ws, { PartitionKey: 'ws', RowKey: ws.id, createdAt: row.createdAt || ws.createdAt, seedDate, ipHash: row.ipHash || '', app: APP });

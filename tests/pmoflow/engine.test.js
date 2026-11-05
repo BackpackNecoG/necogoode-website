@@ -12,6 +12,8 @@ const E = require(API_ENGINE);
 
 const TODAY = '2026-11-04';
 const PRJ = 'vendor-modernization';
+// R8: generateTests keeps at most 6 cases per field by default; the pre-R8 tests below check the full set.
+const GT = (d, p) => E.generateTests(d, p, { all: true });
 
 /* ---------------- fixture: mirrors the v2 scenario (fictional Northwind data) ---------------- */
 function deepFreeze(o) { if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); Object.values(o).forEach(deepFreeze); } return o; }
@@ -143,9 +145,17 @@ function readyDocs() {
   return d;
 }
 const check = (r, id) => r.checks.find(c => c.id === id);
+// R8: remove an element from every Today (as-is) step so it counts as new in the Future (the project changes it).
+function asNewInFuture(d, id) {
+  const strip = nodes => (nodes || []).forEach(n => { if (!n) return; if (Array.isArray(n.data)) n.data = n.data.filter(x => x !== id); (n.subs || []).forEach(x => { if (x && Array.isArray(x.data)) x.data = x.data.filter(y => y !== id); }); (n.branches || []).forEach(b => strip(b && b.nodes)); });
+  d.process.forEach(e => strip(e.data.asis));
+  return d;
+}
 // R6: plan the one unplanned missing element (D9) so health is driven by the schedule.
 function withHoldResolver(d) {
   d.workItem.push({ id: 'W12', data: { id: 'W12', projectId: PRJ, pid: 'invoice-approval', step: 'i4', title: 'Hold list feed', owner: 'ar', status: 'idle', start: '2026-11-05', due: '2026-11-12', deps: [], resolves: 'D9' } });
+  // R8: Vendor risk tier (new in the Future, examples only) is an unplanned blocker too; give it a live source.
+  Object.assign(d.dataElement.find(e => e.id === 'D8').data, { avail: 'live', check: { ok: true, at: '2026-11-01T00:00:00Z', detail: 'Probe ok' } });
   return d;
 }
 
@@ -203,7 +213,8 @@ test('stepState, projectStats, dataReady, impactOfData, flatSteps', () => {
   assert.equal(st.onTrack, true);
   assert.equal(E.dataReady(docs, 'D4'), true);
   assert.equal(E.dataReady(docs, 'D2'), false);
-  assert.equal(E.dataReady(docs, 'D1'), false);          // examples only is not live
+  assert.equal(E.dataReady(docs, 'D1'), true);           // R8: on a Today step and not marked missing → live
+  assert.equal(E.dataReady(docs, 'D8'), false);          // R8: new in Future, examples only → not live
   assert.deepEqual(E.impactOfData(docs, 'D2').map(x => x.stepId).sort(), ['i1', 'i3', 's3', 's4']);
   const proc = docs.process[0].data;
   assert.deepEqual(E.flatSteps(proc.tobe).map(s => s.id), ['s1', 's2', 's2a', 's3', 's4', 's5', 's6']);
@@ -330,7 +341,7 @@ test('profileCsv statistics', () => {
   assert.deepEqual([rt.minLen, rt.maxLen], [8, 9]);
   assert.equal(rt.min, undefined);                       // identifier-like: no numeric min/max
   assert.deepEqual(rt.patterns[0], { pattern: '9{9}', count: 3 });
-  assert.ok(rt.examples.includes('099999991'));          // masked 021000021
+  assert.ok(rt.examples.includes('999999999'));          // R8: every digit hidden (021000021)
   const amt = by('Amount');
   assert.deepEqual([amt.min, amt.max], [15.25, 1250.5]);
   const holder = by('Account holder');
@@ -378,7 +389,7 @@ test('specDrift flags an 8-digit routing number against a 9-digit spec, and more
 
 test('generateTests produces valid/boundary/invalid/edge cases, synthetic and deduped', () => {
   const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
-  const cases = E.generateTests(d2, E.profileCsv(CSV, {}));
+  const cases = GT(d2, E.profileCsv(CSV, {}));
   const kinds = new Set(cases.map(c => c.kind));
   ['valid', 'boundary', 'invalid', 'edge'].forEach(k => assert.ok(kinds.has(k), 'missing kind ' + k));
   const rt = cases.filter(c => c.field === 'Routing number');
@@ -399,7 +410,7 @@ test('generateTests produces valid/boundary/invalid/edge cases, synthetic and de
   cases.forEach(c => assert.ok(!raws.some(r => c.input.includes(r)), 'raw value in input ' + c.input));
   // expectations agree with the engine's own validator
   cases.filter(c => !c.context).forEach(c => assert.equal(E.validate(E.fieldSpec(d2.fields.find(f => f.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
-  assert.ok(E.generateTests(d2).every(c => c.origin === 'spec'));
+  assert.ok(GT(d2).every(c => c.origin === 'spec'));
 });
 
 /* ---------------- portfolio ---------------- */
@@ -623,19 +634,21 @@ const IDS = /\b(W\d+|D\d+|AP\d+|G\d+|T\d+|s\d+a?|i\d+|sug-\d+)\b/;
 test('R3 effectiveAvail drives blockers (missing only) and data-live (fails on examples)', () => {
   const docs = deepFreeze(baseDocs());
   assert.equal(E.effectiveAvail(docs, 'D4'), 'live');
-  assert.equal(E.effectiveAvail(docs, 'D1'), 'example');
+  assert.equal(E.effectiveAvail(docs, 'D1'), 'live');            // R8: on a Today step, not marked missing
+  assert.equal(E.effectiveAvail(docs, 'D8'), 'example');         // R8: new in Future
   assert.equal(E.effectiveAvail(docs, 'D2'), 'missing');
   assert.equal(E.effectiveAvail(docs, 'nope'), 'missing');
   const d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.status = 'done';
+  d.dataElement.find(e => e.id === 'D2').data.owner = 'ar';      // R8: a fix by someone other than the owner
   assert.equal(E.effectiveAvail(d, 'D2'), 'pending');            // R4: fix done, awaiting owner confirmation
   const s2 = E.stepState(docs, PRJ, 'vendor-onboarding', 's2', TODAY);
   assert.deepEqual(s2.blockers, ['D5']);                        // red: missing only
-  assert.deepEqual(s2.needsLive, ['D1', 'D8']);                 // amber: examples only
-  const r = readyDocs(); r.dataElement.find(e => e.id === 'D1').data.avail = 'example';
+  assert.deepEqual(s2.needsLive, ['D8']);                       // amber: examples only (R8: D1 is on a Today step)
+  const r = readyDocs(); r.dataElement.find(e => e.id === 'D8').data.avail = 'example';
   const c = check(E.readiness(r, PRJ, TODAY), 'data-live');
   assert.equal(c.pass, false); assert.equal(c.status, 'fail');
-  assert.deepEqual(c.examples, ['D1']);
-  assert.equal(c.detail, 'Vendor legal name & Tax ID has examples only and needs a live source before go-live.');
+  assert.deepEqual(c.examples, ['D8']);
+  assert.equal(c.detail, 'Vendor risk tier has examples only and needs a live source before go-live.');
 });
 
 test('R3 released project: frozen readiness, staleness ignored', () => {
@@ -720,7 +733,7 @@ test('R3 tests-passed: latest run per env, zero-case elements fail', () => {
 function aba(s) { const d = s.split('').map(Number); return /^\d{9}$/.test(s) && (3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + d[2] + d[5] + d[8]) % 10 === 0; }
 test('R3 generateTests: every field, special characters, cross-field, ABA routing', () => {
   const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
-  const cases = E.generateTests(d2);
+  const cases = GT(d2);
   d2.fields.forEach(f => assert.ok(cases.some(c => c.field === f.name), 'no cases for ' + f.name));
   const bank = cases.filter(c => c.field === 'Bank name');
   ["O'Neill Supply", 'Zoë Café', 'Ames & Sons', 'Acme Rockets 🚀', '  Acme Ltd  '].forEach(x => assert.ok(bank.some(c => c.input === x && c.kind === 'edge'), x));
@@ -732,7 +745,7 @@ test('R3 generateTests: every field, special characters, cross-field, ABA routin
   const bad = rt.find(c => /ABA checksum fails/.test(c.note));
   assert.ok(bad && /^\d{9}$/.test(bad.input) && !aba(bad.input) && bad.expect === 'reject');
   // same-element cross-field: "Must be after Start date"
-  const dates = E.generateTests({ id: 'DX', fields: [{ name: 'Start date', type: 'date' }, { name: 'End date', type: 'date', rule: 'Must be after Start date' }] });
+  const dates = GT({ id: 'DX', fields: [{ name: 'Start date', type: 'date' }, { name: 'End date', type: 'date', rule: 'Must be after Start date' }] });
   const cross = dates.filter(c => c.context);
   assert.equal(cross.length, 2);
   cross.forEach(c => { assert.ok('Start date' in c.context); assert.equal(c.expect === 'accept', c.input > c.context['Start date']); });
@@ -758,20 +771,21 @@ test('R3 specDrift plain English; row count from the profile doc; humanPattern',
 test('R4 suggestWorkFromDiff: data-driven deps, gateways, all non-live data, business days', () => {
   const docs = deepFreeze(baseDocs());
   const sug = E.suggestWorkFromDiff(docs, PRJ, TODAY);
+  // R8: D1/D3 are on Today steps ("We have it"): no tasks for them; only Not-available-yet information (D8, D9).
   assert.deepEqual(sug.map(s => [s.key, s.step, s.resolves || null]), [
-    ['sug-1', 's1', 'D1'], ['sug-2', 's1', 'D3'], ['sug-3', 's2', 'D8'], ['sug-4', 'd1', null], ['sug-5', 's5', null], ['sug-6', 'i4', 'D9'], ['sug-7', 'i4', null]]);
-  assert.equal(sug[0].title, 'Connect a live source for Vendor legal name & Tax ID');
-  assert.equal(sug[3].title, 'Configure routing: Risk tier?');        // new gateway
-  assert.equal(sug[5].title, 'Make Payment hold list available');
-  assert.equal(sug[5].owner, 'ar');                                 // data owner for resolvers
-  assert.equal(sug[6].owner, 'ps');                                 // step owner otherwise
+    ['sug-1', 's2', 'D8'], ['sug-2', 'd1', null], ['sug-3', 's5', null], ['sug-4', 'i4', 'D9'], ['sug-5', 'i4', null]]);
+  assert.equal(sug[0].title, 'Make Vendor risk tier available');      // R8: one plain wording
+  assert.equal(sug[1].title, 'Configure routing: Risk tier?');        // new gateway
+  assert.equal(sug[3].title, 'Make Payment hold list available');
+  assert.equal(sug[3].owner, 'ar');                                 // data owner for resolvers
+  assert.equal(sug[4].owner, 'ps');                                 // step owner otherwise
   // R6 (changed): flow-order FS deps on the nearest preceding step's work, plus resolvers; dates spread toward the target
-  assert.deepEqual(sug[6].deps, ['W11', 'sug-6']);                  // i2's open work, then the D9 resolver
-  assert.deepEqual(sug[4].deps, ['W8']);                            // s5 follows s4's open work
-  assert.deepEqual(sug[3].deps, ['W2', 'W3', 'W4']);                // gateway follows s2's open work
-  assert.ok(sug.every(s => s.effortDays === 2));
-  assert.deepEqual([0, 1, 2, 5].map(i => sug[i].start), Array(4).fill('2026-11-04'));   // can start now = today
-  assert.deepEqual([sug[4].start, sug[6].start], ['2026-11-25', '2026-11-23']);         // business day after deps finish
+  assert.deepEqual(sug[4].deps, ['W11', 'sug-4']);                  // i2's open work, then the D9 resolver
+  assert.deepEqual(sug[2].deps, ['W8']);                            // s5 follows s4's open work
+  assert.deepEqual(sug[1].deps, ['W2', 'W3', 'W4']);                // gateway follows s2's open work
+  assert.ok(sug.every(s => s.effortDays === 3));                    // R8: default 3 business days
+  assert.deepEqual([0, 3].map(i => sug[i].start), Array(2).fill('2026-11-04'));   // can start now = today
+  assert.deepEqual([sug[2].start, sug[4].start], ['2026-11-25', '2026-11-23']);   // business day after deps finish
   assert.ok(new Set(sug.map(s => s.start)).size > 1);
   // resolvers for non-live data used by ANY to-be step, even unchanged ones
   const d = baseDocs(); d.dataElement.push({ id: 'DZ', data: { id: 'DZ', name: 'Bank cut-off calendar', owner: 'lp', avail: 'missing', fields: [] } });
@@ -785,7 +799,7 @@ test('R4 suggestWorkFromDiff: data-driven deps, gateways, all non-live data, bus
   e.process[1].data.tobe.splice(1, 0, { id: 'i0', title: 'Check bank on file', owner: 'lp', data: ['D2'] });
   const s2 = E.suggestWorkFromDiff(e, PRJ, TODAY).find(x => x.step === 'i0');
   assert.deepEqual(s2.deps, ['W6']);
-  assert.deepEqual([s2.start, s2.due], ['2026-11-12', '2026-11-17']);   // R6 (changed): day after W6's Nov 11 forecast; spread span
+  assert.deepEqual([s2.start, s2.due], ['2026-11-12', '2026-11-18']);   // R6 (changed): day after W6's Nov 11 forecast; spread span (R8: 3-day effort)
   assert.equal(E.suggestWorkFromDiff(docs, PRJ)[0].start, '2026-11-20');   // anchor: latest project due
   // weekend anchor rolls to Monday
   assert.equal(E.suggestWorkFromDiff(docs, PRJ, '2026-11-07')[0].start, '2026-11-09');
@@ -794,6 +808,7 @@ test('R4 suggestWorkFromDiff: data-driven deps, gateways, all non-live data, bus
 /* ================================ Round 4 ================================ */
 test('R4 effectiveAvail: pending until the data owner confirms', () => {
   const d = baseDocs(); d.workItem.find(e => e.id === 'W6').data.status = 'done';
+  d.workItem.find(e => e.id === 'W6').data.owner = 'dk';          // R8: fixed by someone other than the owner
   const d2 = d.dataElement.find(e => e.id === 'D2').data;
   d2.owner = 'lp';
   assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
@@ -813,7 +828,7 @@ test('R4 effectiveAvail: pending until the data owner confirms', () => {
   assert.equal(E.effectiveAvail(e, 'D1'), 'live');                // examples element confirmed live by its owner
   // gate: pending fails data-live with "awaiting <owner> to confirm"
   const r = readyDocs(); const rd2 = r.dataElement.find(x => x.id === 'D2').data;
-  rd2.avail = 'missing'; rd2.owner = 'lp';
+  rd2.avail = 'missing'; rd2.owner = 'lp'; r.workItem.find(x => x.id === 'W6').data.owner = 'dk';   // R8: fixed by a non-owner
   const c = check(E.readiness(r, PRJ, TODAY), 'data-live');
   assert.equal(c.pass, false); assert.deepEqual(c.pending, ['D2']);
   assert.equal(c.awaiting[0].text, 'awaiting Leo Park to confirm');
@@ -941,13 +956,13 @@ test('R4 sprints and sprintOf', () => {
 test('R4 profile-derived test cases reproduce observed shapes synthetically', () => {
   const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
   const prof = E.profileCsv(CSV, {});
-  const cases = E.generateTests(d2, prof).filter(c => c.origin === 'profile');
+  const cases = GT(d2, prof).filter(c => c.origin === 'profile');
   const rt = cases.filter(c => c.field === 'Routing number');
   const eight = rt.find(c => /^Observed shape: 8 digits/.test(c.note));
   assert.ok(eight && /^\d{8}$/.test(eight.input) && eight.expect === 'reject');
   const nine = rt.find(c => /^Observed shape: 9 digits/.test(c.note));
   assert.ok(nine && aba(nine.input) && nine.expect === 'accept');
-  const blank = E.generateTests(d2, prof).find(c => c.field === 'Bank name' && c.input === '');   // blanks observed: deduped into the spec case
+  const blank = GT(d2, prof).find(c => c.field === 'Bank name' && c.input === '');   // blanks observed: deduped into the spec case
   assert.ok(blank.observed && blank.expect === 'reject' && /also observed in the extract: empty values observed \(1\)/.test(blank.note), blank.note);
   assert.ok(cases.some(c => c.field === 'Account holder' && /Unicode/.test(c.note)));
   assert.ok(cases.some(c => /Longest observed length/.test(c.note)));
@@ -992,6 +1007,7 @@ test('R4 coverage: latest result per item across all runs in the env, by project
 /* ================================ Round 5 ================================ */
 test('R5 effectiveAvail requires evidence; attested evidence is a warn', () => {
   const d = readyDocs();
+  asNewInFuture(d, 'D2'); d.workItem.find(e => e.id === 'W6').data.owner = 'dk';   // R8: evidence applies to changing information
   const d2 = d.dataElement.find(e => e.id === 'D2').data;
   delete d2.check;                                                   // claimed live, no evidence
   assert.equal(E.effectiveAvail(d, 'D2'), 'pending');
@@ -1144,15 +1160,20 @@ test('R5 external deps, causesSlip', () => {
 // R6 deliberately changes the RAG rule (was: any late item = red, < 7 calendar days buffer = amber).
 test('R6 projectStats RAG follows projectHealth; notPlanned', () => {
   let st = E.projectStats(baseDocs(), PRJ, TODAY);
-  assert.deepEqual([st.rag, st.ragReason, st.notPlanned], ['red', 'Payment hold list is missing with no work planned to provide it', false]);
+  // R8: unplanned blockers = Not-available-yet information with no work planned (D9 missing, D8 new with examples only)
+  assert.deepEqual([st.rag, st.ragReason, st.notPlanned], ['red', 'Vendor risk tier and Payment hold list are not available yet and no work is planned to get them', false]);
   let d = withHoldResolver(baseDocs());
   st = E.projectStats(d, PRJ, TODAY);
-  assert.equal(st.rag, 'amber'); assert.match(st.ragReason, /^1 item late, but the finish still meets the target; 5 items slipping/);
-  d = baseDocs(); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
+  assert.equal(st.rag, 'amber'); assert.match(st.ragReason, /^1 task late, but the finish still meets the deadline; 5 tasks running late/);
+  d = withHoldResolver(baseDocs()); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
   st = E.projectStats(d, PRJ, TODAY);
   assert.deepEqual([st.rag, st.ragReason], ['green', 'All work done']);
   d.project[0].data.target = '2026-11-10';
-  assert.deepEqual(E.projectStats(d, PRJ, TODAY).ragReason, 'Forecast finish Nov 20 is after the target Nov 10');
+  assert.deepEqual(E.projectStats(d, PRJ, TODAY).ragReason, 'Forecast finish Nov 20 is after the Nov 10 deadline');
+  // R8: all tasks done but an unplanned blocker remains → At risk, never "All work done"
+  d = baseDocs(); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
+  st = E.projectStats(d, PRJ, TODAY);
+  assert.equal(st.rag, 'red'); assert.doesNotMatch(st.ragReason, /All work/);
   d = baseDocs(); d.workItem = [];
   st = E.projectStats(d, PRJ, TODAY);
   assert.deepEqual([st.rag, st.ragReason, st.notPlanned], ['grey', 'Not planned: no work yet', true]);
@@ -1199,7 +1220,7 @@ test('R5 caseLabel: TC<n> per element, stable by creation', () => {
 test('R5 generated cases: longest-length expectation follows the spec; no "? rows"; merged shapes', () => {
   const d2 = baseDocs().dataElement.find(e => e.id === 'D2').data;
   const cols = E.profileCsv(CSV, {}).map(c => { const x = Object.assign({}, c); delete x.rows; return x; });
-  const cases = E.generateTests(d2, { rows: 4, columns: cols });
+  const cases = GT(d2, { rows: 4, columns: cols });
   const longest = cases.find(c => c.field === 'Routing number' && /longest observed length \(9\)/i.test(c.note));   // may merge into the identical spec case
   assert.equal(longest.expect, 'accept');                          // spec allows 9 digits
   assert.ok(aba(longest.input));
@@ -1232,7 +1253,8 @@ test('R5 financials: workCost, projectFinancials, burndown', () => {
   assert.equal(E.workCost(d, 'W6'), 800);                          // default: 1 day × 800
   const f = E.projectFinancials(d, PRJ);
   // dk: W3, W7, W9 at 1 day × 1000 + W8 5000 = 8000; others: W1, W2, W4, W5, W6, W10 at 800 = 4800 → 12800 (+W11 dk 1000) = 13800
-  assert.deepEqual(f, { planned: 9000, forecastCost: 13800, actualCost: 1800, remainingCost: 12000, variance: 4800, overBudget: true, program: 'Supplier Excellence' });
+  // R8: actualCost = logged hours × rate (none logged here → 0); forecastCost = EAC (bottom-up estimate before actuals)
+  assert.deepEqual(f, { planned: 9000, estimate: 13800, forecastCost: 13800, actualCost: 0, remainingCost: 13800, variance: 4800, overBudget: true, program: 'Supplier Excellence' });
   const bd = E.burndown(d, PRJ, TODAY);
   assert.deepEqual(bd[0], { date: '2026-10-08', remaining: 15, ideal: 15 });
   assert.equal(bd[bd.length - 1].date, '2026-12-15'); assert.equal(bd[bd.length - 1].ideal, 0);
@@ -1245,19 +1267,20 @@ test('R5 financials: workCost, projectFinancials, burndown', () => {
 
 /* ---------------- R6 ---------------- */
 test('R6 projectHealth: red only for finish after target or unplanned missing data; amber for late/slip/buffer; grey', () => {
-  assert.deepEqual(E.projectHealth(deepFreeze(baseDocs()), PRJ, TODAY), { rag: 'red', reasons: ['Payment hold list is missing with no work planned to provide it'] });
+  assert.deepEqual(E.projectHealth(deepFreeze(baseDocs()), PRJ, TODAY), { rag: 'red', label: 'At risk', bufferDays: 10, reasons: ['Vendor risk tier and Payment hold list are not available yet and no work is planned to get them'] });
   const d = withHoldResolver(baseDocs());
   const h = E.projectHealth(d, PRJ, TODAY);
   assert.equal(h.rag, 'amber');                                     // late W6 but finish Dec 1 ≤ target Dec 15
-  assert.deepEqual(h.reasons, ['1 item late, but the finish still meets the target', '5 items slipping']);
+  assert.equal(h.label, 'On track, some tasks running late');       // R8 label
+  assert.deepEqual(h.reasons, ['1 task late, but the finish still meets the deadline', '5 tasks running late']);
   d.project[0].data.target = '2026-11-30';
-  assert.deepEqual(E.projectHealth(d, PRJ, TODAY), { rag: 'red', reasons: ['Forecast finish Dec 1 is after the target Nov 30'] });
-  // buffer: everything on plan, finish 4 business days before target → amber
+  assert.deepEqual(E.projectHealth(d, PRJ, TODAY), { rag: 'red', label: 'At risk', bufferDays: -1, reasons: ['Forecast finish Dec 1 is after the Nov 30 deadline'] });
+  // R8: a small buffer alone is not "at risk" (status changes only for a missed deadline, a blocker or late tasks)
   const g = { workItem: [{ id: 'A', data: { id: 'A', projectId: 'P', status: 'idle', start: '2026-11-16', due: '2026-11-20', deps: [] } }],
     project: [{ id: 'P', data: { id: 'P', processes: [], target: '2026-11-26' } }] };
-  assert.deepEqual(E.projectHealth(g, 'P', TODAY), { rag: 'amber', reasons: ['Only 4 business days of buffer before the target'] });
+  assert.deepEqual(E.projectHealth(g, 'P', TODAY), { rag: 'green', label: 'On track', bufferDays: 4, reasons: ['On track: 4 business days of buffer'] });
   g.project[0].data.target = '2026-11-27';
-  assert.deepEqual(E.projectHealth(g, 'P', TODAY), { rag: 'green', reasons: ['On track: 5 business days of buffer'] });
+  assert.deepEqual(E.projectHealth(g, 'P', TODAY), { rag: 'green', label: 'On track', bufferDays: 5, reasons: ['On track: 5 business days of buffer'] });
   g.workItem = [];
   assert.equal(E.projectHealth(g, 'P', TODAY).rag, 'grey');
 });
@@ -1266,7 +1289,8 @@ test('R6 scheduleBadge: one badge, late > causing > slipping > soon > on track',
   const d = deepFreeze(withHoldResolver(baseDocs()));
   const k = id => E.scheduleBadge(d, id, TODAY).key;
   assert.deepEqual(['W1', 'W6', 'W8', 'W2', 'W7', 'W3'].map(k), ['done', 'late', 'causing', 'causing', 'slipping', 'ontrack']);
-  assert.deepEqual(E.scheduleBadge(d, 'W8', TODAY), { key: 'causing', label: 'Causing slip' });
+  assert.deepEqual(E.scheduleBadge(d, 'W8', TODAY), { key: 'causing', label: 'Holding up other work' });   // R8: no "slip"
+  assert.equal(E.scheduleBadge(d, 'W7', TODAY).label, 'Running late');
   assert.equal(E.scheduleBadge(d, 'W6', TODAY).label, 'Late');      // W6 is late AND causes slip: late wins
   const s = { workItem: [{ id: 'S', data: { id: 'S', projectId: 'P', status: 'idle', start: '2026-11-04', due: '2026-11-06', deps: [] } }] };
   assert.deepEqual(E.scheduleBadge(s, 'S', TODAY), { key: 'soon', label: 'Due soon' });
@@ -1285,11 +1309,14 @@ test('R6 earnedValue: BAC, PV, EV, AC, SPI, CPI, EAC with divide-by-zero guards'
   deepFreeze(d);
   const ev = E.earnedValue(d, 'P', TODAY);
   // PV: A 4000 + B 4000 × (2 of 4 bd from Nov 2 to Nov 4) = 6000; EV: 4000 + 1600 = 5600; AC: 4000 + 1600
-  assert.deepEqual(ev, { BAC: 12000, PV: 6000, EV: 5600, AC: 5600, SPI: 0.93, CPI: 1, EAC: 12000 });
+  assert.deepEqual(ev, { BAC: 12000, PV: 6000, EV: 5600, AC: 5600, SPI: 0.93, CPI: 1, EAC: 12000, estimate: 12000 });
   const b = JSON.parse(JSON.stringify(d)); b.project[0].data.budget = { planned: 6000 };
-  assert.deepEqual(E.earnedValue(b, 'P', TODAY), { BAC: 6000, PV: 3000, EV: 2800, AC: 5600, SPI: 0.93, CPI: 0.5, EAC: 12000 });
+  assert.deepEqual(E.earnedValue(b, 'P', TODAY), { BAC: 6000, PV: 3000, EV: 2800, AC: 5600, SPI: 0.93, CPI: 0.5, EAC: 12000, estimate: 12000 });
   const z = E.earnedValue({ project: [{ id: 'P', data: { id: 'P' } }], workItem: [] }, 'P', TODAY);
-  assert.deepEqual(z, { BAC: 0, PV: 0, EV: 0, AC: 0, SPI: null, CPI: null, EAC: 0 });
+  assert.deepEqual(z, { BAC: 0, PV: 0, EV: 0, AC: 0, SPI: null, CPI: null, EAC: 0, estimate: 0 });
+  // R8: before any hours are logged, EAC is the bottom-up estimate (so an estimate above the budget shows)
+  const n = JSON.parse(JSON.stringify(b)); n.workItem.forEach(e => { delete e.data.time; });
+  assert.equal(E.earnedValue(n, 'P', TODAY).EAC, 12000);
 });
 
 test('R6 levelResources: latest-starting non-critical items move later, spans kept, FS successors follow', () => {
@@ -1336,7 +1363,9 @@ test('R6 testCoverage: field coverage beside UAT and dev counts', () => {
   const r = deepFreeze(readyDocs());
   const c = E.testCoverage(r, PRJ);
   assert.deepEqual([c.fieldsTotal, c.fieldsCovered, c.uncoveredFields], [5, 5, []]);
-  assert.equal(c.uat.done, c.uat.total); assert.equal(c.dev.total, 14); assert.equal(c.dev.done, 14);
+  // R8: only cases on information the project changes count (D2 fixed; D5, D7, D8, D9 new) → 10, not 14
+  assert.equal(c.uat.done, c.uat.total); assert.equal(c.dev.total, 10); assert.equal(c.dev.done, 10);
+  assert.deepEqual(c.system, c.dev); assert.equal(c.system.label, 'Try it out');
   const d = readyDocs();
   d.testCase = d.testCase.filter(e => e.id !== 'TF0');                       // Bank name loses its case
   d.testRun[1].data.results = d.testRun[1].data.results.map(x => x.caseId === 'T1' ? Object.assign({}, x, { outcome: 'fail' }) : x);
@@ -1344,7 +1373,7 @@ test('R6 testCoverage: field coverage beside UAT and dev counts', () => {
   assert.deepEqual(c2.uncoveredFields, [{ data: 'D2', field: 'Bank name' }]);
   assert.equal(c2.fieldsCovered, 4);
   assert.equal(c2.uat.done, c2.uat.total - 1);
-  assert.deepEqual(E.testCoverage(baseDocs(), PRJ).dev, { done: 0, total: 0 });
+  assert.deepEqual(E.testCoverage(baseDocs(), PRJ).dev, { done: 0, total: 0, label: 'Try it out' });
 });
 
 test('R6 defectState lifecycle; a passing retest verifies', () => {
@@ -1366,6 +1395,7 @@ test('R6 defectState lifecycle; a passing retest verifies', () => {
 test('R6 stepState built/awaitingLive; criticalPath full predecessor chain', () => {
   const d = baseDocs();
   d.workItem.find(e => e.id === 'W6').data.status = 'done';
+  d.workItem.find(e => e.id === 'W6').data.owner = 'dk';                // R8: fixed by a non-owner → still pending
   d.workItem.find(e => e.id === 'W7').data.status = 'done';
   deepFreeze(d);
   const s3 = E.stepState(d, PRJ, 'vendor-onboarding', 's3', TODAY);    // work done, D2 only pending (not live)
@@ -1456,7 +1486,7 @@ test('R6 generateTests: complete in one call, type-tailored values, specials onl
     { name: 'Vendor ID', type: 'text' }, { name: 'Legal name', type: 'text', required: true }, { name: 'Notes', type: 'text' },
   ] };
   const prof = E.profileCsv('Tax ID,Remit-to address,Notes\n12-3456789,"1 Main St, Ste 2",a&b\n98-7654321,2 Oak Ave,x\n', {});
-  const cases = E.generateTests(de, prof);
+  const cases = GT(de, prof);
   de.fields.forEach(f => assert.ok(cases.some(c => c.field === f.name && c.kind === 'valid'), f.name));   // every field, one call
   const by = n => cases.filter(c => c.field === n);
   assert.ok(!by('Tax ID (EIN)').some(c => /special character/i.test(c.note)));          // no "1-2-3456789"
@@ -1496,13 +1526,16 @@ const JARGON = /\b(SPI|CPI|EAC|slip|slipping|amber|UAT|SIT|spec|cutover|runbook|
 
 test('R7 availLabel: one label set from effectiveAvail', () => {
   const d = baseDocs();
-  d.workItem.find(e => e.id === 'W2').data.status = 'done';      // resolver of D5 done -> pending
+  d.workItem.find(e => e.id === 'W2').data.status = 'done';      // resolver of D5 done (by dk, not the owner) -> pending
+  d.workItem.find(e => e.id === 'W2').data.owner = 'dk';
   deepFreeze(d);
-  assert.deepEqual(E.availLabel(d, 'D4'), { key: 'connected', label: 'Connected', tone: 'green' });
-  assert.deepEqual(E.availLabel(d, 'D1'), { key: 'sample', label: 'Sample only', tone: 'amber' });
-  assert.deepEqual(E.availLabel(d, 'D2'), { key: 'notyet', label: 'Not available yet', tone: 'red' });
-  assert.deepEqual(E.availLabel(d, 'D5'), { key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' });
-  assert.deepEqual(E.availLabel(d, 'nope'), { key: 'notyet', label: 'Not available yet', tone: 'red' });
+  // R8 Advanced: the detailed labels
+  const A = { advanced: true };
+  assert.deepEqual(E.availLabel(d, 'D4', A), { state: 'live', key: 'connected', label: 'Connected', tone: 'green' });
+  assert.deepEqual(E.availLabel(d, 'D8', A), { state: 'example', key: 'sample', label: 'Sample only', tone: 'amber' });
+  assert.deepEqual(E.availLabel(d, 'D2', A), { state: 'missing', key: 'notyet', label: 'Not available yet', tone: 'red' });
+  assert.deepEqual(E.availLabel(d, 'D5', A), { state: 'pending', key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' });
+  assert.deepEqual(E.availLabel(d, 'nope', A), { state: 'missing', key: 'notyet', label: 'Not available yet', tone: 'red' });
   ['D1', 'D2', 'D4', 'D5'].forEach(id => assertNoIds(E.availLabel(d, id).label, d));
 });
 
@@ -1511,15 +1544,16 @@ test('R7 projectSummary: label matches projectHealth; At risk says what; red/gre
   let d = deepFreeze(baseDocs());
   let s = E.projectSummary(d, PRJ, TODAY);
   assert.equal(s.rag, E.projectHealth(d, PRJ, TODAY).rag);
-  assert.equal(s.rag, 'red'); assert.equal(s.label, 'Off track');
-  assert.match(s.sentence, /Payment hold list is not available yet and no work is planned to get it \(Ana Ruiz\)/);
+  assert.equal(s.rag, 'red'); assert.equal(s.label, 'At risk');      // R8: unplanned blocker → At risk
+  assert.match(s.sentence, /Vendor risk tier is not available yet and no work is planned to get it \(Priya Shah\)/);
   assert.ok(s.who.some(x => x.person === 'ar' && x.name === 'Ana Ruiz' && /Plan work to get Payment hold list/.test(x.action)));
   // amber: finishes before the deadline but W6 is late and holds up 3 tasks
   d = deepFreeze(withHoldResolver(baseDocs()));
   s = E.projectSummary(d, PRJ, TODAY);
   assert.equal(E.projectHealth(d, PRJ, TODAY).rag, 'amber');
-  assert.equal(s.rag, 'amber'); assert.equal(s.label, 'At risk');
-  assert.match(s.sentence, /^Expected [A-Z][a-z]{2} \d+, about \d weeks before the Dec 15 deadline\. Stand up structured bank capture is late and holding up 3 other tasks \(Leo Park\)\./);
+  assert.equal(s.rag, 'amber'); assert.equal(s.label, 'On track, some tasks running late');   // R8
+  assert.match(s.sentence, /^Expected Dec 1, 10 business days before the Dec 15 deadline\. Stand up structured bank capture is late and holding up 3 other tasks \(Leo Park\)\./);   // R8: business days
+  assert.ok(s.who.some(x => /^Get .* back on schedule$/.test(x.action)) && !s.who.some(x => /Speed up/.test(x.action)));
   assert.equal(s.who[0].person, 'lp'); assert.match(s.who[0].action, /^Finish Stand up structured bank capture \(was due Nov 3\)$/);
   // green
   d = withHoldResolver(baseDocs());
@@ -1528,11 +1562,11 @@ test('R7 projectSummary: label matches projectHealth; At risk says what; red/gre
   s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
   assert.equal(E.projectHealth(d, PRJ, TODAY).rag, 'green');
   assert.deepEqual([s.rag, s.label], ['green', 'On track']);
-  assert.equal(s.sentence, 'Expected Nov 25, about 3 weeks before the Dec 15 deadline. Nothing needs attention right now.');
+  assert.equal(s.sentence, 'Expected Nov 25, 14 business days before the Dec 15 deadline. Nothing needs attention right now.');
   // off track by date
   d = withHoldResolver(baseDocs()); d.project[0].data.target = '2026-11-20';
   s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
-  assert.equal(s.label, 'Off track'); assert.match(s.sentence, /after the Nov 20 deadline\./);
+  assert.equal(s.label, 'At risk'); assert.match(s.sentence, /7 business days after the Nov 20 deadline\./);
   // grey
   d = baseDocs(); d.workItem = [];
   s = E.projectSummary(deepFreeze(d), PRJ, TODAY);
@@ -1550,7 +1584,7 @@ test('R7 projectSummary: no jargon, no ids, never contradicts itself', () => {
     const s = E.projectSummary(d, PRJ, TODAY);
     assert.ok(!JARGON.test(s.sentence), s.sentence);
     assertNoIds(s.sentence, d); s.who.forEach(x => { assertNoIds(x.action, d); assertNoIds(x.name, d); });
-    assert.equal(s.label, { green: 'On track', amber: 'At risk', red: 'Off track', grey: 'Not planned' }[E.projectHealth(d, PRJ, TODAY).rag]);
+    assert.equal(s.label, { green: 'On track', amber: 'On track, some tasks running late', red: 'At risk', grey: 'Not planned' }[E.projectHealth(d, PRJ, TODAY).rag]);
     if (s.rag === 'amber') { assert.ok(!/after the .* deadline/.test(s.sentence)); assert.ok(!/Nothing needs attention/.test(s.sentence)); assert.ok(s.sentence.split('. ').length >= 2); }
     if (s.rag === 'green') assert.ok(!/late|after the/.test(s.sentence));
   });
@@ -1563,7 +1597,7 @@ test('R7 testingSummary: plain one line with a next action', () => {
   let d = deepFreeze(readyDocs());
   let t = E.testingSummary(d, PRJ);
   assert.equal(t.done, true);
-  assert.match(t.sentence, /^Yes: all \d+ business tests passed and no problems are open\.$/);
+  assert.match(t.sentence, /^Yes: (\d+) of \1 tests passed and no problems are open\.$/);   // R8: one number
   assert.equal(t.nextAction.key, 'none');
   // one rule without a test, one business test not run
   d = readyDocs();
@@ -1571,8 +1605,9 @@ test('R7 testingSummary: plain one line with a next action', () => {
   d.testCase.push({ id: 'CZ', data: { id: 'CZ', dataId: 'D4', field: 'g', kind: 'valid', input: 'x', expect: 'accept', origin: 'user' } });
   t = E.testingSummary(deepFreeze(d), PRJ);
   assert.equal(t.done, false);
-  assert.equal(t.sentence, "Not yet: 1 business test hasn't been run and 1 rule has no test. Next: generate the missing tests.");
-  assert.deepEqual(t.nextAction, { key: 'generate', label: 'Generate the missing tests' });
+  // R8: D4 is unchanged ("We have it"), so its untested case is not required; the new D2 rule still needs a test
+  assert.equal(t.sentence, 'Not yet: 22 of 22 tests passed; some information has no tests yet. Next: create the tests.');
+  assert.deepEqual(t.nextAction, { key: 'generate', label: 'Create the tests' });
   // a failed test -> fix
   d = readyDocs(); d.testRun[1].data.results[0].outcome = 'fail';
   t = E.testingSummary(deepFreeze(d), PRJ);
@@ -1587,7 +1622,7 @@ test('R7 testingSummary: plain one line with a next action', () => {
 
 test('R7 launchSteps: ordered plain checklist from the readiness checks', () => {
   let steps = E.launchSteps(deepFreeze(baseDocs()), PRJ, TODAY);
-  assert.deepEqual(steps.map(s => s.label), ['Plan the work', 'Finish the work', 'Information connected', 'Tests passed', 'Each team approved its part', 'Launch-day plan ready', 'Launch']);
+  assert.deepEqual(steps.map(s => s.label), ['Plan the work', 'Finish the work', 'Information available', 'Tests passed', 'Each team approved its part', 'Launch-day plan ready', 'Launch']);   // R8: no "connected"
   assert.deepEqual(steps.map(s => s.key), ['plan', 'work', 'information', 'tests', 'approvals', 'launch-plan', 'launch']);
   assert.equal(steps[0].done, true); assert.equal(steps[1].done, false); assert.equal(steps[1].next, true);
   assert.equal(steps.filter(s => s.next).length, 1);
@@ -1630,7 +1665,9 @@ test('R7 re-approval scope: one owner change stales only the sections it touches
   d.process[0].data.tobe.find(n => n.id === 's3').owner = 'ar';
   d.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
   const bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
-  assert.deepEqual(bu.stale.map(x => x.bu).sort(), ['Accounts Payable', 'Treasury']);
+  // R8: Treasury's only changed step moved to Accounts Payable, so Treasury no longer has a part to approve
+  assert.ok(!bu.sections.includes('Treasury'));
+  assert.deepEqual(bu.stale.map(x => x.bu).sort(), ['Accounts Payable']);
   assert.ok(bu.stale.every(x => x.reason === 're-approval needed: its steps'));
   assert.ok(bu.stale.every(x => x.changed.every(c => /^section:/.test(c))));
   const ex = check(E.readiness(d, PRJ, TODAY), 'exceptions');
@@ -1712,8 +1749,11 @@ test('R7 ownerRole: role-only steps are valid and ignored by sign-off sections',
   delete s6.owner; s6.ownerRole = 'Employee';
   d.process[1].data.tobe.find(n => n.id === 'i2').owner = '';   // the other IT step
   d.process[1].data.tobe.find(n => n.id === 'i2').ownerRole = 'Manager';
-  const r = E.readiness(d, PRJ, TODAY);
+  let r = E.readiness(d, PRJ, TODAY);
   assert.equal(check(r, 'process-valid').pass, true);
+  assert.ok(check(r, 'bu-signoff').sections.includes('IT'));        // R8: IT still owns a launch-day task (Dev Kumar)
+  d.project[0].data.cutover.tasks[0].owner = 'mc';
+  r = E.readiness(d, PRJ, TODAY);
   assert.ok(!check(r, 'bu-signoff').sections.includes('IT'));
   // blank role is still "no owner"
   s6.ownerRole = '  ';
@@ -1734,12 +1774,310 @@ test('R7 specFromProfile: types, required, bounds; generateTests uses observed m
   assert.deepEqual(E.specFromProfile(null), []);
   // the generated spec validates its own sample
   const de = { id: 'DX', name: 'Payments', fields: f };
-  const cases = E.generateTests(de, prof);
+  const cases = GT(de, prof);
   cases.filter(c => !c.context).forEach(c => assert.equal(E.validate(E.fieldSpec(f.find(x => x.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
   assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '12.50' && c.expect === 'accept'));
   assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '1200.01' && c.expect === 'reject'));
   // no spec bounds: observed min/max still become boundary cases (profile origin)
-  const loose = E.generateTests({ id: 'DY', fields: [{ name: 'Qty', type: 'number' }] }, prof);
+  const loose = GT({ id: 'DY', fields: [{ name: 'Qty', type: 'number' }] }, prof);
   assert.ok(loose.some(c => c.kind === 'boundary' && c.origin === 'profile' && c.input === '3' && /Smallest value seen/.test(c.note)));
   assert.ok(loose.some(c => c.kind === 'boundary' && c.origin === 'profile' && c.input === '10' && /Largest value seen/.test(c.note)));
+});
+
+/* ================================ Round 8: ONE TRUTH, NO MAKE-WORK ================================ */
+const SIMPLE_JARGON = /\b(slip|slipping|target|connected|sample only|waiting for confirmation)\b/i;
+
+test('R8 exports', () => {
+  ['projectTruth', 'buReady', 'approvalNoteFacts', 'changedInformation', 'generateProjectTests', 'awaitingConfirmation', 'burndownStatus', 'stepConflict', 'projectConflicts']
+    .forEach(n => assert.equal(typeof E[n], 'function', n));
+  assert.ok(fs.readFileSync(API_ENGINE).equals(fs.readFileSync(WEB_ENGINE)));
+});
+
+test('R8 §1 information on a Today step is live unless explicitly missing; evidence only for changing information', () => {
+  const d = baseDocs();
+  // D1/D3 are examples-only but used Today → "We have it"; D6 live on Today needs no evidence
+  delete d.dataElement.find(e => e.id === 'D6').data.check;
+  deepFreeze(d);
+  assert.equal(E.effectiveAvail(d, 'D1'), 'live');
+  assert.equal(E.effectiveAvail(d, 'D3'), 'live');
+  assert.equal(E.effectiveAvail(d, 'D6'), 'live');
+  assert.equal(E.effectiveAvail(d, 'D2'), 'missing');            // on Today but explicitly marked missing
+  assert.equal(E.effectiveAvail(d, 'D8'), 'example');            // new in Future
+  assert.equal(E.effectiveAvail(d, 'D9'), 'missing');
+  // new in Future, claimed live without evidence → still needs evidence (changing information)
+  const n = baseDocs(); delete n.dataElement.find(e => e.id === 'D7').data.check;
+  assert.equal(E.effectiveAvail(n, 'D7'), 'pending');
+  // the owner finishing the fix task counts as their confirmation (owner defaults to the step owner: Leo Park on s3)
+  const f = baseDocs(); f.workItem.find(e => e.id === 'W6').data.status = 'done';
+  assert.equal(E.effectiveAvail(f, 'D2'), 'live');
+  const ev = E.evidenceOf(f, f.dataElement.find(e => e.id === 'D2').data);
+  assert.deepEqual([ev.type, ev.ok, ev.text], ['fix', true, 'Fix completed by Leo Park']);
+  // someone else fixed it → one "Confirm" tap by the owner is still needed
+  f.workItem.find(e => e.id === 'W6').data.owner = 'dk';
+  assert.equal(E.effectiveAvail(f, 'D2'), 'pending');
+  assert.deepEqual(E.awaitingConfirmation(f, 'lp'), ['D2']);
+  assert.deepEqual(E.awaitingConfirmation(f, 'dk'), []);
+  // an explicit data owner wins over the step owner
+  f.dataElement.find(e => e.id === 'D2').data.owner = 'dk';
+  assert.equal(E.effectiveAvail(f, 'D2'), 'live');
+});
+
+test('R8 §1 availLabel: Simple has two states; Advanced keeps the detailed labels', () => {
+  const d = baseDocs(); d.workItem.find(e => e.id === 'W2').data.status = 'done'; d.workItem.find(e => e.id === 'W2').data.owner = 'dk';
+  deepFreeze(d);
+  const labels = ['D1', 'D2', 'D4', 'D5', 'D8', 'D9', 'nope'].map(id => E.availLabel(d, id).label);
+  assert.deepEqual([...new Set(labels)].sort(), ['Not available yet', 'We have it']);
+  assert.deepEqual(E.availLabel(d, 'D1'), { state: 'live', needsConfirm: false, key: 'have', label: 'We have it', tone: 'green' });
+  assert.deepEqual(E.availLabel(d, 'D2'), { state: 'missing', needsConfirm: false, key: 'notyet', label: 'Not available yet', tone: 'red' });
+  assert.deepEqual(E.availLabel(d, 'D5'), { state: 'pending', needsConfirm: true, key: 'notyet', label: 'Not available yet', tone: 'amber' });
+  ['D1', 'D2', 'D5', 'D8'].forEach(id => assert.ok(!SIMPLE_JARGON.test(E.availLabel(d, id).label)));
+  assert.equal(E.availLabel(d, 'D5', { advanced: true }).label, 'Waiting for confirmation');
+  assert.equal(E.availLabel(d, 'D8', { advanced: true }).label, 'Sample only');
+});
+
+test('R8 §2 projectTruth holds every number, date and label', () => {
+  const d = withHoldResolver(baseDocs());
+  d.project[0].data.budget = { planned: 9000 };
+  d.workItem.find(e => e.id === 'W1').data.time = [{ by: 'mc', date: '2026-10-15', hours: 16 }];
+  deepFreeze(d);
+  const t = E.projectTruth(d, PRJ, TODAY);
+  assert.deepEqual([t.forecastFinish, t.target, t.bufferDays, t.bufferUnit], ['2026-12-01', '2026-12-15', 10, 'business days']);
+  assert.deepEqual([t.lateCount, t.late, t.runningLateCount], [1, ['W6'], 5]);
+  assert.deepEqual(t.tasks, { total: 12, done: 2, open: 10 });
+  assert.deepEqual([t.rag, t.label], ['amber', 'On track, some tasks running late']);
+  assert.deepEqual(t.blockers.map(b => [b.name, b.planned]), [['Bank remittance details', true], ['Sanctions screening result', true], ['Payment hold list', true]]);
+  assert.equal(t.unplannedBlockers, 0);
+  assert.equal(t.cost.actual, 1600);                                // 16 h × 800 / 8
+  assert.equal(t.cost.actual, t.ev.AC);
+  assert.equal(t.cost.forecast, t.ev.EAC);                          // EAC is the one cost forecast
+  assert.equal(t.cost.planned, 9000);
+  assert.equal(t.testing.count, t.testing.passed + ' of ' + t.testing.total + ' tests passed');
+  assert.equal(t.launchSteps.length, 7);
+  assert.ok(['on-track', 'behind', null].includes(t.burndown.direction));
+  assert.equal(E.projectTruth(d, 'nope', TODAY), null);
+});
+
+test('R8 §2 consistency: every derived function reads the same truth', () => {
+  const variants = [baseDocs(), withHoldResolver(baseDocs()), readyDocs()];
+  const late = withHoldResolver(baseDocs()); late.project[0].data.target = '2026-11-20'; variants.push(late);
+  const done = baseDocs(); done.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; }); variants.push(done);
+  const timed = withHoldResolver(baseDocs()); timed.project[0].data.budget = { planned: 5000 };
+  timed.workItem.find(e => e.id === 'W1').data.time = [{ by: 'mc', date: '2026-10-15', hours: 24 }]; variants.push(timed);
+  variants.forEach(d => {
+    deepFreeze(d);
+    const t = E.projectTruth(d, PRJ, TODAY);
+    const s = E.projectSummary(d, PRJ, TODAY), h = E.projectHealth(d, PRJ, TODAY), st = E.projectStats(d, PRJ, TODAY);
+    assert.deepEqual([s.sentence, s.rag, s.label, s.who], [t.sentence, t.rag, t.label, t.who]);
+    assert.deepEqual([h.rag, h.label, h.reasons, h.bufferDays], [t.rag, t.label, t.reasons, t.bufferDays]);
+    assert.deepEqual([st.rag, st.ragReason, st.finish, st.late, st.slip], [t.rag, t.reasons.join('; '), t.forecastFinish, t.lateCount, t.runningLateCount]);
+    assert.deepEqual(E.testingSummary(d, PRJ, TODAY), t.testing);
+    assert.deepEqual(E.launchSteps(d, PRJ, TODAY), t.launchSteps);
+    assert.deepEqual(E.earnedValue(d, PRJ, TODAY), t.ev);
+    const f = E.projectFinancials(d, PRJ, TODAY);
+    assert.deepEqual([f.actualCost, f.forecastCost, f.planned, f.variance, f.overBudget], [t.cost.actual, t.cost.forecast, t.cost.planned, t.cost.variance, t.cost.overBudget]);
+    assert.deepEqual(E.burndownStatus(d, PRJ, TODAY), t.burndown);
+    assert.equal(t.launchSteps.find(x => x.key === 'tests').done, t.testing.done);
+    // never "All work is done" / "Nothing needs attention" while blockers exist
+    if (t.blockers.length) assert.ok(!/All work is done|Nothing needs attention/.test(t.sentence), t.sentence);
+    if (t.blockers.length) assert.ok(!t.reasons.some(r => /^All work done/.test(r)));
+    assert.ok(!SIMPLE_JARGON.test(t.sentence + ' ' + t.reasons.join(' ') + ' ' + t.who.map(x => x.action).join(' ') + ' ' + t.testing.sentence), t.sentence);
+    assertNoIds(t.sentence, d);
+  });
+});
+
+test('R8 §2 status rules: At risk only for a missed deadline or an unplanned blocker; due today is not late', () => {
+  // all tasks done but an unplanned blocker remains
+  const d = baseDocs(); d.workItem.forEach(e => { e.data.status = 'done'; e.data.doneAt = e.data.due; });
+  const t = E.projectTruth(deepFreeze(d), PRJ, TODAY);
+  assert.equal(t.label, 'At risk');
+  assert.ok(!/All work is done/.test(t.sentence)); assert.match(t.sentence, /^Every planned task is finished/);
+  // late tasks while the finish meets the deadline: not "At risk"
+  const a = E.projectTruth(deepFreeze(withHoldResolver(baseDocs())), PRJ, TODAY);
+  assert.equal(a.label, 'On track, some tasks running late');
+  // a planned blocker alone keeps "On track" but is named (never "Nothing needs attention")
+  const g = withHoldResolver(baseDocs());
+  g.workItem.forEach(e => { if (e.data.status !== 'done') { const fix = !!e.data.resolves; e.data.deps = []; e.data.start = fix ? '2026-11-05' : '2026-11-20'; e.data.due = fix ? '2026-11-10' : '2026-11-25'; e.data.status = 'idle'; } });
+  const gt = E.projectTruth(deepFreeze(g), PRJ, TODAY);
+  assert.equal(gt.label, 'On track');
+  assert.ok(gt.blockers.length > 0 && gt.blockers.every(b => b.planned));
+  assert.doesNotMatch(gt.sentence, /Nothing needs attention/);
+  assert.match(gt.sentence, /not available yet; work is planned to get it/);
+  // due today is not late; due yesterday is
+  const W = (id, due) => ({ id, data: { id, projectId: 'P', title: id, owner: 'mc', status: 'prog', start: '2026-11-02', due, deps: [] } });
+  const x = { project: [{ id: 'P', data: { id: 'P', processes: [], target: '2026-11-30' } }], workItem: [W('A', TODAY), W('B', '2026-11-03')] };
+  const xt = E.projectTruth(x, 'P', TODAY);
+  assert.deepEqual(xt.late, ['B']); assert.equal(E.forecastAll(x, TODAY).A.sched, 'soon');
+  // buffer is business days: Fri Nov 20 → Mon Nov 23 is 1 business day (3 calendar days)
+  const y = { project: [{ id: 'P', data: { id: 'P', processes: [], target: '2026-11-23' } }], workItem: [W('A', '2026-11-20')] };
+  assert.equal(E.projectTruth(y, 'P', TODAY).bufferDays, 1);
+  assert.match(E.projectTruth(y, 'P', TODAY).sentence, /1 business day before the Nov 23 deadline/);
+});
+
+test('R8 §2 SPI and burndown agree in direction, or the burndown shows only on Sprints', () => {
+  const t = E.projectTruth(deepFreeze(withHoldResolver(baseDocs())), PRJ, TODAY);
+  const b = t.burndown;
+  assert.equal(b.spiDirection, t.ev.SPI == null ? null : t.ev.SPI >= 1 ? 'on-track' : 'behind');
+  assert.equal(b.agree, b.direction == null || b.spiDirection == null || b.direction === b.spiDirection);
+  assert.equal(b.sprintsOnly, !b.agree);
+  const pts = E.burndown(withHoldResolver(baseDocs()), PRJ, TODAY).filter(p => p.remaining != null);
+  const last = pts[pts.length - 1];
+  assert.equal(b.direction, last.remaining <= last.ideal ? 'on-track' : 'behind');
+});
+
+test('R8 §3 suggestWorkFromDiff: no make-work, owners spread, 3 business days, never late on day one', () => {
+  const d = baseDocs();
+  // a wait node and a message node in the Future: no tasks for them
+  d.process[0].data.tobe.splice(5, 0, { id: 'w1', type: 'wait', title: 'Wait for vendor signature', wait: 'signature' }, { id: 'm1', type: 'message', title: 'Tell the vendor', direction: 'send', party: 'Vendor' });
+  deepFreeze(d);
+  const sug = E.suggestWorkFromDiff(d, PRJ, TODAY);
+  const diff0 = E.diffProcess(d.process[0].data), diff1 = E.diffProcess(d.process[1].data);
+  const state = s => (s.pid === 'vendor-onboarding' ? diff0 : diff1).nodes[s.step];
+  sug.forEach(s => {
+    if (s.resolves) assert.ok(['missing', 'example'].includes(E.effectiveAvail(d, s.resolves)), s.title);   // only Not-available-yet information
+    else assert.ok(['new', 'changed'].includes(state(s)), s.title);                                       // only changed/new steps
+    assert.ok(!['w1', 'm1'].includes(s.step) || s.resolves);
+    assert.equal(s.effortDays, 3);
+    assert.ok(s.owner, s.title);
+    assert.ok(s.start >= TODAY && s.due >= TODAY);
+  });
+  assert.ok(!sug.some(s => s.step === 'w1' || s.step === 'm1'));
+  assert.ok(!sug.some(s => s.resolves === 'D1' || s.resolves === 'D3'));                                 // "We have it"
+  assert.ok(new Set(sug.map(s => s.owner)).size >= 3);                                                   // spread across step owners
+  // accepting the plan: nothing is late on day one
+  const acc = JSON.parse(JSON.stringify(d));
+  sug.forEach(s => acc.workItem.push({ id: s.key, data: { id: s.key, projectId: PRJ, pid: s.pid, step: s.step, title: s.title, owner: s.owner, status: 'idle', start: s.start, due: s.due, effortDays: s.effortDays, deps: s.deps, resolves: s.resolves } }));
+  const fc = E.forecastAll(acc, TODAY);
+  sug.forEach(s => assert.notEqual(fc[s.key].sched, 'late', s.title));
+});
+
+test('R8 §4 generateTests sanity: types match, ≤ 6 per field, bad sample values are rejected', () => {
+  const de = { id: 'DQ', name: 'Receipt', fields: [
+    { name: 'Receipt photo', type: 'file', required: true },
+    { name: 'Approved', type: 'boolean', required: true },
+    { name: 'Notes', type: 'text', min: 2, max: 60 },
+    { name: 'Total', type: 'currency', min: 0, max: 5000, rule: 'Must match the invoice total' },
+    { name: 'Routing number', type: 'digits', length: 9, required: true },
+  ] };
+  const cases = E.generateTests(de);
+  const by = n => cases.filter(c => c.field === n);
+  de.fields.forEach(f => { assert.ok(by(f.name).length >= 2, f.name); assert.ok(by(f.name).length <= 6, f.name + ' ' + by(f.name).length); });
+  // every expected-accept value satisfies the field's own spec (no "Net 30" for a photo, no "Aab" for Yes/No)
+  cases.filter(c => c.expect === 'accept').forEach(c => assert.ok(E.validate(E.fieldSpec(de.fields.find(f => f.name === c.field)), c.input), c.field + ': ' + c.input));
+  assert.ok(!by('Receipt photo').some(c => /Net 30|&|Résumé/.test(c.input)));
+  assert.ok(by('Receipt photo').some(c => c.expect === 'accept' && /\.jpg$/.test(c.input)));
+  assert.ok(!by('Approved').some(c => /^Ab/.test(c.input)));
+  assert.ok(by('Approved').some(c => c.input === 'Yes' && c.expect === 'accept'));
+  assert.ok(!by('Total').some(c => c.context));                    // cross-field text values never go into a currency field
+  assert.ok(E.generateTests(de, undefined, { all: true }).length > cases.length);
+  // a rare shape seen in the sample is a "should be rejected" test, never accepted
+  const csv = 'Branch code\n' + Array.from({ length: 19 }, (_, i) => '0' + (100 + i)).join('\n') + '\n012\n';   // codes (leading zeros)
+  const prof = E.profileCsv(csv, {});
+  const f = E.specFromProfile(prof);
+  assert.equal(f[0].length, 4);                                    // the dominant length is the rule, not 3–4
+  const pc = E.generateTests({ id: 'DB', fields: f }, prof, { all: true }).filter(c => c.origin === 'profile' && /Observed shape: 3 digits/.test(c.note));
+  assert.ok(pc.length && pc.every(c => c.expect === 'reject'));
+  const loose = E.generateTests({ id: 'DB', fields: [{ name: 'Branch code', type: 'text' }] }, prof, { all: true }).filter(c => /Observed shape: 3 digits/.test(c.note));
+  assert.ok(loose.length && loose.every(c => c.expect === 'reject'));
+});
+
+test('R8 §4 tests only for changed information; "Create the tests" covers all of it; stages; one number', () => {
+  const d = baseDocs();
+  deepFreeze(d);
+  assert.deepEqual(E.changedInformation(d, PRJ).map(x => x.dataId + ':' + x.reason).sort(),
+    ['D2:fixed', 'D5:new', 'D7:new', 'D8:new', 'D9:new'].sort());          // D1, D3, D4, D6 are unchanged "We have it"
+  const gen = E.generateProjectTests(d, PRJ);
+  assert.deepEqual(gen.map(x => x.dataId).sort(), ['D2', 'D5', 'D7', 'D8', 'D9']);
+  gen.forEach(x => assert.ok(x.cases.length >= 2, x.dataId));               // nothing skipped, even without field rules
+  assert.deepEqual(gen.find(x => x.dataId === 'D9').cases.map(c => c.expect), ['accept', 'reject']);
+  assert.ok(E.generateProjectTests(d, PRJ, { includeUnchanged: true }).length > gen.length);
+  // a rule change makes Today information need tests
+  const r = baseDocs(); r.dataElement.find(e => e.id === 'D6').data.rulesChanged = true;
+  assert.ok(E.changedInformation(r, PRJ).some(x => x.dataId === 'D6' && x.reason === 'rules'));
+  // stages: a SIT run counts for "Try it out"; UAT for "Business sign-off"; one number
+  const t = readyDocs();
+  t.testRun[0].data.env = 'sit';
+  const ts = E.testingSummary(deepFreeze(t), PRJ, TODAY);
+  assert.equal(ts.done, true);
+  assert.deepEqual(ts.stages.map(s => [s.label, s.done]), [['Try it out', true], ['Business sign-off', true]]);
+  assert.match(ts.sentence, /^Yes: \d+ of \d+ tests passed and no problems are open\.$/);
+  // no system run at all → "Try it out" is the next action (no separate build gate)
+  const u = readyDocs(); u.testRun.splice(0, 1);
+  const us = E.testingSummary(u, PRJ, TODAY);
+  assert.equal(us.done, false); assert.equal(us.nextAction.label, 'Try it out');
+  assert.ok(!/build/i.test(us.sentence));
+  // an unchanged element's missing tests do not block
+  const v = readyDocs(); v.testCase = v.testCase.filter(e => e.id !== 'CD6' && e.id !== 'CD1');
+  assert.equal(E.testingSummary(v, PRJ, TODAY).done, true);
+  // generated UAT scripts count without adopting them
+  assert.equal(readyDocs().project[0].data.uatScripts, undefined);
+  assert.ok(E.testingSummary(readyDocs(), PRJ, TODAY).total > E.testCoverage(readyDocs(), PRJ).system.total);
+});
+
+test('R8 §4 masking hides every digit of identifier-like values', () => {
+  ['021000021', '12-3456789', 'NW100245', '4111 1111 1111 1111'].forEach(v => assert.ok(!/\d/.test(E.maskValue(v).replace(/9/g, '')) && ![...v].some((c, i) => /\d/.test(c) && c !== '9' && E.maskValue(v)[i] === c), v));
+  assert.equal(E.maskValue('021000021'), '999999999');
+  assert.equal(E.maskValue('12-3456789'), '99-9999999');
+  const prof = E.profileCsv('Tax ID\n123456789\n987654321\n', {});
+  prof[0].examples.forEach(x => assert.match(x, /^9+$/));
+});
+
+test('R8 §5 sections only for changed teams; buReady; precise staleness; prefilled facts', () => {
+  const d = readyDocs();
+  // invoice-approval: i3 (Schedule payment, Leo Park) is unchanged
+  const bu = check(E.readiness(d, PRJ, TODAY), 'bu-signoff');
+  assert.deepEqual(bu.sections, ['Accounts Payable', 'Compliance', 'IT', 'Procurement', 'Treasury']);
+  // a team whose steps did not change gets no section
+  const u = readyDocs();
+  const s3 = u.process[0].data.tobe.find(n => n.id === 's3'); const a3 = u.process[0].data.asis.find(n => n.id === 'a3');
+  s3.title = a3.title; s3.owner = 'ar';                                // Treasury's only changed step moves to AP
+  assert.ok(!check(E.readiness(u, PRJ, TODAY), 'bu-signoff').sections.includes('Treasury'));
+  // buReady: complete → ready; an open task or a failed test → waiting
+  assert.equal(E.buReady(d, PRJ, 'Treasury').ready, true);
+  assert.equal(E.buReady(d, PRJ, 'Treasury').sentence, 'Ready for your approval.');
+  const w = readyDocs(); w.workItem.find(e => e.id === 'W6').data.status = 'prog';
+  const wr = E.buReady(w, PRJ, 'Treasury');
+  assert.equal(wr.ready, false); assert.equal(wr.waiting[0].kind, 'work');
+  assert.match(wr.sentence, /^Not ready for your approval yet: waiting on 1 task on its step/);
+  assert.equal(E.buReady(w, PRJ, 'Compliance').ready, true);           // other teams are unaffected
+  // a failed test result after approval stales only the sections that test covers (T1: D2 → Treasury, Accounts Payable)
+  const s = readyDocs();
+  s.testRun.push({ id: 'R9', data: { id: 'R9', projectId: PRJ, env: 'uat', at: '2026-11-03T09:00:00Z', by: 'ar', results: [{ caseId: 'T1', outcome: 'fail' }] } });
+  const st = check(E.readiness(s, PRJ, TODAY), 'bu-signoff').stale.map(x => x.bu).sort();
+  assert.deepEqual(st, ['Accounts Payable', 'Treasury']);
+  assert.equal(E.buReady(s, PRJ, 'Treasury').ready, false);
+  // a defect raised from that test belongs to the covered sections, not its owner's team (Dev Kumar, IT)
+  const df = readyDocs();
+  df.workItem.push({ id: 'DF1', data: { id: 'DF1', projectId: PRJ, kind: 'defect', title: 'Routing rejected', owner: 'dk', status: 'done', updatedAt: '2026-11-03T00:00:00Z', testRef: { caseId: 'T1' } } });
+  assert.deepEqual(check(E.readiness(df, PRJ, TODAY), 'bu-signoff').stale.map(x => x.bu).sort(), ['Accounts Payable', 'Treasury']);
+  // prefilled "What you checked" from facts
+  const n = E.approvalNoteFacts(d, PRJ, 'Treasury');
+  assert.match(n.text, /^\d+ changed steps? reviewed; \d+ of \d+ tasks? done; (\d+) of \1 tests? passed; (\d+) of \2 pieces? of information available$/);
+  assert.equal(n.facts.tests.passed, n.facts.tests.total);
+  assert.equal(E.approvalNoteFacts(s, PRJ, 'Treasury').facts.tests.passed, n.facts.tests.passed - 1);
+});
+
+test('R8 §8 wording and cross-project conflicts', () => {
+  const d = withHoldResolver(baseDocs());
+  const strings = [];
+  ['W1', 'W6', 'W7', 'W8', 'W3'].forEach(id => strings.push(E.scheduleBadge(d, id, TODAY).label));
+  const t = E.projectTruth(d, PRJ, TODAY);
+  strings.push(t.sentence, t.label, ...t.reasons, ...t.who.map(x => x.action), t.testing.sentence, ...t.launchSteps.map(s => s.label + ' ' + s.action));
+  strings.forEach(x => assert.ok(!SIMPLE_JARGON.test(x), x));
+  assert.ok(!t.who.some(x => /Speed up/.test(x.action)));
+  // conflicts: two projects changing one step
+  const c = baseDocs();
+  c.project.push({ id: 'P2', data: { id: 'P2', name: 'Payments refresh', owner: 'ta', processes: ['vendor-onboarding'], status: 'active' } });
+  c.workItem.push({ id: 'X1', data: { id: 'X1', projectId: 'P2', pid: 'vendor-onboarding', step: 's3', title: 'Bank form v2', owner: 'lp', status: 'idle', start: '2026-11-10', due: '2026-11-12', deps: [] } });
+  deepFreeze(c);
+  assert.deepEqual(E.stepConflict(c, PRJ, 'vendor-onboarding', 's3'), { conflict: true, projects: [{ id: 'P2', name: 'Payments refresh' }], text: 'Another project is also changing this step' });
+  assert.equal(E.stepConflict(c, PRJ, 'vendor-onboarding', 's1').conflict, false);
+  assert.deepEqual(E.projectConflicts(c, PRJ).map(x => x.step), ['s3']);
+  assert.deepEqual(E.projectConflicts(c, 'P2').map(x => x.step), ['s3']);
+});
+
+test('R8 §4 profileLines: one plain line per column, counts only', () => {
+  const prof = E.profileCsv('Tax ID (EIN),Bank name,Extra\n123456789,A,x\n12345678,,y\n987654321,B,z\n', {});
+  const lines = E.profileLines({ fields: [{ name: 'Tax ID (EIN)', type: 'digits', length: 9, required: true }, { name: 'Bank name', type: 'text', required: true }] }, { rows: 3, columns: prof });
+  assert.deepEqual(lines.map(l => l.text), ['Tax ID (EIN): 3 values, 1 is too short', 'Bank name: 2 values, 1 is empty', 'Extra: 3 values']);
+  lines.forEach(l => assert.ok(!/123456789|12345678|987654321/.test(l.text)));
 });

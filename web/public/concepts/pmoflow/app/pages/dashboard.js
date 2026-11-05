@@ -3,9 +3,9 @@
    reorders them; the layout is saved in localStorage. Program roll-ups group projects by project.program. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, toast } from '../ui.js';
-import { eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, gateInfo, financials, money, projectBurn, burnChart,
-  earnedValue, fmtIdx, idxCls, effAvail, dataName, flatSteps, projectItems, effortOf } from './project.js';
-import { byProgram, workloadRows } from './portfolio.js';
+import { today, projectStats, rag, ragBadge, RAG_RULE, rerender, gateInfo, financials, money,
+  earnedValue, fmtIdx, idxCls, projectItems, truthOf, summaryPill, summaryOf, launchStepsOf } from './project.js';
+import { byProgram, workloadRows, burnOrNote, likelyResolved } from './portfolio.js';
 
 const KEY = 'pmoflow.dashboard';
 const ALL = 'all';
@@ -55,7 +55,7 @@ function rollupHTML() {
   if (!groups.length) return '';
   const prog = L().program;
   return `<section class="pmo-dash-roll" data-rollup aria-label="Program roll-up">${groups.map(g => {
-    const rc = {}; g.projects.forEach(p => { const k = rag(p, projectStats(p.id)).k; rc[k] = (rc[k] || 0) + 1; });
+    const rc = {}; g.projects.forEach(p => { const k = truthOf(p).k; rc[k] = (rc[k] || 0) + 1; });
     const fin = g.projects.map(financials), planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
     const ev = evSum(g.projects);
     const next = g.projects.filter(p => p.status !== 'live' && p.target).sort((a, b) => String(a.target).localeCompare(String(b.target)))[0];
@@ -73,8 +73,8 @@ function rollupHTML() {
 function ragW(projects) {
   if (!projects.length) return '<div class="empty">No projects in this program.</div>';
   return byProgram(projects).map(g => `<div class="pmo-dash-grp"><div class="pmo-dash-grp-h">${esc(g.program)}</div>${g.projects.map(p => {
-    const s = projectStats(p.id), r = rag(p, s), gi = gateInfo(p, s);
-    return `<a class="pmo-dash-row" href="${link('/project/' + encodeURIComponent(p.id))}" data-link data-dash-prj="${esc(p.id)}"><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${esc(gi.k === 'live' ? gi.label : !s.total ? 'Not planned' : `${s.pct}% done · ${gi.label} · target ${fmt(p.target)}`)}</span></span>${ragBadge(r)}</a>`;
+    const t = truthOf(p);
+    return `<a class="pmo-dash-row" href="${link('/project/' + encodeURIComponent(p.id))}" data-link data-dash-prj="${esc(p.id)}"><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${esc(t.sentence)}</span></span>${summaryPill(summaryOf(p))}</a>`;
   }).join('')}</div>`).join('') + `<div class="hint" style="margin-top:8px">${esc(RAG_RULE)}</div>`;
 }
 function burnW(projects) {
@@ -82,7 +82,7 @@ function burnW(projects) {
   if (!withWork.length) return '<div class="empty">No project here has work yet.</div>';
   const j = withWork.find(p => p.id === L().burnPrj) || withWork.find(p => p.status !== 'live') || withWork[0];
   return `<select class="pmo-sel" data-dash-burn aria-label="Project for the burndown">${withWork.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-    ${burnChart(projectBurn(j), { id: 'dash', title: j.name + ' burndown', idealTo: j.target ? 'target ' + fmt(j.target) : '' })}`;
+    ${burnOrNote(j, 'dash')}`;
 }
 function evW(projects) {
   if (!projects.length) return '<div class="empty">No projects in this program.</div>';
@@ -90,11 +90,11 @@ function evW(projects) {
     const t = evSum(g.projects);
     return `<tr class="pmo-prog-h"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">SPI ${fmtIdx(t && t.spi)} · CPI ${fmtIdx(t && t.cpi)}</span></td></tr>` + g.projects.map(p => {
       const e = earnedValue(p);
-      return `<tr data-dash-ev="${esc(p.id)}"><td><a href="${link('/project/' + encodeURIComponent(p.id))}" data-link>${esc(p.name)}</a></td>${e ? `<td class="pmo-num">${esc(money(e.pv))}</td><td class="pmo-num">${esc(money(e.ev))}</td><td class="pmo-num"><b class="${idxCls(e.spi)}">${fmtIdx(e.spi)}</b></td><td class="pmo-num"><b class="${idxCls(e.cpi)}">${fmtIdx(e.cpi)}</b></td><td class="pmo-num">${esc(money(e.eac))}</td>` : '<td colspan="5" class="hint">No earned value yet</td>'}</tr>`;
+      return `<tr data-dash-ev="${esc(p.id)}"><td><a href="${link('/project/' + encodeURIComponent(p.id))}" data-link>${esc(p.name)}</a></td>${e ? `<td class="pmo-num">${esc(money(e.pv))}</td><td class="pmo-num">${esc(money(e.ev))}</td><td class="pmo-num"><b class="${idxCls(e.spi)}">${fmtIdx(e.spi)}</b></td><td class="pmo-num"><b class="${idxCls(e.cpi)}">${fmtIdx(e.cpi)}</b></td><td class="pmo-num" data-t="cost">${esc(money(financials(p).forecast))}</td>` : '<td colspan="5" class="hint">No earned value yet</td>'}</tr>`;
     }).join('');
   }).join('');
-  return `<div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned value</th><th class="pmo-num">Earned value</th><th class="pmo-num">SPI</th><th class="pmo-num">CPI</th><th class="pmo-num">EAC</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="hint" style="margin-top:6px">SPI and CPI below 1.00 mean behind schedule or over cost. Actual cost comes from logged hours × day rate ÷ 8.</div>`;
+  return `<div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned value</th><th class="pmo-num">Earned value</th><th class="pmo-num">SPI</th><th class="pmo-num">CPI</th><th class="pmo-num">Forecast cost</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="hint" style="margin-top:6px">SPI and CPI below 1.00 mean behind schedule or over cost. Forecast cost is the expected total at completion; actual cost comes from logged hours × day rate ÷ 8.</div>`;
 }
 function workloadW(projects) {
   const ids = new Set(projects.flatMap(p => [p.owner, ...(p.resources || []), ...projectItems(p.id).map(w => w.owner)]));
@@ -112,34 +112,22 @@ function risksW(projects) {
   const ids = new Set(projects.map(p => p.id));
   const list = store.list('risk', r => r.status !== 'closed' && ids.has(r.projectId)).sort((a, b) => score(b) - score(a)).slice(0, 6);
   if (!list.length) return '<div class="empty">No open risks.</div>';
-  return list.map(r => `<a class="pmo-dash-row" href="${link('/portfolio')}" data-link data-dash-risk="${esc(r.id)}"><span class="pmo-sev ${score(r) >= 6 ? 'hi' : score(r) >= 3 ? 'md' : 'lo'}">${score(r)}</span><span class="pmo-dash-main"><b>${esc(r.title)}</b><span class="hint">${esc((store.get('project', r.projectId) || {}).name || '')} · ${esc(pname(r.owner))}</span></span></a>`).join('');
+  return list.map(r => `<a class="pmo-dash-row" href="${link('/portfolio')}" data-link data-dash-risk="${esc(r.id)}"><span class="pmo-sev ${score(r) >= 6 ? 'hi' : score(r) >= 3 ? 'md' : 'lo'}">${score(r)}</span><span class="pmo-dash-main"><b>${esc(r.title)}</b><span class="hint">${esc((store.get('project', r.projectId) || {}).name || '')} · ${esc(pname(r.owner))}${likelyResolved(r) ? ' · <b>Likely resolved: close it?</b>' : ''}</span></span></a>`).join('');
 }
+/* The same blockers list as every project page (projectTruth), most urgent projects first. */
 function blockersW(projects) {
-  const held = {};
-  projects.filter(p => p.status !== 'live').forEach(p => {
-    const items = projectItems(p.id);
-    (p.processes || []).forEach(pid => {
-      const proc = store.get('process', pid); if (!proc) return;
-      flatSteps(proc.tobe).forEach(s => {
-        const open = items.filter(w => w.pid === pid && w.step === s.id && w.status !== 'done');
-        if (!open.length) return;
-        (s.data || []).forEach(d => { const e = effAvail(d); if (e === 'missing' || e === 'pending') { const x = held[d] = held[d] || { d, e, items: 0, effort: 0, projects: new Set() }; x.items += open.length; x.effort += open.reduce((a, w) => a + effortOf(w), 0); x.projects.add(p.name); } });
-      });
-    });
-  });
-  const list = Object.values(held).sort((a, b) => b.items - a.items || b.effort - a.effort).slice(0, 6);
-  if (!list.length) return '<div class="empty">No data is holding open work.</div>';
-  return list.map(x => `<a class="pmo-dash-row" href="${link('/data/' + encodeURIComponent(x.d))}" data-link data-dash-blocker="${esc(x.d)}"><span class="pmo-dash-main"><b>${esc(dataName(x.d))}</b><span class="hint">${x.e === 'pending' ? 'Fix done · awaiting owner confirmation' : 'Missing'} · ${esc([...x.projects].join(', '))}</span></span><span class="pmo-dash-num"><b class="fail">${x.items}</b><small>item${x.items === 1 ? '' : 's'} held</small></span></a>`).join('');
+  const list = projects.filter(p => p.status !== 'live').flatMap(p => truthOf(p).blockers.map(b => ({ p, b }))).slice(0, 6);
+  if (!list.length) return '<div class="empty">Nothing is blocking any project.</div>';
+  return list.map(({ p, b }) => `<a class="pmo-dash-row" href="${link(b.href)}" data-link data-dash-blocker="${esc(b.ref)}"><span class="pmo-dash-main"><b>${esc(b.text)}</b><span class="hint">${esc(p.name)}${b.who ? ` · ${esc(pname(b.who))}` : ''}${b.action ? ': ' + esc(b.action) : ''}</span></span></a>`).join('');
 }
 function goLivesW(projects) {
   const list = projects.filter(p => p.status !== 'live' && p.target).sort((a, b) => String(a.target).localeCompare(String(b.target))).slice(0, 6);
   if (!list.length) return '<div class="empty">No upcoming launches.</div>';
   return list.map(p => {
-    const s = projectStats(p.id), gi = gateInfo(p, s), r = rag(p, s);
-    const rd = eng('readiness', null, docs(), p.id, today());
-    const fails = rd && Array.isArray(rd.checks) ? rd.checks.filter(c => c.status ? c.status === 'fail' : !c.pass).length : null;
+    const s = projectStats(p.id), gi = gateInfo(p, s), t = truthOf(p);
+    const ls = launchStepsOf(p), fails = ls.length ? ls.filter(x => !x.done).length : null;
     const d = Math.round((new Date(p.target + 'T12:00:00') - new Date(today() + 'T12:00:00')) / 86400000);
-    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}"><span class="pmo-dash-date"><b>${esc(fmt(p.target).split(' ')[1] || '')}</b><small>${esc(fmt(p.target).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${d >= 0 ? `in ${d} day${d === 1 ? '' : 's'}` : `${-d} day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'forecast ' + fmt(gi.fi.date) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail">${fails} gate check${fails === 1 ? '' : 's'} failing</span>` : 'gate passes'}` : ''}</span></span>${ragBadge(Object.assign({}, r, { reason: '' }))}</a>`;
+    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}"><span class="pmo-dash-date"><b>${esc(fmt(p.target).split(' ')[1] || '')}</b><small>${esc(fmt(p.target).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${d >= 0 ? `in ${d} day${d === 1 ? '' : 's'}` : `${-d} day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'expected ' + fmt(t.forecast) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail">${fails} launch step${fails === 1 ? '' : 's'} left</span>` : 'ready to launch'}` : ''}</span></span>${summaryPill(summaryOf(p))}</a>`;
   }).join('');
 }
 const RENDER = { rag: ragW, burndown: burnW, ev: evW, workload: workloadW, risks: risksW, blockers: blockersW, golives: goLivesW };

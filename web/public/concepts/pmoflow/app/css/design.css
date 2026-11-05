@@ -53,7 +53,7 @@
 
 /* step page */
 .d-prevnext{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-.d-prevnext .btn{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.d-prevnext .btn{max-width:260px;white-space:normal;overflow-wrap:anywhere;text-align:left;line-height:1.3}
 a.d-wi:hover .t{color:var(--accent)}
 .d-blk{font-size:11px;color:var(--late);margin-top:3px;display:flex;gap:4px;align-items:center;font-weight:600}
 
@@ -474,3 +474,40 @@ a.d-wi:hover .t{color:var(--accent)}
 }
 .d-addother{background:#fff;border-radius:999px;position:relative;z-index:1}
 .d-chipbox input::-webkit-calendar-picker-indicator,#d-f-who::-webkit-calendar-picker-indicator{display:none!important}
+
+/* == round 8: one truth, no make-work == */
+/* step dialog: a "not available yet" tick box inside a new information chip */
+.d-ny{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:500;color:var(--ink2);background:#fff;border:1px solid var(--line);border-radius:999px;padding:1px 7px 1px 5px;cursor:pointer;white-space:nowrap;text-transform:none;letter-spacing:0;margin:0}
+.d-ny input{margin:0;width:auto}
+.d-ny:has(input:checked){color:var(--late);border-color:#fecaca;background:#fef2f2}
+.d-ichip{flex-wrap:wrap}
+.d-nycheck{font-size:14px;font-weight:600;text-transform:none;letter-spacing:0}
+.d-nyfield .hint{margin-top:2px}
+/* who does it: a role reads the same everywhere */
+.d-rolesm{font-size:11.5px;color:var(--ink2);background:#f8fafc;border:1px solid var(--line);border-radius:999px;padding:1px 8px;white-space:nowrap}
+/* step page: another project is changing this step */
+.d-conflict-line{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;margin-top:10px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:10px;padding:8px 12px;font-size:13px}
+.d-conflict-line .btn{margin-left:auto}
+/* data page: confirm all */
+.d-confirmall{border-color:#fde68a}
+.d-calist{display:flex;flex-direction:column;gap:6px;margin:4px 0 10px}
+.d-caitem{align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.d-caitem input{margin-top:3px}
+.d-caitem > span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.d-profline{align-items:flex-start;font-size:13px}
+/* BPMN re-import preview: renamed steps */
+.d-renamed{margin:8px 0 0;padding-left:18px;font-size:12.5px;color:var(--ink2);display:flex;flex-direction:column;gap:3px}
+/* phone: the map first, side panels folded to their headings below it */
+@media (max-width:640px){
+  .d-sidefold > .card > h3.d-foldh{cursor:pointer;display:flex;align-items:center;gap:6px;margin:0;min-height:28px}
+  .d-sidefold > .card > h3.d-foldh::after{content:"▾";margin-left:auto;color:var(--ink3);font-size:13px}
+  .d-sidefold > .card.d-unfold > h3.d-foldh{margin-bottom:10px}
+  .d-sidefold > .card.d-unfold > h3.d-foldh::after{content:"▴"}
+  .d-sidefold > .card:not(.d-unfold) > :not(h3){display:none}
+  .d-goto{white-space:normal;max-width:100%}
+  .flow .flow{min-width:0;width:100%}
+  .branch{min-width:0}
+  .branches .node,.branches .ghost,.branches .passthru{min-width:0;max-width:100%}
+  .d-prevnext .btn{max-width:100%;flex:1 1 140px}
+  .d-conflict-line .btn{margin-left:0}
+}

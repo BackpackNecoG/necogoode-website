@@ -1,8 +1,10 @@
 /* Testing page (stream R): data profiling (statistics only), spec drift, generated test cases, process UAT scripts,
    step-level test runs with evidence and defects, discovered requirements. Route: /testing/:prj */
 import { store } from '../store.js';
-import { E, esc, fmt, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues } from '../ui.js';
+import { E, esc, fmt as fmtDay, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues } from '../ui.js';
 
+/* R8: timestamps render as the browser's LOCAL calendar date; plain YYYY-MM-DD dates stay as they are. */
+const fmt = s => s && /T\d/.test(String(s)) && !isNaN(new Date(s)) ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : fmtDay(s);
 const ui = { sel: {}, paste: '', pasteOpen: false, busy: false, runOpen: new Set(), scriptOpen: new Set(), origin: 'all' };
 
 function flat(nodes) { const e = E(); return e && e.flatSteps ? e.flatSteps(nodes || []) : (nodes || []).filter(n => n.type === 'step'); }
@@ -28,6 +30,8 @@ const ENV_TXT = { dev: 'Build testing', sit: 'System testing', uat: 'Business te
 /* engine-written script text names environments by their professional terms; Simple mode shows the plain ones */
 const plainEnv = t => String(t || '').replace(/\bUAT\b/g, 'business testing').replace(/\bSIT\b/g, 'system testing');
 const envTxt = e => ENV_TXT[e] || String(e || '').toUpperCase();
+/* R8 Simple: two stages */
+const STAGE_TXT = { sit: 'Try it out (system test)', uat: 'Business sign-off test' };
 const ENV_TIP = { dev: 'Development: where the build is made', sit: 'SIT (system integration testing): the systems tested together', uat: 'UAT (user acceptance testing): the people who run the process confirm it works', 'prod-verify': 'A check in production right after go-live' };
 const envOpts = v => ENVS.map(e => `<option value="${e}" ${e === v ? 'selected' : ''}>${ENV_TXT[e]}</option>`).join('');
 const scriptEnv = e => e !== 'dev'; /* scripts and scenarios run in SIT, UAT and prod verify */
@@ -564,77 +568,168 @@ function availOf(dataId) {
   if (l && l.label) return { label: l.label, tone: TONE[l.tone] || 'warn' };
   return { live: { label: 'Connected', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[effAvail(dataId)] || { label: 'Not available yet', tone: 'bad' };
 }
-function summaryOf(prj) {
+/* R8 ONE TRUTH: the testing numbers come from E().projectTruth (the same values the project header, home and the status
+   report show). Local fallbacks only keep the page usable while the engine is loading. */
+const pickv = (o, ...ks) => { for (const k of ks) { const v = String(k).split('.').reduce((a, x) => a == null ? a : a[x], o); if (v != null) return v; } return null; };
+function truthOf(prj) { return eng('projectTruth', store.state.docs, prj.id, store.state.today) || null; }
+/* Information this project changes (new in the Future, being fixed, or with changed rules). Only these need tests. */
+function changedData(prj, tt) {
+  const tc = testsCheck(prj.id);
+  const ids = pickv(tt, 'dataIds', 'changedData') || (tc && tc.changedData);
+  if (Array.isArray(ids)) return ids.map(x => store.get('dataElement', typeof x === 'string' ? x : (x && (x.id || x.dataId)))).filter(Boolean);
+  const asisIds = new Set();
+  (prj.processes || []).map(id => store.get('process', id)).filter(Boolean).forEach(p => flat(p.asis).forEach(s => { (s.data || []).forEach(d => asisIds.add(d)); (s.subs || []).forEach(sb => (sb.data || []).forEach(d => asisIds.add(d))); }));
+  const fixing = new Set(store.list('workItem', w => w.projectId === prj.id && w.resolves).map(w => w.resolves));
+  return projectData(prj).filter(d => !asisIds.has(d.id) || fixing.has(d.id) || d.avail === 'missing');
+}
+/* projectTruth.testing.stages: [{key: 'system' (Try it out) | 'uat' (Business sign-off), total, passed, failed, run, done}] */
+function stageOf(tt, key) {
+  const arr = tt && tt.stages; const st = Array.isArray(arr) ? arr.find(x => x && x.key === key) : arr && arr[key];
+  return st && typeof st === 'object' ? { passed: +st.passed || 0, total: +st.total || 0, failed: (+st.failed || 0) + (+st.blocked || 0), done: !!st.done, runs: st.run ? 1 : 0 } : null;
+}
+/* "Try it out": any System testing (or Build testing) run counts; done when there is one and nothing in it failed. */
+function localTryOut(prj, ids) {
+  const by = {}; let runs = 0;
+  runsFor(prj.id).filter(r => r.env === 'sit' || r.env === 'dev').slice().reverse().forEach(r => { runs++; (r.results || []).forEach(x => { const k = rid(x); if (k && x.outcome !== 'not-run' && x.outcome !== 'skipped') by[k] = x.outcome; }); });
+  const vals = ids.map(id => by[id]).filter(Boolean);
+  const failed = vals.filter(o => o === 'fail' || o === 'blocked').length;
+  return { passed: vals.filter(o => o === 'pass').length, total: ids.length, failed, runs, done: runs > 0 && Object.keys(by).length > 0 && !Object.values(by).some(o => o === 'fail' || o === 'blocked') };
+}
+function localSignOff(prj, ids) {
+  const by = latestBy(prj.id, 'uat');
+  const passed = ids.filter(id => by[id] && by[id].outcome === 'pass').length;
+  const failed = ids.filter(id => by[id] && (by[id].outcome === 'fail' || by[id].outcome === 'blocked')).length;
+  return { passed, total: ids.length, failed, runs: runsFor(prj.id).filter(r => r.env === 'uat').length, done: ids.length > 0 && passed === ids.length };
+}
+function testingFacts(prj) {
+  const tt0 = truthOf(prj);
+  const tt = tt0 && (tt0.testing || tt0.tests || tt0.testingSummary) || null;
+  const des = changedData(prj, tt);
+  const caseIds = [].concat(...des.map(d => casesFor(d.id).map(c => c.id)));
+  const scripts = scriptsFor(prj).list.concat(Array.isArray(prj.uatScenarios) ? prj.uatScenarios : []);
+  const ids = caseIds.concat(scripts.map(x => x.id));
+  const sum = summaryOf(prj, tt);
+  const try1 = stageOf(tt, 'system') || localTryOut(prj, ids);
+  const sign = stageOf(tt, 'uat') || localSignOff(prj, ids);
+  const passed = pickv(tt, 'passed', 'pass'), total = pickv(tt, 'total');
+  return { tt, des, caseIds, scripts, ids, sum, try1, sign, passed: passed != null ? +passed : sign.passed, total: total != null ? +total : ids.length };
+}
+function summaryOf(prj, tt) {
+  if (tt && (tt.sentence || tt.label)) return { done: !!tt.done, sentence: tt.sentence || tt.label, nextAction: tt.nextAction || null };
   const s = eng('testingSummary', store.state.docs, prj.id);
   if (s && s.sentence) return s;
   const tc = testsCheck(prj.id);
-  return { done: !!(tc && tc.pass), sentence: tc ? (tc.pass ? 'Yes: testing is finished.' : 'Not yet: ' + (tc.detail || 'some tests still need attention.')) : 'Not yet: no tests have been set up.', nextAction: { key: tc && tc.pass ? 'none' : 'generate', label: tc && tc.pass ? 'Nothing left to test' : 'Generate the tests' } };
+  return { done: !!(tc && tc.pass), sentence: tc ? (tc.pass ? 'Yes: testing is finished.' : 'Not yet: ' + (tc.detail || 'some tests still need attention.')) : 'Not yet: no tests have been set up.', nextAction: null };
 }
-const TIP = { profile: 'Check sample data (profile): count lengths, blanks and characters in a sample file, never keeping the values.', rules: 'Rules to test (spec fields): what each column of the information must look like.', uat: 'Business testing (UAT): the people who run the process confirm it works.', dev: 'Build testing (Dev): checks made while the change is being built.', sit: 'System testing (SIT): the systems tested together.' };
+const TIP = { profile: 'Check sample data (profile): count lengths, blanks and characters in a sample file, never keeping the values.', rules: 'Rules to test (spec fields): what each column of the information must look like.', uat: 'Business sign-off test (UAT): the people who run the process confirm it works.', sit: 'Try it out (system testing, SIT): the systems tested together before the business signs off.' };
 const gt = (word, k) => `<span class="ts-g" title="${esc(TIP[k])}">${esc(word)}</span>`;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+
+/* "Check sample data", one plain line per column: "Tax ID: 40 values, 1 is too short". */
+const ISSUE_TXT = { 'required-nulls': ['empty', 'empty'], 'length-mismatch': ['is the wrong length', 'are the wrong length'], 'non-digit': ['has letters or symbols', 'have letters or symbols'],
+  duplicates: ['repeats another', 'repeat others'], 'pattern-mismatch': ['is in a different format', 'are in a different format'], 'type-mismatch': ['is the wrong kind of value', 'are the wrong kind of value'],
+  'out-of-range': ['is outside the allowed range', 'are outside the allowed range'], 'value-not-in-list': ['is not one of the allowed values', 'are not allowed values'],
+  'unexpected-specials': ['has unexpected characters', 'have unexpected characters'] };
+function columnLines(de, prof) {
+  let drift = [];
+  try { drift = (E() && E().specDrift && (de.fields || []).length) ? E().specDrift(de, prof) || [] : []; } catch (err) { drift = []; }
+  const rows = rowsOf(prof);
+  return (prof.columns || []).map(c => {
+    const filled = Math.max(0, (c.rows != null ? +c.rows : rows) - (+c.nulls || 0));
+    const iss = drift.filter(d => norm(d.field) === norm(c.name) || (d.detail || '').toLowerCase().includes(String(c.name).toLowerCase() + '"'));
+    const bits = [];
+    iss.forEach(d => {
+      const t = ISSUE_TXT[d.issue]; if (!t) return;
+      const m = /(\d+) of \d+/.exec(d.detail || '');
+      if (d.issue === 'required-nulls') { bits.push(`${m ? m[1] : 'some'} empty`); return; }
+      const n = m ? +m[1] : null;
+      bits.push(n != null ? `${n} ${n === 1 ? t[0] : t[1]}` : `some ${t[1]}`);
+    });
+    if (!iss.length && +c.nulls) bits.push(`${c.nulls} empty`);
+    const ok = !iss.length && (de.fields || []).length;
+    return `<li class="ts-col ${iss.length ? 'bad' : ''}" data-col-line="${esc(c.name)}"><b>${esc(c.name)}:</b> ${plural(filled, 'value')}${bits.length ? ', ' + esc([...new Set(bits)].join(', ')) : ok ? ', all look right' : ''}</li>`;
+  }).join('');
+}
 
 function simpleRender(prj) {
   const prjId = prj.id;
   const projects = store.list('project');
-  const des = projectData(prj);
-  const sum = summaryOf(prj);
-  const na = sum.nextAction || { key: 'none', label: '' };
-  const sc = scriptsFor(prj);
-  const allCases = des.reduce((n, d) => n + casesFor(d.id).length, 0);
-  const noRules = des.filter(d => !(d.fields || []).length);
-  const by = latestBy(prjId, 'uat');
-  const items = [].concat(...des.map(d => casesFor(d.id).map(c => c.id))).concat(sc.adopted ? uatItems(prj).map(x => x.id) : []);
-  const passN = items.filter(id => by[id] && by[id].outcome === 'pass').length;
-  const failN = items.filter(id => by[id] && by[id].outcome === 'fail').length;
-  const step1Done = des.length > 0 && des.every(d => latestProfile(d.id) || !d.sampleCsv);
-  const fold = (rows, n, label) => rows.length ? `<details class="ts-fold" ${ui.fold && ui.fold[label] ? 'open' : ''} data-fold="${label}"><summary>See each piece of information (${n})</summary><ul class="ts-srs">${rows.join('')}</ul></details>` : '';
-  const need1 = des.filter(d => d.sampleCsv && !latestProfile(d.id) || latestProfile(d.id) && !(d.fields || []).length);
-  const step2Done = des.length > 0 && des.every(d => casesFor(d.id).length && !fieldCoverage(d).missing.length) && (sc.adopted || !sc.list.length);
-  const step3Done = !!sum.done;
+  const f = testingFacts(prj);
+  const des = f.des;
+  const sum = f.sum;
+  const withSample = des.filter(d => d.sampleCsv || latestProfile(d.id));
+  const checked = des.filter(d => latestProfile(d.id));
+  /* Done only when a sample was actually checked (and every sample that exists has been) */
+  const step1Done = checked.length > 0 && withSample.every(d => latestProfile(d.id));
+  const untested = des.filter(d => !casesFor(d.id).length || fieldCoverage(d).missing.length);
+  const step2Done = des.length > 0 && !untested.length;
+  const cur = des.length && !step2Done ? 2 : !f.try1.done ? 3 : !f.sign.done ? 4 : 0;
   const problems = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done');
-  const btn = na.key && na.key !== 'none' ? `<button class="btn primary rs-big" data-next-action="${esc(na.key)}">${esc(na.label)}</button>` : '';
-  const row1 = d => { const p = latestProfile(d.id); const a = availOf(d.id); const nr = !(d.fields || []).length;
-    return `<li class="ts-sr" data-s1="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><span class="rs-st ${a.tone}">${esc(a.label)}</span>
-        <small>${p ? `Sample checked ${esc(fmt(p.at))}: ${esc(rowsOf(p))} rows` : d.sampleCsv ? 'A sample file is ready to check.' : 'No sample file yet.'}</small></div>
-      <div class="ts-sr-a">${p ? (nr ? `<button class="btn primary" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : '<span class="ts-okt">✓ Checked</span>')
+  const fold = (rows, label, key) => rows.length ? `<details class="ts-fold" ${ui.fold && ui.fold[key] ? 'open' : ''} data-fold="${key}"><summary>${label}</summary><ul class="ts-srs">${rows.join('')}</ul></details>` : '';
+  const row1 = d => { const p = latestProfile(d.id); const nr = !(d.fields || []).length;
+    return `<li class="ts-sr" data-s1="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b>
+        <small>${p ? `Sample checked ${esc(fmt(p.at))}: ${esc(plural(rowsOf(p), 'row'))}. No values were kept.` : d.sampleCsv ? 'A sample file is ready to check.' : 'No sample file yet (optional).'}</small>
+        ${p ? `<ul class="ts-cols" data-col-lines>${columnLines(d, p)}</ul>` : ''}</div>
+      <div class="ts-sr-a">${p ? (nr ? `<button class="btn" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : '<span class="ts-okt">✓ Checked</span>')
         : d.sampleCsv ? `<button class="btn" data-s-prof="${esc(d.id)}" ${ui.busy ? 'disabled' : ''}>Check sample data</button>` : `<label class="btn ts-file">Upload a sample file<input type="file" accept=".csv,text/csv" data-s-file="${esc(d.id)}" hidden></label>`}</div></li>`; };
-  const row2 = d => { const n = casesFor(d.id).length; const f = (d.fields || []).length; const miss = fieldCoverage(d).missing.length;
-    return `<li class="ts-sr" data-s2="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><small>${f ? `${f} ${f === 1 ? 'rule' : 'rules'} to test` : 'No rules to test yet'} · ${n} test${n === 1 ? '' : 's'}${miss ? ` · ${miss} rule${miss === 1 ? '' : 's'} without a test` : ''}</small></div>
-      <div class="ts-sr-a">${!f ? (latestProfile(d.id) ? `<button class="btn" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : `<a class="rl-go" href="${link('/data/' + d.id)}" data-link>Add rules ›</a>`) : miss || !n ? `<button class="btn" data-s-gen="${esc(d.id)}">Create tests</button>` : '<span class="ts-okt">✓ Ready</span>'}</div></li>`; };
-  const stepCard = (n, title, done, body, open) => `<li class="ts-step ${done ? 'done' : ''} ${open ? 'cur' : ''}" data-guide-step="${n}"><div class="ts-step-h"><span class="ts-num">${done ? '✓' : n}</span><b>${title}</b>${done ? '<span class="ts-okt">Done</span>' : ''}</div>${body}</li>`;
-  const cur = !step1Done ? 1 : !step2Done ? 2 : 3;
+  const row2 = d => { const n = casesFor(d.id).length;
+    return `<li class="ts-sr" data-s2="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><small>${n ? plural(n, 'test') : 'No tests yet'}</small></div><div class="ts-sr-a">${n && !fieldCoverage(d).missing.length ? '<span class="ts-okt">✓ Ready</span>' : ''}</div></li>`; };
+  const stepCard = (n, title, done, body, isCur, extra) => `<li class="ts-step ${done ? 'done' : ''} ${isCur ? 'cur' : ''}" data-guide-step="${n}" ${extra || ''}><div class="ts-step-h"><span class="ts-num">${done ? '✓' : n}</span><b>${title}</b>${done ? '<span class="ts-okt">Done</span>' : ''}</div>${body}</li>`;
+  const stageLine = (st, what) => st.runs ? `${st.passed} of ${st.total} passed${st.failed ? ` · ${st.failed} need fixing` : ''}` : `Not tried yet · ${plural(st.total, what)}`;
+  const big = `<div class="ts-big" data-tests-number="${f.passed}/${f.total}"><b>${f.passed} of ${f.total}</b><span>tests passed</span></div>`;
   return `<section class="hdr rs-hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
       <div class="rl-title"><h1>Testing</h1>${projects.length > 1 ? `<select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}</div></div></section>
     <div class="rs-wrap" data-simple-testing>
       <div class="rs-status ${sum.done ? 'ready' : 'notready'} ts-sum" data-testing-summary="${sum.done ? 'done' : 'open'}" role="status"><span class="rs-status-ic" aria-hidden="true">${sum.done ? '✓' : '!'}</span>
-        <div><span class="ts-q">Is testing finished?</span><b data-testing-sentence>${esc(sum.sentence)}</b></div></div>
-      ${btn ? `<div class="ts-next">${btn}</div>` : ''}
-      <ol class="ts-guide" data-guide>
-        ${stepCard(1, `${gt('Check sample data', 'profile')}`, step1Done, `<p class="ts-help">See what real information looks like (lengths, blanks, characters) without keeping any of the values.</p>${des.length ? `${need1.length ? `<ul class="ts-srs">${need1.map(row1).join('')}</ul>` : ''}${fold(des.filter(d => !need1.includes(d)).map(row1), des.length - need1.length, 's1')}` : '<div class="hint">This project’s steps use no information yet.</div>'}`, cur === 1)}
-        ${stepCard(2, 'Create tests', step2Done, `<p class="ts-help">Tests are made for you from the ${gt('rules to test', 'rules')} and the sample data. One tap creates them all.</p>
-          <div class="ts-step-a"><button class="btn ${cur === 2 ? 'primary' : ''}" data-s-genall>Create all tests</button><span class="hint">${allCases} information test${allCases === 1 ? '' : 's'} · ${sc.adopted ? sc.list.length : 0} business test${(sc.adopted ? sc.list.length : 0) === 1 ? '' : 's'}${noRules.length ? ` · ${noRules.length} without rules yet` : ''}</span></div>
-          ${des.length ? fold(des.map(row2), des.length, 's2') : ''}`, cur === 2)}
-        ${stepCard(3, 'Record results', step3Done, `<p class="ts-help">Run each test and mark it passed or failed. Failed tests become problems for the owner to fix.</p>
-          <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record>Record ${gt('business testing', 'uat')} results</button><span class="hint" data-s-progress>${passN} of ${items.length} passed${failN ? ` · ${failN} failed` : ''}</span></div>`, cur === 3)}
-      </ol>
+        <div><span class="ts-q">Is testing finished?</span><b data-testing-sentence>${esc(sum.sentence)}</b></div>${big}</div>
+      ${!des.length && !f.total ? `<div class="card rs-card" data-no-changes><h3>Nothing here needs testing</h3><p class="rs-p">This project doesn’t change any information, so there is nothing to test yet. Tests are only needed for information that is new, being fixed, or has new rules.</p></div>` : ''}
+      ${des.length || f.total ? `<ol class="ts-guide" data-guide>
+        ${!des.length ? '' : stepCard(1, `${gt('Check sample data', 'profile')} <small class="ts-opt">optional</small>`, step1Done, `<p class="ts-help">See what real information looks like (lengths, blanks, characters) without keeping any of the values.</p>
+          ${withSample.length ? `<ul class="ts-srs">${withSample.map(row1).join('')}</ul>${fold(des.filter(d => !withSample.includes(d)).map(row1), `Information without a sample (${des.length - withSample.length})`, 's1')}` : fold(des.map(row1), `See each piece of information (${des.length})`, 's1')}`, false)}
+        ${!des.length ? '' : stepCard(2, 'Create the tests', step2Done, `<p class="ts-help">${plural(des.length, 'piece', 'pieces')} of information ${des.length === 1 ? 'changes' : 'change'} in this project, so ${des.length === 1 ? 'it needs' : 'they need'} tests. One press makes them all from the ${gt('rules to test', 'rules')} and any sample data.</p>
+          <div class="ts-step-a"><button class="btn ${cur === 2 ? 'primary' : ''} rs-big" data-s-create ${ui.creating ? 'disabled' : ''}>${ui.creating ? 'Creating the tests…' : 'Create the tests'}</button><span class="hint" data-s2-count>${step2Done ? `${plural(f.caseIds.length, 'test')} ready` : `${plural(des.length - untested.length, 'of ' + des.length + ' has tests', 'of ' + des.length + ' have tests')}`}</span></div>
+          ${fold(des.map(row2), `See each piece of information (${des.length})`, 's2')}`, cur === 2)}
+        ${stepCard(des.length ? 3 : 1, `${gt('Try it out', 'sit')} <small class="ts-opt">system test</small>`, f.try1.done, `<p class="ts-help">Run the tests in the test system and mark each one passed or failed. Any system test run counts.</p>
+          <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record="sit">Record what happened</button><span class="hint" data-stage="try" data-stage-done="${f.try1.done ? 1 : 0}">${stageLine(f.try1, 'test')}</span></div>`, cur === 3)}
+        ${stepCard(des.length ? 4 : 2, gt('Business sign-off test', 'uat'), f.sign.done, `<p class="ts-help">The people who run the process try each test and mark it passed or failed. Failed tests become problems for the owner to fix.</p>
+          <div class="ts-step-a"><button class="btn ${cur === 4 ? 'primary' : ''}" data-s-record="uat">Record what happened</button><span class="hint" data-stage="signoff" data-stage-done="${f.sign.done ? 1 : 0}" data-s-progress>${stageLine(f.sign, 'test')}</span></div>`, cur === 4)}
+      </ol>` : ''}
       <div class="card rs-card" id="problems" data-problems><h3>Problems found<span class="n">${problems.length} open</span></h3>
         ${problems.map(w => `<div class="ts-prob" data-problem="${esc(w.id)}"><b>${esc(w.title)}</b><span class="hint">${av(w.owner)} ${esc(pname(w.owner))} fixes it · due ${esc(fmt(w.due))}</span></div>`).join('') || '<div class="hint">No open problems.</div>'}</div>
       <div class="rs-adv"><button class="btn rs-link" data-show-adv>Show advanced tools</button></div>
     </div>`;
 }
 
-async function generateAll(prj) {
-  const des = projectData(prj);
-  const withRules = des.filter(d => (d.fields || []).length || latestProfile(d.id));
-  let made = 0;
-  for (const d of withRules) made += await generateFor(d, true);
-  const cur = store.get('project', prj.id) || prj;
-  let scripts = 0;
-  if (!Array.isArray(cur.uatScripts) && generated(prj.id).length) { scripts = generated(prj.id).length; await adoptScripts(prj, false, true); }
-  else if (Array.isArray(cur.uatScripts)) { const fresh = generated(prj.id).filter(g => !cur.uatScripts.some(h => h.id === g.id)); if (fresh.length) { scripts = fresh.length; await adoptScripts(prj, true, true); } }
-  const skipped = des.length - withRules.length;
-  if (!made && !scripts) toast(skipped ? 'Add rules first (or use your sample data)' : 'Every test already exists.');
-  else toast(`Created ${made} information test${made === 1 ? '' : 's'}${scripts ? ` and ${scripts} business test${scripts === 1 ? '' : 's'}` : ''}${skipped ? `. ${skipped} without rules: add rules first (or use your sample data)` : ''}`);
+/* R8: ONE press creates the tests for EVERY piece of information the project changes. Nothing is skipped:
+   information without rules uses its sample (checked first when there is a sample file), and anything with neither
+   still gets one plain "typical value" test, so the button never does nothing. */
+async function createAllTests(prj) {
+  if (ui.creating) return;
+  ui.creating = true; store.emit();
+  let made = 0, covered = 0, noted = [];
+  try {
+    const des = testingFacts(prj).des;
+    for (const d0 of des) {
+      let d = store.get('dataElement', d0.id) || d0;
+      if (!(d.fields || []).length && !latestProfile(d.id) && d.sampleCsv) {
+        try { await store.api('/profile/' + d.id, { csv: d.sampleCsv }); await store.load(); } catch (e) { /* fall through: generic test below */ }
+      }
+      d = store.get('dataElement', d.id) || d;
+      if (!(d.fields || []).length && latestProfile(d.id)) {
+        const fields = eng('specFromProfile', latestProfile(d.id));
+        if (Array.isArray(fields) && fields.length) { await store.save('dataElement', d.id, Object.assign({}, d, { fields }), `Used the ${fields.length} sample-data columns of ${d.name} as its rules to test`); d = store.get('dataElement', d.id) || d; }
+      }
+      let n = 0;
+      if ((d.fields || []).length || latestProfile(d.id)) n = await generateFor(d, true);
+      if (!casesFor(d.id).length) {
+        const id = store.newId('tc');
+        await store.save('testCase', id, { id, dataId: d.id, field: d.name, kind: 'valid', input: `A typical ${d.name}`, expect: 'accept', origin: 'user', note: 'Enter a realistic made-up value and check it is saved and shown correctly.', tester: d.owner || undefined, createdAt: new Date().toISOString() }, `Created a basic test for ${d.name}`);
+        n++; noted.push(d.name);
+      }
+      made += n; if (casesFor(d.id).length) covered++;
+    }
+    toast(made ? `Created ${plural(made, 'test')}. All ${plural(covered, 'piece', 'pieces')} of information now have tests.` : `All ${plural(covered, 'piece', 'pieces')} of information already have their tests.`);
+  } finally { ui.creating = false; store.emit(); }
 }
 async function useColumns(dataId) {
   const de = store.get('dataElement', dataId); const prof = latestProfile(dataId);
@@ -642,7 +737,7 @@ async function useColumns(dataId) {
   const fields = eng('specFromProfile', prof);
   if (!Array.isArray(fields) || !fields.length) { toast('The sample data has no columns to use.'); return; }
   await store.save('dataElement', dataId, Object.assign({}, de, { fields }), `Used the ${fields.length} sample-data columns of ${de.name} as its rules to test`);
-  toast(`${fields.length} rules to test added to ${de.name}. Next: create tests.`);
+  toast(`${fields.length} rules to test added to ${de.name}. Next: create the tests.`);
 }
 function bindSimple(root, prj) {
   const adv = root.querySelector('[data-show-adv]'); if (adv) adv.onclick = () => { store.setAdvanced(true); toast('Advanced tools shown'); };
@@ -656,18 +751,8 @@ function bindSimple(root, prj) {
   root.querySelectorAll('[data-s-prof]').forEach(b => b.onclick = () => { const d = store.get('dataElement', b.dataset.sProf); if (d) prof(d, d.sampleCsv, 'the sample data of ' + d.name); });
   root.querySelectorAll('[data-s-file]').forEach(f => f.onchange = () => { const d = store.get('dataElement', f.dataset.sFile); const file = f.files[0]; if (!d || !file) return; if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB.'); return; } const rd = new FileReader(); rd.onload = () => prof(d, String(rd.result), file.name); rd.readAsText(file); });
   root.querySelectorAll('[data-use-cols]').forEach(b => b.onclick = () => useColumns(b.dataset.useCols));
-  root.querySelectorAll('[data-s-gen]').forEach(b => b.onclick = () => { const d = store.get('dataElement', b.dataset.sGen); if (d) generateFor(d); });
-  const ga = root.querySelector('[data-s-genall]'); if (ga) ga.onclick = () => generateAll(prj);
-  const rec = root.querySelector('[data-s-record]'); if (rec) rec.onclick = () => recordRun(prj, { simple: true, env: 'uat' });
-  const nx = root.querySelector('[data-next-action]');
-  if (nx) nx.onclick = () => {
-    const k = nx.dataset.nextAction;
-    if (k === 'generate') return generateAll(prj);
-    if (k === 'fix') return retestIds(prj.id, 'uat').length ? recordRun(prj, { simple: true, retestEnv: 'uat' }) : recordRun(prj, { simple: true, env: 'uat' });
-    if (k === 'run' || k === 'evidence') return recordRun(prj, { simple: true, env: 'uat' });
-    if (k === 'run-build') return recordRun(prj, { simple: true, env: 'dev' });
-    const t = root.querySelector(k === 'problems' ? '#problems' : '[data-guide]'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  const ca = root.querySelector('[data-s-create]'); if (ca) ca.onclick = () => createAllTests(prj);
+  root.querySelectorAll('[data-s-record]').forEach(b => b.onclick = () => recordRun(prj, { simple: true, env: b.dataset.sRecord }));
 }
 
 /* ---------- bind ---------- */
@@ -885,26 +970,31 @@ async function recordRun(prj, opts) {
   const me = store.state.me;
   const c0 = cycles.find(c => c.id === cyc0);
   if (c0 && !(c0.testers || []).includes(me)) { toast(`Only this cycle's testers (${(c0.testers || []).map(pname).join(', ')}) can record results in it.`); return; }
-  const cases = []; des.forEach(d => casesFor(d.id).forEach(c => { if (!only || only.has(c.id)) cases.push({ c, d }); }));
+  /* R8 Simple: only information the project changes needs tests, so only those are listed */
+  const desRun = opts.simple ? testingFacts(prj).des : des;
+  const cases = []; desRun.forEach(d => casesFor(d.id).forEach(c => { if (!only || only.has(c.id)) cases.push({ c, d }); }));
   const scnIds = new Set((prj.uatScenarios || []).map(x => x.id));
   const scripts = uatItems(prj).filter(s => !only || only.has(s.id));
-  if (!cases.length && !scripts.length) { toast(only ? 'Nothing to retest.' : 'Generate test cases or UAT scripts first.'); return; }
+  if (!cases.length && !scripts.length) { toast(only ? 'Nothing to retest.' : opts.simple ? 'Create the tests first.' : 'Generate test cases or UAT scripts first.'); return; }
   const env0 = prev ? prev.env : (opts.env || (c0 || {}).env || 'dev');
   const sel = (name, label) => `<select name="${name}" aria-label="${esc(label)}"><option value="">Not run</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="blocked">Blocked</option></select>`;
   const pick = (k, label) => `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
-  const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const t = `${d.name} ${caseLbl(c.id)} · ${c.field}`; return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t">${pick(k, t)}<b>${esc(d.name)} ${esc(caseLbl(c.id))} · ${esc(c.field)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small>expect ${esc(c.expect)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small></div>
+  /* Simple: no test ids and no "expect accept/reject": the value to try and what should happen, in words */
+  const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const nm = opts.simple ? `${d.name}${tok(c.field) !== tok(d.name) ? ' · ' + c.field : ''}` : `${d.name} ${caseLbl(c.id)} · ${c.field}`;
+    const exp = opts.simple ? (c.expect === 'reject' ? 'should be rejected' : 'should be accepted') : 'expect ' + c.expect;
+    return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t">${pick(k, nm)}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small></div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
   const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}><div class="ts-case-t">${pick(k, s.title)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
     <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(opts.simple ? plainEnv(x.action) : x.action)}<small>Expected: ${esc(opts.simple ? plainEnv(x.expected) : x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence (required to pass): link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({
-    title: prev ? `Retest failures · ${envTxt(prev.env)} retest ${(prev.cycle || 1) + 1}` : opts.simple ? 'Record results' : 'Record test run',
-    body: `<div class="frow"><div class="field"><label>${opts.simple ? 'Which testing' : 'Environment'}</label><select name="env" data-env ${prev ? 'disabled' : ''}>${opts.simple ? ENVS.filter(e => e === 'uat' || e === 'sit' || e === env0).map(e => `<option value="${e}" ${e === env0 ? 'selected' : ''}>${ENV_TXT[e]}</option>`).join('') : envOpts(env0)}</select></div>
+    title: prev ? `Retest failures · ${envTxt(prev.env)} retest ${(prev.cycle || 1) + 1}` : opts.simple ? 'Record what happened' : 'Record test run',
+    body: `<div class="frow"><div class="field"><label>${opts.simple ? 'Which test' : 'Environment'}</label><select name="env" data-env ${prev ? 'disabled' : ''}>${opts.simple ? ['sit', 'uat'].map(e => `<option value="${e}" ${e === env0 ? 'selected' : ''}>${STAGE_TXT[e]}</option>`).join('') : envOpts(env0)}</select></div>
       <div class="field" ${opts.simple ? 'hidden style="display:none"' : ''}><label>Test cycle</label><select name="cycleId" data-cycle-sel><option value="">No planned cycle</option>${cycles.map(c => `<option value="${esc(c.id)}" data-cenv="${esc(c.env)}" ${c.id === cyc0 ? 'selected' : ''}>${esc(c.name)} · ${esc(envTxt(c.env))}</option>`).join('')}</select></div></div>
       <div class="ts-bulk" data-bulk><label class="ts-pick"><input type="checkbox" data-pick-all aria-label="Select every row"> All</label>
         <input data-bulk-ev placeholder="Evidence note for the selected rows" aria-label="Evidence note for the selected rows"><button type="button" class="btn sm primary" data-bulk-pass>Mark selected as passed</button><button type="button" class="btn sm" data-reset>Reset to not run</button>
         <span class="ts-bulk-hint" data-bulk-hint role="status" aria-live="polite" hidden></span></div>
-      <div class="hint">“Mark selected as passed” sets every step of each selected row to Pass and records the one evidence note on each. Script and scenario passes need evidence.</div>
+      <div class="hint">${opts.simple ? 'Tick the tests that worked, write what you saw, then press “Mark selected as passed”. A business test needs a note on what you saw to count as passed.' : '“Mark selected as passed” sets every step of each selected row to Pass and records the one evidence note on each. Script and scenario passes need evidence.'}</div>
       ${prev ? `<div class="hint">Only the ${only.size} item${only.size === 1 ? '' : 's'} whose latest ${esc(envTxt(prev.env))} result failed or was blocked. Earlier passes still count toward coverage.</div>` : ''}
       <div class="ts-cov-live hint" data-cov-live></div><div class="ts-err" data-err hidden></div>
       <div class="ts-cases">
@@ -940,7 +1030,7 @@ async function recordRun(prj, opts) {
   if (ov) {
     const envSel = ov.querySelector('[data-env]'); const blk = ov.querySelector('[data-scripts-block]'); const live = ov.querySelector('[data-cov-live]'); const err = ov.querySelector('[data-err]');
     const rows = () => [...ov.querySelectorAll('.ts-case')].filter(x => !x.closest('[hidden]'));
-    const upd = () => { const v = rows(); const done = v.filter(x => [...x.querySelectorAll('select')].some(s => s.value)).length; live.textContent = `${done} of ${v.length} rows have an outcome. Rows left as Not run count against coverage.`; };
+    const upd = () => { const v = rows(); const done = v.filter(x => [...x.querySelectorAll('select')].some(s => s.value)).length; live.textContent = opts.simple ? `${done} of ${v.length} tests marked.` : `${done} of ${v.length} rows have an outcome. Rows left as Not run count against coverage.`; };
     const showErr = list => { err.hidden = false; err.innerHTML = `<b>Can't save yet</b><ul>${list.slice(0, 5).map(x => `<li>${esc(x)}</li>`).join('')}</ul>`; err.scrollIntoView({ block: 'nearest' }); };
     envSel.onchange = () => { blk.hidden = !scriptEnv(envSel.value); upd(); };
     ov.querySelector('[data-reset]').onclick = e => { e.stopPropagation(); rows().forEach(x => x.querySelectorAll('select').forEach(s => { s.value = ''; })); upd(); };
@@ -999,7 +1089,7 @@ async function recordRun(prj, opts) {
   await store.save('testRun', id, doc,
     prev ? `Recorded ${envTxt(env)} retest (cycle ${cycle}) for ${prj.name}: ${fresh.size} retested, ${fails.length} still failing`
       : `Recorded ${envTxt(env)} test run for ${prj.name}${cyc ? ` in “${cyc.name}”` : ''}: ${results.length} of ${total} run, ${fails.length} failed`);
-  toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : `${envTxt(env)} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
+  toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : opts.simple ? `Saved: ${results.filter(x => x.outcome === 'pass').length} passed${fails.length ? `, ${fails.length} failed` : ''}` : `${envTxt(env)} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
   await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
 }

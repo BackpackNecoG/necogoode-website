@@ -88,28 +88,41 @@ export const AV = {
   pending: { label: 'Waiting for confirmation', short: 'Waiting for confirmation', color: 'var(--soon)' },
 };
 export const avOf = k => AV[k] || AV.missing;
-const LBL_KEY = { connected: 'live', 'sample only': 'example', 'not available yet': 'missing', 'waiting for confirmation': 'pending' };
-/* {key, label, tone} for a data element: engine availLabel first, the local effective state otherwise */
-export function availInfo(id) {
-  const r = eng('availLabel', [docs(), id], null);
-  const k0 = effAvail(id);
-  if (r && typeof r === 'object' && (r.label || r.key)) {
-    const key = AV[r.key] ? r.key : LBL_KEY[String(r.label || '').toLowerCase()] || k0;
-    return { key, label: r.label || avOf(key).label, tone: r.tone || '' };
-  }
-  return { key: k0, label: avOf(k0).label, tone: '' };
-}
-export const avText = id => availInfo(id).label;
-/* "Waiting for <owner> to confirm" for a pending element */
-export const awaitingText = id => { const d = dataEl(id); return `Waiting for ${d && d.owner ? pname(d.owner) : 'the owner'} to confirm it's connected`; };
-/* dot coloured by the plain state */
-export function effDot(id) { const i = availInfo(id), a = avOf(i.key); return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
-export const NEEDS_LIVE = 'Needs to be connected before launch';
+const LBL_KEY = { connected: 'live', 'we have it': 'live', 'sample only': 'example', 'not available yet': 'missing', 'waiting for confirmation': 'pending' };
 /* R7: Simple is the default; Advanced shows the power tools */
 export const isAdv = () => !!store.advanced;
+/* R8 §1: Simple has two states only. "We have it" (effectively live) and "Not available yet" (everything else).
+   The words connected / waiting for confirmation / sample only are Advanced-only detail. */
+export const HAVE = 'We have it', NOTYET = 'Not available yet';
+export const SIMPLE_AV = { live: { label: HAVE, color: 'var(--live)' }, notyet: { label: NOTYET, color: 'var(--missing)' } };
+/* {key, label, tone, simple} for a data element. key is the detailed state (live/example/missing/pending);
+   label is the plain label for the current mode. The engine's availLabel decides when it gives a usable answer. */
+export function availInfo(id) {
+  const r = eng('availLabel', [docs(), id, { advanced: isAdv() }], null);
+  const k0 = effAvail(id);
+  let key = k0, label = avOf(k0).label, tone = '';
+  if (r && typeof r === 'object' && (r.label || r.key)) {
+    key = AV[r.state] ? r.state : AV[r.key] ? r.key : LBL_KEY[String(r.label || '').toLowerCase()] || k0;
+    label = r.label || avOf(key).label; tone = r.tone || '';
+  }
+  const simple = key === 'live' ? HAVE : NOTYET;
+  return { key, label: isAdv() ? label : simple, tone, simple, have: key === 'live' };
+}
+export const avText = id => availInfo(id).label;
+/* the owner still has to say "we have it" (a fix finished by someone else, or information the project adds) */
+export const awaitingText = id => { const d = dataEl(id); const who = d && d.owner ? pname(d.owner) : 'the owner';
+  return isAdv() ? `Waiting for ${who} to confirm it's connected` : `Fixed. ${who} needs to confirm we have it`; };
+/* dot coloured by the plain state (two colours in Simple) */
+export function effDot(id) { const i = availInfo(id), a = isAdv() ? avOf(i.key) : SIMPLE_AV[i.have ? 'live' : 'notyet']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
+export const NEEDS_LIVE_ADV = 'Needs to be connected before launch';
+/* kept as a constant for the pages that import it; reads plainly in Simple */
+export const NEEDS_LIVE = NEEDS_LIVE_ADV;
+export const needsLive = () => isAdv() ? NEEDS_LIVE_ADV : 'Needed before launch';
 /* R7 §4: who does a step — a person, or a free-text role stored as ownerRole */
 export const whoOf = n => (n && n.ownerRole) ? n.ownerRole : pname(n && n.owner);
 export const whoAv = n => (n && n.ownerRole) ? '' : av(n && n.owner);
+/* R8 §8: the same words for "who does it" wherever a step shows (a role reads exactly as typed on the map) */
+export const whoChip = n => n && n.ownerRole ? `<span class="person d-role" data-who data-role>${esc(n.ownerRole)}</span>` : n && n.owner ? `<span class="person" data-who>${av(n.owner)}${esc(pname(n.owner))}</span>` : '';
 /* R5: process editors are the owner plus the resources; everyone else is read-only */
 export const canEditProc = p => !!p && !!store.state.me && (p.owner === store.state.me || (p.resources || []).includes(store.state.me));
 export const askAccess = p => `Ask ${pname(p && p.owner)} for edit access`;
@@ -231,7 +244,9 @@ export function workBadge(w, f) {
 }
 /* R6 §2: one status that combines work and data. Work done but data not effectively live is
    "Built · awaiting live data" (amber), never green Done. Pass the step node (or its data ids). */
-export const BUILT_LBL = 'Built · information not connected yet';
+export const BUILT_LBL_ADV = 'Built · information not connected yet';
+export const BUILT_LBL = BUILT_LBL_ADV;
+export const builtLbl = () => isAdv() ? BUILT_LBL_ADV : 'Built · information not available yet';
 export function stepData(n) { return n ? [...new Set([...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])])] : []; }
 export function combinedStatus(st, node) {
   if (!st || st.status === 'none') return 'none';
@@ -242,14 +257,14 @@ export function stepBadge(st, node) {
   const cs = combinedStatus(st, node);
   if (cs === 'none') return badge('No change', 'b-none');
   if (cs === 'done') return badge('Done', 'b-done');
-  if (cs === 'built') return `<span class="badge d-b-amber" data-built title="The work is done; the information this step needs is not connected yet">${esc(BUILT_LBL)}</span>`;
+  if (cs === 'built') return `<span class="badge d-b-amber" data-built title="The work is done; the information this step needs is not available yet">${esc(builtLbl())}</span>`;
   const sch = st.sched === 'late' ? badge('Late' + (st.forecast && st.forecast > st.due ? ' · now ' + fmt(st.forecast) : ''), 'b-late')
     : st.sched === 'slip' ? badge('Running late → ' + fmt(st.forecast), 'b-slip')
     : st.sched === 'soon' ? badge('Next due in ' + Math.max(0, daysTo(st.next || st.due)) + 'd', 'b-soon') : badge('Due ' + fmt(st.due), 'b-ok');
   return badge(STATUS_LBL[st.status] || st.status, 'b-' + st.status) + ' ' + sch;
 }
 function daysTo(s) { if (!s) return 0; return Math.round((new Date(s + 'T12:00:00') - new Date(today() + 'T12:00:00')) / 86400000); }
-export const notFound = what => `<div class="card"><h3>Not found</h3><p class="hint" style="margin:0 0 8px">${esc(what || 'This item')} does not exist in your sandbox. It may have been deleted, or the demo data was reset.</p><a href="${link('/')}" data-link style="color:var(--accent)">Back to workspace</a></div>`;
+export const notFound = what => `<div class="card"><h3>Not found</h3><p class="hint" style="margin:0 0 8px">${esc(what || 'This item')} does not exist in your sandbox. It may have been deleted, or the demo data was reset.</p><a href="${link('/')}" data-link style="color:var(--accent)">Back to Home</a></div>`;
 /* the trigger prompt is a placeholder, never a value (older sandboxes stored it literally) */
 const TRIG_PH = 'What starts this process?';
 const TRIG_PHS = [TRIG_PH, 'What starts it?', 'What starts it'];
@@ -304,7 +319,12 @@ function nodeHTML(n, ctx, idx) {
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   } else {
     const bare = !rd.total && !tn && !(n.subs || []).length; /* nothing tagged: no empty stats line */
-    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>`) + opsLine(n);
+    /* R8 §1: Simple shows how much information the step needs and, only when some is missing, how much is not available yet */
+    const notYet = rd.total - rd.live;
+    const infoStats = isAdv()
+      ? `${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}`
+      : `${rd.total ? `<span data-info-n="${rd.total}">Information <b>${rd.total}</b></span>` : ''}${notYet ? `<span class="d-miss" data-notyet="${notYet}" title="Information that is not available yet">${LOCK} ${notYet} not available yet</span>` : ''}`;
+    body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${infoStats}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} sub-steps</span>` : ''}</div>`) + opsLine(n);
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
@@ -435,7 +455,7 @@ const attr = (k, v) => v == null || v === '' ? '' : ` ${k}="${xe(v)}"`;
 function extXml(n, ind) {
   const ref = d => `<pmoflow:data ref="${xe(d)}" name="${xe(dataName(d))}" />`;
   const c = n.type === 'subprocess' ? calledOf(n) : null;
-  const lines = [`<pmoflow:node${attr('nodeType', n.type || 'step')}${attr('owner', n.owner)}${attr('ownerName', n.owner ? pname(n.owner) : '')}${attr('ownerRole', n.ownerRole)}${attr('sla', n.sla)}${attr('system', n.system)}${attr('durationHrs', n.durationHrs)}${n.type === 'wait' ? attr('wait', n.wait) : ''}${n.type === 'message' ? attr('direction', n.direction === 'receive' ? 'receive' : 'send') + attr('party', n.party) : ''}${c ? attr('calls', n.calls) + attr('callsName', c.p ? c.p.name : c.name) : ''} />`];
+  const lines = [`<pmoflow:node${attr('id', n.id)}${attr('nodeType', n.type || 'step')}${attr('owner', n.owner)}${attr('ownerName', n.owner ? pname(n.owner) : '')}${attr('ownerRole', n.ownerRole)}${attr('sla', n.sla)}${attr('system', n.system)}${attr('durationHrs', n.durationHrs)}${n.type === 'wait' ? attr('wait', n.wait) : ''}${n.type === 'message' ? attr('direction', n.direction === 'receive' ? 'receive' : 'send') + attr('party', n.party) : ''}${c ? attr('calls', n.calls) + attr('callsName', c.p ? c.p.name : c.name) : ''} />`];
   (n.data || []).forEach(d => lines.push(ref(d)));
   (n.touches || []).forEach(t => lines.push(`<pmoflow:touch name="${xe(t)}" />`));
   (n.subs || []).forEach(sb => lines.push((sb.data || []).length ? `<pmoflow:sub title="${xe(sb.title)}">\n${sb.data.map(d => `${ind}    ${ref(d)}`).join('\n')}\n${ind}  </pmoflow:sub>` : `<pmoflow:sub title="${xe(sb.title)}" />`));
@@ -624,6 +644,9 @@ export function parseBpmn(text, people, me) {
     const a = x.a; if (a.ownerRole && out.type !== 'trigger') out.ownerRole = a.ownerRole; if (a.sla) out.sla = a.sla; if (a.system) out.system = a.system; if (a.durationHrs && isFinite(+a.durationHrs)) out.durationHrs = +a.durationHrs;
   };
   const extIds = new Set();
+  /* R8 §8: the PMOFlow id a node had when it was exported (extension attribute, else the exporter's element id) */
+  const fromPmo = (doc.documentElement.getAttribute('exporter') || '') === 'PMOFlow';
+  const pmoIdOf = (elId, a) => (a && a.id) || (fromPmo && /^N_/.test(elId || '') && !/_join$/.test(elId) ? elId.slice(2) : null);
   const emitted = {}; let pendingAlias = [];
   const mark = (bid, nid) => { emitted[bid] = nid; pendingAlias.forEach(a => emitted[a] = nid); pendingAlias = []; };
   const taskLike = n => !!n && (TASKS.has(n.tag) || !!n.def);
@@ -634,6 +657,7 @@ export function parseBpmn(text, people, me) {
     const n = nodes[id]; const d = docText(n.el); const x = extOf(n.el); const a = x ? x.a : {};
     let type = a.nodeType === 'step' || NT[a.nodeType] ? a.nodeType : n.tag === 'callActivity' ? 'subprocess' : n.def === 'timer' ? 'wait' : n.def === 'message' ? 'message' : 'step';
     const out = { id: store.newId('n'), type, title: n.name, owner: ownerOf(id, a), data: [], touches: [], subs: [] };
+    const pid0 = pmoIdOf(id, a); if (pid0) out.pmoId = pid0;
     if (laneMatched[id] || extOwner(a)) laneHit.add(out.id);
     if (type === 'wait') {
       const td = n.el.getElementsByTagNameNS('*', 'timeDuration')[0];
@@ -681,6 +705,7 @@ export function parseBpmn(text, people, me) {
       const n = nodes[cur]; const o = outs[cur] || [];
       if (n.tag === 'startEvent') {
         const x = extOf(n.el); const t = { id: store.newId('n'), type: 'trigger', title: n.name || 'Process starts', owner: ownerOf(cur, x && x.a), touches: [], data: [] };
+        const tp = pmoIdOf(cur, x && x.a); if (tp) t.pmoId = tp;
         if (x) { t.touches = x.touches.slice(); t.data = refs(x.data); extIds.add(t.id); }
         mark(cur, t.id); list.push(t); trigger = t; cur = o[0] && o[0].to; continue;
       }
@@ -690,6 +715,7 @@ export function parseBpmn(text, people, me) {
       if (taskLike(n)) { const st = mkStep(cur); mark(cur, st.id); list.push(st); if (o.length <= 1) { cur = o[0] && o[0].to; continue; } kind = o.every(f => f.name) ? 'decision' : 'parallel'; }
       /* split: a gateway (or a task with several outgoing flows) */
       const gw = { id: store.newId('d'), type: kind, title: taskLike(n) ? (kind === 'parallel' ? 'In parallel' : 'Decision') : (n.name || (kind === 'parallel' ? 'In parallel' : 'Decision')), branches: [] };
+      if (!taskLike(n)) { const gp = pmoIdOf(cur, null); if (gp) gw.pmoId = gp; }
       if (!taskLike(n)) mark(cur, gw.id);
       gwN++;
       const join = findJoin(o);
@@ -732,6 +758,7 @@ let hl = null;            /* highlighted data element on the map */
 let newOpen = false;      /* /new modal guard (the router re-renders on every store change) */
 let newImport = false;    /* the visitor chose "Import BPMN" on /new: do not re-open the create modal on re-render */
 let hdrOpen = false;      /* phone: header KPIs and controls expanded */
+const sideOpen = new Set(); /* R8 phone: side panels the visitor opened (folded by default) */
 let autoAdd = null;       /* R7: a process just created opens its first "Add a step" dialog */
 const futureMaking = new Set(); /* R7: processes whose Future version is being created from Today */
 let menuCloser = null;    /* document listener that closes the "⋯ More" menu */
@@ -782,7 +809,7 @@ function shown(p, q) {
 export const needsFuture = p => !!p && !p.tobeForked && !flat(p.tobe).length && flat(p.asis).length > 0;
 const FUTURE_HINT = 'Change steps to show how it should work. We’ll highlight what changed.';
 export function render(params) {
-  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › New process</div><h1>Map a process</h1><p>Give it a name, then add the steps as they happen today.</p></div><div class="hdr-side"><div class="d-hdrtools"><button class="btn primary" data-new-open>Start</button>${isAdv() ? importBtn() : ''}</div></div></section>`;
+  if (params.create) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a> › Map a process</div><h1>Map a process</h1><p>Give it a name, then add the steps as they happen today.</p></div><div class="hdr-side"><div class="d-hdrtools"><button class="btn primary" data-new-open>Start</button>${isAdv() ? importBtn() : ''}</div></div></section>`;
   const pid = params.pid;
   const p = store.get('process', pid);
   if (!p) return notFound('Process “' + pid + '”');
@@ -833,14 +860,14 @@ export function render(params) {
   const res = p.resources || [];
   const people = store.state.people;
   const headLeft = editing
-    ? `<div class="crumbs"><a href="${link('/processes')}" data-link>Processes</a> › Changing the steps</div>
+    ? `<div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a> › Changing the steps</div>
        <input class="title" data-meta="name" value="${esc(p.name)}" aria-label="Process name" />
        <div class="d-collapse"><textarea data-meta="desc" rows="2" aria-label="Process description" placeholder="One line: what this process does">${esc(p.desc || '')}</textarea>
        <details class="d-hdropts"${adv ? ' open' : ''}><summary>Owner and people who can edit</summary>
        <div class="res"><span class="lbl">Owner</span><select class="d-sel" data-meta="owner" aria-label="Process owner">${people.map(x => `<option value="${esc(x.id)}" ${x.id === p.owner ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
        <div class="res"><span class="lbl">Can edit</span>${res.map(r => `<span class="person">${av(r)}${esc(pname(r))}<button class="d-x" data-res-del="${esc(r)}" aria-label="Remove ${esc(pname(r))}">×</button></span>`).join('')}
          <select class="d-sel" data-res-add aria-label="Add a person who can edit"><option value="">+ Add person</option>${people.filter(x => !res.includes(x.id)).map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select></div></details></div>`
-    : `<div class="crumbs"><a href="${link('/processes')}" data-link>Processes</a>${adv ? ` · <span data-ver-label>${esc(verLabel(p))}</span>${p.tobeFrom && (p.tobeRev || 1) > 1 ? ` <span class="hint" data-ver-from>from ${esc(p.tobeFrom)}</span>` : ''}` : ''}</div><h1>${esc(p.name)}</h1><div class="d-collapse">${p.desc ? `<p class="d-desc">${esc(p.desc)}</p>` : ''}
+    : `<div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a>${adv ? ` · <span data-ver-label>${esc(verLabel(p))}</span>${p.tobeFrom && (p.tobeRev || 1) > 1 ? ` <span class="hint" data-ver-from>from ${esc(p.tobeFrom)}</span>` : ''}` : ''}</div><h1>${esc(p.name)}</h1><div class="d-collapse">${p.desc ? `<p class="d-desc">${esc(p.desc)}</p>` : ''}
        <div class="res d-people"><span class="lbl">Owner</span>${personChip(p.owner) || '<span class="hint">None</span>'}${adv ? `<span class="lbl">Can edit</span>${res.map(personChip).join('') || '<span class="hint">Nobody yet</span>'}` : res.length > 1 ? `<span class="d-avs" title="${esc(res.map(pname).join(', '))} can edit">${res.map(av).join('')}</span>` : ''}</div></div>`;
 
   /* canvas */
@@ -873,9 +900,13 @@ export function render(params) {
   const vname = view.key === 'tobe' ? 'Future' : view.key === 'asis' ? 'Today' : view.key === 'compare' ? view.B.label : 'released Today';
   const dl = [...new Set(vsteps.flatMap(s => s.data || []))];
   const stepGo = s => rel || mode === 'compare' ? '' : `data-go="/process/${esc(pid)}/step/${esc(s.id)}"`;
-  const missingSteps = vsteps.filter(s => (s.data || []).some(d => availOf(d) === 'missing'));
-  const pendSteps = vsteps.filter(s => !missingSteps.includes(s) && (s.data || []).some(d => availOf(d) === 'pending'));
-  const liveSteps = vsteps.filter(s => !missingSteps.includes(s) && (s.data || []).some(d => availOf(d) === 'example'));
+  /* R8 §8: a step can sit in several groups (one piece missing, another sample only): each group keeps every step it applies to */
+  const stepsWith = k => vsteps.filter(s => (s.data || []).some(d => availOf(d) === k));
+  const notYetSteps = vsteps.filter(s => (s.data || []).some(d => availOf(d) !== 'live'));
+  const missingSteps = adv ? stepsWith('missing') : notYetSteps;
+  const pendSteps = adv ? stepsWith('pending') : [];
+  const liveSteps = adv ? stepsWith('example') : [];
+  const blockNames = s => (s.data || []).filter(d => adv ? availOf(d) === 'missing' : availOf(d) !== 'live').map(d => esc(dataName(d))).join(', ');
   const ord = ['missing', 'pending', 'example', 'live'];
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const u = usage(d, pid);
@@ -889,9 +920,10 @@ export function render(params) {
   const drafts = (p.drafts || []).slice().reverse();
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
       <div class="r d-draftacts"><button class="btn sm" data-draft-cmp="${esc(d.id)}" aria-label="Compare ${esc(d.name)} with the current Future">Compare</button>${editor ? `<button class="btn sm" data-draft-restore="${esc(d.id)}" aria-label="Restore ${esc(d.name)}">Restore</button><button class="btn sm danger" data-draft-del="${esc(d.id)}" aria-label="Delete saved version ${esc(d.name)}">Delete</button>` : ''}</div></div>`).join('') : '<div class="s">No saved versions yet. “Save version” (in ⋯ More) keeps a named copy you can compare or restore.</div>'}</div>`;
-  const blockCard = missingSteps.length || pendSteps.length || liveSteps.length || adv ? `<div class="card" data-side-blocked><h3>${LOCK} Steps waiting for information <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Not available yet: ${s.data.filter(d => availOf(d) === 'missing').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('') : '<div class="s">Every step has the information it needs, or a plan to get it.</div>'}
-      ${liveSteps.length ? `<div class="d-needlive-h">Sample only: ${NEEDS_LIVE.toLowerCase()} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">Sample only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('')}` : ''}
-      ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Waiting for confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${esc(awaitingText(s.data.find(d => availOf(d) === 'pending')))}: ${s.data.filter(d => availOf(d) === 'pending').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoAv(s)}</div></div>`).join('')}` : ''}</div>` : '';
+  const whoMini = s => s.ownerRole ? `<span class="d-rolesm" data-who>${esc(s.ownerRole)}</span>` : whoAv(s);
+  const blockCard = missingSteps.length || pendSteps.length || liveSteps.length || adv ? `<div class="card" data-side-blocked><h3>${LOCK} Steps waiting for information <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)} data-blocked-step="${esc(s.id)}"><div><div class="t">${esc(s.title)}</div><div class="s">Not available yet: ${blockNames(s)}</div></div><div class="r">${whoMini(s)}</div></div>`).join('') : '<div class="s">Every step has the information it needs, or a plan to get it.</div>'}
+      ${liveSteps.length ? `<div class="d-needlive-h" data-sample-steps>Sample only: ${NEEDS_LIVE.toLowerCase()} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)} data-sample-step="${esc(s.id)}"><div><div class="t">${esc(s.title)}</div><div class="s">Sample only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoMini(s)}</div></div>`).join('')}` : ''}
+      ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Waiting for confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${esc(awaitingText(s.data.find(d => availOf(d) === 'pending')))}: ${s.data.filter(d => availOf(d) === 'pending').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoMini(s)}</div></div>`).join('')}` : ''}</div>` : '';
   const sideHTML = `${blockCard}
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
@@ -903,7 +935,7 @@ export function render(params) {
 
   return `<section class="hdr d-hdr ${hdrOpen ? 'd-hdr-open' : ''} ${adv ? 'd-adv' : 'd-simple'}"><div>${headLeft}</div><div class="hdr-side">${side}</div></section>
     <div class="grid"><section class="canvas ${editing ? 'd-edit' : ''}" id="canvas" aria-label="Process map">${roBanner}${modeNote ? `<div class="hint d-modenote" data-modenote style="text-align:center;margin:-8px 0 14px">${esc(modeNote)}</div>` : ''}${canvas}</section>
-    <aside class="side">${sideHTML}</aside></div>`;
+    <aside class="side d-sidefold" aria-label="About this map">${sideHTML}</aside></div>`;
 }
 
 /* ---------- persistence ---------- */
@@ -928,9 +960,15 @@ async function saveProc(p, summary, opts) {
 
 /* ---------- modals ---------- */
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
-/* R7: plain states. "Connected" means we have it today; the owner's confirmation with proof is still recorded on the data page. */
-const AVAIL_OPT = { live: 'Connected (we have this today)', example: 'Sample only', missing: 'Not available yet' };
-const availOpts = sel => Object.entries(AVAIL_OPT).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
+/* R8 §1: Simple asks one thing, a "Not available yet" tick box (unticked = we have it). Advanced keeps the detailed choice. */
+export const AVAIL_OPT = { live: 'We have it (connected)', example: 'Sample only', missing: 'Not available yet' };
+export const availOpts = sel => Object.entries(AVAIL_OPT).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
+/* the availability control for a form: a select named `avail` (Advanced) or a tick box named `notyet` (Simple) */
+export const availField = (sel, attrs) => isAdv()
+  ? `<div class="field"><label>Do we have it?</label><select name="avail" ${attrs || ''}>${availOpts(sel)}</select></div>`
+  : `<div class="field d-nyfield"><label class="d-check d-nycheck"><input type="checkbox" name="notyet" value="yes" ${sel === 'live' ? '' : 'checked'} ${attrs || ''} /> ${NOTYET}</label><span class="hint">Leave it unticked if we have this today.</span></div>`;
+/* reads availField back: Simple tick = missing, no tick = live; Advanced keeps a sample-only choice */
+export const availFrom = form => form.avail != null && form.avail !== '' && !Array.isArray(form.avail) ? form.avail : (form.notyet || []).length ? 'missing' : 'live';
 const allData = () => store.list('dataElement').slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
 const availDot = a => `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${avOf(a).color}" title="${esc(avOf(a).label)}"></span>`;
 const dataCheck = (name, d, on, pending) => `<label class="d-pick ${pending ? 'd-pending' : ''}"><input type="checkbox" name="${esc(name)}" value="${esc(d.id)}" ${on ? 'checked' : ''} />${pending ? availDot(d.avail) : effDot(d.id)}<span>${esc(d.name)}${pending ? ' <small>(new)</small>' : ''}</span></label>`;
@@ -948,19 +986,19 @@ export async function newDataModal(defaults) {
   const r = await modal({
     title: 'New information',
     body: `${defaults.error ? `<div class="banner d-err" role="alert">${esc(defaults.error)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(defaults.name || '')}" placeholder="e.g. Vendor bank account" /></div>
-      <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(defaults.owner || store.state.me)}</select><span class="hint">You own it unless you pick someone else. The owner sets its rules and confirms it is connected.</span></div>
-      <div class="field"><label>Do we have it?</label><select name="avail">${availOpts(defaults.avail || 'missing')}</select></div></div>
+      <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(defaults.owner || store.state.me)}</select><span class="hint">You own it unless you pick someone else. The owner sets its rules and ${isAdv() ? 'confirms it is connected' : 'confirms we have it'}.</span></div>
+      ${availField(defaults.avail || 'missing')}</div>
       <div class="field"><label>Where it comes from</label><input name="source" placeholder="e.g. Finance system" value="${esc(defaults.source || '')}" /></div>
       <div class="field"><label>Note</label><textarea name="note" placeholder="What exists today, and what is needed">${esc(defaults.note || '')}</textarea></div>`,
     actions: [{ id: 'save', label: 'Create', primary: true }],
   });
   if (r.action !== 'save') return null;
   const name = (r.form.name || '').trim();
-  if (!name) return newDataModal(Object.assign({}, r.form, { error: 'Give the information a name.' }));
+  if (!name) return newDataModal(Object.assign({}, r.form, { avail: availFrom(r.form), error: 'Give the information a name.' }));
   const dup = dupDataName(name);
-  if (dup) return newDataModal(Object.assign({}, r.form, { error: `Information called '${dup.name}' already exists. Use it, or choose a different name.` }));
+  if (dup) return newDataModal(Object.assign({}, r.form, { avail: availFrom(r.form), error: `Information called '${dup.name}' already exists. Use it, or choose a different name.` }));
   const id = store.newId('de');
-  const data = { id, name, owner: r.form.owner, source: r.form.source.trim(), avail: r.form.avail, note: r.form.note.trim(), fields: [], samples: [], discovered: [] };
+  const data = { id, name, owner: r.form.owner, source: r.form.source.trim(), avail: availFrom(r.form), note: r.form.note.trim(), fields: [], samples: [], discovered: [] };
   try { await store.save('dataElement', id, data, `Created information '${name}'`); toast(`Created '${name}'`); return data; }
   catch (e) { toast('Could not save: ' + e.message); return null; }
 }
@@ -978,7 +1016,8 @@ export function parseWho(text, p) {
 }
 const peopleList = () => `<datalist id="d-people">${store.state.people.map(x => `<option value="${esc(x.name)}">${esc(x.role || '')}</option>`).join('')}</datalist>`;
 const infoList = () => `<datalist id="d-infos">${allData().map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist>`;
-const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" data-iname="${esc(c.name)}">${c.id ? effDot(c.id) : availDot(c.avail)}<span>${esc(c.name)}</span><button type="button" class="d-x" data-ichip-del aria-label="Remove ${esc(c.name)}">×</button></span>`;
+/* an information chip; new information (no id yet) carries its own "not available yet" tick box (R8 §1) */
+const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" data-iname="${esc(c.name)}">${c.id ? effDot(c.id) : availDot(c.avail === 'live' ? 'live' : 'missing')}<span>${esc(c.name)}</span>${c.id || c.fixed ? '' : `<label class="d-ny" title="Tick if we do not have ${esc(c.name)} yet"><input type="checkbox" data-ny aria-label="${esc(c.name)}: ${NOTYET.toLowerCase()}" ${c.avail === 'live' ? '' : 'checked'} />not available yet</label>`}<button type="button" class="d-x" data-ichip-del aria-label="Remove ${esc(c.name)}">×</button></span>`;
 
 /* R6: the step dialog also edits the typed nodes. Subprocess picks the process it calls; wait sets how long;
    message sets the direction and the external party. Waits carry no information or sub-steps.
@@ -990,6 +1029,8 @@ async function stepModal(p, ver, node, opts) {
   const adv = isAdv();
   const kind = NT[node.type] ? node.type : 'step', lbl = kind === 'step' ? 'step' : NT[kind].label.toLowerCase();
   const isNew = !node.title;
+  /* R8 §7: on a phone the keyboard has no reliable Enter, so "Add step" keeps the dialog going and "Done adding" ends it */
+  const phoneQuick = !!(isNew && opts.quick && typeof window !== 'undefined' && window.innerWidth <= 640);
   const asisSteps = flat(p.asis);
   const pending = []; /* information created inline (More options): saved only when the step is saved */
   const others = store.list('process', x => x.id !== p.id).sort((a, b) => String(a.name).localeCompare(String(b.name)));
@@ -1007,8 +1048,8 @@ async function stepModal(p, ver, node, opts) {
       <div class="field"><label for="d-f-title">Step name</label><input id="d-f-title" name="title" value="${esc(node.title || '')}" placeholder="${esc(PH[kind])}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" />${kind !== 'step' ? '<span class="hint">Leave blank for a name made from the fields above.</span>' : ''}</div>
       <div class="field"><label for="d-f-who">Who does it</label><input id="d-f-who" name="who" list="d-people" value="${esc(whoVal)}" placeholder="A person, or a role such as Manager" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" data-who-input />${peopleList()}</div>
       ${hasData ? `<div class="field"><label for="d-f-info">What information it needs</label><div class="d-chipbox" data-chipbox>${chips.map(chipHTML).join('')}<input id="d-f-info" list="d-infos" data-info-input placeholder="${chips.length ? 'Add more…' : 'e.g. Invoice number, Due date'}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" aria-describedby="d-f-info-h" /></div>${infoList()}
-        <span class="hint" id="d-f-info-h">Separate several with commas. New information counts as ${ver === 'asis' ? '“Connected” (we have it today)' : '“Not available yet”'}.</span></div>` : ''}
-      ${isNew && opts.quick ? '<div class="hint d-quickhint">Press Enter to add this step and start the next one.</div>' : ''}
+        <span class="hint" id="d-f-info-h">Separate several with commas. ${ver === 'asis' ? `New information counts as “${HAVE}”. Tick “not available yet” on any we don’t have.` : `New information counts as “${NOTYET}”. Untick it if we already have it.`}</span></div>` : ''}
+      ${isNew && opts.quick ? `<div class="hint d-quickhint">${phoneQuick ? 'Tap “Add step” to save it and start the next one. Tap “Done adding” when you have finished.' : 'Press Enter to add this step and start the next one.'}</div>` : ''}
       <details class="d-moreopts" data-more-options${moreOpen ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b">
       ${ver === 'tobe' ? `<div class="field"><label>Replaces this step from Today</label><select name="from"><option value="">None: new in Future</option>${asisSteps.map(a => `<option value="${esc(a.id)}" ${a.id === node.from ? 'selected' : ''}>${esc(a.title)}</option>`).join('')}</select></div>` : ''}
       ${kind === 'wait' ? '' : `<div class="frow d-frow3"><div class="field"><label>Time limit</label><input name="sla" value="${esc(node.sla || '')}" placeholder="e.g. 2 business days" /></div>
@@ -1017,16 +1058,27 @@ async function stepModal(p, ver, node, opts) {
       <div class="field"><label>Teams involved (separate with commas)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" placeholder="e.g. Finance, Legal" /></div>
       ${hasData ? `<div class="field"><label>Add information with a different owner or source</label>
         <div class="d-inline-new" data-nd-row><input data-nd-name placeholder="Information name" aria-label="New information name" /><select data-nd-avail aria-label="Do we have it?">${availOpts(defaultAvail(ver))}</select>
-          <select data-nd-owner aria-label="Owner of the new information" title="Owner (defaults to you)">${store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === store.state.me ? 'selected' : ''}>${esc(x.name)}${x.id === store.state.me ? ' (me)' : ''}</option>`).join('')}</select>
+          <select data-nd-owner aria-label="Owner of the new information" title="Owner (defaults to whoever does the step)"><option value="" selected>Owner: whoever does the step</option>${store.state.people.map(x => `<option value="${esc(x.id)}">${esc(x.name)}${x.id === store.state.me ? ' (me)' : ''}</option>`).join('')}</select>
           <input data-nd-source placeholder="Where it comes from, e.g. Finance system" aria-label="Where the new information comes from" />
           <button type="button" class="btn sm" data-nd-create>Create and add</button></div>
         <div class="hint" data-nd-msg aria-live="polite"></div></div>` : ''}
       ${kind === 'step' ? `<div class="field"><label>Sub-steps: how this step is done</label><div data-subs>${(node.subs || []).map(subRow).join('')}</div><div><button type="button" class="btn sm" data-subadd>+ Add sub-step</button></div></div>` : ''}
       </div></details>`,
-    actions: [{ id: 'save', label: isNew ? (kind === 'step' ? 'Add step' : 'Add') : 'Save', primary: true }],
+    actions: [{ id: 'save', label: isNew ? (kind === 'step' ? 'Add step' : 'Add') : 'Save', primary: true }].concat(phoneQuick ? [{ id: 'done', label: 'Done adding' }] : []),
   });
   const m = [...document.querySelectorAll('.overlay .modal')].pop();
   let next = false;
+  /* R8 queue: a step needs a name (inline message, the dialog stays open). "Done adding" with an empty name just closes. */
+  m.parentNode.addEventListener('click', e => {
+    const b = e.target.closest('[data-act="save"],[data-act="done"]'); if (!b || kind !== 'step') return;
+    const t = m.querySelector('#d-f-title'); if (!t || t.value.trim()) return;
+    if (b.dataset.act === 'done') return;
+    e.stopPropagation(); e.preventDefault();
+    let er = m.querySelector('[data-title-err]');
+    if (!er) { t.insertAdjacentHTML('afterend', `<span class="hint fail" data-title-err role="alert">Type a name for the step${phoneQuick ? ', or tap “Done adding”' : ''}.</span>`); er = m.querySelector('[data-title-err]'); }
+    t.setAttribute('aria-invalid', 'true'); t.focus();
+  }, true);
+  m.querySelector('#d-f-title').addEventListener('input', e => { const er = m.querySelector('[data-title-err]'); if (er && e.target.value.trim()) { er.remove(); e.target.removeAttribute('aria-invalid'); } });
   /* information chips */
   const box = m.querySelector('[data-chipbox]'), infoEl = m.querySelector('[data-info-input]');
   const chipNames = () => [...m.querySelectorAll('[data-ichip]')].map(c => c.dataset.iname.toLowerCase());
@@ -1034,7 +1086,7 @@ async function stepModal(p, ver, node, opts) {
     name = String(name || '').trim(); if (!name || !box) return;
     if (chipNames().includes(name.toLowerCase())) return;
     const hit = dupDataName(name, null, pending), isPend = !!hit && pending.includes(hit);
-    const c = hit && !isPend ? { id: hit.id, name: hit.name } : { id: '', name: hit ? hit.name : name, avail: hit ? hit.avail : defaultAvail(ver) };
+    const c = hit && !isPend ? { id: hit.id, name: hit.name } : { id: '', name: hit ? hit.name : name, avail: hit ? hit.avail : defaultAvail(ver), fixed: isPend };
     infoEl.insertAdjacentHTML('beforebegin', chipHTML(c));
     const el = infoEl.previousElementSibling; if (isPend) el.dataset.pendingId = hit.id;
     infoEl.placeholder = 'Add more…';
@@ -1046,6 +1098,7 @@ async function stepModal(p, ver, node, opts) {
     infoEl.addEventListener('blur', flushInfo);
     infoEl.addEventListener('keydown', e => { if (e.key === 'Backspace' && !infoEl.value) { const last = infoEl.previousElementSibling; if (last && last.matches('[data-ichip]')) last.remove(); } });
     box.addEventListener('click', e => { const b = e.target.closest('[data-ichip-del]'); if (b) { b.closest('[data-ichip]').remove(); infoEl.focus(); } else if (e.target === box) infoEl.focus(); });
+    box.addEventListener('change', e => { const t = e.target.closest('[data-ny]'); if (!t) return; const dot = t.closest('[data-ichip]').querySelector('.dot'); if (dot) dot.outerHTML = availDot(t.checked ? 'missing' : 'live'); });
   }
   /* Enter in the three main fields: add the step (and start the next one when quick-adding) */
   m.querySelectorAll('#d-f-title, #d-f-who, #d-f-info').forEach(el => el.addEventListener('keydown', e => {
@@ -1068,16 +1121,18 @@ async function stepModal(p, ver, node, opts) {
     const name = nameEl.value.trim(); if (!name) { nameEl.focus(); return; }
     const dup = dupDataName(name, null, pending);
     if (dup) { msg.textContent = `'${dup.name}' already exists${pending.includes(dup) ? ' in this step' : ''}. Type it in “What information it needs” instead.`; msg.className = 'hint fail'; nameEl.focus(); return; }
-    const d = { id: store.newId('de'), name, avail: m.querySelector('[data-nd-avail]').value, owner: m.querySelector('[data-nd-owner]').value || store.state.me, source: m.querySelector('[data-nd-source]').value.trim() };
+    const d = { id: store.newId('de'), name, avail: m.querySelector('[data-nd-avail]').value, owner: m.querySelector('[data-nd-owner]').value || '', source: m.querySelector('[data-nd-source]').value.trim() };
     pending.push(d);
     addChip(name, { pid: d.id, avail: d.avail });
     m.querySelectorAll('[data-subpicks]').forEach(b => b.insertAdjacentHTML('beforeend', dataCheck('sub_data', d, false, true)));
     nameEl.value = ''; m.querySelector('[data-nd-source]').value = ''; msg.className = 'hint';
-    msg.textContent = `'${name}' will be created when you save the ${lbl}, owned by ${d.owner === store.state.me ? 'you' : pname(d.owner)}${d.source ? ', from ' + d.source : ''}.`;
+    msg.textContent = `'${name}' will be created when you save the ${lbl}, owned by ${!d.owner ? 'whoever does the step' : d.owner === store.state.me ? 'you' : pname(d.owner)}${d.source ? ', from ' + d.source : ''}.`;
   };
   if (nameEl) { m.querySelector('[data-nd-create]').onclick = create; nameEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); create(); } }); }
   const r = await pr;
-  if (r.action !== 'save') return null; /* cancelled: pending information is discarded */
+  if (r.action === 'done') { if (!(r.form.title || '').trim()) return null; next = false; }
+  else if (r.action !== 'save') return null; /* cancelled: pending information is discarded */
+  else if (phoneQuick) next = true;
   const root = r.root;
   const hrs = parseFloat(r.form.durationHrs);
   const who = parseWho(r.form.who, p);
@@ -1088,7 +1143,8 @@ async function stepModal(p, ver, node, opts) {
     if (c.dataset.ichip) return c.dataset.ichip;
     if (c.dataset.pendingId) { const d = pending.find(x => x.id === c.dataset.pendingId); if (d) { created.push(d); return d.id; } }
     const hit = dupDataName(c.dataset.iname); if (hit) return hit.id;
-    const d = { id: store.newId('de'), name: c.dataset.iname, avail: defaultAvail(ver), owner: store.state.me, source: '' };
+    const ny = c.querySelector('[data-ny]');
+    const d = { id: store.newId('de'), name: c.dataset.iname, avail: ny ? (ny.checked ? 'missing' : 'live') : defaultAvail(ver), owner: '', source: '' };
     created.push(d); return d.id;
   });
   const out = Object.assign({}, node, {
@@ -1113,7 +1169,9 @@ async function stepModal(p, ver, node, opts) {
   pending.filter(x => used.has(x.id) && !created.includes(x)).forEach(x => created.push(x));
   for (const d of created) {
     if (dupDataName(d.name)) { const hit = dupDataName(d.name); out.data = out.data.map(x => x === d.id ? hit.id : x); continue; }
-    const doc = { id: d.id, name: d.name, owner: d.owner || store.state.me, source: d.source || '', avail: d.avail, note: `Added from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
+    /* R8 §1: new information belongs to whoever does the step (a person, or the role with its accountable person) */
+    const doc = { id: d.id, name: d.name, owner: d.owner || out.owner || store.state.me, source: d.source || '', avail: d.avail, note: `Added from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
+    if (!d.owner && out.ownerRole) doc.ownerRole = out.ownerRole;
     try { await store.save('dataElement', d.id, doc, `Created information '${d.name}'`); }
     catch (e) { toast('Could not save: ' + e.message); out.data = out.data.filter(x => x !== d.id); }
   }
@@ -1188,6 +1246,7 @@ export function bindImport(root, pid) {
     if (pid) { await importVersion(pid, r, file.name); return; }
     const name = r.name || file.name.replace(/\.(bpmn|xml)$/i, '') || 'Imported process';
     const id = store.newId('proc');
+    allNodes(r.nodes).forEach(n => delete n.pmoId); /* a new process: the ids in the file belong to some other map */
     const asis = r.nodes, tobe = forkNodes(asis);
     const owners = [...new Set(flat(asis).map(n => n.owner).filter(Boolean))];
     const p = { id, name, desc: r.desc || `Imported from ${file.name}.`, owner: store.state.me, resources: [...new Set([store.state.me, ...owners])], version: 1, asis, tobe, released: [] };
@@ -1200,17 +1259,29 @@ export function bindImport(root, pid) {
   });
 }
 
-/* R5: merge an imported map into this process's to-be. Nodes are matched by name (and kind), so matched steps keep
-   their id (work items stay attached), data tags, sub-steps, touches, owner and as-is link. */
+/* R5: merge an imported map into this process's to-be. R8 §8: nodes are matched by the PMOFlow id the file carries
+   (extensionElements, set on export) first, then by name (and kind). A matched step keeps its id, so its work items stay
+   attached, along with its data tags, sub-steps, touches, owner and Today link. A step matched by id under a new name
+   is reported as renamed. */
 const nkey = n => (isGw(n) || isSpecial(n) ? n.type : n.type === 'trigger' || n.type === 'end' ? n.type : 'step') + '|' + String((n.type === 'trigger' ? trigTitle(n) : n.title) || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const kindOf = n => n.type === 'trigger' || n.type === 'end' ? n.type : isGw(n) ? 'gw' : 'step';
 export function mergeImport(oldNodes, newNodes, laneOwned, extIds) {
   /* R6: a node that carried PMOFlow extension data keeps what the file says (lossless); a foreign node keeps the old tags */
   const fromFile = n => !!(extIds && extIds.has(n.id));
-  const pool = {}; allNodes(oldNodes).forEach(n => (pool[nkey(n)] = pool[nkey(n)] || []).push(n));
-  const take = n => { if (n.type === 'trigger' || n.type === 'end') { const k = Object.keys(pool).find(x => x.startsWith(n.type + '|') && pool[x].length); return k ? pool[k].shift() : null; } const l = pool[nkey(n)]; return l && l.length ? l.shift() : null; };
-  const idMap = {}, kept = [], added = [];
+  const olds = allNodes(oldNodes), byOld = {}; olds.forEach(n => byOld[n.id] = n);
+  const used = new Set(), byNewId = {};
+  /* pass 1: reserve every id match, so a name match can never take a node another node claims by id */
+  allNodes(newNodes).forEach(n => { const o = n.pmoId && byOld[n.pmoId]; if (o && !used.has(o.id) && kindOf(o) === kindOf(n)) { used.add(o.id); byNewId[n.id] = o; } });
+  const pool = {}; olds.forEach(n => (pool[nkey(n)] = pool[nkey(n)] || []).push(n));
+  const shift = l => { while (l && l.length) { const o = l.shift(); if (!used.has(o.id)) { used.add(o.id); return o; } } return null; };
+  const take = n => {
+    if (byNewId[n.id]) return byNewId[n.id];
+    if (n.type === 'trigger' || n.type === 'end') { for (const k of Object.keys(pool).filter(x => x.startsWith(n.type + '|'))) { const o = shift(pool[k]); if (o) return o; } return null; }
+    return shift(pool[nkey(n)]);
+  };
+  const idMap = {}, kept = [], added = [], renamed = [];
   const walk = list => (list || []).map(n => {
-    const o = take(n); const c = Object.assign({}, n);
+    const o = take(n); const c = Object.assign({}, n); delete c.pmoId;
     if (o) {
       idMap[n.id] = o.id; c.id = o.id; if (o.from) c.from = o.from;
       if (n.type === 'trigger') { c.title = trigTitle(n) && trigTitle(n) !== 'Process starts' ? n.title : (o.title || n.title); if (!fromFile(n)) { c.owner = o.owner || n.owner; c.touches = o.touches || []; c.data = o.data || []; } }
@@ -1219,6 +1290,7 @@ export function mergeImport(oldNodes, newNodes, laneOwned, extIds) {
         if (!(laneOwned && laneOwned.has(n.id)) || !n.owner) c.owner = o.owner || n.owner; /* a lane naming a real person wins; otherwise keep the owner */
         if (!fromFile(n)) ['sla', 'system', 'durationHrs'].forEach(k => { if (c[k] == null && o[k] != null) c[k] = o[k]; });
         kept.push(c);
+        if (String(o.title || '').trim() !== String(n.title || '').trim()) renamed.push({ id: o.id, from: o.title, to: n.title });
       }
     } else if (isStep(n)) added.push(c);
     if (isGw(n)) c.branches = (n.branches || []).map(b => Object.assign({}, b, { nodes: walk(b.nodes) }));
@@ -1228,7 +1300,7 @@ export function mergeImport(oldNodes, newNodes, laneOwned, extIds) {
   allNodes(out).forEach(n => isGw(n) && (n.branches || []).forEach(b => { if (b.goto && idMap[b.goto]) b.goto = idMap[b.goto]; }));
   const outIds = new Set(allNodes(out).map(n => n.id));
   const removed = flat(oldNodes).filter(n => !outIds.has(n.id));
-  return { nodes: out, kept, added, removed };
+  return { nodes: out, kept, added, removed, renamed };
 }
 async function importVersion(pid, r, fileName) {
   const p0 = store.get('process', pid); if (!p0) return;
@@ -1238,8 +1310,9 @@ async function importVersion(pid, r, fileName) {
   const room = (p0.drafts || []).length < MAX_DRAFTS;
   const res = await modal({
     title: 'Import as a new version of this process',
-    body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps are matched by name, so matched steps keep their information, sub-steps and owners.</p>
-      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> choice${r.gateways === 1 ? '' : 's'}</span></div>
+    body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps that were in this map before keep their work, information, sub-steps and owners, even if they were renamed.</p>
+      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span data-imp-renamed="${m.renamed.length}"><b>${m.renamed.length}</b> renamed</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> choice${r.gateways === 1 ? '' : 's'}</span></div>
+      ${m.renamed.length ? `<ul class="d-renamed" data-renamed-list>${m.renamed.slice(0, 12).map(x => { const wn = store.list('workItem', w => w.pid === pid && w.step === x.id).length; return `<li data-renamed="${esc(x.id)}">Renamed: “${esc(x.from)}” → “<b>${esc(x.to)}</b>”${wn ? ` <span class="hint">keeps ${plural(wn, 'work item')}</span>` : ''}</li>`; }).join('')}${m.renamed.length > 12 ? `<li class="hint">and ${m.renamed.length - 12} more</li>` : ''}</ul>` : ''}
       ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
       ${droppedHTML(r.dropped)}
       ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (you own it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
@@ -1254,7 +1327,7 @@ async function importVersion(pid, r, fileName) {
   /* R6: the header's version label moves with the import: to-be revision n+1, from this file */
   p.tobeRev = (p.tobeRev || 1) + 1; p.tobeFrom = fileName;
   try { await createImportedData(r.newData, fileName); } catch (e) { toast('Could not create the new data elements: ' + e.message); return; }
-  if (await saveProc(p, `Imported '${fileName}' as Future revision ${p.tobeRev} (${m.kept.length} matched, ${m.added.length} new, ${m.removed.length} removed, ${r.dropped.length} dropped)`)) go(`/process/${pid}?mode=diff`);
+  if (await saveProc(p, `Imported '${fileName}' as Future revision ${p.tobeRev} (${m.kept.length} matched, ${m.renamed.length} renamed, ${m.added.length} new, ${m.removed.length} removed, ${r.dropped.length} dropped)`)) go(`/process/${pid}?mode=diff`);
 }
 /* R7: one "New project" form everywhere (stream P's: name, which process, deadline; first plan suggested right after).
    The local form is the fallback if that module cannot load. */
@@ -1468,6 +1541,17 @@ export function bind(root, params) {
     const p = clone(cur()); p.tobe = forkNodes(p.asis || []); p.tobeForked = true;
     saveProc(p, 'Created the Future version from Today', { quiet: true, noUndo: true }).finally(() => futureMaking.delete(pid));
   }
+  /* R8 §7: on a phone the side panels sit below the map, folded to their headings; a tap opens one */
+  root.querySelectorAll('.d-sidefold > .card').forEach((card, i) => {
+    const h = card.querySelector(':scope > h3'); if (!h) return;
+    const key = card.getAttribute('data-side-blocked') != null ? 'blocked' : card.dataset.sideData != null ? 'data' : (h.textContent || '').trim().split(/\s+/)[0] + i;
+    card.dataset.fold = key; card.classList.toggle('d-unfold', sideOpen.has(key));
+    h.classList.add('d-foldh');
+    if (window.innerWidth <= 640) { h.setAttribute('tabindex', '0'); h.setAttribute('role', 'button'); h.setAttribute('aria-expanded', String(sideOpen.has(key))); }
+    const tog = () => { if (sideOpen.has(key)) sideOpen.delete(key); else sideOpen.add(key); card.classList.toggle('d-unfold', sideOpen.has(key)); if (h.hasAttribute('aria-expanded')) h.setAttribute('aria-expanded', String(sideOpen.has(key))); };
+    h.addEventListener('click', e => { if (e.target.closest('a,button,input,select')) return; if (window.innerWidth <= 640) tog(); });
+    h.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && window.innerWidth <= 640) { e.preventDefault(); tog(); } });
+  });
   /* phone summary row */
   const ht = root.querySelector('[data-hdr-toggle]');
   if (ht) ht.onclick = () => { hdrOpen = !hdrOpen; const h = root.querySelector('.d-hdr'); h.classList.toggle('d-hdr-open', hdrOpen); ht.setAttribute('aria-expanded', String(hdrOpen)); ht.querySelector('.d-sumtog').textContent = hdrOpen ? 'Less ▴' : 'Details ▾'; };

@@ -57,19 +57,120 @@ export function addBiz(s, n) {
 export function bizDays(a, b) { let n = 0; for (let d = a; d <= b; d = addDays(d, 1)) if (!isWeekend(d)) n++; return n; }
 export const procName = pid => (store.get('process', pid) || {}).name || 'Unlinked process';
 export const projectItems = prj => store.list('workItem', w => w.projectId === prj);
+/* One done date everywhere (board, timeline, step, lists): the local calendar date of doneAt (timestamps are converted). */
+export const localDate = v => { if (!v) return null; const x = String(v); if (x.length <= 10) return x; const d = new Date(x); return isNaN(d) ? x.slice(0, 10) : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+export const doneDate = w => localDate(w && (w.doneAt || w.due));
 export const effortOf = w => (typeof w.effortDays === 'number' && w.effortDays > 0) ? w.effortDays : 1;
 const fmtEffort = n => (Math.round(n * 10) / 10) + 'd';
-export function projectStats(prj) {
-  const s = eng('projectStats', null, docs(), prj, today());
-  if (s) return s;
-  const items = projectItems(prj), done = items.filter(w => w.status === 'done').length;
-  return { total: items.length, done, pct: items.length ? Math.round(done / items.length * 100) : 0, late: 0, slip: 0, blocked: 0, finish: maxDate(items.map(w => w.due)), target: (store.get('project', prj) || {}).target, onTrack: true };
+/* ---------------------------------------------------------------- R8: ONE TRUTH
+   Every number, date and label about a project (header, home card, portfolio row, dashboard, CSV, status report) is read
+   from E().projectTruth(docs, prj, today) through truthOf(). Nothing below recomputes it. The reader only normalises key
+   names, so a renamed engine field can't blank a page. Memoised for one synchronous render (cleared on the next microtask). */
+let truthMemo = null;
+const num = (...xs) => { for (const x of xs) { const n = typeof x === 'string' && x.trim() !== '' ? Number(x) : x; if (typeof n === 'number' && isFinite(n)) return n; } return null; };
+const pickObj = (...xs) => xs.find(x => x && typeof x === 'object' && !Array.isArray(x)) || {};
+const dateOf = (...xs) => { for (const x of xs) if (typeof x === 'string' && /^\d{4}-\d{2}-\d{2}/.test(x)) return x.slice(0, 10); return null; };
+const RAGK = { red: 'red', amber: 'amber', green: 'green', none: 'none', grey: 'none', gray: 'none', live: 'live', r: 'red', a: 'amber', g: 'green',
+  'off track': 'red', 'at risk': 'amber', 'on track': 'green', 'not planned': 'none', launched: 'live' };
+const KLBL = { red: 'At risk', amber: 'On track, some tasks running late', green: 'On track', none: 'Not planned', live: 'Launched' };
+const BURN_WORDS = { 'on-track': 'Work is being finished at the planned pace.', behind: 'Work is being finished more slowly than planned.' };
+function blockerHref(b, prj) {
+  if (b.href) return String(b.href);
+  const ref = b.ref || b.dataId || b.workId || b.id;
+  if (b.kind === 'data' || b.kind === 'missing') return '/data/' + ref;
+  if (b.kind === 'confirm' || b.kind === 'pending') return `/data/${ref}?confirm=1`;
+  return store.get('workItem', ref) ? `/project/${prj}?mode=work&item=${ref}` : `/project/${prj}`;
 }
-/* Finished (all work done: actual date) vs forecast (open work). */
-export function finishInfo(j, s) {
+function normTruth(t, j) {
+  const st = pickObj(t.status, t.health, t.summary);
+  const rawK = String(st.rag || st.k || st.key || t.rag || st.label || t.label || (typeof t.status === 'string' ? t.status : '')).toLowerCase();
+  const k = j.status === 'live' ? 'live' : (RAGK[rawK] || 'none');
+  const label = String(st.label || t.label || KLBL[k]);
+  const sentence = String(st.sentence || t.sentence || '');
+  const prog = pickObj(t.progress, t.work, t.tasks);
+  const total = num(prog.total, t.total, t.workTotal) || 0, done = num(prog.done, t.done, t.workDone) || 0;
+  const cost = pickObj(t.cost, t.costs, t.financials);
+  const evRaw = pickObj(t.ev, t.earnedValue);
+  const pick = k2 => { const hit = Object.keys(evRaw).find(x => x.toLowerCase() === k2); return hit != null ? num(evRaw[hit]) : null; };
+  const ev = { pv: pick('pv'), ev: pick('ev'), ac: pick('ac'), spi: pick('spi'), cpi: pick('cpi'), eac: pick('eac'), bac: pick('bac') };
+  const blockersRaw = Array.isArray(t.blockers) ? t.blockers : Array.isArray(t.blocking) ? t.blocking : [];
+  const blockers = blockersRaw.map(b => typeof b === 'string' ? { kind: 'other', text: b } : b).map(b => {
+    const kind = String(b.kind || b.type || (b.dataId ? 'data' : 'other'));
+    const who = personOf(b.who || (b.planned ? b.resolverOwner || b.owner : b.owner) || b.person) || null;
+    const text = String(b.text || b.label || b.title || b.sentence || '');
+    const action = String(b.action || b.next || (b.dataId && b.name ? (b.planned ? `Get ${b.name} ready` : `Plan work to get ${b.name}`) : ''));
+    const nb = Object.assign({}, b, { kind });
+    return { kind, ref: b.ref || b.dataId || b.workId || b.id || '', who, text: text && !/[.!?]$/.test(text) ? text + '.' : text,
+      action, planned: !!b.planned, sentence: String(b.sentence || text), href: blockerHref(nb, j.id) };
+  }).filter(b => b.text);
+  const ls = Array.isArray(t.launchSteps) ? t.launchSteps : t.launchSteps && (t.launchSteps.steps || t.launchSteps.items) || null;
+  const tests = pickObj(t.testing, t.tests);
+  const burn = pickObj(t.burndown, t.burn);
+  const sched = pickObj(t.schedule, t.dates);
+  const forecast = dateOf(t.forecast, t.forecastFinish, t.finish, sched.forecast, sched.finish);
+  const late = num(t.late, t.lateCount, sched.late, prog.late) || 0;
+  const running = num(t.runningLate, t.running, t.runningLateCount, t.slip, sched.runningLate, prog.runningLate) || 0;
+  const buffer = num(t.bufferDays, t.buffer, t.bufferBizDays, sched.bufferDays, sched.buffer);
+  const ac = num(cost.actual, cost.actualCost, ev.ac);
+  const eac = num(cost.forecast, cost.forecastCost, cost.eac, cost.forecastAtCompletion, ev.eac);
+  const allDone = total > 0 && done === total;
+  return {
+    src: 'engine', k, label, sentence,
+    who: (Array.isArray(t.who) ? t.who : Array.isArray(st.who) ? st.who : blockers.map(b => ({ person: b.who, action: b.action })))
+      .map(w => ({ person: personOf(w.person || w), action: String(w.action || '') })).filter(w => w.person),
+    total, done, pct: num(prog.pct, t.pct, t.percent) != null ? Math.round(num(prog.pct, t.pct, t.percent)) : (total ? Math.round(done / total * 100) : 0),
+    forecast, target: dateOf(t.target, t.deadline, sched.target) || j.target || null,
+    finished: t.finished != null ? !!t.finished : t.allDone != null ? !!t.allDone : allDone,
+    actualFinish: dateOf(t.actualFinish, sched.actualFinish), buffer, late, running, blockers,
+    launchSteps: ls, tests: (num(tests.passed) != null || num(tests.total) != null) ? { passed: num(tests.passed) || 0, total: num(tests.total) || 0, text: String(tests.count || tests.text || tests.label || '') } : null,
+    cost: { planned: num(cost.planned, cost.budget, t.budget) || 0, actual: ac || 0, forecast: eac || 0 },
+    ev: Object.values(ev).some(v => v != null) ? Object.assign(ev, { eac: eac != null ? eac : ev.eac }) : null,
+    burn: { status: String(burn.status || burn.direction || burn.trend || ''), text: String(burn.text || burn.sentence || burn.label || BURN_WORDS[burn.direction || burn.status] || ''),
+      show: burn.show != null ? !!burn.show : burn.sprintsOnly != null ? !burn.sprintsOnly : burn.agree != null ? !!burn.agree : burn.agrees != null ? !!burn.agrees : true },
+    raw: t,
+  };
+}
+export function truthOf(j) {
+  if (!j) return null;
+  if (!truthMemo) { truthMemo = new Map(); queueMicrotask(() => { truthMemo = null; }); }
+  const key = j.id + '|' + today();
+  if (truthMemo.has(key)) return truthMemo.get(key);
+  const raw = eng('projectTruth', null, docs(), j.id, today());
+  const t = raw && typeof raw === 'object' ? normTruth(raw, j) : fallbackTruth(j);
+  truthMemo.set(key, t);
+  return t;
+}
+/* Only while the engine is being upgraded (projectTruth missing): the same shape from the R7 engine functions. */
+function fallbackTruth(j) {
+  const s = eng('projectStats', null, docs(), j.id, today()) || { total: 0, done: 0, pct: 0, late: 0, slip: 0 };
+  const sm = eng('projectSummary', null, docs(), j.id, today()) || {};
+  const ev = eng('earnedValue', null, docs(), j.id, today()) || {};
+  const fin = eng('projectFinancials', null, docs(), j.id, today()) || {};
   const allDone = s.total > 0 && s.done === s.total;
-  const date = allDone ? (s.actualFinish || maxDate(projectItems(j.id).map(w => w.doneAt || w.due))) : s.finish;
-  return { done: allDone, date, label: allDone ? 'Finished' : 'Forecast', over: !!(date && j.target && date > j.target) };
+  const forecast = allDone ? (s.actualFinish || s.finish) : s.finish;
+  const t = { status: { label: j.status === 'live' ? 'Launched' : sm.label, sentence: sm.sentence, rag: sm.rag, who: sm.who },
+    total: s.total, done: s.done, pct: s.pct, forecast, target: j.target, late: s.late, runningLate: s.slip, actualFinish: s.actualFinish,
+    bufferDays: forecast && j.target ? (forecast <= j.target ? bizDays(addDays(forecast, 1), j.target) : -bizDays(addDays(j.target, 1), forecast)) : null,
+    blockers: legacyBlocking(j), launchSteps: eng('launchSteps', null, docs(), j.id, today()),
+    cost: { planned: Number(j.budget && j.budget.planned) || 0, actual: num(ev.AC, ev.ac, fin.actual), forecast: num(ev.EAC, ev.eac, fin.forecast) }, ev };
+  return Object.assign(normTruth(t, j), { src: 'fallback' });
+}
+export function projectStats(prj) {
+  const j = store.get('project', prj);
+  const t = j ? truthOf(j) : null;
+  if (!t) return { total: 0, done: 0, pct: 0, late: 0, slip: 0, finish: null, target: null };
+  return { total: t.total, done: t.done, pct: t.pct, late: t.late, slip: t.running, finish: t.forecast, actualFinish: t.actualFinish, target: t.target, buffer: t.buffer };
+}
+/* Finished (all work done) vs forecast (open work): both are projectTruth's forecast. */
+export function finishInfo(j) {
+  const t = truthOf(j);
+  return { done: t.finished, date: t.forecast, label: t.finished ? 'Finished' : 'Forecast', over: t.buffer != null ? t.buffer < 0 : !!(t.forecast && t.target && t.forecast > t.target) };
+}
+/* One buffer unit everywhere: business days. */
+export function bufferText(t) {
+  if (t.buffer == null) return '';
+  const n = Math.abs(t.buffer);
+  return t.buffer < 0 ? `${n} business day${n === 1 ? '' : 's'} late` : `${n} business day${n === 1 ? '' : 's'} to spare`;
 }
 
 /* R3: the data element is the single source of truth. Engine effectiveAvail, with a local fallback that mirrors the contract. */
@@ -113,9 +214,9 @@ export function gateInfo(j, s) {
     return { k: 'live', at, v, fi, label: `Live since ${fmt(at)}${v ? ` (v${v})` : ''}` };
   }
   if (fi.done) {
-    const rd = eng('readiness', null, docs(), j.id, today());
-    const blocking = rd && Array.isArray(rd.checks) ? rd.checks.filter(c => c.status ? c.status === 'fail' : (!c.pass && c.id !== 'exceptions')).length : null;
-    return { k: 'awaiting', fi, blocking, label: 'All tasks done · waiting to launch' };
+    const t = truthOf(j), steps = launchStepsOf(j), blocking = steps.filter(x => !x.done).length;
+    /* never "all done" while something still blocks: the blockers come from projectTruth */
+    return { k: 'awaiting', fi, blocking, label: t.blockers.length ? `Tasks done · ${plural(t.blockers.length, 'blocker')} left` : 'All tasks done · waiting to launch' };
   }
   return { k: 'forecast', fi, label: `Forecast ${fmt(fi.date)}` };
 }
@@ -126,46 +227,24 @@ export const lockTitle = (w, j) => `Only ${pname(w.owner)} or ${pname(j && j.own
 
 /* Red/amber/green. R6: one health truth, the engine's projectHealth(docs, prj, today) -> {rag, reasons[]}.
    Red only when the finish date is at risk; every pill carries its reasons; zero work is grey "Not planned". */
-export const RAG_RULE = 'Off track: expected to finish after the deadline, or information is missing with no plan to get it. At risk: something is late but the finish still meets the deadline, or less than 5 working days to spare. On track: otherwise. Not planned: no tasks yet.';
-/* R7 glossary: Red/Amber/Green -> Off track/At risk/On track (CSS keys stay red/amber/green). */
-export const RAG_LBL = { red: 'Off track', amber: 'At risk', green: 'On track', none: 'Not planned', live: 'Launched' };
+export const RAG_RULE = 'At risk: the expected finish misses the deadline, or something unplanned is blocking. On track: otherwise, even if some tasks are running late. Not planned: no tasks yet.';
+/* R8 labels: red = At risk, amber = On track with some tasks running late, green = On track (CSS keys stay red/amber/green). */
+export const RAG_LBL = { red: 'At risk', amber: 'Running late', green: 'On track', none: 'Not planned', live: 'Launched' };
 const nItems = (n, w) => `${n} ${w} item${n === 1 ? '' : 's'}`;
 const reasonText = x => typeof x === 'string' ? x : (x && (x.text || x.label || x.detail)) || '';
-export function rag(p, s) {
-  if (p.status === 'live') return { k: 'live', label: 'Launched', reason: 'launched', reasons: ['launched'] };
-  s = s || projectStats(p.id);
-  if (!s.total) return { k: 'none', label: 'Not planned', reason: 'no tasks yet', reasons: ['no tasks yet'] };
-  const h = eng('projectHealth', null, docs(), p.id, today());
-  if (h && (h.rag || h.status)) {
-    const raw = String(h.rag || h.status).toLowerCase();
-    const k = ({ red: 'red', amber: 'amber', green: 'green', r: 'red', a: 'amber', g: 'green', grey: 'none', gray: 'none', none: 'none', live: 'live' })[raw] || 'none';
-    const reasons = (Array.isArray(h.reasons) ? h.reasons : []).map(reasonText).filter(Boolean);
-    return { k, label: RAG_LBL[k], reason: reasons.join('; '), reasons };
-  }
-  /* local fallback: the same R6 rule */
-  const fi = finishInfo(p, s);
-  const buffer = (fi.date && p.target) ? dayDiff(p.target, fi.date) : null;
-  const bizBuf = (fi.date && p.target) ? (fi.date <= p.target ? bizDays(addDays(fi.date, 1), p.target) : -1) : null;
-  const red = [];
-  if (buffer != null && buffer < 0) red.push(`forecast finish ${-buffer}d after target`);
-  if (red.length) return { k: 'red', label: 'Off track', reason: red.join('; '), reasons: red };
-  const amber = [];
-  if (s.late > 0) amber.push(`${nItems(s.late, 'late')}, finish still meets target`);
-  if (!fi.done && bizBuf != null && bizBuf < 5) amber.push(`only ${bizBuf} business day${bizBuf === 1 ? '' : 's'} of buffer`);
-  if (amber.length) return { k: 'amber', label: 'At risk', reason: amber.join('; '), reasons: amber };
-  const g = fi.done ? 'all work done' : buffer != null ? `${buffer}d buffer, nothing late` : 'nothing late';
-  return { k: 'green', label: 'On track', reason: g, reasons: [g] };
+/* The status label (projectTruth). reason = the truth sentence, so a badge's tooltip never disagrees with the page. */
+export function rag(p) {
+  const t = truthOf(p);
+  return { k: t.k, label: t.label, reason: t.sentence, reasons: t.sentence ? [t.sentence] : [] };
 }
-export const ragBadge = r => `<span class="rag rag-${r.k}" data-rag-k="${r.k}" title="${esc(r.label + ': ' + (r.reason || '') + '. ' + RAG_RULE)}"><i></i>${esc(r.label)}${r.reason ? `<small class="pmo-rag-why" data-rag-reason> · ${esc(r.reason)}</small>` : ''}</span>`;
+const noDot = x => String(x || '').trim().replace(/[.\s]+$/, '');
+export const ragBadge = r => `<span class="rag rag-${r.k}" data-rag-k="${r.k}" title="${esc(noDot(r.label + (r.reason ? ': ' + noDot(r.reason) : '')) + '. ' + RAG_RULE)}"><i></i>${esc(r.label)}</span>`;
 
 /* ---------------------------------------------------------------- R7: SIMPLICITY
    Simple is the default (store.advanced false). One sentence answers "are we on track?", one card says what's blocking
    and who acts, and a checklist shows the steps to launch. Engine first (projectSummary, launchSteps, availLabel), with
    local fallbacks that follow the same rules so the page never blanks while the engine is being updated. */
 export const isSimple = () => !store.advanced;
-const K_LABEL = { green: 'On track', amber: 'At risk', red: 'Off track', none: 'Not planned', live: 'Launched' };
-const LABEL_K = { 'on track': 'green', 'at risk': 'amber', 'off track': 'red', 'not planned': 'none', launched: 'live', live: 'live' };
-const RAG_K = { red: 'red', amber: 'amber', green: 'green', none: 'none', grey: 'none', gray: 'none', live: 'live' };
 const plural = (n, w, ws) => `${n} ${n === 1 ? w : (ws || w + 's')}`;
 function spanWords(d) {
   if (d < 7) return plural(d, 'day');
@@ -183,9 +262,12 @@ export function availText(dataId) {
 const daysLate = (w, f) => { const end = (f && f.forecast) || w.due; return w.due && w.due < today() ? dayDiff(today(), w.due) : (end && w.due && end > w.due ? dayDiff(end, w.due) : 0); };
 /* What's blocking a project, most important first: information that isn't available and holds open tasks, late tasks,
    information waiting for its owner's confirmation, tasks delaying others. Each says who needs to act. */
-export function blockingOf(j, fc) {
+/* What's blocking: projectTruth's blockers list (the same list everywhere). */
+export function blockingOf(j) { return !j || j.status === 'live' ? [] : truthOf(j).blockers; }
+/* Fallback only (projectTruth missing): the R7 local rule. */
+function legacyBlocking(j, fc) {
   if (!j || j.status === 'live') return [];
-  fc = fc || renderFc || forecasts();
+  fc = fc || forecasts();
   const items = projectItems(j.id), out = [];
   const held = {};
   (j.processes || []).forEach(pid => {
@@ -223,29 +305,11 @@ export function blockingOf(j, fc) {
   });
   return out;
 }
-function localSentence(j, s, fc) {
-  if (!s.total) return `No tasks planned yet. The deadline is ${fmt(j.target)}.`;
-  const fi = finishInfo(j, s);
-  let a;
-  if (fi.done) a = 'All tasks are done; it’s waiting to launch.';
-  else if (fi.date && j.target) {
-    const d = dayDiff(j.target, fi.date);
-    a = d === 0 ? `Expected ${fmt(fi.date)}, right on the deadline.` : d > 0 ? `Expected ${fmt(fi.date)}, ${spanWords(d)} before the ${fmt(j.target)} deadline.` : `Expected ${fmt(fi.date)}, ${spanWords(-d)} after the ${fmt(j.target)} deadline.`;
-  } else a = fi.date ? `Expected ${fmt(fi.date)}.` : 'No finish date yet.';
-  const b = blockingOf(j, fc)[0];
-  return b ? `${a} ${b.sentence}` : a;
-}
-/* "Are we on track?" in one sentence + a label that agrees with it. */
-export function summaryOf(j, fc) {
-  const s = projectStats(j.id);
-  if (j.status === 'live') { const gi = gateInfo(j, s); return { k: 'live', label: 'Launched', sentence: `Launched on ${fmt(gi.at)}${gi.v ? ` (version ${gi.v})` : ''}.`, who: [] }; }
-  const x = eng('projectSummary', null, docs(), j.id, today());
-  if (x && x.sentence) {
-    const k = LABEL_K[String(x.label || '').toLowerCase()] || RAG_K[String(x.rag || '').toLowerCase()] || rag(j, s).k;
-    return { k, label: x.label || K_LABEL[k], sentence: String(x.sentence), who: (Array.isArray(x.who) ? x.who : []).map(w => ({ person: personOf(w.person || w), action: w.action || '' })).filter(w => w.person) };
-  }
-  const r = rag(j, s);
-  return { k: r.k, label: K_LABEL[r.k] || r.label, sentence: localSentence(j, s, fc), who: blockingOf(j, fc).slice(0, 3).map(b => ({ person: b.who, action: b.action })) };
+/* "Are we on track?" in one sentence + a label that agrees with it (projectTruth). */
+export function summaryOf(j) {
+  const t = truthOf(j);
+  if (j.status === 'live') { const gi = gateInfo(j); return { k: 'live', label: 'Launched', sentence: t.sentence || `Launched on ${fmt(gi.at)}${gi.v ? ` (version ${gi.v})` : ''}.`, who: [] }; }
+  return { k: t.k, label: t.label, sentence: t.sentence, who: t.who };
 }
 export const summaryPill = sm => `<span class="pmo-lbl pmo-lbl-${esc(sm.k)}" data-summary-label="${esc(sm.k)}"><i aria-hidden="true"></i>${esc(sm.label)}</span>`;
 export const summaryHTML = (sm, cls) => `<div class="pmo-sum ${cls || ''}" data-summary>${summaryPill(sm)}<span class="pmo-sum-s" data-summary-sentence>${esc(sm.sentence)}</span></div>`;
@@ -257,27 +321,14 @@ export function whoActs(j, n) {
   return list.filter(x => x.person && !seen.has(x.person) && seen.add(x.person)).slice(0, n || 3);
 }
 /* Steps to launch: engine launchSteps (plain words, done/next, who acts), else the readiness checks in plain words. */
-const CHECK_PLAIN = {
-  'work-done': 'Finish every task', 'data-live': 'Connect all the information', 'tests-passed': 'Pass the tests',
-  'grants-closed': 'Close temporary data access', 'bu-signoff': 'Each team approves its part', 'two-person': 'Two different people approve',
-  'cutover-plan': 'Write the launch-day plan', 'process-valid': 'Finish the future process', 'discovered-resolved': 'Settle what testing found',
-  'cutover-check': 'Check the launch-day plan', 'runbook': 'Check the launch-day plan',
-};
 export function launchStepsOf(j) {
-  let ls = eng('launchSteps', null, docs(), j.id, today());
-  if (ls && !Array.isArray(ls)) ls = ls.steps || ls.items || null;
-  if (Array.isArray(ls) && ls.length) {
-    return ls.map(x => ({
-      id: x.id || x.key || '', label: String(x.label || x.text || x.title || x.id || ''),
-      done: x.done != null ? !!x.done : x.pass != null ? !!x.pass : x.status === 'pass' || x.status === 'done',
-      who: [].concat(x.who || x.owner || x.person || []).map(personOf).filter(Boolean), detail: (x.done || /^done$/i.test(String(x.action || ''))) ? '' : String(x.detail || x.action || ''),
-    })).filter(x => x.label);
-  }
-  const rd = eng('readiness', null, docs(), j.id, today());
-  return ((rd && rd.checks) || []).filter(c => c.id !== 'exceptions' && !c.warning).map(c => ({
-    id: c.id, label: CHECK_PLAIN[c.id] || c.label, done: c.status ? c.status !== 'fail' : !!c.pass,
-    who: c.id === 'cutover-plan' || c.id === 'work-done' ? [j.owner] : [], detail: '',
-  }));
+  const ls = truthOf(j).launchSteps;
+  if (!Array.isArray(ls)) return [];
+  return ls.map(x => ({
+    id: x.id || x.key || '', label: String(x.label || x.text || x.title || x.id || ''),
+    done: x.done != null ? !!x.done : x.pass != null ? !!x.pass : x.status === 'pass' || x.status === 'done',
+    who: [].concat(x.who || x.owner || x.person || []).map(personOf).filter(Boolean), detail: (x.done || /^done$/i.test(String(x.action || ''))) ? '' : String(x.detail || x.action || ''),
+  })).filter(x => x.label);
 }
 export function launchHTML(j) {
   if (j.status === 'live') return `<div class="card pmo-launch" data-launch-steps><h3>Steps to launch</h3><div class="pmo-ls-done">✓ Launched. Every step is done.</div></div>`;
@@ -294,7 +345,7 @@ export function blockingHTML(j, fc) {
   const bl = blockingOf(j, fc), top = bl.slice(0, 3);
   return `<section class="card pmo-blocking ${top.length ? 'has' : 'clear'}" data-whats-blocking><h3>What’s blocking${bl.length ? ` <span class="n">${bl.length}</span>` : ''}</h3>
     ${top.length ? top.map(b => `<a class="pmo-bl-row" href="${link(b.href)}" data-link data-bl-kind="${b.kind}"><span class="pmo-bl-ic" aria-hidden="true">${b.kind === 'data' ? LOCK : b.kind === 'late' ? '!' : b.kind === 'confirm' ? '?' : '⏱'}</span>
-      <span class="pmo-bl-b"><span class="t">${esc(b.text)}</span><span class="s">${av(b.who)}<span><b>${esc(pname(b.who))}</b>: ${esc(b.action)}</span></span></span><span class="pmo-chev" aria-hidden="true">›</span></a>`).join('')
+      <span class="pmo-bl-b"><span class="t">${esc(b.text)}</span>${b.who || b.action ? `<span class="s">${b.who ? `${av(b.who)}<span><b>${esc(pname(b.who))}</b>${b.action ? ': ' + esc(b.action) : ''}</span>` : `<span>${esc(b.action)}</span>`}</span>` : ''}</span><span class="pmo-chev" aria-hidden="true">›</span></a>`).join('')
       + (bl.length > 3 ? `<div class="hint">+${bl.length - 3} more on the plan below.</div>` : '')
     : '<div class="pmo-bl-none">✓ Nothing is blocking right now.</div>'}</section>`;
 }
@@ -310,7 +361,7 @@ export function taskRowHTML(w, j, fc, compact) {
   const f = (fc || {})[w.id] || {};
   const can = canEditWork(w, j), done = w.status === 'done';
   const k = schedKey(w, fc);
-  const when = done ? `Done ${fmt(w.doneAt || w.due)}` : `Due ${fmt(w.due)}${f.forecast && f.forecast > w.due ? ` · expected ${fmt(f.forecast)}` : ''}`;
+  const when = done ? `Done ${fmt(doneDate(w))}` : `Due ${fmt(w.due)}${f.forecast && f.forecast > w.due ? ` · expected ${fmt(f.forecast)}` : ''}`;
   const tick = done ? '<span class="pmo-tick on" aria-hidden="true">✓</span>'
     : can ? `<button type="button" class="pmo-tick" data-done="${esc(w.id)}" aria-label="Mark “${esc(w.title)}” done" title="Mark done">✓</button>`
     : '<span class="pmo-tick off" aria-hidden="true"></span>';
@@ -349,18 +400,13 @@ export const fieldVal = (w, f) => { const v = w && w.custom ? w.custom[f.key] : 
 export const hoursOf = w => (Array.isArray(w && w.time) ? w.time : []).reduce((a, t) => a + (Number(t.hours) || 0), 0);
 const fmtHours = n => (Math.round(n * 10) / 10) + 'h';
 /* R6 earned value: E().earnedValue(docs, prj, today) -> PV, EV, AC, SPI, CPI, EAC (keys normalised to lower case). */
-export function earnedValue(j) {
-  const raw = j ? eng('earnedValue', null, docs(), j.id, today()) : null;
-  if (!raw || typeof raw !== 'object') return null;
-  const pick = k => { const hit = Object.keys(raw).find(x => x.toLowerCase() === k); const v = hit != null ? Number(raw[hit]) : NaN; return isFinite(v) ? v : null; };
-  const out = { pv: pick('pv'), ev: pick('ev'), ac: pick('ac'), spi: pick('spi'), cpi: pick('cpi'), eac: pick('eac'), bac: pick('bac') };
-  return Object.values(out).some(v => v != null) ? out : null;
-}
+/* Earned value from projectTruth (EAC is the one cost forecast). */
+export function earnedValue(j) { return j ? truthOf(j).ev : null; }
 const r2 = v => v == null ? '—' : (Math.round(v * 100) / 100).toFixed(2);
 export const idxCls = v => v == null ? '' : v >= 1 ? 'pass' : v >= 0.9 ? 'warn' : 'fail';
 export function evChips(ev) {
   if (!ev) return '<span class="hint">No earned value yet</span>';
-  return `<span class="pmo-ev" data-ev-spi title="Schedule performance index: earned value ÷ planned value. Below 1 means behind schedule."><small>SPI</small><b class="${idxCls(ev.spi)}">${r2(ev.spi)}</b></span><span class="pmo-ev" data-ev-cpi title="Cost performance index: earned value ÷ actual cost. Below 1 means over cost."><small>CPI</small><b class="${idxCls(ev.cpi)}">${r2(ev.cpi)}</b></span><span class="pmo-ev" data-ev-eac title="Estimate at completion: budget ÷ CPI"><small>EAC</small><b>${esc(money(ev.eac))}</b></span>`;
+  return `<span class="pmo-ev" data-ev-spi title="Schedule performance index: earned value ÷ planned value. Below 1 means behind schedule."><small>SPI</small><b class="${idxCls(ev.spi)}">${r2(ev.spi)}</b></span><span class="pmo-ev" data-ev-cpi title="Cost performance index: earned value ÷ actual cost. Below 1 means over cost."><small>CPI</small><b class="${idxCls(ev.cpi)}">${r2(ev.cpi)}</b></span>`;
 }
 export const fmtIdx = r2;
 /* R6 default target: the next business day on or after today + 60 calendar days (engine defaultTarget). */
@@ -432,7 +478,7 @@ export function emailOf(pid) {
 /* One schedule format everywhere: short status badge + "Due Nov 3 · forecast Nov 11 (+8d)". */
 export function slipOf(w, f) {
   f = f || {};
-  const end = w.status === 'done' ? (w.doneAt || w.due) : (f.forecast || w.due);
+  const end = w.status === 'done' ? doneDate(w) : (f.forecast || w.due);
   return end && w.due && end > w.due ? dayDiff(end, w.due) : 0;
 }
 /* R6: exactly one schedule badge per item, by priority late > causing slip > slipping > due soon > on track.
@@ -469,7 +515,7 @@ export function wBadge(w, f, fc) {
 export function dueLine(w, f) {
   f = f || {};
   const n = slipOf(w, f);
-  if (w.status === 'done') return `Due ${fmt(w.due)} · done ${fmt(w.doneAt || w.due)}${n ? ` (+${n}d)` : ''}`;
+  if (w.status === 'done') return `Due ${fmt(w.due)} · done ${fmt(doneDate(w))}${n ? ` (+${n}d)` : ''}`;
   return `Due ${fmt(w.due)} · forecast ${fmt(f.forecast || w.due)}${n ? ` (+${n}d)` : ''}`;
 }
 export const schedHTML = (w, f) => `${wBadge(w, f)}${whyBtn(w)} <span class="pmo-dl">${esc(dueLine(w, f))}</span>`;
@@ -504,16 +550,21 @@ export function bindFeed(root, key, match) {
 /* Planned budget vs forecast cost (all work) vs actual cost (done work). Engine projectFinancials, with a local fallback
    that applies the same rule: cost = effortDays × the owner's dayRate (default 800). */
 export function financials(j) {
-  const planned = Number(j && j.budget && j.budget.planned) || 0;
-  const r = j ? eng('projectFinancials', null, docs(), j.id, today()) : null;
-  const num = (...xs) => { for (const x of xs) if (typeof x === 'number' && isFinite(x)) return x; return null; };
-  if (r && typeof r === 'object') {
-    const f = num(r.forecast, r.forecastCost, r.forecast && r.forecast.cost), a = num(r.actual, r.actualCost, r.actual && r.actual.cost);
-    if (f != null && a != null) { const pl = num(r.planned, r.budget, r.plannedBudget); return { planned: pl != null ? pl : planned, forecast: f, actual: a, src: 'engine' }; }
-  }
-  const items = j ? projectItems(j.id) : [];
-  const cost = w => effortOf(w) * rateOf(w.owner);
-  return { planned, forecast: items.reduce((x, w) => x + cost(w), 0), actual: items.filter(w => w.status === 'done').reduce((x, w) => x + cost(w), 0), src: 'local' };
+  const c = truthOf(j).cost;
+  return { planned: c.planned, forecast: c.forecast, actual: c.actual, src: 'truth' };
+}
+/* Planned / actual / forecast cost, one format everywhere. */
+export function costHTML(j, cls) {
+  const c = financials(j);
+  return `<span class="pmo-cost ${cls || ''}" data-cost><span>Budget <b data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</b></span><span>Spent <b data-t="actual">${esc(money(c.actual))}</b></span><span>Forecast cost <b data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</b></span></span>`;
+}
+/* The standard facts line (projectTruth): expected finish, late count, blockers. Used by header, home card, portfolio, report. */
+export function factsHTML(j, opts) {
+  opts = opts || {};
+  const t = truthOf(j), live = j.status === 'live';
+  const when = !t.total && !live ? `<span>Expected <b data-t="forecast">Not planned</b></span>`
+    : `<span>${live || t.finished ? 'Finished' : 'Expected'} <b data-t="forecast" class="${!t.finished && t.buffer != null && t.buffer < 0 ? 'fail' : ''}">${esc(fmt(t.forecast))}</b></span>`;
+  return `${when}<span><b data-t="late" class="${t.late ? 'fail' : ''}">${t.late}</b> late</span><span><b data-t="blockers" class="${t.blockers.length ? 'fail' : ''}">${t.blockers.length}</b> blocking</span>${opts.cost ? costHTML(j) : ''}`;
 }
 /* Burndown: remaining effort over time (work drops off on its doneAt), plus an ideal line from start to target.
    Normalised to {points: [{date, remaining, ideal}], total, start, end}. */
@@ -536,16 +587,19 @@ function localBurn(items, start, end) {
   const dates = []; for (let d = start; d <= end; d = addDays(d, 1)) if (!isWeekend(d)) dates.push(d);
   if (!dates.length) dates.push(start);
   const span = Math.max(1, dates.length - 1);
-  const doneBy = d => items.filter(w => w.status === 'done' && (w.doneAt || w.due) <= d).reduce((a, w) => a + effortOf(w), 0);
+  const doneBy = d => items.filter(w => w.status === 'done' && doneDate(w) <= d).reduce((a, w) => a + effortOf(w), 0);
   return { total, start: dates[0], end: dates[dates.length - 1], points: dates.map((d, i) => ({ date: d, remaining: d > today() ? null : Math.round((total - doneBy(d)) * 10) / 10, ideal: Math.round(Math.max(0, total * (1 - i / span)) * 10) / 10 })) };
 }
 export function projectBurn(j) {
   const items = projectItems(j.id);
   if (!items.length) return null;
+  const t = truthOf(j);
   const e = normBurn(eng('burndown', null, docs(), j.id, today()));
-  if (e) return e;
   const start = minDate(items.map(w => w.start || w.due));
-  return localBurn(items, start, maxDate([j.target, start]));
+  const b = e || localBurn(items, start, maxDate([j.target, start]));
+  /* the ahead/behind words come from projectTruth (they agree with SPI); never recomputed from the chart */
+  if (b) Object.assign(b, { statusText: t.burn.text, show: t.burn.show, truth: true });
+  return b;
 }
 function sprintBurn(j, sp, items) {
   if (!sp || !items.length) return null;
@@ -567,7 +621,9 @@ export function burnChart(b, opts) {
   const td = today() >= b.start && today() <= b.end ? `<line class="pmo-burn-today" x1="${X(today())}" x2="${X(today())}" y1="${T}" y2="${H - B}"/>` : '';
   const idealNow = nowP && b.points.find(p => p.date === nowP.date);
   const ahead = nowP && idealNow && idealNow.ideal != null ? Math.round((idealNow.ideal - nowP.remaining) * 10) / 10 : null;
-  const summary = nowP ? `${fmtEffort(nowP.remaining)} of ${fmtEffort(b.total)} effort remaining on ${fmt(nowP.date)}${ahead != null ? (ahead >= 0 ? `, ${fmtEffort(ahead)} ahead of the ideal line` : `, ${fmtEffort(-ahead)} behind the ideal line`) : ''}` : `${fmtEffort(b.total)} of effort planned; burndown starts ${fmt(b.start)}`;
+  const base = nowP ? `${fmtEffort(nowP.remaining)} of ${fmtEffort(b.total)} effort remaining on ${fmt(nowP.date)}` : `${fmtEffort(b.total)} of effort planned; burndown starts ${fmt(b.start)}`;
+  const summary = b.truth ? (b.statusText ? `${base}. ${b.statusText}` : base)
+    : `${base}${nowP && ahead != null ? (ahead >= 0 ? `, ${fmtEffort(ahead)} ahead of the ideal line` : `, ${fmtEffort(-ahead)} behind the ideal line`) : ''}`;
   const rows = b.points.filter(p => p.remaining != null || p.ideal != null);
   return `<figure class="pmo-burn" data-burn="${esc(id)}">
     <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc((opts.title || 'Burndown') + ': ' + summary)}" preserveAspectRatio="xMidYMid meet">
@@ -724,7 +780,7 @@ function compareScen(j, sc) {
   if (r && !plan && (r.planFinish || r.planCost != null)) plan = { finish: r.planFinish || null, cost: num(r.planCost) };
   if (r && !scen && (r.scenarioFinish || r.scenarioCost != null)) scen = { finish: r.scenarioFinish || null, cost: num(r.scenarioCost) };
   if (!plan || !scen) {
-    const fin = D => { const f = eng('forecastAll', {}, D, today()) || {}; return maxDate(scItems(D, j.id).map(w => w.status === 'done' ? (w.doneAt || w.due) : ((f[w.id] || {}).forecast || w.due))); };
+    const fin = D => { const f = eng('forecastAll', {}, D, today()) || {}; return maxDate(scItems(D, j.id).map(w => w.status === 'done' ? doneDate(w) : ((f[w.id] || {}).forecast || w.due))); };
     const cost = financials(j).forecast;
     plan = plan || { finish: fin(docs()), cost }; scen = scen || { finish: fin(scenarioDocs(sc)), cost };
   }
@@ -761,7 +817,7 @@ function timelineHTML(j, fc, list, D, sc) {
   const bl = bls.find(b => b.id === blPick[j.id]) || bls[bls.length - 1] || null;
   const blItems = (!sc && !isSimple() && showBaseline && bl && bl.items) || {};
   const start = addDays(minDate([...all.map(w => w.start), today()]), -2);
-  const end = addDays(maxDate([...all.map(w => (fc[w.id] || {}).forecast || w.due), ...all.map(w => w.due), ...all.map(w => w.doneAt), j.target, today(), ...Object.values(blItems).map(x => x && x.due)]), 4);
+  const end = addDays(maxDate([...all.map(w => (fc[w.id] || {}).forecast || w.due), ...all.map(w => w.due), ...all.map(w => w.doneAt ? doneDate(w) : null), j.target, today(), ...Object.values(blItems).map(x => x && x.due)]), 4);
   const span = Math.max(1, dayDiff(end, start));
   const pos = s => (dayDiff(s, start) / span * 100);
   const ticks = []; for (let d = start; d <= end; d = addDays(d, 7)) ticks.push(d);
@@ -785,7 +841,7 @@ function timelineHTML(j, fc, list, D, sc) {
       const sub = [stepTitle(w.pid, w.step), pname(w.owner)];
       if (w.resolves) sub.push('unblocks ' + dataName(w.resolves));
       if (deps.length) sub.push('after ' + deps.join(', '));
-      const actual = w.status === 'done' && w.doneAt;
+      const actual = w.status === 'done' && w.doneAt ? doneDate(w) : null;
       const isCrit = crit.has(w.id);
       const drag = canMove(w);
       const lw = sc ? store.get('workItem', w.id) : null;
@@ -801,8 +857,8 @@ function timelineHTML(j, fc, list, D, sc) {
         ${b && b.due ? `<span class="pmo-blbar" style="left:${pos(b.start || b.due)}%;width:${Math.max(0.6, pos(b.due) - pos(b.start || b.due))}%"></span><span class="pmo-blmark" style="left:${pos(b.due)}%" title="Saved plan due ${esc(fmt(b.due))}"></span>` : ''}
         ${bar}
         ${w.status !== 'done' && fcast > w.due ? `<span class="tslip" style="left:${pos(w.due)}%;width:${pos(fcast) - pos(w.due)}%" title="Forecast ${esc(fmt(fcast))}"></span>` : ''}
-        ${actual && w.doneAt > w.due ? `<span class="tslip pmo-late-actual" style="left:${pos(w.due)}%;width:${pos(w.doneAt) - pos(w.due)}%"></span>` : ''}
-        ${actual ? `<span class="pmo-actual" style="left:${pos(w.doneAt)}%" title="Finished ${esc(fmt(w.doneAt))} (planned ${esc(fmt(w.due))})"></span>` : ''}</td></tr>`;
+        ${actual && actual > w.due ? `<span class="tslip pmo-late-actual" style="left:${pos(w.due)}%;width:${pos(actual) - pos(w.due)}%"></span>` : ''}
+        ${actual ? `<span class="pmo-actual" style="left:${pos(actual)}%" title="Done ${esc(fmt(actual))} (due ${esc(fmt(w.due))})"></span>` : ''}</td></tr>`;
     });
   });
   const critCtl = `<label class="pmo-toggle"><input type="checkbox" data-crit-toggle ${showCrit ? 'checked' : ''}/> Highlight critical path${showCrit && crit.size ? ` <span class="hint">(${crit.size} item${crit.size === 1 ? '' : 's'})</span>` : ''}</label>`;
@@ -1073,24 +1129,13 @@ function workHTML(j, fc, list) {
 /* R6 view-aware right rail.
    Map: blockers, up next, legend. Timeline: conflicts, critical path. Board/Sprints: sprint stats (burndown only on Sprints).
    Work: filter summary. Every view: one collapsed "Activity" toggle (comments, history, work changes). */
+/* Advanced sidebar: the same blockers list as the header and every other page (projectTruth), with its fix task. */
 function blockersHTML(j, fc) {
-  const items = projectItems(j.id);
-  /* R3: red = effectively missing data on steps with open work. Everything else not live (examples-only, or missing
-     with no open work yet) is amber: it doesn't hold work today but fails the gate's data-live check. */
-  const held = {};
-  (j.processes || []).forEach(pid => {
-    const p = store.get('process', pid); if (!p) return;
-    flatSteps(p.tobe).forEach(s => {
-      if (!items.some(w => w.pid === pid && w.step === s.id && w.status !== 'done')) return;
-      (s.data || []).forEach(d => { if (effAvail(d) === 'missing') (held[d] = held[d] || []).push({ pid, s }); });
-    });
-  });
-  const blockers = Object.entries(held).map(([d, steps]) => ({ d, steps, r: resolverOf(d, j.id) })).sort((a, b) => b.steps.length - a.steps.length);
-  const amber = projectData(j).filter(d => !held[d] && effAvail(d) !== 'live').map(d => ({ d, e: effAvail(d), r: resolverOf(d, j.id) }));
-  const fixLine = r => r ? `<div class="s">Fix: ${esc(r.title)} · ${esc(pname(r.owner))}</div><div class="s pmo-schedrow">${schedHTML(r, fc[r.id])}</div>` : '<div class="s pmo-noplan">No resolution plan. Add a work item that resolves it.</div>';
-  return `<div class="card" data-blockers><h3>${LOCK} Biggest blockers <span class="n">${blockers.length}</span></h3>${blockers.map(({ d, steps, r }) => `<div class="row click" data-go="/data/${esc(d)}"><span style="color:var(--late);margin-top:2px">${LOCK}</span><div><div class="t">${esc(dataName(d))}</div>
-      ${fixLine(r)}</div><div class="r"><b style="color:var(--late)">${steps.length}</b><div class="s">step${steps.length === 1 ? '' : 's'} held</div></div></div>`).join('') || '<div class="s">No data is holding open work. Missing data on steps with open work shows here.</div>'}</div>
-    ${amber.length ? `<div class="card pmo-amber-card" data-needs-live><h3><i class="pmo-adot"></i> Needs to be connected before launch <span class="n">${amber.length}</span></h3><div class="hint" style="margin:-4px 0 8px">Not holding work today, but the release gate requires live data.</div>${amber.map(({ d, e, r }) => `<div class="row click" data-go="/data/${esc(d)}"><span class="pmo-amber-dot" aria-hidden="true"></span><div><div class="t">${esc(dataName(d))} <span class="badge ${e === 'missing' ? 'b-late' : 'b-soon'}">${e === 'example' ? 'Examples only' : e === 'pending' ? 'Fix done · awaiting owner confirmation' : 'Missing'}</span></div>${e === 'pending' ? `<div class="s">Waiting for ${esc(pname((store.get('dataElement', d) || {}).owner))} to confirm the live source.</div>` : fixLine(r)}</div></div>`).join('')}</div>` : ''}`;
+  const bl = truthOf(j).blockers;
+  const fixLine = b => { const r = b.kind === 'data' ? resolverOf(b.ref, j.id) : null;
+    return r ? `<div class="s">Fix: ${esc(r.title)} · ${esc(pname(r.owner))}</div><div class="s pmo-schedrow">${schedHTML(r, fc[r.id])}</div>` : b.action ? `<div class="s ${b.kind === 'data' ? 'pmo-noplan' : ''}">${esc(b.action)}${b.who ? ' · ' + esc(pname(b.who)) : ''}</div>` : ''; };
+  return `<div class="card" data-blockers><h3>${LOCK} Blocking <span class="n">${bl.length}</span></h3>${bl.map(b => `<a class="row click" href="${link(b.href)}" data-link data-blocker-row><span style="color:var(--late);margin-top:2px">${b.kind === 'data' ? LOCK : '!'}</span><div><div class="t">${esc(b.text)}</div>
+      ${fixLine(b)}</div></a>`).join('') || '<div class="s">Nothing is blocking right now.</div>'}</div>`;
 }
 function upNextHTML(j, fc) {
   const items = projectItems(j.id), open = items.filter(w => w.status !== 'done');
@@ -1301,7 +1346,7 @@ function dataBlockers(w, f) {
 }
 function shortDue(w, f) {
   f = f || {};
-  if (w.status === 'done') return `Done ${fmt(w.doneAt || w.due)}`;
+  if (w.status === 'done') return `Done ${fmt(doneDate(w))}`;
   const fcast = f.forecast || w.due;
   return fcast > w.due ? `Due ${fmt(w.due)} → ${fmt(fcast)}` : `Due ${fmt(w.due)}`;
 }
@@ -1532,7 +1577,9 @@ export function dataNotLive(j) {
 export const notLiveText = x => `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not connected yet${x.n ? ` (${[x.by.missing ? x.by.missing + ' not available yet' : '', x.by.example ? x.by.example + ' sample only' : '', x.by.pending ? x.by.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`;
 export function reportText(j, d) {
   const sec = (h, arr) => (arr && arr.length) ? `\n${h}\n` + arr.map(x => '- ' + txt(x)).join('\n') + '\n' : '';
-  return `${j.name}: status report (${fmt(today())})\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', d.asks)}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
+  const t = truthOf(j), c = t.cost;
+  const facts = `Status: ${t.label}. ${t.finished || j.status === 'live' ? 'Finished' : 'Expected'} ${t.total || j.status === 'live' ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late} late, ${t.blockers.length} blocking. Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, forecast cost ${money(c.forecast)}.`;
+  return `${j.name}: status report (${fmt(today())})\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', d.asks)}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
 }
 /* R5: the email draft goes to the project's resources (the PM is always one), as first.last@northwind.example. */
 export function reportRecipients(j) {
@@ -1552,6 +1599,7 @@ function reportPanelHTML(j, r) {
     const mail = `mailto:${to.map(x => x.email).join(',')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(reportText(j, d))}`;
     body = `<div class="pmo-rep" data-rep-body>
       <div class="pmo-rep-top">${ragBadge(r)}<span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ Generated by AI' : 'Rules-based'}</span><span class="hint">${esc(fmt(today()))} · ${ai ? 'written from project facts only; check before sending' : 'built from project facts by deterministic rules'}</span></div>
+      <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-fact hint" data-rep-notlive>Information: ${esc(notLiveText(dataNotLive(j)))}.</div>
@@ -1563,7 +1611,7 @@ function reportPanelHTML(j, r) {
 }
 async function openReport(j) {
   reports[j.id] = { loading: true }; rerender();
-  try { const r = await store.api('/ai/status-report', { projectId: j.id }); reports[j.id] = { data: (r && (r.report || r)) || {} }; }
+  try { const r = await store.api('/ai/status-report', { projectId: j.id, today: today() }); reports[j.id] = { data: (r && (r.report || r)) || {} }; }
   catch (e) { reports[j.id] = { error: e.message || 'service unavailable' }; }
   rerender();
   requestAnimationFrame(() => { const el = document.querySelector('[data-prj-rep]'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
@@ -1618,7 +1666,7 @@ export function render(params) {
   const j = store.get('project', prj);
   if (!j) {
     const all = store.list('project');
-    return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Project</div><h1>Project not found</h1><p>It may have been removed, or the link is from another sandbox.</p></div></section>
+    return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/projects')}" data-link>Projects</a></div><h1>Project not found</h1><p>It may have been removed, or the link is from another sandbox.</p></div></section>
       <div class="card" style="margin-top:16px"><h3>Projects</h3>${all.map(p => `<div class="row click" data-go="/project/${esc(p.id)}"><div><div class="t">${esc(p.name)}</div><div class="s">Target ${esc(fmt(p.target))}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">No projects yet.</div>'}</div>`;
   }
   const simple = isSimple();
@@ -1638,12 +1686,13 @@ export function render(params) {
   const fcT = D ? (eng('forecastAll', {}, D, today()) || {}) : fc;
   if (D) fcDocs.set(fcT, D);
   const list = filterItems(D ? scItems(D, prj) : all, f, fcT);
+  const T = truthOf(j);
   const finishKpi = gi.k === 'live'
-    ? `<div class="kpi" data-kpi-finish><b style="color:var(--done)">Live since ${esc(fmt(gi.at))}${gi.v ? ` <small>(v${esc(gi.v)})</small>` : ''}</b><span>Released · <a href="${link('/release/' + encodeURIComponent(prj))}" data-link>release log ›</a></span></div>`
+    ? `<div class="kpi" data-kpi-finish><b style="color:var(--done)">Live since ${esc(fmt(gi.at))}${gi.v ? ` <small>(v${esc(gi.v)})</small>` : ''}</b><span>Finished <span data-t="forecast">${esc(fmt(T.forecast))}</span> · <a href="${link('/release/' + encodeURIComponent(prj))}" data-link>launch log ›</a></span></div>`
     : gi.k === 'awaiting'
-    ? `<a class="kpi pmo-kpi-gate" data-kpi-finish href="${link('/release/' + encodeURIComponent(prj))}" data-link><b>All tasks done · waiting to launch</b><span>${gi.blocking ? `<span class="fail">${gi.blocking} gate check${gi.blocking === 1 ? '' : 's'} blocking</span>` : gi.blocking === 0 ? 'Gate passes' : 'Readiness gate'} · open release ›</span></a>`
-    : !s.total ? `<div class="kpi" data-kpi-finish><b class="pmo-muted">Not planned</b><span>No work yet · target ${esc(fmt(j.target))}</span></div>`
-    : `<div class="kpi" data-kpi-finish><b style="color:${fi.over ? 'var(--late)' : 'inherit'}">${esc(fmt(fi.date))}</b><span>Forecast · target ${esc(fmt(j.target))}</span></div>`;
+    ? `<a class="kpi pmo-kpi-gate" data-kpi-finish href="${link('/release/' + encodeURIComponent(prj))}" data-link><b>${esc(gi.label)}</b><span>Last task done <span data-t="forecast">${esc(fmt(T.forecast))}</span> · open the launch page ›</span></a>`
+    : !s.total ? `<div class="kpi" data-kpi-finish><b class="pmo-muted" data-t="forecast">Not planned</b><span>No work yet · deadline ${esc(fmt(j.target))}</span></div>`
+    : `<div class="kpi" data-kpi-finish><b style="color:${fi.over ? 'var(--late)' : 'inherit'}" data-t="forecast">${esc(fmt(fi.date))}</b><span>Expected · deadline ${esc(fmt(j.target))}${T.buffer != null ? ` · <span data-t="buffer">${esc(bufferText(T))}</span>` : ''}</span></div>`;
   const rm = relMgr(j);
   const team = (j.resources || []).filter(x => x !== j.owner && x !== rm);
   const fin = financials(j);
@@ -1651,18 +1700,19 @@ export function render(params) {
   /* tabs keep the filters (they are views of the same items); Map ignores them */
   const tab = (k, l) => `<a href="${link(k === 'map' ? prjURL(prj, 'map') : prjURL(prj, k, f, view))}" data-link data-tab="${k}" class="${mode === k ? 'on' : ''}" role="tab" aria-selected="${mode === k}">${l}</a>`;
   const hdr = `<section class="hdr"><div>
-      <div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › <a href="${link('/portfolio')}" data-link>Portfolio</a> › ${j.program ? `<span data-program>${esc(j.program)}</span> › ` : ''}Project</div>
-      <h1>${esc(j.name)} <span class="pmo-hrag" data-rag="${r.k}">${ragBadge(r)}</span></h1>${summaryHTML(summaryOf(j, fc))}${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
+      <div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/projects')}" data-link>Projects</a> › ${j.program ? `<span data-program>${esc(j.program)}</span> › ` : ''}Project</div>
+      <h1>${esc(j.name)}</h1>${summaryHTML(summaryOf(j), 'pmo-hrag')}${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
       <div class="res pmo-roles"><span class="pmo-role" data-role-pm><span class="lbl">Project manager</span>${personChip(j.owner)}</span><span class="pmo-role" data-role-rm><span class="lbl">Launch owner</span>${personChip(rm)}${rm === j.owner ? '<small class="hint"> (also PM)</small>' : ''}</span>${team.length ? `<span class="pmo-role"><span class="lbl">Team</span>${team.map(av).join('')}</span>` : ''}</div>
-      ${j.program || fin.planned ? `<div class="pmo-hfin" data-hfin>${j.program ? `<span class="chip" data-program-chip>Program: ${esc(j.program)}</span>` : ''}${fin.planned ? `<span class="chip ${fin.forecast > fin.planned ? 'block' : ''}">Budget ${esc(money(fin.planned))} · forecast ${esc(money(fin.forecast))}</span>` : ''}</div>` : ''}
+      <div class="pmo-hfin" data-hfin>${j.program ? `<span class="chip" data-program-chip>Program: ${esc(j.program)}</span>` : ''}${costHTML(j)}</div>
       ${s.total ? `<div class="pmo-hev" data-hev><span class="lbl">Earned value</span>${evChips(earnedValue(j))}</div>` : ''}</div>
     <div class="hdr-side"><div class="kpis">
       <div class="kpi"><b>${s.pct}%</b><span>${s.done}/${s.total} work done</span><div class="bar pmo-kbar"><i style="width:${s.pct}%"></i></div></div>
-      <div class="kpi"><b style="color:${s.late ? 'var(--late)' : 'inherit'}">${s.late}</b><span>Late</span></div>
-      <div class="kpi"><b style="color:${s.slip ? 'var(--late)' : 'inherit'}">${s.slip}</b><span>Running late</span></div>
+      <div class="kpi"><b style="color:${s.late ? 'var(--late)' : 'inherit'}" data-t="late">${s.late}</b><span>Late</span></div>
+      <div class="kpi"><b style="color:${s.slip ? 'var(--late)' : 'inherit'}" data-t="running">${s.slip}</b><span>Running late</span></div>
+      <div class="kpi"><b style="color:${T.blockers.length ? 'var(--late)' : 'inherit'}" data-t="blockers">${T.blockers.length}</b><span>Blocking</span></div>
       ${finishKpi}</div></div></section>
     <div class="pmo-toolbar"><nav class="seg pmo-tabs" role="tablist" aria-label="Project views">${tab('map', 'Plan')}${tab('timeline', 'Timeline')}${tab('board', 'Board')}${tab('sprints', 'Sprints')}${tab('work', 'Work')}</nav>
-      <div class="pmo-actions"><button class="btn sm primary" data-report>Status report</button>${isOwner ? `<button class="btn sm" data-settings>Settings</button><button class="btn sm" data-link-proc>Link a process</button><button class="btn sm" data-suggest title="Propose tasks for new and changed steps and for information that isn’t connected">✦ Suggest a plan</button><button class="btn sm" data-baseline>Save plan</button>` : ''}
+      <div class="pmo-actions"><button class="btn sm primary" data-report>Status report</button>${isOwner ? `<button class="btn sm" data-settings>Settings</button><button class="btn sm" data-link-proc>Link a process</button><button class="btn sm" data-suggest title="Propose tasks for new and changed steps and for information that isn’t available yet">✦ Suggest a plan</button><button class="btn sm" data-baseline>Save plan</button>` : ''}
       <a class="btn sm" href="${link('/release/' + encodeURIComponent(prj))}" data-link>Launch ›</a><a class="btn sm" href="${link('/testing/' + encodeURIComponent(prj))}" data-link>Testing ›</a></div></div>`;
   const fbar = FILTER_MODES.includes(mode) && all.length ? filterBarHTML(j, f, mode, list.length, all.length, view) : '';
   const main = mode === 'timeline' ? `<section class="pmo-main">${fbar}${timelineHTML(j, fcT, list, D, sc)}</section>`
@@ -1706,14 +1756,14 @@ const simpleLegend = () => `<details class="card" data-legend><summary><h3>What 
   <div><span class="chip block" style="padding:1px 6px">${LOCK}</span> Waiting on information</div>
   <div><span class="chip diff-new">NEW</span> New step</div></div></details>`;
 function simpleRender(j, mode, fc, params) {
-  const prj = j.id, s = projectStats(prj), sm = summaryOf(j, fc), rm = relMgr(j), pm = isPM(j);
+  const prj = j.id, s = projectStats(prj), sm = summaryOf(j), rm = relMgr(j), pm = isPM(j), T = truthOf(j);
   const tab = (k, l) => `<a href="${link(prjURL(prj, k))}" data-link data-tab="${k}" class="${mode === k ? 'on' : ''}" role="tab" aria-selected="${mode === k}">${l}</a>`;
   const gapSteps = (j.processes || []).length && s.total === 0;
   const hdr = `<section class="hdr pmo-shdr"><div>
-      <div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Project</div>
+      <div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/projects')}" data-link>Projects</a> › Project</div>
       <h1>${esc(j.name)}</h1>
       ${summaryHTML(sm, 'pmo-sum-big')}
-      <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}<span>Deadline <b>${esc(fmt(j.target))}</b></span><span>Project manager <b>${esc(pname(j.owner))}</b></span>${rm !== j.owner ? `<span>Launch owner <b>${esc(pname(rm))}</b></span>` : ''}</div></div></section>
+      <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}${factsHTML(j)}<span>Deadline <b>${esc(fmt(j.target))}</b></span><span>Project manager <b>${esc(pname(j.owner))}</b></span>${rm !== j.owner ? `<span>Launch owner <b>${esc(pname(rm))}</b></span>` : ''}</div></div></section>
     ${blockingHTML(j, fc)}
     <div class="pmo-toolbar"><nav class="seg pmo-tabs pmo-tabs-big" role="tablist" aria-label="Project views">${tab('map', 'Plan')}${tab('timeline', 'Timeline')}${tab('work', 'Work')}</nav>
       <div class="pmo-actions">${pm && gapSteps ? '<button class="btn primary" data-suggest>✦ Suggest a plan</button>' : ''}<button class="btn" data-report>Status report</button>${pm ? '<button class="btn" data-settings>Settings</button>' : ''}<a class="btn" href="${link('/release/' + encodeURIComponent(prj))}" data-link>Launch ›</a><a class="btn" href="${link('/testing/' + encodeURIComponent(prj))}" data-link>Testing ›</a></div></div>`;
@@ -1722,7 +1772,7 @@ function simpleRender(j, mode, fc, params) {
     : `<section class="canvas pm" id="canvas">${mapHTML(j)}</section>`;
   const side = mode === 'map' ? myTasksHTML(j, fc) + simpleUpNext(j, fc) + launchHTML(j) + simpleLegend()
     : mode === 'timeline' ? myTasksHTML(j, fc) + simpleUpNext(j, fc) : launchHTML(j);
-  return hdr + conflictHTML(j) + reportPanelHTML(j, rag(j, s)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${activityToggle(j)}</aside></div>`;
+  return hdr + conflictHTML(j) + reportPanelHTML(j, rag(j)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${activityToggle(j)}</aside></div>`;
 }
 
 /* ---------------------------------------------------------------- actions */
@@ -1797,7 +1847,9 @@ async function editWork(j, w, err) {
   const isNew = !w || !w.id;
   if (!isNew && !canEditWork(store.get('workItem', w.id) || w, j)) { toast(lockTitle(w, j)); return; }
   const prev = isNew ? null : (store.get('workItem', w.id) || w);
-  w = Object.assign({ title: '', owner: store.state.me, status: 'idle', kind: 'build', start: today(), due: addDays(today(), 7), deps: [], effortDays: 1 }, w || {});
+  /* default dates on business days (R8: no weekend due dates, defects included) */
+  const s0 = isWeekend(today()) ? addBiz(today(), 1) : today();
+  w = Object.assign({ title: '', owner: store.state.me, status: 'idle', kind: 'build', start: s0, due: addBiz(s0, 4), deps: [], effortDays: 1 }, w || {});
   if (!w.pid && (j.processes || []).length) { const p = store.get('process', j.processes[0]); const s0 = p && flatSteps(p.tobe)[0]; if (s0) { w.pid = p.id; w.step = s0.id; } }
   const blocked = new Set(w.id ? [w.id, ...(eng('dependents', [], docs(), w.id) || [])] : []); /* cycle guard */
   const others = projectItems(j.id).filter(x => !blocked.has(x.id));
@@ -1904,7 +1956,26 @@ async function setStatus(j, id, statusKey) {
   if (!canEditWork(w, j)) { toast(lockTitle(w, j)); rerender(); return; }
   const next = applyDone(w, Object.assign({}, w, { status: st.maps, statusId: st.id, updatedAt: stamp() }));
   await psave('workItem', id, next, `“${w.title}”: ${prevSt.name} → ${st.name}${st.maps === 'done' && w.status !== 'done' ? ' (finished ' + fmt(next.doneAt) + ')' : ''}`);
-  toast(`Marked ${st.name.toLowerCase()}`);
+  if (st.maps === 'done' && w.status !== 'done') undoToast(`Done: “${w.title}”`, () => undoDone(j, w));
+  else toast(`Marked ${st.name.toLowerCase()}`);
+}
+/* R8 §7: "Mark done" can be undone for a few seconds. Undo puts back the previous status and done date exactly. */
+async function undoDone(j, prev) {
+  const cur = store.get('workItem', prev.id); if (!cur) return;
+  const back = Object.assign({}, cur, { status: prev.status, updatedAt: stamp() });
+  ['statusId', 'doneAt'].forEach(k => { if (prev[k] != null) back[k] = prev[k]; else delete back[k]; });
+  await psave('workItem', prev.id, back, `Undid “done” on “${prev.title}”: back to ${statusName(prev, j)}`);
+  toast(`Back to ${statusName(prev, j).toLowerCase()}`);
+}
+export function undoToast(text, onUndo, ms) {
+  document.querySelectorAll('.toast').forEach(x => x.remove());
+  const t = document.createElement('div'); t.className = 'toast pmo-undo-toast'; t.setAttribute('role', 'status'); t.dataset.undoToast = '1';
+  t.innerHTML = `<span>${esc(text)}</span><button type="button" class="pmo-undo" data-undo>Undo</button>`;
+  let used = false;
+  const kill = setTimeout(() => t.remove(), ms || 7000);
+  t.querySelector('[data-undo]').addEventListener('click', async () => { if (used) return; used = true; clearTimeout(kill); t.remove(); await onUndo(); });
+  document.body.appendChild(t);
+  return t;
 }
 async function linkProcess(j) {
   if (!isPM(j)) { toast(pmOnly(j, 'link processes')); return; }
@@ -2003,11 +2074,11 @@ function suggestBody(j, items, meta, ro, err) {
   };
   const ai = String(meta.source).toLowerCase() === 'ai';
   return `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ AI' : 'Rules'}</span><span class="hint">${ai ? 'Generated by AI from the project facts. Review before adding.' : 'One item per new or changed step or gateway without work, plus a resolver for each data element without a live source. In map order.'}</span></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ AI' : 'Rules'}</span><span class="hint">${ai ? 'Generated by AI from the project facts. Review before adding.' : 'One task per new or changed step without work, plus one for each piece of information that isn’t available yet. In map order.'}</span></div>
     ${meta.note ? `<div class="note">${esc(meta.note)}</div>` : ''}
     ${ro ? `<div class="banner pmo-ro-note" style="margin:0">Only <b>${esc(pname(j.owner))}</b> (project manager) can create work from suggestions. Switch “Viewing as” to ${esc(pname(j.owner).split(' ')[0])} to create them.</div>` : ''}
     ${(() => { const st = minDate(items.map(x => x.start)), en = maxDate(items.map(x => x.due)), now = items.filter(x => !(x.deps || []).length).length;
-      return `<div class="pmo-sg-sum" data-sg-spread><span>Spread <b>${esc(fmt(st))} → ${esc(fmt(en))}</b></span><span>target <b>${esc(fmt(j.target))}</b>${en && j.target ? (en <= j.target ? ` · ${dayDiff(j.target, en)}d buffer` : ` · <span class="fail">${dayDiff(en, j.target)}d past target</span>`) : ''}</span><span><b>${now}</b> can start now</span><span><b>${items.reduce((a, x) => a + (x.deps || []).length, 0)}</b> dependencies</span></div>`; })()}
+      return `<div class="pmo-sg-sum" data-sg-spread><span>Spread <b>${esc(fmt(st))} → ${esc(fmt(en))}</b></span><span>deadline <b>${esc(fmt(j.target))}</b>${en && j.target ? (en <= j.target ? ` · ${plural(bizDays(addDays(en, 1), j.target), 'business day')} to spare` : ` · <span class="fail">${plural(bizDays(addDays(j.target, 1), en), 'business day')} past the deadline</span>`) : ''}</span><span><b>${now}</b> can start now</span><span><b>${items.reduce((a, x) => a + (x.deps || []).length, 0)}</b> dependencies</span></div>`; })()}
     <div class="pmo-sg-list">${items.map(row).join('')}</div>
     <div class="hint">Dates are business days (weekends skipped), spread from today toward the target ${esc(fmt(j.target))}. Each step’s work follows the previous step’s work in map order (finish → start) and waits for the resolvers of its data; items with nothing before them start today. Change a start date and the due date moves with it.</div>`;
 }
@@ -2025,7 +2096,7 @@ function hasCycle(items, picked) {
 async function fetchSuggestions(j) {
   let list = [], source = 'rules', note = '';
   try {
-    const r = await store.api('/ai/suggest-work', { projectId: j.id });
+    const r = await store.api('/ai/suggest-work', { projectId: j.id, today: today() });
     list = Array.isArray(r) ? r : (r && (r.items || r.suggestions || r.work)) || [];
     source = (r && r.source) || 'rules';
   } catch (e) {
@@ -2034,21 +2105,15 @@ async function fetchSuggestions(j) {
   }
   return { list: list.filter(x => x && x.title), source, note };
 }
+/* R8 §3: one plan screen everywhere. "Suggest a plan" and a new project both open the same card. */
 async function suggestWork(j, btn) {
   const label = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="pmo-spin sm"></span> Thinking…'; }
-  let { list, source, note } = await fetchSuggestions(j);
-  if (btn) { btn.disabled = false; btn.textContent = label; }
-  const ai = String(source).toLowerCase() === 'ai';
-  if (!list.length) {
-    await modal({ title: 'Suggested tasks', body: `<div><span class="pmo-src ${ai ? 'ai' : ''}">${ai ? '✦ AI' : 'Rules'}</span></div><p style="margin:0">Nothing to suggest. Every new or changed step already has a task, and all information that isn’t connected has a fix planned.</p>`, actions: [{ id: 'ok', label: 'OK', primary: true }] });
-    return;
-  }
-  return suggestModal(j, normalizeSuggestions(j, list), { source, note });
+  try { await planCard(j); } finally { if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; } }
 }
 async function suggestModal(j, items, meta, err) {
   const ro = store.state.me !== j.owner;
-  const pending = modal({ title: 'Suggested tasks from what changed', body: suggestBody(j, items, meta, ro, err), actions: ro ? [] : [{ id: 'create', label: 'Create selected', primary: true }] });
+  const pending = modal({ title: 'Adjust the plan', body: suggestBody(j, items, meta, ro, err), actions: ro ? [] : [{ id: 'create', label: 'Create selected', primary: true }] });
   const ov = [...document.querySelectorAll('.overlay')].pop();
   if (ov) {
     ov.querySelector('.modal').classList.add('pmo-wide');
@@ -2100,13 +2165,26 @@ let autoPlan = null;
 let flashed = null;
 async function firstPlan(j) {
   if (!j || !isPM(j) || !(j.processes || []).length || projectItems(j.id).length) return;
+  return planCard(j);
+}
+/* "Here's a first plan: N tasks. Accept · Adjust". Tasks only for changed or new steps and for information that's
+   Not available yet (engine suggestWorkFromDiff). Adjust opens the detailed editor. Only the PM can accept. */
+async function planCard(j) {
   const { list, source, note } = await fetchSuggestions(j);
-  if (!list.length) { toast('Nothing to plan yet: the linked process has no new or changed steps.'); return; }
+  const has = projectItems(j.id).length > 0, pm = isPM(j);
+  if (!list.length) {
+    await modal({ title: has ? 'Nothing new to plan' : 'Nothing to plan yet', body: `<p style="margin:0" data-plan-none>${has ? 'Every new or changed step already has a task, and everything that isn’t available yet has a task to get it.' : 'The linked process has no new or changed steps, and no information is marked “Not available yet”. Change the future version of the process first.'}</p>`, actions: [{ id: 'ok', label: 'OK', primary: true }] });
+    return;
+  }
   const items = normalizeSuggestions(j, list);
   const end = maxDate(items.map(x => x.due));
-  const r = await modal({ title: 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">Here’s a first plan: <b>${items.length} task${items.length === 1 ? '' : 's'}</b>, done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).</p>
-    <ol class="pmo-fp">${items.slice(0, 8).map(x => `<li><b>${esc(x.title)}</b><span class="hint">${esc(pname(x.owner))} · ${esc(fmt(x.start))} – ${esc(fmt(x.due))}</span></li>`).join('')}</ol>${items.length > 8 ? `<div class="hint">+${items.length - 8} more</div>` : ''}
-    <div class="hint">Accept adds them all. Adjust lets you change names, people and dates first.</div>`, actions: [{ id: 'adjust', label: 'Adjust' }, { id: 'accept', label: 'Accept', primary: true }] });
+  const people = [...new Set(items.map(x => x.owner))];
+  const r = await modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b> for ${plural(people.length, 'person', 'people')}, done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).</p>
+    <ol class="pmo-fp">${items.slice(0, 8).map(x => `<li data-fp-item><b>${esc(x.title)}</b><span class="hint">${esc(pname(x.owner))} · ${esc(fmt(x.start))} – ${esc(fmt(x.due))}</span></li>`).join('')}</ol>${items.length > 8 ? `<div class="hint">+${items.length - 8} more</div>` : ''}
+    <div class="hint">Only steps that change, and information you don’t have yet, get a task.${pm ? ' Accept adds them all. Adjust lets you change names, people and dates first.' : ''}</div>
+    ${pm ? '' : `<div class="banner pmo-ro-note" style="margin:0">Only <b>${esc(pname(j.owner))}</b> (project manager) can add this plan.</div>`}`,
+    actions: pm ? [{ id: 'adjust', label: 'Adjust' }, { id: 'accept', label: 'Accept', primary: true }] : [] });
+  if (!pm) return;
   const all = new Set(items.map((x, i) => i));
   if (r.action === 'accept') { if (hasCycle(items, all)) return suggestModal(j, items, { source, note }, 'Some tasks wait for each other in a loop. Untick one of the “After” links.'); return createSuggestions(j, items, all, { source }); }
   if (r.action === 'adjust') return suggestModal(j, items, { source, note });
@@ -2295,10 +2373,20 @@ function levelPlan(j) {
   const moves = list.map(([id, v]) => ({ w: store.get('workItem', id), start: v.start || (v.to && v.to.start), due: v.due || (v.to && v.to.due) }))
     .filter(x => x.w && x.w.projectId === j.id && x.w.status !== 'done' && x.start && x.due && (x.start !== x.w.start || x.due !== x.w.due))
     .sort((a, b) => String(a.start).localeCompare(String(b.start)));
-  const ov = arr => (Array.isArray(arr) ? arr : []).map(o => ({ person: o.person || o.personId || o.owner, week: o.week || o.weekStart || o.start, load: Number(o.load != null ? o.load : o.effort != null ? o.effort : o.days), cap: Number(o.cap != null ? o.cap : o.capacity) })).filter(o => o.person);
+  const ov = arr => (Array.isArray(arr) ? arr : []).map(o => ({ person: o.person || o.personId || o.owner, week: o.week || o.weekStart || o.start, load: Number(o.load != null ? o.load : o.effort != null ? o.effort : o.days), cap: Number(o.cap != null ? o.cap : o.capacity), why: o.why || o.reason || o.explain || '' })).filter(o => o.person);
   return { moves, before: ov(r.before || r.overloadsBefore || r.overloads), after: ov(r.after || r.overloadsAfter || r.remaining), notes: (Array.isArray(r.notes) ? r.notes : r.note ? [r.note] : []).map(reasonText).filter(Boolean) };
 }
 const ovLine = o => `${esc(pname(o.person))}${o.week ? ` · week of ${esc(fmt(o.week))}` : ''}${isFinite(o.load) ? `: ${esc(fmtEffort(o.load))}${isFinite(o.cap) ? ` / ${esc(fmtEffort(o.cap))}` : ''}` : ''}`;
+/* R8: say why leveling couldn't fix an overload, and what a person can do about it. Engine reasons first. */
+function unresolvedWhy(j, after) {
+  const why = after.map(o => o.why || o.reason).filter(Boolean);
+  if (why.length) return why.map(reasonText).join(' ');
+  const who = [...new Set(after.map(o => o.person))];
+  const fixed = after.every(o => projectItems(j.id).filter(w => w.owner === o.person && w.status !== 'done').every(w => !w.start || w.start <= today()));
+  return `${who.map(pname).join(', ')} still ${who.length === 1 ? 'has' : 'have'} more work than time in ${after.length === 1 ? 'that week' : 'those weeks'}. `
+    + (fixed ? 'Their tasks have already started, so they can’t be moved later. ' : 'Moving their tasks any later would break a dependency or push past the deadline. ')
+    + 'Give some of the work to someone else, or raise their capacity in Portfolio › Workload.';
+}
 async function levelResources(j) {
   const plan = levelPlan(j);
   const pm = isPM(j);
@@ -2311,6 +2399,7 @@ async function levelResources(j) {
     ${pm ? '' : `<div class="banner pmo-ro-note" style="margin:0">${esc(pmOnly(j, 'apply leveling'))}.</div>`}
     <div class="pmo-lv-cmp" data-lv-compare><div><h4>Overloads now <span class="n" data-lv-before>${before.length}</span></h4>${ovList(before, 'before')}</div><div><h4>After leveling <span class="n" data-lv-after>${after.length}</span></h4>${ovList(after, 'after')}</div></div>
     ${plan.notes.length ? `<div class="hint">${plan.notes.map(esc).join(' · ')}</div>` : ''}
+    ${after.length ? `<div class="note pmo-lv-why" data-lv-why><b>Why ${after.length === 1 ? 'one overload is' : after.length + ' overloads are'} left:</b> ${esc(unresolvedWhy(j, after))}</div>` : ''}
     ${moves.length ? `<div class="tbl-wrap"><table class="pmo-astable" data-lv-table><thead><tr><th>Work item</th><th>Before</th><th>After</th><th>Shift</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p style="margin:0" data-lv-none>${before.length ? 'No shift inside the plan removes these overloads. Consider reassigning work or raising capacity.' : 'Nobody is over capacity, so nothing needs to move.'}</p>`}`;
   const pending = modal({ title: `Level resources${moves.length ? `: ${moves.length} shift${moves.length === 1 ? '' : 's'}` : ''}`, body, actions: pm && moves.length ? [{ id: 'apply', label: `Apply ${moves.length} shift${moves.length === 1 ? '' : 's'}`, primary: true }] : [] });
   const ov = [...document.querySelectorAll('.overlay')].pop(); if (ov) ov.querySelector('.modal').classList.add('pmo-wide');
@@ -2371,8 +2460,8 @@ export function workCSVRows(j, list) {
   const head = ['ID', 'Title', 'Process', 'Step', 'Owner', 'Status', 'Kind', 'Start', 'Due', 'Forecast', 'Schedule', 'Done on', 'Effort (days)', 'Hours logged', 'Resolves', 'Depends on', ...flds.map(f => f.label)];
   const rows = (list || projectItems(j.id)).slice().sort((a, b) => String(a.due).localeCompare(String(b.due))).map(w => {
     const f = fc[w.id] || {};
-    return [w.id, w.title, procName(w.pid), stepTitle(w.pid, w.step), pname(w.owner), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? (w.doneAt || w.due) : (f.forecast || w.due || ''),
-      (BADGE[schedKey(w, fc)] || BADGE.ok)[1], w.doneAt || '', effortOf(w), Math.round(hoursOf(w) * 100) / 100, w.resolves ? dataName(w.resolves) : '',
+    return [w.id, w.title, procName(w.pid), stepTitle(w.pid, w.step), pname(w.owner), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? doneDate(w) : (f.forecast || w.due || ''),
+      (BADGE[schedKey(w, fc)] || BADGE.ok)[1], w.doneAt ? doneDate(w) : '', effortOf(w), Math.round(hoursOf(w) * 100) / 100, w.resolves ? dataName(w.resolves) : '',
       (w.deps || []).map(d => (store.get('workItem', depId(d)) || {}).title).filter(Boolean).join('; '), ...flds.map(fd => fieldVal(w, fd))];
   });
   return [head, ...rows];

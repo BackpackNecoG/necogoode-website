@@ -136,6 +136,13 @@ function grantExpiryError(g, prev) {
   return null;
 }
 
+const RATE_LIMIT_MSG = 'Too many new demo sandboxes from your network today. Try again tomorrow.';
+/* the client's today: body.today on writes, ?today= on reads */
+function dayInput(req, body) {
+  if (body && typeof body.today === 'string') return body;
+  const q = (req && req.query) || {};
+  return typeof q.today === 'string' ? { today: q.today } : body;
+}
 function clientToday(body, serverToday) {
   const t = body && typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : null;
   if (!t || !isFinite(Date.parse(t + 'T12:00:00Z')) || new Date(t + 'T12:00:00Z').toISOString().slice(0, 10) !== t) return serverToday;   /* rejects 2026-02-30 */
@@ -270,7 +277,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
     const pipe = pipelineAction('golive', projectId, relId, plan);
     pipe.status = 'simulated-failed';
     pipe.detail += '\n\nRun result: failed at step "deploy automation" (simulated). Nothing was promoted, published or expired.';
-    const release = { id: relId, kind: 'golive', status: 'failed', projectId, at, by: actor, approvers, stepUp, actions: [pipe,
+    const release = { id: relId, kind: 'golive', status: 'failed', projectId, at, date: today, by: actor, approvers, stepUp, actions: [pipe,
       { type: 'notify', target: pn(rm), status: 'simulated-ok', detail: `Pipeline failure notice for ${project.name} sent to the release manager only.` }],
       exceptions: [], checks: JSON.parse(JSON.stringify(gate.checks)), snapshot: {} };
     /* 3. the one failure event */
@@ -305,7 +312,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
     ev('release', 'process:' + p.id, `Released ${p.name} v${version}: to-be promoted to as-is (v${prevVersion} kept in history)`);
   }
   const liveAt = tick();
-  const proj = Object.assign({}, project, { status: 'live', liveAt });
+  const proj = Object.assign({}, project, { status: 'live', liveAt, liveDate: today });
   await store.putDoc(wsId, 'project', projectId, proj);
   log.push({ actor, at: liveAt, action: 'golive', ref: 'project:' + projectId, summary: `${project.name} went live` });
   /* 5. SOP publish */
@@ -325,7 +332,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
   /* R4: go-live never flips data to live; only the data owner's confirmation (liveConfirmedBy + liveSource) does */
   const team = (project.resources || []).map(pn).join(', ');
   const release = {
-    id: relId, kind: 'golive', status: 'succeeded', projectId, at, by: actor, approvers, stepUp,
+    id: relId, kind: 'golive', status: 'succeeded', projectId, at, date: today, by: actor, approvers, stepUp,
     actions: [pipelineAction('golive', projectId, relId, snapshot),
       ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
@@ -341,7 +348,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
   return { status: 200, body: { ok: true, release, project: proj } };
 }
 
-async function rollback(wsId, docs, project, actor, body) {
+async function rollback(wsId, docs, project, actor, body, today) {
   const projectId = project.id;
   if (project.status !== 'live') return { status: 409, body: { error: 'only a live project can be rolled back', reasons: ['Project status is ' + (project.status || 'active') + '.'] } };
   const reason = String((body && body.reason) || '').slice(0, 500);
@@ -378,7 +385,7 @@ async function rollback(wsId, docs, project, actor, body) {
     const pipe = pipelineAction('rollback', projectId, relId, target);
     pipe.status = 'simulated-failed';
     pipe.detail += '\n\nRun result: failed at step "restore previous version" (simulated). Nothing was restored or re-published.';
-    const release = { id: relId, kind: 'rollback', status: 'failed', projectId, at, by: actor, approvers: [], stepUp, reason,
+    const release = { id: relId, kind: 'rollback', status: 'failed', projectId, at, date: today, by: actor, approvers: [], stepUp, reason,
       actions: [pipe, { type: 'notify', target: pn(rm), status: 'simulated-ok', detail: `Rollback failure notice for ${project.name} sent to the release manager only.` }],
       exceptions: [], snapshot: {}, undone: [], undoes: undoes ? undoes.id : null };
     ev('rollback-failed', 'project:' + projectId, `Rollback pipeline failed for ${project.name} (simulated); nothing was restored, the release stays live`);
@@ -425,7 +432,7 @@ async function rollback(wsId, docs, project, actor, body) {
   const owner = project.cutover && project.cutover.rollbackOwner;
   const team = (project.resources || []).map(pn).join(', ');
   const release = {
-    id: relId, kind: 'rollback', projectId, at, by: actor, approvers: [], stepUp,
+    id: relId, kind: 'rollback', projectId, at, date: today, by: actor, approvers: [], stepUp,
     actions: [pipelineAction('rollback', projectId, relId, snapshot),
       ...procDocs.filter(pd => snapshot[pd.id]).map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Re-published v${snapshot[pd.id]} of ${pd.data.name} as the controlled SOP; v${snapshot[pd.id] + 1} was withdrawn.` })),
@@ -460,10 +467,12 @@ module.exports = async function (context, req) {
     if (seg[0] === 'workspaces' && seg.length === 1) {
       if (method !== 'POST') return fail(405, 'method not allowed');
       try {
-        const ws = await store.createWorkspace(clientIpHash(req));
+        /* R8 §2: the demo is dated from the visitor's own today (within 2 days of the server's UTC date) */
+        const ws = await store.createWorkspace(clientIpHash(req), { seedDate: clientToday(dayInput(req, body), new Date().toISOString().slice(0, 10)) });
         return send(201, { id: ws.id });
       } catch (e) {
-        if (e.status === 429) return fail(429, 'Daily workspace limit reached. Try again tomorrow.');
+        /* R8 §8: one plain message, nothing else */
+        if (e.status === 429) return send(429, { error: RATE_LIMIT_MSG });
         throw e;
       }
     }
@@ -476,12 +485,14 @@ module.exports = async function (context, req) {
     const action = seg[2];
     const isWrite = method !== 'GET';
     if (isWrite && rateLimited(wsId)) return fail(429, 'Too many writes. Slow down.');
-    const today = new Date().toISOString().slice(0, 10);
+    const serverToday = new Date().toISOString().slice(0, 10);
+    /* R8 §2: "today" is the client's local date (body.today, or ?today= on GET), accepted within 2 days of the server's UTC date */
+    const today = clientToday(dayInput(req, body), serverToday);
 
     /* GET /ws/:ws/state */
     if (action === 'state' && seg.length === 3) {
       if (method !== 'GET') return fail(405, 'method not allowed');
-      return send(200, await store.getState(ws));
+      return send(200, await store.getState(ws, today));
     }
 
     /* GET /ws/:ws/events */
@@ -523,6 +534,8 @@ module.exports = async function (context, req) {
         /* R5: cutover edits are stamped so approvals taken before them go stale */
         if (type === 'project' && cutoverStructureChanged(prev && prev.data.cutover, data.cutover) &&
           (!data.cutoverUpdatedAt || (prev && prev.data.cutoverUpdatedAt === data.cutoverUpdatedAt))) data.cutoverUpdatedAt = new Date().toISOString();
+        /* R8 §2: an approval decision is dated with the approver's own today (the timestamp stays ISO) */
+        if (type === 'approval' && data.decision && (!data.date || !(prev && prev.data.decision === data.decision))) data.date = today;
         /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
@@ -551,7 +564,7 @@ module.exports = async function (context, req) {
 
     /* POST /ws/:ws/reset */
     if (action === 'reset' && seg.length === 3) {
-      const w = await store.resetWorkspace(ws);
+      const w = await store.resetWorkspace(ws, today);
       await store.appendEvent(wsId, { actor: actorOf(body), action: 'reset', ref: 'workspace:' + wsId, summary: 'Workspace reset to the demo seed' });
       return send(200, { ok: true, id: w.id });
     }
@@ -601,7 +614,7 @@ module.exports = async function (context, req) {
       if (!ai.KINDS.includes(kind)) return fail(400, 'unknown ai kind');
       const st = await store.getState(ws);
       /* R7: reports are dated with the client's own today (no server/local skew); only a date within 2 days of the server is accepted */
-      const r = await ai.run(kind, body, st.docs, clientToday(body, today));
+      const r = await ai.run(kind, body, st.docs, today);
       return send(r.status, r.body);
     }
 
@@ -640,7 +653,7 @@ module.exports = async function (context, req) {
       if (actorOf(body) !== rm) return fail(403, `Only the release manager (${personName(st.docs, rm)}) can ${action === 'golive' ? 'take' : 'roll back'} ${project.name}${action === 'golive' ? ' live' : ''}.`);
       const r = action === 'golive'
         ? await goLive(wsId, st.docs, project, actorOf(body), today, body.simulateFailure === true, body)
-        : await rollback(wsId, st.docs, project, actorOf(body), body);
+        : await rollback(wsId, st.docs, project, actorOf(body), body, today);
       return send(r.status, r.body);
     }
 
@@ -651,4 +664,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };
+module.exports._internal = { RATE_LIMIT_MSG, dayInput, clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };

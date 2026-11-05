@@ -3,7 +3,7 @@
    three big choices, then projects and processes (each labelled, one plain sentence each). */
 import { store } from '../store.js';
 import { esc, fmt, fmtTime, link, go, av, pname, toast, stepUp, addDays, LOCK } from '../ui.js';
-import { eng, docs, today, forecasts, flatSteps, projectStats, rerender, newProject, relMgr, schedKey, summaryOf, summaryHTML, whoActs, markDone, availText, diffCounts } from './project.js';
+import { eng, docs, today, forecasts, flatSteps, projectStats, rerender, newProject, relMgr, schedKey, summaryOf, summaryHTML, whoActs, markDone, availText, diffCounts, factsHTML } from './project.js';
 
 const PRJ_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M7 13h4M7 17h7"/></svg>';
 const PROC_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="5" rx="1.5"/><rect x="7" y="17" width="10" height="5" rx="1.5"/><path d="M12 7v3M12 14v3"/><path d="M12 10l3 2-3 2-3-2z"/></svg>';
@@ -44,10 +44,20 @@ function refPath(ref) {
   return null;
 }
 
+/* R8 §5: is this business unit's part ready for approval? E().buReady(...) decides; "waiting on" says what's missing. */
+export function buReadiness(p, bu) {
+  let r = eng('buReady', undefined, docs(), p.id, bu, today());
+  if (r === undefined) return { ready: true, waiting: [] }; /* engine without buReady: keep the R7 behaviour */
+  if (typeof r === 'boolean') return { ready: r, waiting: [] };
+  r = r || {};
+  const list = [].concat(r.waiting || r.waitingOn || r.missing || r.blockers || r.reasons || []).map(x => typeof x === 'string' ? x : (x && (x.text || x.label || x.title || x.name)) || '').filter(Boolean);
+  return { ready: !!(r.ready != null ? r.ready : r.ok != null ? r.ok : !list.length), waiting: list };
+}
 export function waitingFor() {
   const me = store.state.me, fc = forecasts(), soon = addDays(today(), 7);
   const projects = store.list('project');
-  const approve = projects.flatMap(p => pendingSections(p).filter(x => canApprovePart(p, x.bu)).map(x => ({ p, bu: x.bu, stale: x.stale })));
+  const parts = projects.flatMap(p => pendingSections(p).filter(x => canApprovePart(p, x.bu)).map(x => Object.assign({ p, bu: x.bu, stale: x.stale }, buReadiness(p, x.bu))));
+  const approve = parts.filter(x => x.ready), notReady = parts.filter(x => !x.ready);
   const done = store.list('workItem', w => w.owner === me && w.status !== 'done' && (String(w.due) <= soon || ['late', 'slip', 'causing'].includes(schedKey(w, fc))))
     .filter(w => { const p = store.get('project', w.projectId); return p && p.status !== 'live'; })
     .sort((a, b) => String(a.due).localeCompare(String(b.due)));
@@ -56,7 +66,7 @@ export function waitingFor() {
   const grants = store.list('grant', g => g.status === 'requested' && grantApprover(g) === me);
   const grantIds = new Set(grants.map(g => 'grant:' + g.id));
   const mentions = store.list('notification', n => n.to === me && !n.read && !grantIds.has(n.ref)).sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  return { approve, done, confirm, grants, mentions, total: approve.length + done.length + confirm.length + grants.length + mentions.length };
+  return { approve, notReady, done, confirm, grants, mentions, total: approve.length + done.length + confirm.length + grants.length + mentions.length };
 }
 
 function waitHTML() {
@@ -67,6 +77,8 @@ function waitHTML() {
   const rows = [
     ...w.approve.map(({ p, bu, stale }) => row('approve', '✓', `Approve your part of <b>${esc(p.name)}</b>`, `${esc(bu)}${stale ? ' · something changed since you last approved' : ' · your team’s steps, information and tests on one page'}`,
       `<a class="btn primary pmo-big" data-approve-part="${esc(p.id)}" data-bu="${esc(bu)}" href="${link('/release/' + encodeURIComponent(p.id) + '?bu=' + encodeURIComponent(bu))}" data-link>Approve my part</a>`)),
+    ...w.notReady.map(({ p, bu, waiting }) => `<li class="pmo-wrow pmo-wrow-muted" data-wkind="notready" data-notready="${esc(p.id)}"><span class="pmo-wic pmo-wic-notready" aria-hidden="true">…</span>
+      <div class="pmo-wtxt"><div class="t">${esc(p.name)} · ${esc(bu)}</div><div class="s" data-notready-text>Your part isn’t ready yet: waiting on ${esc(waiting.length ? waiting.slice(0, 2).join(' and ') : 'your team’s tasks, information and tests')}.</div></div></li>`),
     ...w.done.map(x => { const f = fc[x.id] || {}, late = String(x.due) < today(), k = schedKey(x, fc);
       return row('done', '☐', `<a href="${link(`/project/${x.projectId}?mode=work&item=${x.id}`)}" data-link data-task-link="${esc(x.id)}">${esc(x.title)}</a>`,
         `${esc(pn(x.projectId))} · ${late ? `<b class="fail">was due ${esc(fmt(x.due))}</b>` : `due ${esc(fmt(x.due))}`}${k === 'causing' ? ' · <b class="fail">other tasks are waiting for it</b>' : ''}${!late && f.forecast && f.forecast > x.due ? ` · expected ${esc(fmt(f.forecast))}` : ''}`,
@@ -88,7 +100,7 @@ function bigCards() {
   const card = (attrs, ic, t, s) => `<${attrs.startsWith('href') ? 'a' : 'button type="button"'} class="pmo-big3-c" ${attrs}><span class="pmo-big3-ic" aria-hidden="true">${ic}</span><span class="t">${t}</span><span class="s">${s}</span></${attrs.startsWith('href') ? 'a' : 'button'}>`;
   return `<section class="pmo-big3" data-big3 aria-label="What would you like to do?">
     ${card(`href="${link('/import')}" data-link data-big="import"`, PASTE_IC, 'Paste a procedure you already have', 'The fastest way: paste the text and we turn it into a process map.')}
-    ${card('data-big="check"', PRJ_IC, 'Check on a project', 'See in one sentence if it’s on track, and what’s holding it up.')}
+    ${card(`href="${link('/projects')}" data-link data-big="check"`, PRJ_IC, 'Check on a project', 'See in one sentence if it’s on track, and what’s holding it up.')}
     ${card(`href="${link('/new')}" data-link data-big="map"`, PROC_IC, 'Map a process from scratch', 'Add the steps one at a time. We guide you as you go.')}</section>`;
 }
 
@@ -101,6 +113,7 @@ function projectTile(j) {
     <h4>${esc(j.name)}</h4>
     ${summaryHTML(sm)}
     ${s.total ? `<div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done</span></div>` : ''}
+    <div class="pmo-sline pmo-tfacts" data-tile-facts>${factsHTML(j, { cost: store.advanced })}</div>
     ${who.length ? `<div class="pmo-who" data-who>${who.map(x => `<span class="pmo-who-r">${av(x.person)}<span><b>${esc(pname(x.person))}</b>${x.action ? ': ' + esc(x.action) : ''}</span></span>`).join('')}</div>` : ''}</a>`;
 }
 function processTile(p) {
@@ -156,19 +169,13 @@ export function bind(root) {
   on('[data-new-project]', () => newProject());
   on('[data-wdone]', async el => {
     el.disabled = true;
-    const w = store.get('workItem', el.dataset.wdone);
-    await markDone(el.dataset.wdone);
-    if (w) toast(`Done: “${w.title}”`);
+    await markDone(el.dataset.wdone); /* shows "Done · Undo" */
   });
   on('[data-grant-ok]', el => decideGrant(el.dataset.grantOk, true));
   on('[data-grant-no]', el => decideGrant(el.dataset.grantNo, false));
   on('[data-note-seen]', el => { el.disabled = true; readNote(el.dataset.noteSeen); });
   on('[data-note-open]', async el => { const n = await readNote(el.dataset.noteOpen); const p = n && refPath(n.ref); if (p) go(p); });
-  on('[data-big="check"]', () => {
-    const el = root.querySelector('#home-projects'); if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    const first = root.querySelector('[data-ptile]'); if (first) first.focus({ preventScroll: true });
-  });
+  on('[data-big="check"]', () => go('/projects'));
 }
 
 /* Kept for other pages and older tests: business units still to approve a project (now from the engine's sign-off check). */

@@ -1,7 +1,10 @@
 /* Release page (stream R): readiness gate, BU sign-off, project-scoped access grants, go-live + release history.
    Route: /release/:prj */
 import { store } from '../store.js';
-import { E, esc, fmt, fmtTime, days, addDays, link, go, av, pname, badge, chip, modal, toast, commentsPanel, bindActivity, formValues } from '../ui.js';
+import { E, esc, fmt as fmtDay, fmtTime, days, addDays, link, go, av, pname, badge, chip, modal, toast, commentsPanel, bindActivity, formValues } from '../ui.js';
+
+/* R8: timestamps (ISO with a time) render as the browser's LOCAL calendar date; plain YYYY-MM-DD dates stay as they are. */
+const fmt = s => s && /T\d/.test(String(s)) && !isNaN(new Date(s)) ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : fmtDay(s);
 
 /* Module state survives the router's full re-render on every store change. */
 const ui = { open: new Set(), lastRelease: null, reasons: null, showRel: new Set(), pipe: null, attest: {}, incident: {} };
@@ -141,7 +144,60 @@ function buSections(prj) {
       (s.touches || []).forEach(t => { const bu = known.get(String(t || '').trim().toLowerCase()); if (bu) add(bu, { pid: p.id, pname: p.name, step: s, via: 'tag', tag: t }); });
     });
   });
-  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([bu, steps]) => ({ bu, steps, fromTags: steps.every(x => x.via !== 'owner') }));
+  /* R8: a team whose part didn't change doesn't approve: no section unless one of its steps is new or changed,
+     or it owns launch-day tasks. */
+  const e = E(); const diffs = {};
+  projectProcesses(prj).forEach(p => { try { diffs[p.id] = p.tobe && p.tobe.length && e && e.diffProcess ? e.diffProcess(p) : { nodes: {} }; } catch (err) { diffs[p.id] = { nodes: {} }; } });
+  const chg = x => { const st = ((diffs[x.pid] || {}).nodes || {})[x.step.id]; return st === 'new' || st === 'changed'; };
+  const taskBus = new Set(tasksOf(prj.cutover).map(t => t.bu || (store.person(t.owner) || {}).bu).filter(Boolean).map(b => String(b).toLowerCase()));
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([bu, steps]) => ({ bu, steps, changed: steps.filter(chg), tasks: taskBus.has(bu.toLowerCase()), fromTags: steps.every(x => x.via !== 'owner') }))
+    .filter(sec => sec.changed.length || sec.tasks);
+}
+
+/* R8 approvals happen once: is this team's own evidence complete (its steps' work, its information, its tests)?
+   Engine buReady first; the local fallback applies the same rule. -> {ready, waiting: [plain text]} */
+function buReadyOf(prj, bu) {
+  const r = eng('buReady', prj.id, bu, store.state.today);
+  if (typeof r === 'boolean') return { ready: r, waiting: [] };
+  if (r && typeof r === 'object') {
+    const ready = [r.ready, r.done, r.pass, r.ok].find(v => typeof v === 'boolean');
+    const raw = r.waiting || r.waitingOn || r.missing || r.reasons || r.items || r.left || [];
+    const waiting = (Array.isArray(raw) ? raw : [raw]).map(x => typeof x === 'string' ? x : x && (x.text || x.label || x.title || x.what) || '').filter(Boolean);
+    if (typeof ready === 'boolean') return { ready, waiting: ready ? [] : waiting.length ? waiting : [r.sentence || r.text || 'the rest of this part'].filter(Boolean) };
+  }
+  const sec = buSections(prj).find(x => x.bu.toLowerCase() === String(bu).toLowerCase());
+  if (!sec) return { ready: true, waiting: [] };
+  const keys = new Set(sec.steps.map(x => x.pid + '|' + x.step.id));
+  const work = store.list('workItem', w => w.projectId === prj.id && w.kind !== 'defect' && keys.has(w.pid + '|' + w.step) && w.status !== 'done');
+  const dataIds = new Set(); sec.changed.forEach(x => stepDataIds(x.step).forEach(d => dataIds.add(d)));
+  const notLive = [...dataIds].filter(id => effAvail(id) !== 'live').map(id => (store.get('dataElement', id) || {}).name).filter(Boolean);
+  const testIds = new Set(store.list('testCase', c => dataIds.has(c.dataId)).map(c => c.id)); sectionScripts(prj, new Set(sec.changed.map(x => x.pid + '|' + x.step.id))).forEach(x => testIds.add(x.id));
+  const outs = latestOutcomes(prj.id, ['uat']); const notPassed = [...testIds].filter(id => !outs[id] || outs[id].outcome !== 'pass').length;
+  const waiting = [];
+  if (work.length) waiting.push(`${work.length} task${work.length === 1 ? '' : 's'} to finish (${work.slice(0, 2).map(w => w.title).join(', ')}${work.length > 2 ? '…' : ''})`);
+  if (notLive.length) waiting.push(`${notLive.slice(0, 3).join(', ')} to be available`);
+  if (notPassed) waiting.push(`${notPassed} business test${notPassed === 1 ? '' : 's'} to pass`);
+  return { ready: !waiting.length, waiting };
+}
+const stepDataIds = st => { const out = new Set(st.data || []); (st.subs || []).forEach(sb => (sb.data || []).forEach(d => out.add(d))); return [...out]; };
+const joinAnd = a => a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0] || '';
+/* R8 prefilled "What you checked": built from facts ("3 changed steps reviewed; 12 of 12 tests passed"), never boilerplate. */
+function noteFactsOf(prj, bu, sec) {
+  const r = eng('approvalNoteFacts', prj.id, bu, store.state.today);
+  if (typeof r === 'string' && r.trim()) return r.trim();
+  if (r && typeof r === 'object') {
+    const t = r.text || r.note || r.sentence; if (typeof t === 'string' && t.trim()) return t.trim();
+    const facts = Array.isArray(r) ? r : r.facts; if (Array.isArray(facts) && facts.length) return facts.map(x => typeof x === 'string' ? x : x.text || x.label || '').filter(Boolean).join('; ') + '.';
+  }
+  sec = sec || buSections(prj).find(x => x.bu.toLowerCase() === String(bu).toLowerCase());
+  if (!sec) return '';
+  const facts = [`${sec.changed.length} changed step${sec.changed.length === 1 ? '' : 's'} reviewed`];
+  const dataIds = new Set(); sec.changed.forEach(x => stepDataIds(x.step).forEach(d => dataIds.add(d)));
+  if (dataIds.size) { const live = [...dataIds].filter(id => effAvail(id) === 'live').length; facts.push(`${live} of ${dataIds.size} piece${dataIds.size === 1 ? '' : 's'} of information available`); }
+  const testIds = new Set(store.list('testCase', c => dataIds.has(c.dataId)).map(c => c.id)); sectionScripts(prj, new Set(sec.changed.map(x => x.pid + '|' + x.step.id))).forEach(x => testIds.add(x.id));
+  if (testIds.size) { const outs = latestOutcomes(prj.id, ['uat']); facts.push(`${[...testIds].filter(id => outs[id] && outs[id].outcome === 'pass').length} of ${testIds.size} tests passed`); }
+  if (sec.tasks) facts.push('my launch-day tasks checked');
+  return facts.join('; ') + '.';
 }
 /* BU names the engine's bu-signoff check reports (sections, missing approvers), so UI sections match the gate. */
 function engineSectionBus(prj) {
@@ -876,9 +932,11 @@ function buView(prj, buRaw, rd) {
     : a && a.decision === 'approved' ? `<div class="hint" data-bu-nochange>Nothing in this part changed since ${esc(pname(a.approver))} approved on ${esc(fmtTime(a.at))}.</div>`
     : `<div class="hint" data-bu-nochange>${esc(s.bu)} has not approved yet, so everything above is new to review: ${s.steps.filter(x => ((diffs[x.pid] || { nodes: {} }).nodes[x.step.id] || 'same') !== 'same').length} new or changed step${s.steps.length === 1 ? '' : 's'}.</div>`;
   const why = live ? '' : signoffWhy(prj, s.bu, open);
+  const rdy = live || signed ? { ready: true, waiting: [] } : buReadyOf(prj, s.bu);
+  const early = !live && !rdy.ready ? `<div class="rl-early" data-early-warning role="note"><b>Not ready for approval yet: waiting on ${esc(joinAnd(rdy.waiting))}.</b> You can approve early, but this part may need approving again when that changes.</div>` : '';
   const form = live ? `<div class="hint">The project is live; approvals are closed.</div>`
     : `<div class="rl-bv-form" data-bu-form><div class="field"><label for="rl-attest" title="Attestation note">What you checked <span class="rl-req">required</span></label>
-        <textarea id="rl-attest" data-attest placeholder="e.g. “I reviewed the ${esc(s.bu)} steps, the proof for their information, and the business test results.”" ${why ? 'disabled' : ''}>${esc(ui.attest[prj.id + '|' + s.bu] || '')}</textarea></div>
+        <textarea id="rl-attest" data-attest placeholder="e.g. “I reviewed the ${esc(s.bu)} steps, the proof for their information, and the business test results.”" ${why ? 'disabled' : ''}>${esc(ui.attest[prj.id + '|' + s.bu] != null ? ui.attest[prj.id + '|' + s.bu] : why ? '' : noteFactsOf(prj, s.bu, s))}</textarea></div>
         <div class="rl-err" data-attest-err role="alert" hidden></div>
         <div class="rl-bu-act">${why ? `<button class="btn sm" disabled data-locked>${a && a.decision === 'approved' ? 'Approve again' : 'Approve this part'}</button>${why}`
           : `<button class="btn primary sm" data-bu-decide="approved">${a && a.decision === 'approved' ? 'Approve again' : 'Approve this part'}</button><button class="btn sm danger" data-bu-decide="rejected">Ask for changes</button><span class="hint">Your note is stored on the approval. The extra sign-in check follows.</span>`}</div></div>`;
@@ -894,7 +952,7 @@ function buView(prj, buRaw, rd) {
     </div><aside class="side">
       <div class="card rl-bv-sign"><h3>Approve the ${esc(s.bu)} part</h3>
         ${a ? `<div class="rl-signed">${av(a.approver)} <span>${esc(pname(a.approver))} ${a.decision === 'approved' ? 'approved' : 'asked for changes'} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="rl-mfa">extra sign-in check done</span>' : ''}</span></div>${a.attestation || a.note ? `<div class="rl-attest" data-attestation>“${esc(a.attestation || a.note)}”</div>` : ''}` : '<div class="hint">Not approved yet.</div>'}
-        ${form}</div>
+        ${early}${form}</div>
       <div class="card"><h3>Changes since last approval<span class="n">${stale.length}</span></h3>${changes}</div>
       <div class="card"><h3>Open defects<span class="n">${defects.length}</span></h3>${defects.map(w => `<div class="row" data-bu-defect="${esc(w.id)}"><div><div class="t">${esc(w.title)}</div><div class="s">${esc(pname(w.owner))}${w.severity ? ` · severity ${esc(w.severity)}` : ''} · due ${esc(fmt(w.due))}</div></div></div>`).join('') || '<div class="hint">No open defects on these steps or their data.</div>'}</div>
     </aside></div>`;
@@ -973,23 +1031,33 @@ function partsOf(prj, rd) {
     const stale = live ? [] : staleChanges(prj, s, a, rd);
     const eligible = eligibleFor(prj, s.bu);
     const ok = counts(prj, a);
-    const state = ok && !stale.length ? 'approved' : ok && stale.length ? 'stale' : a && a.decision === 'rejected' && eligible.includes(a.approver) ? 'rejected' : !eligible.length ? 'nobody' : 'waiting';
-    return { bu: s.bu, s, a, stale, eligible, state };
+    const rdy = live ? { ready: true, waiting: [] } : buReadyOf(prj, s.bu);
+    const state = ok && !stale.length ? 'approved' : ok && stale.length ? 'stale' : a && a.decision === 'rejected' && eligible.includes(a.approver) ? 'rejected' : !eligible.length ? 'nobody' : rdy.ready ? 'waiting' : 'notready';
+    /* R8: a changed (stale) part is looked at again only once its own evidence is complete too */
+    const state2 = (state === 'stale' || state === 'rejected') && !rdy.ready ? 'notready' : state;
+    return { bu: s.bu, s, a, stale, eligible, state: state2, ready: rdy.ready, waiting: rdy.waiting };
   });
 }
-const PART_TXT = { approved: 'Approved', stale: 'Changed: approve again', rejected: 'Changes asked for', nobody: 'Needs someone to approve', waiting: 'Waiting for approval' };
-const PART_CLS = { approved: 'b-done', stale: 'b-late', rejected: 'b-late', nobody: 'b-soon', waiting: 'b-soon' };
+const PART_TXT = { approved: 'Approved', stale: 'Changed: approve again', rejected: 'Changes asked for', nobody: 'Needs someone to approve', waiting: 'Ready for approval', notready: 'Not ready yet' };
+const PART_CLS = { approved: 'b-done', stale: 'b-late', rejected: 'b-late', nobody: 'b-soon', waiting: 'b-soon', notready: 'b-idle' };
+const waitingTxt = p => `Not ready for your approval yet: waiting on ${joinAnd(p.waiting.length ? p.waiting : ['the rest of this part'])}.`;
 
 /* "The launch still needs": the open launch steps in plain words (engine launchSteps), else the failing checks. */
+/* R8 ONE TRUTH: launch steps (and their numbers and labels) come from E().projectTruth, the single source every page reads. */
+function truthSteps(prj) {
+  const t = eng('projectTruth', prj.id, store.state.today);
+  const st = t && (t.launchSteps || t.launch && (t.launch.steps || t.launch));
+  return Array.isArray(st) ? st : eng('launchSteps', prj.id, store.state.today);
+}
 function stillNeeds(prj, rd, skipKey) {
-  const steps = eng('launchSteps', prj.id, store.state.today);
+  const steps = truthSteps(prj);
   if (Array.isArray(steps)) return steps.filter(s => !s.done && s.key !== skipKey && s.key !== 'launch').map(s => ({ key: s.key, label: s.label, action: s.action, who: s.who || [] }));
   return (rd.checks || []).filter(c => checkState(c) === 'fail').map(c => ({ key: c.id, label: plainOf(c), action: '', who: [] }));
 }
 
 /* One-tap action for a launch step, where one exists. */
 function stepAction(prj, st, parts, me) {
-  const mine = parts.find(p => p.state !== 'approved' && p.eligible.includes(me));
+  const mine = parts.find(p => p.state !== 'approved' && p.state !== 'notready' && p.eligible.includes(me));
   switch (st.key) {
     case 'approvals': {
       if (mine) return `<a class="btn primary" href="${link(`/release/${prj.id}?bu=${encodeURIComponent(mine.bu)}`)}" data-link data-step-act="approve">Approve your part</a>`;
@@ -1024,7 +1092,7 @@ function simpleRender(prj, rd, params) {
   const lastGo = releases.find(r => !isRollback(r) && !isFailedRel(r));
   const failedRel = !live && releases[0] && !isRollback(releases[0]) && pipePhase(releases[0]) === 'failed' ? releases[0] : null;
   const parts = partsOf(prj, rd);
-  const stepsRaw = eng('launchSteps', prjId, store.state.today);
+  const stepsRaw = truthSteps(prj);
   const steps = Array.isArray(stepsRaw) ? stepsRaw : (rd.checks || []).map(c => ({ key: c.id, label: plainOf(c), done: checkState(c) !== 'fail', who: [], action: c.detail || '' }));
   const ckFail = id => { const c = (rd.checks || []).find(x => x.id === id); return !!c && checkState(c) === 'fail'; };
   const open = steps.filter(s => !s.done && s.key !== 'launch');
@@ -1038,7 +1106,8 @@ function simpleRender(prj, rd, params) {
     : running ? { cls: 'busy', icon: '…', title: 'Launching now', sub: 'The delivery step is running. This takes a few seconds.' }
     : ready ? { cls: 'ready', icon: '✓', title: 'Ready to launch', sub: failedRel ? 'The last launch did not go through. Nothing changed, so it is safe to try again.' : rm === me ? 'Everything is done. You can launch now.' : `Everything is done. ${pname(rm)} (launch owner) can launch.` }
     : { cls: 'notready', icon: String(left), title: `Not ready: ${left} thing${left === 1 ? '' : 's'} left`, sub: 'Here is what is left and who does it.' };
-  const myPart = !live && parts.find(p => p.state !== 'approved' && p.eligible.includes(me));
+  const myPart = !live && parts.find(p => p.state !== 'approved' && p.state !== 'notready' && p.eligible.includes(me));
+  const myWait = !live && !myPart && parts.find(p => p.state === 'notready' && p.eligible.includes(me));
   const myDone = parts.find(p => p.state === 'approved' && p.a && p.a.approver === me);
 
   const stepRows = steps.filter(s => s.key !== 'launch' || !s.done).map(s => {
@@ -1054,10 +1123,10 @@ function simpleRender(prj, rd, params) {
     const mine = p.eligible.includes(me);
     const by = p.a && (p.state === 'approved' || p.state === 'stale' || p.state === 'rejected') ? `${av(p.a.approver)} ${esc(pname(p.a.approver))}, ${esc(fmt(p.a.at))}` : p.eligible.length ? `Who can approve: ${p.eligible.map(id => esc(pname(id))).join(', ')}` : '';
     const act = live ? '' : p.state === 'nobody' ? choosePicker(prj, p.bu)
-      : mine && p.state !== 'approved' ? `<a class="btn primary" href="${link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`)}" data-link data-part-approve="${esc(p.bu)}">${p.state === 'stale' ? 'Look again and approve' : 'Approve your part'}</a>`
+      : mine && p.state !== 'approved' && p.state !== 'notready' ? `<a class="btn primary" href="${link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`)}" data-link data-part-approve="${esc(p.bu)}">${p.state === 'stale' ? 'Look again and approve' : 'Approve your part'}</a>`
       : `<a class="rl-go" href="${link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`)}" data-link data-bu-review="${esc(p.bu)}">See this part ›</a>`;
     return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><b>${esc(p.bu)}</b>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
-      ${by ? `<div class="rs-part-s">${by}</div>` : ''}${act}</div>`;
+      ${by ? `<div class="rs-part-s">${by}</div>` : ''}${p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting>Waiting on ${esc(joinAnd(p.waiting))}</div>` : ''}${act}</div>`;
   }).join('');
 
   const grantsOpen = store.list('grant', g => g.projectId === prjId && ['active', 'approved', 'requested'].includes(grantStatus(g))).length;
@@ -1075,6 +1144,7 @@ function simpleRender(prj, rd, params) {
     ${failedRel && !running ? `<div class="rs-fail" data-pipeline-failed><b>The last launch did not go through.</b> Nothing was changed: the processes, the procedure and temporary data access are exactly as they were.${rm === me ? ` <button class="btn primary" data-retry ${rd.pass && !gOpen.length ? '' : 'disabled'}>Try the launch again</button>` : ''}</div>` : ''}
     ${running ? `<div class="rs-run" data-pipe-phase="${esc(ui.pipe.phase)}" data-pipe-kind="${ui.pipe.kind === 'rollback' ? 'rollback' : 'golive'}"><span class="rs-spin" aria-hidden="true"></span>${ui.pipe.kind === 'rollback' ? 'Undoing the launch…' : 'Launching…'} <small>${ui.pipe.phase === 'queued' ? 'Starting' : 'Running'} (simulated)</small></div>` : ''}
     ${myPart ? `<a class="rs-mine" href="${link(`/release/${prjId}?bu=${encodeURIComponent(myPart.bu)}`)}" data-link data-review-mine="${esc(myPart.bu)}"><b>${myPart.state === 'stale' ? `The ${esc(myPart.bu)} part changed: please look again` : `Approve the ${esc(myPart.bu)} part`}</b><span>You can approve it now, even while other things are still open. It takes about a minute.</span><span class="rs-mine-go" aria-hidden="true">›</span></a>`
+      : myWait ? `<div class="rs-mine wait" data-my-notready="${esc(myWait.bu)}"><b>The ${esc(myWait.bu)} part isn’t ready for your approval yet.</b><span>${esc(waitingTxt(myWait).replace(/^Not ready for your approval yet: /, ''))} You’ll be told when it’s ready.</span></div>`
       : myDone && !live ? `<div class="rs-mine done" data-my-approved><b>Your part (${esc(myDone.bu)}) is approved.</b><span>Thank you. Nothing else is needed from you for it.</span></div>` : ''}
     ${!live ? `<div class="card rs-card"><h3>What is left before launch</h3><ol class="rs-steps" data-launch-steps>${stepRows}</ol></div>` : ''}
     ${!live && (ready || rm === me) ? `<div class="card rs-card rs-go"><h3>Launch</h3>${rm === me
@@ -1083,7 +1153,7 @@ function simpleRender(prj, rd, params) {
     ${live ? `<div class="card rs-card" data-live-card><h3>Launched</h3><p class="rs-p">${esc(prj.name)} went live on ${esc(fmt(lastGo && lastGo.at))}${lastGo && lastGo.by ? `, launched by ${esc(pname(lastGo.by))}` : ''}. Temporary data access closed at launch.</p>
       ${canRollback(prj) ? `<button class="btn danger" data-rollback>Undo the launch</button>` : `<div class="hint" data-why="rm">If something goes badly wrong, ${esc(pname(rm))} (launch owner) can undo the launch.</div>`}
       ${releases[0] && isFailedRb(releases[0]) ? `<div class="rs-fail" data-rollback-failed><b>The undo did not go through.</b> Nothing was restored; the launch is still live.</div>` : ''}</div>` : ''}
-    ${parts.length ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && canChoose(prj) && parts.some(p => p.state === 'nobody')) : ''}
+    ${parts.length ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && canChoose(prj) && parts.some(p => p.state === 'nobody')) : ''}
     ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final yes/no check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
     ${sec('access', 'Temporary data access', grantsOpen ? `${grantsOpen} open` : 'None open', grantsCard(prj), !live && ckFail('grants-closed'))}
     ${live ? sec('support', 'Support after launch', hc.length ? `${hc.length} open problem${hc.length === 1 ? '' : 's'}` : 'No open problems', hypercareCard(prj, lastGo), hc.some(x => +x.severity === 1)) : ''}
@@ -1134,7 +1204,7 @@ function simpleBuView(prj, buRaw, rd) {
   const parts = partsOf(prj, rd);
   const p = parts.find(x => x.bu.toLowerCase() === String(buRaw).toLowerCase());
   const back = `<a class="rl-go" href="${link('/release/' + prj.id)}" data-link data-bu-back>‹ Back to Launch</a>`;
-  if (!p) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/release/' + prj.id)}" data-link>Launch</a></div><h1>${esc(buRaw)}</h1><p>Nothing in ${esc(prj.name)} belongs to ${esc(buRaw)}, so there is nothing to approve.</p>${back}</div></section>`;
+  if (!p) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/release/' + prj.id)}" data-link>Launch</a></div><h1>${esc(buRaw)}</h1><p data-no-section>Nothing ${esc(buRaw)} does changes in ${esc(prj.name)}, so ${esc(buRaw)} doesn’t need to approve anything.</p>${back}</div></section>`;
   const s = p.s; const me = store.state.me; const live = prj.status === 'live';
   const e = E(); const nm = idNames();
   const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const pr = store.get('process', pid); try { diffs[pid] = pr && e && e.diffProcess ? e.diffProcess(pr) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
@@ -1150,20 +1220,21 @@ function simpleBuView(prj, buRaw, rd) {
   const ev = evidenceLine(prj, s);
   const titles = (changed.length ? changed : s.steps).slice(0, 3).map(x => x.step.title);
   const key = prj.id + '|' + p.bu;
-  const dflt = `I reviewed the changes to ${titles.join(', ')}${(changed.length || s.steps.length) > 3 ? ' and the other steps' : ''} and the test results.`;
+  const dflt = noteFactsOf(prj, p.bu, s) || `I reviewed the changes to ${titles.join(', ')}.`;
   const val = ui.attest[key] != null ? ui.attest[key] : dflt;
   const canAct = !live && p.eligible.includes(me);
   const a = p.a;
   const statusLine = p.state === 'approved' ? `Approved by ${esc(pname(a.approver))} on ${esc(fmt(a.at))}.`
     : p.state === 'stale' ? `${esc(pname(a.approver))} approved on ${esc(fmt(a.at))}, but this part has changed since: ${esc(p.stale.map(v => v.text).join(', '))}. Please look again.`
     : p.state === 'rejected' ? `${esc(pname(a.approver))} asked for changes on ${esc(fmt(a.at))}${a.attestation ? `: “${esc(a.attestation)}”` : ''}.`
-    : p.state === 'nobody' ? 'Nobody can approve this part yet.' : 'Not approved yet.';
+    : p.state === 'nobody' ? 'Nobody can approve this part yet.' : p.state === 'notready' ? 'Not ready for approval yet.' : 'Ready for your approval.';
   const needs = stillNeeds(prj, rd, null);
   const doneMsg = p.state === 'approved' && (a.approver === me || ui.justApproved === key)
     ? `<div class="rs-done" data-part-approved><b>Your part is approved.</b>${needs.length ? `<span>The launch still needs:</span><ul data-still-needs>${needs.map(x => `<li>${esc(x.label)}${x.action && x.action !== 'Done' ? ` <small>${esc(x.action)}</small>` : ''}</li>`).join('')}</ul>` : '<span>Nothing else is needed: the launch owner can launch.</span>'}</div>` : '';
   let actHtml = '';
   if (live) actHtml = '<div class="hint">This project is live. Approvals are closed.</div>';
   else if (p.state === 'nobody') actHtml = `<div class="rs-nobody" data-no-approver="${esc(p.bu)}"><b>Nobody can approve the ${esc(p.bu)} part yet.</b>${choosePicker(prj, p.bu)}</div>`;
+  else if (canAct && p.state === 'notready') actHtml = `<div class="rs-notready" data-bu-notready role="status"><b>${esc(waitingTxt(p))}</b><span>Your part is ready to approve once that is done. You’ll be told, so there’s nothing to do now.</span></div>`;
   else if (canAct && p.state !== 'approved') actHtml = `<div class="rs-form" data-bu-form>
       <label for="rl-attest" class="rs-lbl2" title="Attestation note">What you checked</label>
       <textarea id="rl-attest" data-attest rows="3">${esc(val)}</textarea>
@@ -1339,6 +1410,9 @@ function rbFailBanner(prj, rel) {
 
 /* R6 hypercare: days remaining and owner from the cutover plan, plus an incident log on project.incidents.
    An open severity-1 incident suggests a rollback. */
+/* R8: only the support owner, the project manager or the launch owner can resolve a problem after launch. */
+const incResolvers = prj => [...new Set([((prj && prj.cutover) || {}).hypercareOwner, prj && prj.owner, rmOf(prj)].filter(Boolean))];
+const canResolveInc = prj => !!store.state.me && incResolvers(prj).includes(store.state.me);
 const SEV = { 1: 'Critical: work has stopped', 2: 'Major: a workaround is needed', 3: 'Minor', 4: 'Cosmetic' };
 function hypercareCard(prj, lastGo) {
   const c = prj.cutover || {};
@@ -1364,7 +1438,8 @@ function hypercareCard(prj, lastGo) {
       ${badge(SEV[x.severity] || 'Level ' + x.severity, +x.severity === 1 ? 'b-late' : +x.severity === 2 ? 'b-soon' : 'b-idle')}
       <div class="rl-inc-t"><b>${esc(x.title)}</b><small>${esc(pname(x.by))} · ${esc(fmtTime(x.at))}${x.status === 'resolved' && x.resolvedBy ? ` · resolved by ${esc(pname(x.resolvedBy))}` : ''}</small></div>
       ${badge(x.status === 'resolved' ? 'resolved' : 'open', x.status === 'resolved' ? 'b-done' : 'b-late')}
-      ${x.status !== 'resolved' ? `<button class="btn sm" data-inc-resolve="${esc(x.id)}">Resolve</button>` : ''}</div>`).join('') || '<div class="hint">No problems reported.</div>'}</div></div>`;
+      ${x.status !== 'resolved' && canResolveInc(prj) ? `<button class="btn sm" data-inc-resolve="${esc(x.id)}">Resolve</button>` : ''}</div>`).join('') || '<div class="hint">No problems reported.</div>'}</div>
+    ${open.length && !canResolveInc(prj) ? `<div class="hint" data-why="inc-resolve">Only ${esc(incResolvers(prj).map(pname).join(', ').replace(/, ([^,]*)$/, ' or $1'))} can mark a problem resolved.</div>` : ''}</div>`;
 }
 async function addIncident(prj, root) {
   const t = root.querySelector('[data-inc-title]'); const sev = +root.querySelector('[data-inc-sev]').value; const err = root.querySelector('[data-inc-err]');
@@ -1381,6 +1456,7 @@ async function addIncident(prj, root) {
 async function resolveIncident(prj, id) {
   const cur = store.get('project', prj.id) || prj;
   const x = (cur.incidents || []).find(i => i.id === id); if (!x) return;
+  if (!canResolveInc(cur)) { toast(`Only ${incResolvers(cur).map(pname).join(', ')} can resolve problems after launch.`); return; }
   await store.save('project', prj.id, Object.assign({}, cur, { incidents: cur.incidents.map(i => i.id === id ? Object.assign({}, i, { status: 'resolved', resolvedBy: store.state.me, resolvedAt: new Date().toISOString() }) : i) }), `Resolved a problem after launch: ${x.title}`);
   toast('Problem resolved');
 }
@@ -1416,7 +1492,7 @@ function newestRelease(prj, res) {
   const latest = store.list('release', x => x.projectId === prj.id).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
   return (rel && rel.id && store.get('release', rel.id)) || rel || latest || null;
 }
-const SIMFAIL = what => `<label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated pipeline fails. The server then records a failed ${what} and changes nothing.</small></span></label>`;
+const SIMFAIL = (what, after) => `<label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated delivery step fails. The failed ${what} is recorded${after ? `, and ${after}` : ''}. Nothing else changes.</small></span></label>`;
 
 async function goLive(prj, retry) {
   const rm = rmOf(prj);
@@ -1442,7 +1518,7 @@ async function goLive(prj, retry) {
         <li>The new procedure is published and everyone involved is told.</li></ul>
       <div class="hint">If the delivery step fails, nothing changes and you can try again.</div>
       <div class="rl-gl-rb" data-golive-runbook hidden style="display:none">${rbRows ? `<table><tbody>${rbRows}</tbody></table>` : ''}</div>
-      ${SIMFAIL('launch: nothing changes')}`
+      ${SIMFAIL('launch')}`
     : `<div class="rl-sum">
       <div><span class="lbl">Launch owner</span><div>${av(rm)} ${esc(pname(rm))}</div></div>
       <div><span class="lbl">Processes updated if the pipeline succeeds</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
@@ -1453,7 +1529,7 @@ async function goLive(prj, retry) {
       <div class="rl-gl-rb" data-golive-runbook>${tasks.length ? `<div class="rl-rb-h"><b>Launch-day steps</b><span class="hint">${gngOf(prj).length - gOpen.length}/${gngOf(prj).length} ${GNG()} confirmed</span></div>
         <div class="tbl-wrap"><table class="rl-gltbl"><thead><tr><th>#</th><th>Step</th><th>Who</th><th>Status</th></tr></thead><tbody>${rbRows}</tbody></table></div>` : '<div class="hint">No launch-day steps.</div>'}
         ${gOpen.length ? `<div class="rl-err" data-gng-block>Launch is blocked until every final yes/no check has an owner who has confirmed it.</div>` : ''}</div>
-      ${SIMFAIL('launch: nothing is promoted or published and temporary data access stays as it is')}
+      ${SIMFAIL('launch', 'nothing is promoted or published; temporary data access stays as it is')}
       <span class="sim">Simulated: in this showroom the pipeline request is recorded, not sent, and its run is animated.</span>`;
   const r = modal({ title: `${retry ? 'Try again: launch' : 'Launch'} ${prj.name}`, body, actions: [{ id: 'go', label: simple ? 'Launch' : 'Continue to verify', primary: true }] });
   guardModal(() => gngOpen(store.get('project', prj.id) || prj).length ? 'Every final yes/no check must be confirmed by its owner before launch.' : null);
@@ -1490,7 +1566,7 @@ async function rollBack(prj) {
       <div class="rl-sum"><div><span class="lbl">Processes brought back</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc(Math.max(1, (p.version || 1) - 1))}</b></div>`).join('')}</div>
       <div><span class="lbl">Undo plan</span><div>${esc((prj.cutover || {}).rollbackPlan || 'No plan written')}</div></div></div>
       <div class="field" style="margin-top:10px"><label>Why</label><textarea name="reason" placeholder="What went wrong?"></textarea></div>
-      ${SIMFAIL('undo: nothing is brought back or re-published, and the launch stays live')}`,
+      ${SIMFAIL('undo', 'the launch stays live')}`,
     actions: [{ id: 'rollback', label: 'Continue to verify', danger: true }],
   });
   if (r.action !== 'rollback') return;

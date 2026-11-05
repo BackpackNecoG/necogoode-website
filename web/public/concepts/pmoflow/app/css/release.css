@@ -699,3 +699,24 @@
 .is-who{font:inherit;font-size:14px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;min-width:0;flex:1 1 180px;min-height:38px}
 .is-who.is-noowner{border-color:#f59e0b;background:#fffbeb}
 .is-role{background:#ecfeff;border-color:#a5f3fc;color:#0e7490;font-weight:600;align-self:flex-start}
+/* R8 import: what the reader found */
+.is-found{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:14px;color:#0c4a6e}
+.is-found span{display:block;color:#075985;font-size:13px;margin-top:2px}
+.is-facts{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+.is-fact{background:#f8fafc;border-color:#cbd5e1;color:#334155;font-weight:600}
+/* R8 testing: one number, optional step, one plain line per column */
+.ts-sum{flex-wrap:wrap}
+.ts-sum > div:nth-child(2){flex:1 1 240px;min-width:0}
+.ts-big{display:flex;flex-direction:column;align-items:flex-end;margin-left:auto;text-align:right;flex:0 0 auto}
+.ts-big b{font-size:28px;line-height:1.1;font-weight:800}
+.ts-big span{font-size:14px;color:var(--ink2)}
+.ts-opt{font-size:12.5px;font-weight:600;color:var(--ink2);background:var(--idle-fill);border-radius:999px;padding:1px 8px;margin-left:4px;vertical-align:2px}
+.ts-cols{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ts-col{overflow-wrap:anywhere} .ts-col.bad{color:#b45309}
+@media (max-width:640px){ .ts-big{align-items:flex-start;text-align:left;margin-left:0;padding-left:56px;box-sizing:border-box;flex-basis:100%;min-width:0} }
+/* R8 approvals once: not ready yet */
+.rs-notready{display:flex;flex-direction:column;gap:6px;font-size:15px;background:var(--idle-fill);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.rs-notready b{font-size:17px;line-height:1.35}
+.rs-notready span{color:var(--ink2)}
+.rs-mine.wait{background:var(--idle-fill);color:var(--ink);border:1px solid var(--line);display:flex;flex-direction:column;cursor:default}
+.rl-early{background:var(--soon-soft);border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:8px 10px;font-size:13.5px;margin-bottom:8px}

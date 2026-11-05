@@ -3,6 +3,8 @@
    A tenant build swaps this adapter for one that calls the customer's in-tenant API. */
 
 const API = '/api/pmoflow';
+/* "Today" is the user's LOCAL calendar date (UTC dates roll over in the evening in the Americas). */
+function localToday() { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 const WS_KEY = 'pmoflow.ws';
 const ME_KEY = 'pmoflow.me';
 const ADV_KEY = 'pmoflow.advanced';
@@ -12,6 +14,10 @@ function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storag
 function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } }
 
 async function http(method, path, body) {
+  /* Every call carries the user's local date so server-stamped dates match what the user sees. */
+  const t = localToday();
+  if (method === 'GET') path += (path.includes('?') ? '&' : '?') + 'today=' + t;
+  else body = Object.assign({ today: t }, body || {});
   const r = await fetch(API + path, {
     method,
     headers: body ? { 'content-type': 'application/json' } : {},
@@ -23,8 +29,6 @@ async function http(method, path, body) {
   return j;
 }
 
-/* "Today" is the user's LOCAL calendar date (UTC dates roll over in the evening in the Americas). */
-function localToday() { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 
 const listeners = new Set();
 

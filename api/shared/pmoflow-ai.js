@@ -119,7 +119,44 @@ function statusFacts(docs, projectId, today, engine) {
   facts.hypercare = hypercareOf(project, today, L);
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
     .map(g => ({ data: L.label(g.dataId), env: g.env, access: g.access, requestedBy: L.person(g.requestedBy) }));
+  /* R8 ONE TRUTH: every number, date, label and blocker comes from engine.projectTruth, never recomputed here */
+  if (engine && typeof engine.projectTruth === 'function') {
+    let t = null;
+    try { t = engine.projectTruth(docs, projectId, today); } catch (e) { t = null; }
+    if (t) applyTruth(facts, t, docs, today, engine, L);
+  }
   return L.scrub(facts);
+}
+
+/* R8: overwrite every derived fact with projectTruth's value so the report says exactly what the pages say */
+function applyTruth(facts, t, docs, today, engine, L) {
+  const wById = Object.fromEntries(list(docs, 'workItem').map(w => [w.id, w]));
+  const lateIds = new Set(t.late || []), runIds = new Set(t.runningLate || []);
+  facts.stats = Object.assign({}, facts.stats, { total: t.tasks.total, done: t.tasks.done, pct: t.tasks.total ? Math.round(100 * t.tasks.done / t.tasks.total) : 0,
+    late: t.lateCount, slip: t.runningLateCount, runningLate: t.runningLateCount, finish: t.forecastFinish, target: t.target, actualFinish: t.actualFinish });
+  /* the late and running-late tasks are exactly projectTruth's lists, in that order */
+  const fc = engine.forecastAll ? engine.forecastAll(docs, today) : {};
+  const row = (id, sched) => { const w = wById[id] || {}; const f = fc[id] || {};
+    return { title: w.title, owner: L.person(w.owner), due: w.due, forecast: f.forecast, sched, slipDays: f.slipDays,
+      daysPastDue: sched === 'late' && w.due && w.due < today ? dayDiff(w.due, today) : 0, cause: f.cause ? L.label(f.cause) : null }; };
+  facts.atRisk = [...lateIds].map(id => row(id, 'late')).concat([...runIds].filter(id => !lateIds.has(id)).map(id => row(id, 'slip')));
+  facts.blockers = (t.blockers || []).map(b => ({ name: b.name, owner: L.person(b.owner), state: b.state, planned: !!b.planned,
+    resolver: b.resolver && wById[b.resolver] ? wById[b.resolver].title : null, text: b.text }));
+  facts.notLive = facts.blockers;
+  facts.rag = { status: t.rag, reasons: (t.reasons || []).slice(), bufferDays: t.bufferDays, bufferUnit: t.bufferUnit || 'business days', source: 'projectTruth' };
+  facts.summary = { sentence: L.scrub(t.sentence), label: t.label, rag: t.rag,
+    who: (t.who || []).map(w => ({ person: w.name || L.person(w.person), action: L.scrub(String(w.action || '')) })), source: 'projectTruth' };
+  const ev = t.ev || {};
+  const num = (v, d) => (v == null || !isFinite(Number(v)) ? null : Math.round(Number(v) * (d ? 100 : 1)) / (d ? 100 : 1));
+  /* EAC is the one cost forecast (= cost.forecast) */
+  facts.earnedValue = { pv: num(ev.PV), ev: num(ev.EV), ac: num(ev.AC), spi: num(ev.SPI, 1), cpi: num(ev.CPI, 1), eac: num(t.cost && t.cost.forecast != null ? t.cost.forecast : ev.EAC), bac: num(ev.BAC) };
+  facts.cost = t.cost ? Object.assign({}, t.cost) : null;
+  facts.testing = t.testing ? { count: t.testing.count || '', sentence: t.testing.sentence || '', done: !!t.testing.done, passed: t.testing.passed, total: t.testing.total } : null;
+  facts.launchSteps = (t.launchSteps || []).map(x => ({ key: x.key, label: x.label, done: !!x.done, action: L.scrub(String(x.action || '')) }));
+  facts.burndown = t.burndown || null;
+  facts.truth = { forecastFinish: t.forecastFinish, actualFinish: t.actualFinish, target: t.target, bufferDays: t.bufferDays, bufferUnit: t.bufferUnit || 'business days',
+    lateCount: t.lateCount, runningLateCount: t.runningLateCount, blockers: facts.blockers.map(b => b.name), label: t.label, rag: t.rag, sentence: facts.summary.sentence,
+    tasks: Object.assign({}, t.tasks), cost: facts.cost, testing: facts.testing ? facts.testing.count : null };
 }
 
 /* R6: RAG from engine.projectHealth(docs, prj, today) -> {rag, reasons[]}; rules fallback applies the same R6 rule. */
@@ -135,7 +172,8 @@ function healthOf(docs, projectId, today, engine, facts) {
   return ragOf(facts);
 }
 /* R7: {sentence, label, rag, who} from engine.projectSummary; the fallback keeps the same rule and plain words. */
-const LABELS = { red: 'Off track', amber: 'At risk', green: 'On track', grey: 'Not planned' };
+/* R8 labels (engine RAG_LABEL): "At risk" only when the forecast misses the deadline or a blocker has no plan */
+const LABELS = { red: 'At risk', amber: 'On track, some tasks running late', green: 'On track', grey: 'Not planned' };
 function normRag(v) { return ({ red: 'red', amber: 'amber', green: 'green', grey: 'grey', gray: 'grey', r: 'red', a: 'amber', g: 'green' })[String(v || '').toLowerCase()] || null; }
 function summaryOf(docs, projectId, today, engine, facts, L) {
   if (engine && typeof engine.projectSummary === 'function') {
@@ -285,23 +323,29 @@ function statusRules(f, opts) {
   const hc = f.hypercare;
   const nl = notLiveN(f);
   const hcLine = hc ? `Support after launch: ${hc.daysRemaining != null ? `${plural(hc.daysRemaining, 'day')} left` : 'in progress'}${hc.owner ? `, led by ${hc.owner}` : ''}; ${plural(hc.open.length, 'open problem')}` : null;
-  const left = f.readiness ? f.readiness.failing.length : null;
+  /* R8: launch readiness counts projectTruth's launch steps (the same list the Launch page shows) */
+  const steps = Array.isArray(f.launchSteps) ? f.launchSteps.filter(x => x.key !== 'launch') : null;
+  const left = steps ? steps.filter(x => !x.done).length : f.readiness ? f.readiness.failing.length : null;
+  const c = f.cost;
+  const costLine = c && c.planned != null && c.actual != null ? `${money(c.actual)} spent of the ${money(c.planned)} budget` + (c.forecast != null ? `; expected ${money(c.forecast)} in total` : '') : null;
   const out = {
     rag: sum.rag, label: sum.label, sentence: sum.sentence, date: f.today,
     headline: `${sum.label}: ${f.project.name}`,
     summary: [sum.sentence, `${s.done || 0} of ${plural(s.total || 0, 'task')} ${s.total === 1 ? 'is' : 'are'} done.`, lateLine(f),
-      nl ? `${nl} ${pendingWord(nl)} not connected yet.` : 'All the information it needs is connected.', hcLine ? hcLine + '.' : ''].filter(Boolean).join(' '),
+      nl ? `${nl} ${pendingWord(nl)} not available yet.` : '', hcLine ? hcLine + '.' : ''].filter(Boolean).join(' '),
     highlights: [`${s.done || 0} of ${plural(s.total || 0, 'task')} done`]
-      .concat(left == null ? [] : [left ? `Not ready to launch: ${plural(left, 'thing')} left` : 'Ready to launch'])
+      .concat(f.testing && f.testing.count ? [f.testing.count] : [])
+      .concat(left == null ? [] : [left ? `Not ready to launch: ${plural(left, steps ? 'step' : 'thing')} left` : 'Ready to launch'])
+      .concat(costLine ? [costLine] : [])
       .concat(hcLine ? [hcLine] : []),
     risks: (hc ? hc.open.map(i => `${i.severity === 1 ? 'Serious problem' : 'Problem'} "${i.title}" is still open${i.severity === 1 ? ': consider rolling back the launch' : ''}`) : [])
       .concat(lateFirst(f.atRisk || []))
       .concat((f.risks || []).filter(r => r.impact === 'high' && !r.likelyMitigated).map(r => `${r.title} (high impact; ${r.owner} is watching it)`))
-      .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `${r.title}: all linked work is done, so it is likely mitigated. ${r.owner}: confirm and close.`)),
+      .concat((f.risks || []).filter(r => r.likelyMitigated).map(r => `Likely resolved: ${r.title}. All its linked work is done; ${r.owner}, close it?`)),
     asks: (f.blockers || []).map(b => b.state === 'pending'
-        ? `${b.owner}: confirm ${b.name} is connected (the fix is done and waits for your confirmation)`
+        ? `${b.owner}: confirm ${b.name} is ready (the fix is done)`
         : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing "${b.resolver}"` : ''}`)
-      .concat((f.notLive || []).filter(b => b.state === 'example').map(b => `${b.owner}: connect ${b.name} (only sample data today)`))
+      .concat((f.notLive || []).filter(b => b.state === 'example' && !(f.blockers || []).includes(b)).map(b => `${b.owner}: get ${b.name} ready to use`))
       .concat((f.openDiscovered || []).map(x => `Settle the open question on ${x.data}: ${x.requirement}`))
       .concat((f.pendingGrants || []).map(g => `Decide on temporary ${g.access} access to ${g.data} for ${ENV_PLAIN[String(g.env).toLowerCase()] || 'testing'}, requested by ${g.requestedBy}`))
       .concat(hc && hc.considerRollback ? [`${hc.owner || 'The support lead'}: a serious problem is open; decide whether to roll back`] : []),
@@ -324,27 +368,98 @@ const STOP = new Set(['the', 'and', 'for', 'from', 'with', 'into', 'onto', 'that
 const VERBS = /^(collect|enter|send|receive|verify|check|review|email|upload|capture|update|create|key|record|pull|get|request|confirm|validate|approve|read|match|store|attach|notify|submit|file|scan|sign|route|export|import|look|obtain|gather|process|prepare|schedule|issue|post|log|add|set|open|close)(s|es|ed)?$/i;
 const DOMAINS = { vendor: /\b(vendors?|suppliers?)\b/i, employee: /\b(employees?|staff|payroll|personnel|new hires?|workers?)\b/i, customer: /\b(customers?|clients?)\b/i };
 const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event)\b\s*[:\-–—]/i;
-const GOTO_RE = /\b(?:return(?:s|ed)?|go(?:es)? back|loop(?:s)? back|send(?:s)? (?:it )?back|back)\s+to\s+step\s+(\d+)\b/i;
-const GOTO_STRIP = /,?\s*(?:and\s+|then\s+)?(?:return(?:s|ed)?|go(?:es)? back|loop(?:s)? back|send(?:s)? (?:it )?back|back)\s+to\s+step\s+\d+\.?/i;
+/* R8: "skip to step N", "go to step N", "jump/continue/proceed to step N" are gotos too */
+const GOTO_WORDS = '(?:return(?:s|ed)?|go(?:es)? back|loop(?:s)? back|send(?:s)? (?:it )?back|back|skip(?:s|ped)?|go(?:es)?|jump(?:s|ed)?|continue(?:s|d)?(?: at| with)?|proceed(?:s|ed)?|move(?:s|d)? on)';
+const GOTO_RE = new RegExp('\\b' + GOTO_WORDS + '\\s+(?:to\\s+)?step\\s+(\\d+)\\b', 'i');
+const GOTO_STRIP = new RegExp(',?\\s*(?:and\\s+|then\\s+)?' + GOTO_WORDS + '\\s+(?:to\\s+)?step\\s+\\d+\\.?', 'i');
 const RESUBMIT_RE = /\bre-?submit(s|ted|ting)?\b/i;
 const ELSE_RE = /^(otherwise|else|if not)\b[,:]?\s*(.*)$/i;
 const PAR_RE = /\b(at the same time|in parallel|simultaneously|concurrently)\b/i;
 const TRIGGER_LINE = /^(trigger|start(?:ing)? event|starts? when|begins? when)\s*[:\-–—]\s*(.+)$/i;
 const TRIGGER_PROSE = /\b(?:process|procedure|sop|workflow)\s+(?:starts|begins|is triggered|is initiated|kicks off)\s+(?:when|once|after|by)\s+(.+?)\.?$/i;
 const SYSTEMS = ['ERP', 'Concur', 'NetSuite', 'Workday', 'SharePoint', 'Teams', 'Outlook', 'DocuSign', 'Salesforce'];
-const ROLE_ALIASES = [
-  { bu: 'Accounts Payable', re: /\bAP\b|\b(ap|payables?)\s+(clerk|specialist|analyst|team|lead)\b/i },
-  { bu: 'Treasury', re: /\btreasury\s+(analyst|team|manager|ops|specialist)\b|\btreasurer\b|\bcash manager\b/i },
-  { bu: 'Compliance', re: /\bcompliance\s+(officer|analyst|team|manager)\b|\bsanctions analyst\b/i },
-  { bu: 'Procurement', re: /\bbuyer\b|\bpurchasing\s+(agent|team|manager)\b|\bprocurement\s+(specialist|officer|analyst|team)\b/i },
-  { bu: 'IT', re: /\bIT\s+(admin|team|support)\b|\bintegration engineer\b|\bsysadmin\b|\bhelp ?desk\b/i },
-  { bu: 'PMO', re: /\bproject manager\b/i },
-];
 /* "Finance Director must also approve" -> "Finance Director approves" */
 function modal(t) {
   return String(t).replace(/\b(?:must|should|will|shall|needs to|has to)\s+(?:also\s+)?([a-z]+)/i, (m, v) =>
     /(s|sh|ch|x|z|o)$/.test(v) ? v + 'es' : /[^aeiou]y$/.test(v) ? v.slice(0, -1) + 'ies' : v + 's').replace(/\s+also\s+/i, ' ').trim();
 }
+/* ---------- R8 §6: actor, SLA, system, information ---------- */
+const VERB_BASES = new Set(('accept add activate allocate approve archive arrange assess assign attach audit authorise authorize book calculate call capture ' +
+  'certify check choose clear close code collect compare complete confirm contact copy correct create decide deliver deny dispatch distribute do ' +
+  'draft email enter escalate estimate evaluate export fax file fill finalise finalize forward gather generate get give handle import inform ' +
+  'inspect invite invoice issue key keep load log look make match monitor move notify obtain onboard open order pay perform place post prepare ' +
+  'print process publish pull purchase raise read receive reconcile record refund register reject release remove renew request reserve resolve ' +
+  'report resubmit return review route run save scan schedule screen select send set settle share sign source store submit take test tell track transfer ' +
+  'update upload validate verify write').split(' '));
+/* "creates" -> "create", "approves" -> "approve", "pays" -> "pay", "applies" -> "apply"; null when it is not a known verb's 3rd-person form */
+function verbBase(w) {
+  const x = String(w || '').toLowerCase();
+  if (!/^[a-z]+s$/.test(x) || /(ss|us|is)$/.test(x)) return null;
+  const cands = [x.slice(0, -1), x.replace(/ies$/, 'y'), x.replace(/es$/, '')];
+  return cands.find(c => VERB_BASES.has(c)) || null;
+}
+const MODALS = /^(must|should|will|shall|may|can|needs?|has|have|also|then|now|first|always|usually|promptly|immediately)$/i;
+/* Splits "The Finance Director approves the request" into {actor: 'Finance Director', action: 'Approve the request'}.
+   No actor when the sentence already starts with a verb ("Collect three quotes") or reads as a passive ("… are checked by …"). */
+function splitActor(text) {
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return { actor: null, action: String(text).trim() };
+  if (VERB_BASES.has(words[0].toLowerCase())) return { actor: null, action: String(text).trim() };
+  let i = 0;
+  while (i < words.length && DET.test(words[i]) && !/^[A-Z]{2,}$/.test(words[i])) i++;   /* "IT" is a team, not "it" */
+  for (let k = i; k < Math.min(words.length, i + 5); k++) {
+    const raw = words[k].replace(/[,;:]$/, '');
+    if (/^(is|are|was|were|be|been|gets?)$/i.test(raw)) return { actor: null, action: String(text).trim() };
+    const base = verbBase(raw) || (k > i && /^[a-z]+s$/.test(raw) && !/(ss|us|is)$/.test(raw) && !DOC_HEAD.test(raw) && !ROLE_WORD.test(raw) ? raw.replace(/ies$/, 'y').replace(/(ch|sh|x|z|ss)es$/, '$1').replace(/s$/, '') : null);
+    if (base && k > i) {
+      const actorWords = words.slice(i, k);
+      /* an actor is a name, team or role: capitalised words or role words, no digits */
+      if (!actorWords.every(a => /^[A-Z]/.test(a) || ROLE_WORD.test(a.replace(/'s$/, '')) || /^(of|and|&)$/.test(a)) || actorWords.some(a => /\d/.test(a))) return { actor: null, action: String(text).trim() };
+      let rest = words.slice(k + 1).join(' ');
+      /* later verbs joined by and/or/then become imperative too: "reviews and approves" -> "Review and approve" */
+      rest = rest.replace(/\b(and|or|then)\s+([a-z]+)\b/g, (m, c, v) => { const b = verbBase(v); return b ? `${c} ${b}` : m; });
+      return { actor: actorWords.join(' ').replace(/'s$/, ''), action: cap((base + (rest ? ' ' + rest : '')).trim()) };
+    }
+    if (k === i && VERB_BASES.has(raw.toLowerCase()) && i > 0) return { actor: null, action: String(text).trim() };
+  }
+  return { actor: null, action: String(text).trim() };
+}
+/* "within 2 business days" / "no later than 3 working days" -> "2 business days" */
+const NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, twelve: 12, fourteen: 14, thirty: 30 };
+const SLA_RE = /,?\s*\b(?:within|in no more than|no later than|in under|inside)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|thirty)\s+(business|working|calendar)?\s*(hours?|days?|weeks?)\b(?:\s+of\s+[a-z ]+?(?=[,.;]|$))?/i;
+function slaOf(t) {
+  const m = SLA_RE.exec(t);
+  if (!m) return null;
+  const n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMW[m[1].toLowerCase()];
+  const kind = m[2] ? (m[2].toLowerCase() === 'calendar' ? '' : 'business ') : (/^day/i.test(m[3]) ? 'business ' : '');
+  const unit = m[3].toLowerCase().replace(/s$/, '');
+  return { sla: `${n} ${kind}${unit}${n === 1 ? '' : 's'}`, strip: m[0] };
+}
+/* R8: information nouns named in a line ("amount", "cost centre", "budget code", "quotes", "invoice", "receipt", "purchase order") */
+const INFO_NOUNS = [
+  { re: /\bamounts?\b/i, name: 'Amount' },
+  { re: /\bcost cent(re|er)s?\b/i, name: m => 'Cost cent' + m[1].toLowerCase() },
+  { re: /\bbudget codes?\b/i, name: 'Budget code' },
+  { re: /\bquotes?\b|\bquotations?\b/i, name: 'Quotes' },
+  { re: /\binvoices?\b/i, name: 'Invoice' },
+  { re: /\breceipts?\b/i, name: 'Receipts' },
+  { re: /\bpurchase orders?\b|\bPOs?\b(?!\s+(?:number|no\.?|#))/, name: 'Purchase order' },
+];
+function infoNouns(line) {
+  const out = [];
+  INFO_NOUNS.forEach(x => { const m = x.re.exec(line); if (m) out.push(typeof x.name === 'function' ? x.name(m) : x.name); });
+  return out;
+}
+/* R8: a long sentence is shortened at a clause boundary (the full sentence is kept as the step's note) */
+const TITLE_MAX = 70;
+function shorten(t) {
+  if (t.length <= TITLE_MAX) return t;
+  const cut = /(,\s+|\s+so that\s+|\s+because\s+|\s+which\s+|\s+in order to\s+|\s+for the purpose of\s+|\s+including\s+|\s+with\s+|\s+and\s+|\s+for\s+)/gi;
+  let best = null, m;
+  while ((m = cut.exec(t))) { if (m.index >= 15 && m.index <= TITLE_MAX) best = m.index; }
+  return best ? t.slice(0, best).replace(/[,;:\s]+$/, '') : t;
+}
+
 const COND = /^(if|unless)\b|\b(if|unless)\b|\bwhen\b.*\b(exceed\w*|over|above|greater|more than|below|under)\b|\bover \$|\babove \$|\bgreater than\b|\bmore than \$|\bexceed(s|ing)?\b|\bapproval (is )?required\b/i;
 const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
 /* R6: a title never keeps "()" or a lone parenthesis (left over when a condition is split out of "(if over $5,000)") */
@@ -460,50 +575,68 @@ function sopRules(text, docs) {
       const src = /\bfrom\s+(?:the\s+)?([A-Z][\w-]+)/.exec(line);
       docPhrases(line).forEach(nm => propose(nm, `Mentioned in "${clip(line, 80)}"${src ? ` (source: ${src[1]})` : ''}; no existing data element matches.`, node));
     }
+    linkInfo(line, node, hits);
     return [...new Set(hits)];
   };
-  const ownerOf = (line) => {
-    const lower = line.toLowerCase();
-    const full = people.find(p => p.name && lower.includes(p.name.toLowerCase()));
-    if (full) return full.id;
-    const bu = people.find(p => p.bu && (p.bu.length <= 3 ? new RegExp('\\b' + p.bu + '\\b') : new RegExp('\\b' + p.bu.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i')).test(line));
-    if (bu) return bu.id;
-    const alias = ROLE_ALIASES.find(a => a.re.test(line));
-    const viaAlias = alias && people.find(p => p.bu === alias.bu);
-    return viaAlias ? viaAlias.id : undefined;
-  };
-  /* R7: a role nobody in the directory matches ("Employee", "Hiring manager") becomes the step's ownerRole */
-  const roleOf = (line) => {
-    const words = String(line).replace(/[^\w'&/ -]+/g, ' ').trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < words.length && DET.test(words[i])) i++;
-    for (let k = i; k < Math.min(words.length, i + 3); k++) {
-      const w = words[k].replace(/'s$/i, '');
-      if (VERBS.test(w) || STOP.has(w.toLowerCase())) return undefined;
-      if (ROLE_WORD.test(w) && !/^(department|desk|payable|receivable)$/i.test(w)) {
-        const nxt = words[k + 1] ? words[k + 1].toLowerCase() : '';
-        if (ROLE_WORD.test(nxt)) continue;                            /* "Finance director", "hiring manager" */
-        /* the role must be doing something: "Employee submits", "Manager must approve"; not "Employee bank details" */
-        if (!(VERBS.test(nxt) || /^(must|should|will|shall|may|can|needs|has|then|also|signs|pays)$/.test(nxt) || /[^s]s$|ed$/.test(nxt))) return undefined;
-        const role = words.slice(i, k + 1).map(x => (/^[A-Z]{2,4}$/.test(x) ? x : x.toLowerCase())).join(' ').replace(/'s$/i, '');
-        return role.length <= 40 ? cap(role) : undefined;
-      }
-    }
-    return undefined;
-  };
+  /* R8: information nouns (amount, cost centre, budget code, quotes, invoice, receipt, purchase order) become information,
+     unless an existing element or a document phrase on the same line already covers them. Nothing is invented. */
+  function linkInfo(line, node, hits) {
+    const phrases = docPhrases(line).map(x => x.toLowerCase());
+    const linked = (hits || []).map(id => String((dataEls.find(d => d.id === id) || {}).name || '').toLowerCase());
+    infoNouns(line).forEach(nm => {
+      const w = nm.toLowerCase().replace(/s$/, '');
+      if (phrases.some(ph => ph.includes(w)) || linked.some(x => x.includes(w))) return;
+      const same = dataEls.find(d => String(d.name || '').toLowerCase() === nm.toLowerCase());
+      if (same) { if (node && node.type === 'step') node.data = [...new Set((node.data || []).concat([same.id]))]; return; }
+      propose(nm, `Mentioned in "${clip(line, 80)}"; no existing data element matches.`, node);
+    });
+  }
+  /* R8 §6: only a full person name links a person; a team or role is kept as ownerRole text; never the current user */
+  const personNamed = (text) => { const lower = String(text || '').toLowerCase(); return people.find(p => p.name && lower.includes(p.name.toLowerCase())); };
+  const ownerOf = (line) => { const p = personNamed(line); return p ? p.id : undefined; };
   const systemOf = (line) => { const m = SYSTEMS.find(x => new RegExp('\\b' + x + '\\b').test(line)); return m || undefined; };
   let seq = 0;
+  /* R8: who does it (owner or ownerRole) applied to a node */
+  const setActor = (n, actor) => {
+    const a = tidy(String(actor || '').replace(/^(the|a|an|our|your)\s+/i, ''));
+    if (!a) return;
+    const p = personNamed(a);
+    delete n.owner; delete n.ownerRole;
+    if (p) n.owner = p.id; else if (a.length <= 40) n.ownerRole = cap(a);
+  };
   const makeStep = (title, line) => {
-    /* R4: titles are never truncated */
-    const n = { id: 's' + (++seq), type: 'step', title: cap(tidy(title.replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, ''))) };
-    const o = ownerOf(line); if (o) n.owner = o; else { const r = roleOf(line); if (r) n.ownerRole = r; }
+    let t = String(title).replace(/\s+/g, ' ').trim().replace(/[.;:,]$/, '');
+    const n = { id: 's' + (++seq), type: 'step' };
+    /* "… Owner: Records Clerk" */
+    let ownerLine = null;
+    const ol = /[.;,]?\s*\bowner\s*[:\-–—]\s*(.+)$/i.exec(t);
+    if (ol) { ownerLine = ol[1].replace(/[.;]$/, ''); t = t.slice(0, ol.index).trim(); }
+    const sla = slaOf(t);
+    if (sla) { n.sla = sla.sla; t = t.replace(sla.strip, ' ').replace(/\s{2,}/g, ' ').trim(); }
+    const sys = systemOf(line);
+    if (sys) { n.system = sys; t = t.replace(new RegExp('\\s+(?:in|into|on|using|via|through|from|to|with)\\s+(?:the\\s+)?' + sys + '(?:\\s+(?:system|app|tool))?\\b', 'i'), ' ').replace(/\s{2,}/g, ' ').trim(); }
+    const sp = splitActor(t);
+    let action = sp.action;
+    if (sp.actor) setActor(n, sp.actor);
+    else {
+      /* passive or name mid-sentence: "Employee bank details are checked by Leo Park" */
+      const p = personNamed(t);
+      if (p) { n.owner = p.id; action = action.replace(new RegExp('\\s+by\\s+' + p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'), ''); }
+    }
+    if (ownerLine) setActor(n, ownerLine);
+    const full = cap(tidy(action.replace(/[.;:,]$/, '')));
+    const short = shorten(full);
+    n.title = short || full;
+    if (short !== full) n.note = cap(tidy(String(title).trim()));
     const d = linkData(line, n); if (d.length) n.data = d;
-    const sys = systemOf(line); if (sys) n.system = sys;
     return n;
   };
   const splitCond = (t) => {
     t = t.replace(/[.;]\s*$/, '');
     let m = /^(?:if|when|unless)\s+(.+?),(?!\d)\s*(?:then\s+)?(.+)$/i.exec(t);
+    if (m) return { cond: m[1], action: m[2] };
+    /* R8: "If the amount is over $5,000 the Finance Director approves" (no comma after the threshold) */
+    m = /^(?:if|when|unless)\s+(.*?\$\s?[\d,]+(?:\.\d+)?\s*(?:k|m|million|thousand)?)\s+(?:then\s+)?(.+)$/i.exec(t);
     if (m) return { cond: m[1], action: m[2] };
     m = /^(.+?),?\s+(?:only\s+)?(?:if|when|unless)\s+(.+?)$/i.exec(t);
     if (m) return { cond: m[2], action: m[1] };
@@ -514,6 +647,8 @@ function sopRules(text, docs) {
   const decisionTitle = (cond) => {
     let c = tidy(cond).replace(/[.;?]$/, '').replace(/^(?:if|when|unless)\s+/i, '').trim();
     if (/^(over|above|under|below|more than|greater than|less than|exceeds?)\b/i.test(c)) c = 'amount ' + c;
+    /* R8: "the amount is over $5,000" -> "Amount over $5,000?" */
+    if (/\$\s?\d/.test(c)) c = c.replace(/^(the|a|an)\s+/i, '').replace(/\s+(?:is|are)\s+(?=(?:over|above|under|below|more than|greater than|less than|at least)\b)/i, ' ');
     return cap(tidy(c)).replace(/[.;?]$/, '') + '?';
   };
 
@@ -544,9 +679,17 @@ function sopRules(text, docs) {
   };
   const stripGoto = t => t.replace(GOTO_STRIP, '').replace(/^\s*(then|and)\s+/i, '').replace(/[,;\s]+$/, '').trim();
   const setGoto = (branch, g) => { if (!g) return; if (g.id) branch.goto = g.id; else pendingGoto.push({ branch, num: g.num }); };
+  /* R8: "Wait for the weekly payment run" -> a wait node (never a build step) */
+  const waitNode = (sen) => {
+    const m = /^(?:then\s+)?wait\s+(?:up\s+to\s+[^,.;]+?\s+)?(?:for|until|on)\s+(.+?)[.;]?$/i.exec(String(sen).trim());
+    if (!m) return null;
+    return { id: 'w' + (++seq), type: 'wait', title: cap(tidy(String(sen).trim().replace(/^then\s+/i, '').replace(/[.;]$/, ''))), wait: tidy(m[1]) };
+  };
   const branchWith = (branch, text, g) => {
     const rest = stripGoto(text);
-    if (rest.length >= 3 && !/^(return|go back|loop back|send back)\b/i.test(rest)) { const st = makeStep(modal(rest), rest); branch.nodes.push(st); last = st; }
+    const wn = rest.length >= 3 ? waitNode(rest) : null;
+    if (wn) { branch.nodes.push(wn); last = wn; }
+    else if (rest.length >= 3 && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed)\b/i.test(rest)) { const st = makeStep(modal(rest), rest); branch.nodes.push(st); last = st; }
     setGoto(branch, g);
   };
   /* One numbered line can hold several sentences: main step, inline condition, otherwise-clause, parallel work. */
@@ -554,6 +697,9 @@ function sopRules(text, docs) {
     /* R5: "…; otherwise …" and "…, otherwise …" start their own clause so they reach the No branch */
     const sentences = body.split(/(?<=[.;!])\s+(?=[A-Z(])|;\s*(?=(?:otherwise|else|if not)\b)|,\s*(?=otherwise\b)/i).map(x => x.trim()).filter(x => x.length >= 3);
     for (const sen of sentences) {
+      /* "… . Owner: Ana Ruiz" names who does the step just made */
+      const own = /^owner\s*[:\-–—]\s*(.+?)\.?$/i.exec(sen);
+      if (own) { if (last && last.type === 'step') setActor(last, own[1]); continue; }
       const g = gotoOf(sen);
       const els = ELSE_RE.exec(sen);
       if (els && lastDecision) { branchWith(lastDecision.branches[1], els[2].trim(), g); continue; }
@@ -573,10 +719,14 @@ function sopRules(text, docs) {
         else pushTop(st);
         last = st; continue;
       }
+      const wn = waitNode(sen);
+      if (wn) { pushTop(wn); last = wn; continue; }
       if (COND.test(sen)) {
         const { cond, action } = splitCond(sen);
         const dec = newDecision(decisionTitle(cond), []);
         branchWith(dec.branches[0], action, g);
+        /* the information the condition reads ("the amount") belongs to the conditional action */
+        linkInfo(cond, dec.branches[0].nodes[0] || null, []);
         pushTop(dec); lastDecision = dec; continue;
       }
       if (g) {
@@ -587,7 +737,7 @@ function sopRules(text, docs) {
         branchWith(dec.branches[0], sen, g);
         pushTop(dec); lastDecision = dec; continue;
       }
-      const st = makeStep(sen, sen); pushTop(st); last = st;
+      const st = makeStep(modal(sen), sen); pushTop(st); last = st;
     }
   };
 
@@ -611,6 +761,9 @@ function sopRules(text, docs) {
     const indent = rl.match(/^\s*/)[0].length;
     const t = rl.trim();
     const wasFirst = firstContent; firstContent = false;
+    /* R8: an "Owner: X" line after a step names who does that step (before any step it is the document owner: skipped) */
+    const ownLine = /^(?:[-*•–]\s+|[a-z][.)]\s+)?(?:step\s+)?owner\s*[:\-–—]\s*(.+?)\.?$/i.exec(t);
+    if (ownLine && last && last.type === 'step') { setActor(last, ownLine[1]); continue; }
     if (SKIP_LINE.test(t) || /^#+\s/.test(t) || TRIGGER_LINE.test(t)) continue;
     const isNum = NUM.test(t) && !SUBNUM.test(t), isSubNum = SUBNUM.test(t), isLetter = !isNum && LETTER.test(t), isBullet = BULLET.test(t);
     const body = t.replace(NUM, '').replace(SUBNUM, '').replace(LETTER, '').replace(BULLET, '').trim();
@@ -647,7 +800,7 @@ function sopNotes(nodes) {
   const nobody = steps.filter(n => !n.owner && !n.ownerRole).length;
   const roles = [...new Set(steps.filter(n => !n.owner && n.ownerRole).map(n => n.ownerRole))];
   return [`Found ${plural(steps.length, 'step')}${choices ? `, ${plural(choices, 'choice')}` : ''}${together ? ` and ${plural(together, 'set')} of steps done at the same time` : ''}.`,
-    roles.length ? `${roles.join(', ')} ${roles.length === 1 ? 'is a role, not a named person' : 'are roles, not named people'}.` : '',
+    roles.length ? `${roles.join(', ')} ${roles.length === 1 ? 'is a team or role, not a named person' : 'are teams or roles, not named people'}.` : '',
     nobody ? `${plural(nobody, 'step')} ${nobody === 1 ? 'has' : 'have'} no one assigned yet.` : '',
     'Check each step before saving.'].filter(Boolean).join(' ');
 }
@@ -670,7 +823,8 @@ function sanitizeSop(out, docs) {
   const props = [];
   (Array.isArray(out && out.newData) ? out.newData : []).forEach(x => {
     const name = x && typeof x.name === 'string' ? tidy(x.name).slice(0, 80) : '';
-    if (!name || !isDocName(name) || existing.has(name.toLowerCase()) || props.length >= 15) return;
+    const infoName = infoNouns(name).length > 0 && name.split(/\s+/).length <= 3;   /* R8: "Quotes", "Budget code" */
+    if (!name || !(isDocName(name) || infoName) || existing.has(name.toLowerCase()) || props.length >= 15) return;
     const key = ndKey(name);
     if (props.some(p => p.key === key)) return;
     props.push({ key, name, reason: typeof x.reason === 'string' ? x.reason.slice(0, 300) : '', steps: [] });
@@ -695,11 +849,24 @@ function sanitizeSop(out, docs) {
       });
       return g;
     }
-    const title = tidy(n.title);
+    let title = tidy(n.title);
     if (!title) return null;
-    const node = { id: idFor(n, 's'), type: 'step', title: title.slice(0, 300) };
-    if (typeof n.owner === 'string' && peopleIds.has(n.owner)) node.owner = n.owner;
+    if (n.type === 'wait') {
+      const w = { id: idFor(n, 'w'), type: 'wait', title: title.slice(0, 300) };
+      if (typeof n.wait === 'string' && n.wait.trim()) w.wait = tidy(n.wait).slice(0, 120);
+      return w;
+    }
+    /* R8: the title is the action only; an actor left in it becomes the owner (full name) or ownerRole (team/role) */
+    const sp = splitActor(title);
+    if (sp.actor) title = sp.action;
+    const node = { id: idFor(n, 's'), type: 'step', title: shorten(title).slice(0, 300) };
+    const named = sp.actor && list(docs, 'person').find(p => p.name && sp.actor.toLowerCase().includes(p.name.toLowerCase()));
+    if (named) node.owner = named.id;                           /* the person the title names wins */
+    else if (typeof n.owner === 'string' && peopleIds.has(n.owner) && !sp.actor) node.owner = n.owner;
     else if (typeof n.ownerRole === 'string' && n.ownerRole.trim()) node.ownerRole = tidy(n.ownerRole).slice(0, 40);
+    else if (sp.actor) node.ownerRole = cap(tidy(sp.actor.replace(/^(the|a|an)\s+/i, ''))).slice(0, 40);
+    if (node.title !== title) node.note = title.slice(0, 300);
+    if (typeof n.sla === 'string' && n.sla.trim()) node.sla = n.sla.trim().slice(0, 40);
     const data = cleanData(n.data); if (data.length) node.data = data;
     const touches = strArr(n.touches, 4).map(x => x.slice(0, 40)); if (touches.length) node.touches = touches;
     if (typeof n.system === 'string' && n.system.trim()) node.system = n.system.trim().slice(0, 40);
@@ -728,18 +895,21 @@ async function run(kind, body, docs, today) {
       const people = list(docs, 'person').map(p => ({ id: p.id, name: p.name, role: p.role, bu: p.bu }));
       const data = list(docs, 'dataElement').map(d => ({ id: d.id, name: d.name, source: d.source, note: d.note }));
       const out = await chat(RULES + ' Convert the SOP into ordered process steps. Return {"nodes":[node],"newData":[{"name","reason"}],"notes"}. ' +
-        'A node is {"type":"step","title","owner"?,"ownerRole"?,"data"?,"touches"?,"subs"?:[{"title","data"}]} or, for a condition such as an amount threshold or "approval required", ' +
+        'A node is {"type":"step","title","owner"?,"ownerRole"?,"sla"?,"system"?,"data"?,"touches"?,"subs"?:[{"title","data"}]}, or {"type":"wait","title","wait"} for "Wait for …", or, for a condition such as an amount threshold or "approval required", ' +
         '{"type":"decision","title":"<condition>?","branches":[{"label":"Yes","nodes":[step]},{"label":"No","nodes":[]}]}. ' +
         'The first node is {"type":"trigger","title"} naming the SOP\'s stated start event, or "Process starts" if none is stated (never a copy of step 1). ' +
         'Work done "at the same time", "in parallel" or "simultaneously" becomes {"type":"parallel","title","branches":[{"label","nodes":[step]}]}. ' +
         '"Otherwise", "else" or "if not" goes in the No branch of the preceding decision. Every node has a short unique "id". ' +
         '"Resubmit" or "return to step N" sets "goto": <id of that step> on the branch (a loop-back). Never truncate titles. ' +
-        'Leave owner out unless a full name, business unit or role alias (e.g. AP clerk = Accounts Payable) matches; never default it. ' +
-        'When the SOP names a role that matches no supplied person (e.g. "Employee", "Manager"), set "ownerRole" to that role as written instead. A step with an inline condition ' +
+        'Set owner only when the SOP names a supplied person by full name; never default it and never use the current user. ' +
+        'When the SOP names a team or role (e.g. "Procurement", "Compliance analyst", "Manager"), set "ownerRole" to that text as written. ' +
+        'A title is the action only, without the actor ("Procurement creates a PO" -> title "Create a PO", ownerRole "Procurement"), short. ' +
+        '"within N business days" -> "sla": "N business days". An "Owner: X" line sets that step\'s owner/ownerRole. "otherwise skip to step N" sets "goto" on the No branch. ' +
+        'Money thresholds become a decision (Yes = the conditional action, No = continue). Information nouns (amount, cost centre, budget code, quotes, invoice, receipt) go in newData. A step with an inline condition ' +
         '("Manager approves. If over $5,000, Finance Director also approves.") becomes the main step followed by a decision whose Yes branch holds the conditional action. ' +
         'Steps may carry "system" when a named system (e.g. ERP, Concur, NetSuite, Workday, SharePoint, Teams, Outlook, DocuSign, Salesforce) is used. ' +
         'Skip title, purpose, scope, owner and revision lines. Lettered or indented sub-items become subs of the step above them. ' +
-        'owner must be a supplied person id, only on a full-name match or when the step names that person\'s business unit (bu). ' +
+        'owner must be a supplied person id, only on a full-name match. ' +
         'data must be a supplied data element id, only when the element is clearly the same information about the same kind of party ' +
         '(for example, employee bank details are NOT vendor bank remittance details). Anything else goes in newData. ' +
         'touches are short system or team names mentioned in the text. Titles are short imperative phrases.',
@@ -779,16 +949,18 @@ async function run(kind, body, docs, today) {
         'Return {"headline": string, "summary": string (2-3 sentences), "highlights": [string], "risks": [string], "asks": [string]}. ' +
         'Refer to work, information and people only by the names and titles given; never output identifiers. ' +
         `The headline MUST start with "${sum.label}:" and must not contradict it. The summary MUST start with this exact sentence: "${sum.sentence}" ` +
-        'Each ask names the person who needs to act and what to do. Risks marked likelyMitigated go in risks as "likely mitigated, confirm and close". ' +
+        'Each ask names the person who needs to act and what to do. Risks marked likelyMitigated go in risks as "Likely resolved: <title>. … close it?". ' +
+        'Use the numbers, dates, counts and blockers exactly as given (truth); never say all work is done or nothing needs attention while blockers exist. ' +
         'When hypercare (support after launch) is supplied, report days left and open problems; an open severity 1 problem means "consider rolling back".' +
         (advanced ? ' The reader asked for advanced detail: you may add earned value (SPI, CPI) in one highlight.' : ''),
         JSON.stringify(sent), 900);
       if (typeof out.headline !== 'string' || typeof out.summary !== 'string') throw new Error('shape');
       /* the headline must agree with the label (R3/R7) and the summary leads with the sentence */
-      const others = Object.values(LABELS).filter(x => x !== sum.label).concat(['Red', 'Amber', 'Green']);
+      /* the label is ours; the model's text after it may not name any other status */
       let headline = plainWords(out.headline.trim());
-      if (others.some(x => new RegExp('\\b' + x + '\\b', 'i').test(headline)) || !plainOk(headline)) headline = fallback.headline;
-      else if (!headline.toLowerCase().startsWith(sum.label.toLowerCase())) headline = `${sum.label}: ${headline}`;
+      const rest = headline.toLowerCase().startsWith(sum.label.toLowerCase()) ? headline.slice(sum.label.length).replace(/^[\s:,-]+/, '') : headline;
+      if (!rest || /\b(on track|at risk|off track|red|amber|green|running late)\b/i.test(rest) || !plainOk(rest)) headline = fallback.headline;
+      else headline = `${sum.label}: ${rest}`;
       let summary = plainWords(out.summary.trim());
       if (!advanced && !plainOk(summary)) summary = fallback.summary;
       else if (!summary.startsWith(sum.sentence)) summary = `${sum.sentence} ${summary.replace(sum.sentence, '').trim()}`.trim();

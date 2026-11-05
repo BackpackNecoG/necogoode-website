@@ -5,6 +5,7 @@ import { BASE, link, go, esc, fmtTime, drawer, toast, modal } from './ui.js';
 const ROUTES = [
   [/^\/$/, 'home', () => ({})],
   [/^\/processes$/, 'processes', () => ({})],
+  [/^\/projects$/, 'projects', () => ({})],
   [/^\/process\/([\w-]+)\/step\/([\w-]+)$/, 'step', m => ({ pid: m[1], sid: m[2] })],
   [/^\/process\/([\w-]+)$/, 'process', m => ({ pid: m[1] })],
   [/^\/new$/, 'process', () => ({ pid: null, create: true })],
@@ -16,7 +17,7 @@ const ROUTES = [
   [/^\/testing\/([\w-]+)$/, 'testing', m => ({ prj: m[1] })],
   [/^\/import$/, 'importsop', () => ({})],
 ];
-const NAV = { home: 'home', processes: 'process', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process' };
+const NAV = { home: 'home', processes: 'process', projects: 'project', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process' };
 
 const pageCache = {};
 async function loadPage(name) {
@@ -36,7 +37,7 @@ function firstProcess() { const p = store.list('process')[0]; return p ? p.id : 
 
 function renderChrome(active) {
   const prj = firstProject(), proc = firstProcess();
-  const items = [['home', '/', 'Home'], ['process', '/processes', 'Processes'], ['project', '/project/' + prj, 'Projects'],
+  const items = [['home', '/', 'Home'], ['process', '/processes', 'Processes'], ['project', '/projects', 'Projects'],
     ['release', '/release/' + prj, 'Launch'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio']]
     .concat(store.advanced ? [['dashboard', '/dashboard', 'Dashboard']] : []);
   document.getElementById('nav').innerHTML = items.map(([k, p, l]) => `<a href="${link(p)}" data-link class="${active === k ? 'on' : ''}">${l}</a>`).join('');

@@ -2,7 +2,7 @@
    data state counts and linked projects; search; "+ New workflow", "Import BPMN" and "Import SOP". */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname } from '../ui.js';
-import { flat, diffCounts, effAvail, projectsFor, importBtn, bindImport, isAdv, AV } from './process.js';
+import { flat, diffCounts, effAvail, projectsFor, importBtn, bindImport, isAdv, AV, HAVE, NOTYET } from './process.js';
 
 let query = ''; /* kept across re-renders (the router re-renders on every store change) */
 
@@ -20,6 +20,9 @@ const matches = (r, q) => !q || norm(q).split(/\s+/).filter(Boolean).every(t => 
 
 function dataCell(d) {
   if (!d.total) return '<span class="hint">None added yet</span>';
+  /* R8 §1: two states in Simple */
+  if (!isAdv()) { const ny = d.total - d.live;
+    return `<div class="d-dcs" data-datacounts="${d.live}/${d.pending}/${d.example}/${d.missing}">${d.live ? `<span class="d-dc d-dc-live" title="${HAVE}"><i aria-hidden="true"></i>We have ${d.live}</span>` : ''}${ny ? `<span class="d-dc d-dc-missing" title="${NOTYET}"><i aria-hidden="true"></i>${ny} ${NOTYET.toLowerCase()}</span>` : ''}</div>`; }
   const seg = (k, v) => v ? `<span class="d-dc d-dc-${k}" title="${esc(AV[k].label)}"><i aria-hidden="true"></i>${v} ${esc(AV[k].label.toLowerCase())}</span>` : '';
   return `<div class="d-dcs" data-datacounts="${d.live}/${d.pending}/${d.example}/${d.missing}">${seg('live', d.live)}${seg('pending', d.pending)}${seg('example', d.example)}${seg('missing', d.missing)}</div>`;
 }

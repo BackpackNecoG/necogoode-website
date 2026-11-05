@@ -17,6 +17,8 @@ function addDays(day, n) {
   return d.toISOString().slice(0, 10);
 }
 const clone = o => JSON.parse(JSON.stringify(o));
+/* the same day, or the Monday after it when it falls on a weekend */
+const weekday = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 ? addDays(d, 2) : w === 0 ? addDays(d, 1) : d; };
 
 /* ---------- people ---------- */
 const PEOPLE = [
@@ -81,22 +83,22 @@ function d2Csv() {
 const F = (name, format, rule, extra) => Object.assign({ name, format, rule }, extra || {});
 function dataElements() {
   return [
-    { id: 'D1', name: 'Vendor legal name & Tax ID', owner: 'mc', source: 'W-9 upload (vendor portal)', avail: 'example',
-      note: '12 sample W-9s collected; no parser yet.',
+    { id: 'D1', name: 'Vendor legal name & Tax ID', owner: 'mc', source: 'W-9 upload (vendor portal)', avail: 'live',
+      note: 'Collected on every vendor today (W-9 by email, now through the portal).',
       fields: [F('Legal name', 'text', 'Required', { type: 'text', min: 2, max: 120, required: true }),
         F('Tax ID (EIN)', '##-#######', 'Required, unique per vendor', { type: 'text', length: 10, pattern: '^\\d{2}-\\d{7}$', required: true, unique: true }),
         F('Entity type', 'list', 'Required', { type: 'list', values: ['LLC', 'Corporation', 'Partnership', 'Sole proprietor'], required: true }),
         F('Address', 'text', 'Required', { type: 'text', max: 200, required: true })],
       samples: ['w9_acme_supply.pdf', 'w9_bluefin_logistics.pdf', 'w9_cobalt_parts.pdf'], sampleCsv: d1Csv(), discovered: [] },
     { id: 'D2', name: 'Bank remittance details', owner: 'lp', source: 'Treasury portal', avail: 'missing',
-      note: 'Arrives today as emailed PDFs. No structured capture or API exists.',
+      note: 'Arrives today as emailed PDFs. Not available as information yet: no form or connection exists.',
       fields: [F('Bank name', 'text', 'Required', { type: 'text', max: 80, required: true }),
         F('Routing number', '9 digits', 'Required', { type: 'digits', length: 9, pattern: '^\\d{9}$', required: true }),
         F('Account number', 'text, masked', 'Required, unique per vendor', { type: 'digits', min: 4, max: 17, pattern: '^\\d{4,17}$', required: true, unique: true }),
         F('Account holder', 'text', 'Must match legal name', { type: 'text', max: 120, required: true })],
       samples: [], sampleCsv: d2Csv(), discovered: [] },
-    { id: 'D3', name: 'Certificate of insurance', owner: 'ps', source: 'Vendor portal upload', avail: 'example',
-      note: 'Sample COIs on file; expiry dates captured manually.',
+    { id: 'D3', name: 'Certificate of insurance', owner: 'ps', source: 'Vendor portal upload', avail: 'live',
+      note: 'Collected on every vendor today; expiry dates are typed in by hand.',
       fields: [F('Carrier', 'text', 'Required', { type: 'text', max: 80, required: true }),
         F('Coverage amount', 'currency', '≥ $1M', { type: 'currency', min: 1000000, required: true }),
         F('Expiry date', 'date', 'Required', { type: 'date', required: true })],
@@ -108,7 +110,7 @@ function dataElements() {
         F('Remit-to', 'ref → D2', 'Required', { type: 'text', required: true })],
       samples: ['erp_vendor_schema.json'], discovered: [] },
     { id: 'D5', name: 'Sanctions screening result', owner: 'ps', source: 'Screening service API', avail: 'missing',
-      note: 'Screening vendor contract pending signature.',
+      note: 'New: the screening service contract is not signed yet.',
       fields: [F('Match status', 'clear / review / hit', 'Required', { type: 'list', values: ['clear', 'review', 'hit'], required: true }),
         F('Screened at', 'timestamp', 'Required', { type: 'date', required: true }),
         F('Lists checked', 'list', 'Required', { type: 'list', values: ['US sanctions', 'EU sanctions', 'UN sanctions'], required: true })],
@@ -124,8 +126,8 @@ function dataElements() {
         F('Approver', 'person', 'Required', { type: 'text', required: true }),
         F('Limit', 'currency', 'Required', { type: 'currency', min: 0, max: 1000000, required: true })],
       samples: ['approver_matrix.csv'], discovered: [] },
-    { id: 'D8', name: 'Vendor risk tier', owner: 'ps', source: 'Derived (screening + spend)', avail: 'example',
-      note: 'Scoring rules drafted; sample outputs only.',
+    { id: 'D8', name: 'Vendor risk tier', owner: 'ps', source: 'Derived (screening + spend)', avail: 'live',
+      note: 'Compliance records a tier by hand during the manual lookup today; the scoring rules are being written down.',
       fields: [F('Tier', 'high / standard', 'Required', { type: 'list', values: ['high', 'standard'], required: true }),
         F('Reason codes', 'list', 'Optional', { type: 'list', values: ['sanctions-review', 'high-spend', 'new-country', 'adverse-media'], required: false })],
       samples: ['risk_tier_examples.xlsx'], discovered: [] },
@@ -137,12 +139,12 @@ const sub = (title, data) => ({ title, data });
 function processes() {
   return [
     { id: 'vendor-onboarding', name: 'Vendor Onboarding',
-      desc: 'From a vendor request to an active, payable vendor with a signed contract. To-be design: screening and banking move from email to system-captured data.',
+      desc: 'From a vendor request to an active, payable vendor with a signed contract. The new way moves screening and bank details from email into the system.',
       owner: 'mc', resources: ['mc', 'ps', 'lp', 'ar', 'dk'], version: 1, released: [],
       asis: [
         { id: 'k', type: 'trigger', title: 'Vendor request emailed to Procurement', owner: 'mc', data: [], touches: ['Procurement', 'Email'] },
         { id: 'a1', type: 'step', title: 'Email vendor for W-9 and COI', owner: 'mc', data: ['D1', 'D3'], touches: ['Procurement', 'Email'] },
-        { id: 'a2', type: 'step', title: 'Manual sanctions lookup', owner: 'ps', data: ['D1'], touches: ['Compliance', 'Public lists'] },
+        { id: 'a2', type: 'step', title: 'Manual sanctions lookup', owner: 'ps', data: ['D1', 'D8'], touches: ['Compliance', 'Public lists'] },
         { id: 'a3', type: 'step', title: 'Receive bank letter by email', owner: 'lp', data: ['D2'], touches: ['Treasury', 'Email'] },
         { id: 'a4', type: 'step', title: 'Key vendor into ERP by hand', owner: 'ar', data: ['D1', 'D2'], touches: ['Accounts Payable', 'ERP'] },
         { id: 'a5', type: 'step', title: 'Activate contract', owner: 'mc', data: ['D6'], touches: ['Procurement', 'Contract repository'] },
@@ -239,23 +241,26 @@ function processes() {
 
 /* ---------- work items: [id, project, pid, step, title, owner, status, startOff, dueOff, deps, resolves, kind] ---------- */
 const WORK = [
-  ['W1', 'vendor-modernization', 'vendor-onboarding', 's1', 'Launch vendor portal W-9/COI upload', 'mc', 'done', -27, -15, [], null, 'build'],
-  ['W2', 'vendor-modernization', 'vendor-onboarding', 's2', 'Sign screening vendor contract', 'ps', 'prog', -7, 6, [], 'D5', 'other'],
-  ['W3', 'vendor-modernization', 'vendor-onboarding', 's2', 'Integrate screening API', 'dk', 'idle', 7, 13, ['W2'], null, 'build'],
-  ['W4', 'vendor-modernization', 'vendor-onboarding', 's2', 'Define risk-tier scoring rules', 'ps', 'prog', -5, 2, [], null, 'other'],
-  ['W5', 'vendor-modernization', 'vendor-onboarding', 's2a', 'EDD checklist & sign-off form', 'ps', 'idle', 3, 8, ['W4'], null, 'build'],
-  ['W6', 'vendor-modernization', 'vendor-onboarding', 's3', 'Stand up structured bank capture', 'lp', 'idle', -8, -1, [], 'D2', 'build'],
-  ['W7', 'vendor-modernization', 'vendor-onboarding', 's3', 'Build micro-deposit verification', 'dk', 'idle', 0, 6, ['W6'], null, 'build'],
-  ['W8', 'vendor-modernization', 'vendor-onboarding', 's4', 'ERP vendor write integration', 'dk', 'prog', -2, 10, ['W6'], null, 'build'],
-  ['W9', 'vendor-modernization', 'vendor-onboarding', 's6', 'Notification automation', 'dk', 'done', -15, -5, [], null, 'build'],
-  ['W10', 'vendor-modernization', 'invoice-approval', 'i1', 'Remit-to check in 3-way match', 'ar', 'idle', 11, 16, ['W6', 'W8'], null, 'build'],
-  ['W11', 'vendor-modernization', 'invoice-approval', 'i2', 'Amount-based approval routing', 'dk', 'idle', 6, 16, [], null, 'build'],
-  ['W12', 'vendor-modernization', 'vendor-onboarding', 's3', 'Defect: bank capture form accepts a blank account holder', 'lp', 'prog', -1, 4, [], null, 'defect'],
-  ['W13', 'vendor-modernization', 'vendor-onboarding', 's1', 'Defect: portal rejects W-9 PDFs over 5 MB', 'mc', 'done', -20, -17, [], null, 'defect'],
-  ['A1', 'access-review-automation', 'access-review', 'r1', 'Connect identity platform entitlement export', 'dk', 'done', -24, -14, [], null, 'build'],
-  ['A2', 'access-review-automation', 'access-review', 'r2', 'Configure manager review campaigns', 'ps', 'done', -14, -4, ['A1'], null, 'build'],
-  ['A3', 'access-review-automation', 'access-review', 'r3', 'Auto-removal runbook and approval', 'dk', 'done', -6, -1, ['A1'], null, 'access'],
-  ['A4', 'access-review-automation', 'access-review', 'r2', 'UAT: dry-run certification with Compliance', 'ps', 'idle', 5, 9, ['A2', 'A3'], null, 'test'],
+  ['W1', 'vendor-modernization', 'vendor-onboarding', 's1', 'Open W-9 and insurance uploads in the vendor portal', 'mc', 'done', -27, -15, [], null, 'build'],
+  ['W2', 'vendor-modernization', 'vendor-onboarding', 's2', 'Sign the screening service contract', 'ps', 'prog', -7, 6, [], 'D5', 'other'],
+  ['W3', 'vendor-modernization', 'vendor-onboarding', 's2', 'Connect the screening service', 'dk', 'idle', 7, 13, ['W2'], null, 'build'],
+  ['W4', 'vendor-modernization', 'vendor-onboarding', 's2', 'Write down the risk tier rules', 'ps', 'prog', -5, 2, [], null, 'other'],
+  ['W5', 'vendor-modernization', 'vendor-onboarding', 's2a', 'Make the extra-checks list and sign-off form', 'ps', 'idle', 3, 8, ['W4'], null, 'build'],
+  ['W6', 'vendor-modernization', 'vendor-onboarding', 's3', 'Set up the bank details form', 'lp', 'idle', -8, -1, [], 'D2', 'build'],
+  ['W7', 'vendor-modernization', 'vendor-onboarding', 's3', 'Check bank accounts with a small test deposit', 'dk', 'idle', 0, 6, ['W6'], null, 'build'],
+  ['W8', 'vendor-modernization', 'vendor-onboarding', 's4', 'Save new vendors in the ERP automatically', 'dk', 'prog', -2, 10, ['W6'], null, 'build'],
+  ['W9', 'vendor-modernization', 'vendor-onboarding', 's6', 'Send the "vendor is ready" messages automatically', 'dk', 'done', -15, -5, [], null, 'build'],
+  ['W10', 'vendor-modernization', 'invoice-approval', 'i1', 'Check the payment account when matching invoices', 'ar', 'idle', 11, 16, ['W6', 'W8'], null, 'build'],
+  ['W11', 'vendor-modernization', 'invoice-approval', 'i2', 'Send each invoice to the right approver by amount', 'dk', 'idle', 6, 16, [], null, 'build'],
+  ['W12', 'vendor-modernization', 'vendor-onboarding', 's3', 'Fix: the bank details form accepts a blank account holder', 'lp', 'prog', -1, 4, [], null, 'defect'],
+  ['W13', 'vendor-modernization', 'vendor-onboarding', 's1', 'Fix: the portal rejects W-9 files over 5 MB', 'mc', 'done', -20, -17, [], null, 'defect'],
+  ['A1', 'access-review-automation', 'access-review', 'r1', 'Get the access lists from the identity platform', 'dk', 'done', -24, -14, [], null, 'build'],
+  ['A2', 'access-review-automation', 'access-review', 'r2', 'Set up the manager reviews', 'ps', 'done', -14, -4, ['A1'], null, 'build'],
+  ['A3', 'access-review-automation', 'access-review', 'r3', 'Write and approve the steps for removing access', 'dk', 'done', -6, -1, ['A1'], null, 'access'],
+  ['A4', 'access-review-automation', 'access-review', 'r2', 'Practice review with Compliance', 'ps', 'idle', 5, 9, ['A2', 'A3'], null, 'test'],
+  /* R8: a second project changing a Vendor Onboarding step (s4), so "Another project is also changing this step" shows */
+  ['E1', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Add the new ERP fields to the vendor record', 'ar', 'prog', -2, 13, [], null, 'build'],
+  ['E2', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Try a vendor record in the upgraded ERP', 'dk', 'idle', 14, 18, ['E1'], null, 'test'],
 ];
 /* kickoff-plan dues that differ from today's plan (so baseline variance shows) */
 const BASELINE_DUE = { W2: 2, W6: -5, W7: 2, W8: 6, W10: 12, W3: 9, A3: -2, A4: 8 };
@@ -291,6 +296,11 @@ function seed(createdAtISODate) {
     owner: 'ta', resources: ['ta', 'dk', 'ps'], target: addDays(day, 18),
     processes: ['access-review'], status: 'active',
     baselines: [baseline('access-review-automation', 'Kickoff plan', -25)] });
+  add('project', { id: 'erp-upgrade-readiness', name: 'ERP Upgrade Readiness',
+    desc: 'Get the vendor record ready for the ERP upgrade: new fields on the vendor record, tried in the upgraded ERP.',
+    owner: 'ta', resources: ['ta', 'ar', 'dk'], target: weekday(addDays(day, 57)),
+    processes: ['vendor-onboarding'], status: 'active',
+    baselines: [baseline('erp-upgrade-readiness', 'Kickoff plan', -3)] });
   work.forEach(w => add('workItem', w));
 
   add('grant', { id: 'G1', projectId: 'vendor-modernization', dataId: 'D4', env: 'dev', access: 'read',
@@ -313,10 +323,14 @@ function seed(createdAtISODate) {
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract is held up in legal review', impact: 'high', likelihood: 'med', owner: 'ps',
     mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'open' });
-  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank capture not started; blocks micro-deposits and ERP write', impact: 'high', likelihood: 'high', owner: 'lp',
+  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank details form not started; holds up the test deposit and saving vendors in the ERP', impact: 'high', likelihood: 'high', owner: 'lp',
     mitigation: 'Daily check-in with Treasury; pull Integration Eng. in to pair.', status: 'open' });
-  add('risk', { id: 'R3', projectId: 'vendor-modernization', title: 'UAT window overlaps quarter-end close', impact: 'med', likelihood: 'med', owner: 'ta',
-    mitigation: 'Book AP testers now; keep a fallback UAT week after close.', status: 'open' });
+  add('risk', { id: 'R3', projectId: 'vendor-modernization', title: 'Business testing overlaps the quarter-end close', impact: 'med', likelihood: 'med', owner: 'ta',
+    mitigation: 'Book AP testers now; keep a fallback testing week after the close.', status: 'open' });
+  add('risk', { id: 'R5', projectId: 'vendor-modernization', title: 'Vendors can\'t upload large W-9 files', impact: 'med', likelihood: 'med', owner: 'mc',
+    mitigation: 'Raise the upload limit and fix the portal before vendors are invited.', status: 'open' });
+  add('risk', { id: 'R6', projectId: 'access-review-automation', title: 'The identity platform can\'t export access lists', impact: 'high', likelihood: 'low', owner: 'dk',
+    mitigation: 'Prove the export early with one finance app.', status: 'open' });
   add('risk', { id: 'R4', projectId: 'access-review-automation', title: 'Managers miss the first certification deadline', impact: 'low', likelihood: 'med', owner: 'dk',
     mitigation: 'Automated reminders after 5 days; Compliance follows up on stragglers.', status: 'open' });
 
@@ -338,11 +352,11 @@ function seed(createdAtISODate) {
     { caseId: 'TC5', outcome: 'pass', note: '' }, { caseId: 'TC6', outcome: 'pass', note: '' }] });
 
   add('comment', { id: 'C1', ref: 'workItem:W6', author: 'mc', at: at(-1, 20), mentions: ['ta'],
-    text: '@Tom Alvarez Bank capture is due today and has not started; micro-deposit verification, the ERP write and the remit-to check all wait on it. Can we escalate with Treasury?' });
+    text: '@Tom Alvarez The bank details form was due yesterday and has not started; the test deposit, saving vendors in the ERP and the payment account check all wait on it. Can we escalate with Treasury?' });
   add('comment', { id: 'C2', ref: 'process:vendor-onboarding', author: 'ps', at: at(-1, 15), mentions: [],
     text: 'Risk-tier thresholds are drafted. I need sign-off on them before the EDD checklist can start.' });
 
-  add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on "Stand up structured bank capture"', ref: 'workItem:W6', at: at(-1, 20), read: false });
+  add('notification', { id: 'N1', to: 'ta', text: 'Maya Chen mentioned you on "Set up the bank details form"', ref: 'workItem:W6', at: at(-1, 20), read: false });
   add('notification', { id: 'N2', to: 'lp', text: 'Dev Kumar requested UAT read access to Bank remittance details', ref: 'grant:G2', at: at(-1, 21), read: false });
 
   const md = n => new Date(addDays(day, n) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -350,17 +364,18 @@ function seed(createdAtISODate) {
   const events = [
     ev(-30, 15, 'ta', 'create', 'project:vendor-modernization', 'Created project Vendor Onboarding Modernization'),
     ev(-30, 16, 'ta', 'baseline', 'project:vendor-modernization', 'Saved baseline "Kickoff plan"'),
+    ev(-3, 15, 'ta', 'create', 'project:erp-upgrade-readiness', 'Created project ERP Upgrade Readiness'),
     ev(-28, 11, 'mc', 'request', 'grant:G3', 'Requested Dev read access to Vendor legal name & Tax ID'),
-    ev(-15, 17, 'mc', 'update', 'workItem:W1', 'Work item "Launch vendor portal W-9/COI upload" marked done'),
-    ev(-7, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign screening vendor contract" started'),
-    ev(-5, 16, 'dk', 'update', 'workItem:W9', 'Work item "Notification automation" marked done'),
+    ev(-15, 17, 'mc', 'update', 'workItem:W1', 'Work item "Open W-9 and insurance uploads in the vendor portal" marked done'),
+    ev(-7, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign the screening service contract" started'),
+    ev(-5, 16, 'dk', 'update', 'workItem:W9', 'Work item "Send the \"vendor is ready\" messages automatically" marked done'),
     ev(-3, 17, 'ar', 'approve', 'grant:G1', 'Approved Dev read access to Vendor master record'),
     ev(-3, 0, 'system', 'expire', 'grant:G3', 'Dev read access to Vendor legal name & Tax ID expired'),
     ev(-2, 16, 'mc', 'approve', 'approval:AP1', 'Procurement sign-off (step-up verified)'),
     ev(-1, 15, 'ps', 'comment', 'process:vendor-onboarding', 'Commented on Vendor Onboarding'),
     ev(-1, 14, 'dk', 'approve', 'approval:AP2', 'IT sign-off on access review (step-up verified)'),
     ev(-1, 18, 'dk', 'create', 'testRun:TR1', `Dev run, ${md(-1)}: 5 pass, 1 fail`),
-    ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on work item "Stand up structured bank capture" and mentioned Tom Alvarez'),
+    ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on work item "Set up the bank details form" and mentioned Tom Alvarez'),
     ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to Bank remittance details'),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
@@ -370,7 +385,7 @@ function seed(createdAtISODate) {
 
 /* ---------- Round 2 fields (contract R2) ---------- */
 const CAPACITY = { mc: 3, ta: 2, ps: 4, lp: 3, ar: 4, dk: 4 };           /* days per week */
-const EFFORT = { W1: 6, W2: 3, W3: 4, W4: 3, W5: 3, W6: 5, W7: 4, W8: 7, W9: 4, W10: 3, W11: 5, W12: 1, W13: 1, A1: 5, A2: 6, A3: 3, A4: 2 };
+const EFFORT = { E1: 4, E2: 2, W1: 6, W2: 3, W3: 4, W4: 3, W5: 3, W6: 5, W7: 4, W8: 7, W9: 4, W10: 3, W11: 5, W12: 1, W13: 1, A1: 5, A2: 6, A3: 3, A4: 2 };
 const DONE_AT = { W1: -16, W9: -5, W13: -18, A1: -14, A2: -3, A3: -1 };            /* actual finish offsets */
 const SENSITIVITY = { D1: 'confidential', D2: 'pii', D3: 'internal', D4: 'confidential', D5: 'confidential', D6: 'internal', D7: 'internal', D8: 'internal' };
 const STEP_META = {                                                       /* pid/step -> {sla, system, durationHrs} */
@@ -389,8 +404,9 @@ const DAY_RATE = { mc: 900, ta: 950, ps: 850, lp: 850, ar: 750, dk: 1000 };
 const PMO = {
   'vendor-modernization': { program: 'Finance Operations Modernization', budget: { planned: 48000 } },
   'access-review-automation': { program: 'Security & Compliance', budget: { planned: 16000 } },
+  'erp-upgrade-readiness': { program: 'Finance Operations Modernization', budget: { planned: 9000 } },
 };
-const RISK_WORK = { R1: ['W2', 'W3'], R2: ['W6', 'W7', 'W8'], R3: ['W10', 'W11'], R4: ['A4'] };
+const RISK_WORK = { R1: ['W2', 'W3'], R2: ['W6', 'W7', 'W8'], R3: ['W10', 'W11'], R4: ['A4'], R5: ['W1', 'W13'], R6: ['A1'] };
 
 function enrichR2(docs, day, at) {
   const byId = type => Object.fromEntries(docs[type].map(d => [d.id, d.data]));
@@ -490,9 +506,9 @@ function enrichR6(docs, day, at) {
   const cut = vm.target ? addDays(vm.target, -1) : addDays(day, 40);
   vm.cutover = { tasks: [
     { id: 'VT1', order: 1, task: 'Freeze manual vendor changes in the ERP', owner: 'ar', plannedStart: cut + 'T07:30', planned: cut + 'T07:30', durationMins: 30, gonogo: false, done: false },
-    { id: 'VT2', order: 2, task: 'Go/no-go call with Treasury and Compliance', owner: 'ta', plannedStart: cut + 'T08:00', planned: cut + 'T08:00', durationMins: 15, gonogo: true, done: false },
+    { id: 'VT2', order: 2, task: 'Final yes/no call with Treasury and Compliance', owner: 'ta', plannedStart: cut + 'T08:00', planned: cut + 'T08:00', durationMins: 15, gonogo: true, done: false },
     { id: 'VT3', order: 3, task: 'Switch vendor intake to the portal', owner: 'mc', plannedStart: cut + 'T08:15', planned: cut + 'T08:15', durationMins: 45, gonogo: false, done: false },
-    { id: 'VT4', order: 4, task: 'Smoke test: onboard one test vendor end to end', owner: 'ar', plannedStart: cut + 'T09:00', planned: cut + 'T09:00', durationMins: 60, gonogo: true, done: false },
+    { id: 'VT4', order: 4, task: 'Try-out test: set up one test vendor from start to finish', owner: 'ar', plannedStart: cut + 'T09:00', planned: cut + 'T09:00', durationMins: 60, gonogo: true, done: false },
   ] };
   docs.workItem.forEach(d => {
     const w = d.data;

@@ -40,13 +40,25 @@ const KINDS = { wait: { icon: '⏱', label: 'Wait' }, message: { icon: '✉', la
 const kindOf = t => ({ timer: 'wait', wait: 'wait', message: 'message', send: 'message', receive: 'message', subprocess: 'subprocess', callActivity: 'subprocess' }[t] || null);
 const clone = o => JSON.parse(JSON.stringify(o));
 
-/* Map server output (ids, names or roles) to people and data elements. Exact matches only: no keyword guessing. */
+/* Map server output to people. R8: only a person's id or full name is a person; a team or role ("Procurement",
+   "Compliance analyst") stays as that text (ownerRole). An id is kept only when the procedure itself names that person,
+   so the import never assigns a step to someone the text doesn't mention, least of all the current user. */
+function namedInText(p) { const t = strip(ui.text); return !!p && !!t && (` ${t} `).includes(` ${strip(p.name)} `); }
 function matchPerson(v) {
   if (!v) return '';
   const ppl = store.state.people;
-  const s = strip(v);
-  const hit = ppl.find(p => p.id === v) || ppl.find(p => strip(p.name) === s) || ppl.find(p => strip(p.role) === s) || ppl.find(p => p.bu && strip(p.bu) === s);
+  const byId = ppl.find(p => p.id === v);
+  if (byId) return namedInText(byId) ? byId.id : '';
+  const hit = ppl.find(p => strip(p.name) === strip(v));
   return hit ? hit.id : '';
+}
+/* When the server gave a person the text never names, keep what the text does say: the team (their BU) or their role. */
+function roleFromId(v) {
+  const p = store.state.people.find(x => x.id === v); if (!p || namedInText(p)) return '';
+  const t = ` ${strip(ui.text)} `;
+  if (p.bu && t.includes(` ${strip(p.bu)} `)) return p.bu;
+  if (p.role && t.includes(` ${strip(p.role)} `)) return capRole(p.role);
+  return '';
 }
 function matchData(v) {
   const des = store.list('dataElement');
@@ -61,13 +73,15 @@ const srcId = n => (n && typeof n.id === 'string' && n.id) ? n.id : 'x' + (++src
 /* R7: a role named in free text ("The manager approves…") becomes ownerRole when no person matches: shown as "Who: Manager". */
 const ROLE_W = 'manager|employee|clerk|coordinator|courier|officer|analyst|lead|specialist|supervisor|director|controller|buyer|requester|requestor|reviewer|contractor|approver|administrator|admin|accountant|assistant|agent|team|staff|technician|driver|receptionist|nurse|teacher|engineer';
 const ROLE_RE = new RegExp('^(?:the|an?)\\s+((?:[a-z-]+\\s){0,2}?(?:' + ROLE_W + ')s?)\\b', 'i');
-const capRole = r => { const t = String(r || '').trim().replace(/\s+/g, ' '); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
+const capRole = r => { const t = String(r || '').trim().replace(/\s+/g, ' '); return t ? t.charAt(0).toUpperCase() + t.slice(1) : ''; };
 export function roleOf(n, title) {
-  const given = n && (n.ownerRole || (n.role && !matchPerson(n.role) ? n.role : ''));
+  const given = n && (n.ownerRole || (n.role && !matchPerson(n.role) ? n.role : '') || roleFromId(n.owner || n.ownerId));
   if (given) return capRole(given);
   const m = ROLE_RE.exec(String(title || '')); return m ? capRole(m[1]) : '';
 }
 const adv = () => !!store.advanced;
+/* R8: a time limit the procedure states ("within 2 business days"), whatever field the reader put it in. */
+const slaOf = n => { const v = n && (n.sla != null ? n.sla : n.timeLimit != null ? n.timeLimit : n.within); return v == null || v === '' ? '' : String(typeof v === 'object' ? (v.text || v.label || '') : v).trim(); };
 function normStep(n) {
   const title = cleanTitle(n.title || n.text || n.name || '');
   if (!title) return null;
@@ -78,6 +92,7 @@ function normStep(n) {
     data: [...new Set((n.data || n.dataElements || []).map(matchData).filter(Boolean))],
     touches: Array.isArray(n.touches) ? n.touches.map(String) : [],
     system: typeof n.system === 'string' ? n.system.trim() : '',
+    sla: slaOf(n),
     subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [...new Set((s.data || []).map(matchData).filter(Boolean))] }).filter(s => s.title),
     newData: Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')).filter(Boolean) : [],
   };
@@ -173,6 +188,22 @@ function at(path) {
 }
 function countSteps(nodes) { return (nodes || []).reduce((n, x) => n + (x.type === 'step' ? 1 : (x.branches || []).reduce((m, b) => m + countSteps(b.nodes), 0)), 0); }
 
+/* R8: one plain line of what the reader pulled out of the text: steps, choices, time limits, waits, systems, who. */
+function foundSummary(d) {
+  const all = targets(d.nodes);
+  const steps = allSteps(d.nodes, []);
+  const n = (k, one, many) => k ? `${k} ${k === 1 ? one : many}` : '';
+  const slas = all.filter(x => x.sla).length;
+  const waits = all.filter(x => x.type === 'wait').length;
+  const choices = all.filter(x => x.type === 'decision').length;
+  const systems = [...new Set(all.map(x => x.system).filter(Boolean))];
+  const roles = [...new Set(steps.filter(x => !x.owner && x.ownerRole).map(x => x.ownerRole))];
+  const bits = [n(steps.length, 'step', 'steps'), n(choices, 'choice', 'choices'), n(slas, 'time limit', 'time limits'), n(waits, 'wait', 'waits'),
+    systems.length ? `${n(systems.length, 'system', 'systems')} (${systems.join(', ')})` : ''].filter(Boolean);
+  const last = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0] || 'no steps';
+  return `<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}</div>`;
+}
+
 /* ---------- render ---------- */
 function dataPicker(s, path) {
   const des = store.list('dataElement');
@@ -193,9 +224,18 @@ function whoInput(s) {
   return `<input class="is-who ${s.owner || s.ownerRole ? '' : 'is-noowner'}" data-f="who" list="is-people" value="${esc(v)}" placeholder="Who does it? e.g. Manager" aria-label="Who does it" ${s.owner || s.ownerRole ? '' : 'data-noowner'}>`;
 }
 const roleChip = s => !s.owner && s.ownerRole ? `<span class="chip is-role" data-owner-role="${esc(s.ownerRole)}">Who: ${esc(s.ownerRole)}</span>` : '';
+/* R8: what the reader found in the text for this step, in plain words: who, time limit, system. */
+const factChips = s => {
+  const out = [];
+  if (!s.owner && s.ownerRole) out.push(roleChip(s));
+  else if (s.owner) out.push(`<span class="chip is-role" data-owner-person="${esc(s.owner)}">Who: ${esc(pname(s.owner))}</span>`);
+  if (s.sla) out.push(`<span class="chip is-fact" data-sla="${esc(s.sla)}">Time limit: ${esc(s.sla)}</span>`);
+  if (s.system && !adv()) out.push(`<span class="chip is-fact" data-system="${esc(s.system)}">System: ${esc(s.system)}</span>`);
+  return out.length ? `<div class="is-facts">${out.join('')}</div>` : '';
+};
 function stepBody(s, path, label) {
   return `<div class="is-body" data-path="${esc(path)}"><textarea class="is-title" data-f="title" rows="2" aria-label="${esc(label)} title">${esc(s.title)}</textarea>
-    <div class="is-row">${adv() ? ownerSel(s) : whoInput(s)}${dataPicker(s, path)}${adv() ? `<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System">` : ''}</div>${roleChip(s)}${dataChips(s)}
+    <div class="is-row">${adv() ? ownerSel(s) : whoInput(s)}${dataPicker(s, path)}${adv() ? `<input class="is-sys" data-f="system" value="${esc(s.system || '')}" placeholder="System" aria-label="System">` : ''}</div>${factChips(s)}${dataChips(s)}
     ${(s.subs || []).length ? `<ol class="is-subs">${s.subs.map((sb, k) => `<li class="is-sub" data-path="${esc(path + '.s' + k)}"><textarea data-f="title" rows="${Math.min(4, Math.max(1, Math.ceil(sb.title.length / 60)))}" class="is-subt" aria-label="Sub-step ${k + 1}">${esc(sb.title)}</textarea><button class="btn sm is-x" data-rm-path="${esc(path + '.s' + k)}" aria-label="Remove sub-step">✕</button></li>`).join('')}</ol>` : ''}
     <div><button class="btn sm is-link" data-add-sub="${esc(path)}">+ Sub-step</button></div></div>`;
 }
@@ -239,12 +279,14 @@ export function render() {
   const kinds = d ? targets(d.nodes).filter(x => KINDS[x.type]).length : 0;
   const noOwner = d ? allSteps(d.nodes, []).filter(x => !x.owner && !x.ownerRole).length : 0;
   const loops = d ? d.nodes.reduce((n, g) => n + (g.branches || []).filter(b => b.goto).length, 0) : 0;
+  const found = d ? foundSummary(d) : '';
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>New information this procedure needs</h4>
-      <p class="hint">We found information the procedure needs that isn't in your workspace yet. Each ticked one is added (as “Not available yet”, owned by you) to the step shown.</p>
+      <p class="hint">We found information the procedure needs that isn't in your workspace yet. Each ticked one is added to the step shown, and whoever does that step looks after it.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
         <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
 
   const draftHtml = d ? `<div class="card is-draft"><h3>Your process, ready to check${adv() ? `<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span>` : ''}<span class="n">${n} steps${gates ? ` · ${gates} choice${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} at the same time` : ''}${kinds ? ` · ${kinds} wait/message` : ''}</span></h3>
+    ${found}
     ${notesShown().length ? `<div class="note is-notes"><b>Things to check</b><ul>${notesShown().map(x => `<li>${esc(plainNote(x))}</li>`).join('')}</ul></div>` : ''}
     ${noOwner ? `<div class="is-ownerprompt" data-owner-prompt><b>${noOwner} step${noOwner === 1 ? '' : 's'} need${noOwner === 1 ? 's' : ''} someone to do ${noOwner === 1 ? 'it' : 'them'}.</b> The procedure didn't say who, so we left it blank rather than guess. Type a name or a role (like “Manager”) in each highlighted box.</div>` : ''}
     ${loops ? `<div class="hint" data-loops>${loops} step${loops === 1 ? '' : 's'} that go${loops === 1 ? 'es' : ''} back to an earlier step (“resubmit”, “return to step N”). They're drawn as return arrows on the map.</div>` : ''}
@@ -254,7 +296,7 @@ export function render() {
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + (i + 1)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
-    <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add choice</button>${adv() ? '<button class="btn sm" data-add-par>+ Add “at the same time”</button>' : ''}<button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Save the process</button></div></div>` : '';
+    <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add choice</button>${adv() ? '<button class="btn sm" data-add-par>+ Add “at the same time”</button>' : ''}<button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Save as how it works today</button></div></div>` : '';
 
   return `<datalist id="is-people">${store.state.people.map(p => `<option value="${esc(p.name)}"></option>`).join('')}</datalist><section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · Paste a procedure</div>
       <h1>Paste a procedure you already have</h1><p>Paste your written steps. We turn them into a process map: the steps, who does each one, and the information each step needs. You check every step before anything is saved.</p></div>
@@ -358,14 +400,14 @@ async function createProcess() {
   const guess = cleanTitle(d.name || firstLine(ui.text).replace(/^Northwind Traders\s*[—-]\s*/i, '')) || 'Imported process';
   const steps = allSteps(nodes, []);
   const r = await modal({
-    title: 'Save the process',
+    title: 'Save as how it works today',
     body: `<div class="field"><label>Name</label><input name="name" value="${esc(guess.slice(0, 80))}"></div>
-      <div class="field"><label>Description</label><textarea name="desc">${esc('Imported from SOP. ' + steps.length + ' steps.')}</textarea></div>
+      <div class="field"><label>Description</label><textarea name="desc">${esc('From a pasted procedure. ' + steps.length + ' steps.')}</textarea></div>
       <div class="field"><label>What starts it</label><input name="trigger" value="${esc(d.trigger || '')}" placeholder="e.g. An employee submits a claim"></div>
       ${steps.some(x => !x.owner && !x.ownerRole) ? `<div class="is-ownerprompt" data-create-noowner>${steps.filter(x => !x.owner && !x.ownerRole).length} step${steps.filter(x => !x.owner && !x.ownerRole).length === 1 ? ' has' : 's have'} nobody doing it yet. You can save now and add who does it later; before launch every step needs someone.</div>` : ''}
       ${picks.length ? `<div class="hint" data-create-data="${picks.length}">Also creates ${picks.length} piece${picks.length === 1 ? '' : 's'} of information and adds each to its step: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
-      <div class="hint">Saves this as how the process works today. You can then show how it should work in the future.</div>`,
-    actions: [{ id: 'create', label: 'Save the process', primary: true }],
+      <div class="hint">This opens on <b>Today</b>. When you open <b>Future</b>, it starts as a copy you can change.</div>`,
+    actions: [{ id: 'create', label: 'Save as how it works today', primary: true }],
   });
   if (r.action !== 'create') return;
   const name = cleanTitle(r.form.name) || 'Imported process';
@@ -375,7 +417,11 @@ async function createProcess() {
   try {
     for (const x of picks) {
       const id = store.newId('D');
-      await store.save('dataElement', id, { id, name: cleanTitle(x.name), owner: store.state.me, source: 'Proposed by SOP import', avail: 'missing', note: x.reason || `Needed by the “${name}” process.`, fields: [], samples: [], discovered: [] },
+      /* R8: the owner is whoever does the step it belongs to (a person, or the role as text), never the importer */
+      const st = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))) || {};
+      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { owner: '', ownerRole: st.ownerRole } : { owner: '' };
+      /* information the procedure already uses today: "We have it" (R8 §1), described, not blocked */
+      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, { source: 'From a pasted procedure', avail: 'live', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.`, fields: [], samples: [], discovered: [] }),
         `Created information “${cleanTitle(x.name)}” from a pasted procedure`);
       made.set(strip(x.name), id);
     }
@@ -401,6 +447,7 @@ async function createProcess() {
     if (s.owner) node.owner = s.owner;
     else if (s.ownerRole) node.ownerRole = s.ownerRole;
     if (s.system) node.system = s.system;
+    if (s.sla) node.sla = s.sla;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
@@ -411,17 +458,15 @@ async function createProcess() {
   const asis = [{ id: nid(), type: 'trigger', title: ((r.form.trigger || '').trim() || 'Process starts'), touches: [] }].concat(nodes.map(mk)).concat([{ id: nid(), type: 'end', title: 'Done' }]);
   /* loop-backs: point each branch at the new id of its target; drop targets that were removed from the draft */
   asis.forEach(n => (n.branches || []).forEach(b => { if (b._goto) { const t = idOf.get(b._goto); if (t) b.goto = t; delete b._goto; } }));
-  const toId = new Map();
-  const copy = n => { const c = Object.assign(clone(n), { id: nid(), from: n.id }); toId.set(n.id, c.id); if (n.branches) c.branches = n.branches.map(b => Object.assign({ label: b.label, nodes: b.nodes.map(copy) }, b.goto ? { goto: b.goto } : {})); return c; };
-  const tobe = asis.map(copy);
-  tobe.forEach(n => (n.branches || []).forEach(b => { if (b.goto) b.goto = toId.get(b.goto) || b.goto; }));
+  /* R8: saved as Today only; the Future version is made from Today the first time someone opens Future */
+  const tobe = [];
   const pid = store.newId('proc');
-  const resources = [...new Set(steps.map(s => s.owner).filter(Boolean).concat(store.state.me ? [store.state.me] : []))];
+  const resources = [...new Set(steps.map(s => s.owner).filter(Boolean))];
   try {
     await store.save('process', pid, { id: pid, name, desc: (r.form.desc || '').trim(), owner: store.state.me, resources, version: 1, asis, tobe, released: [] },
       `Created process “${name}” from a pasted procedure (${steps.length} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);
   } catch (e) { toast('Could not create: ' + e.message); return; }
   ui.draft = null; ui.text = ''; ui.notes = []; ui.source = null; ui.openData = null;
-  toast('Process created');
-  go(`/process/${pid}?mode=edit`);
+  toast('Saved as how it works today');
+  go(`/process/${pid}?mode=asis`);
 }

@@ -762,7 +762,7 @@ const docsOf = st => st.docs;
     await nav(`/data/${msId}`);
     ok(await page.isVisible('[data-resolution="missing"] [data-noplan]') && await page.isVisible('.hdr [data-eff="missing"]'), 'not-available information: red "No fix planned"');
     const wid = 'wi-e2e-' + Math.random().toString(36).slice(2, 8);
-    ok(await putDoc('workItem', wid, { id: wid, projectId: prjId, pid: impPid, step: flat(imp.tobe)[0].id, title: 'Connect the E2E feed', owner: me, status: 'done', start: st.today, due: st.today, doneAt: st.today, deps: [], resolves: msId, kind: 'access' }, 'Test fixture: resolver done') === 200, 'fixture: done resolver');
+    ok(await putDoc('workItem', wid, { id: wid, projectId: prjId, pid: impPid, step: flat(imp.tobe)[0].id, title: 'Connect the E2E feed', owner: other.id /* R8: a fix finished by the owner counts as their confirmation */, status: 'done', start: st.today, due: st.today, doneAt: st.today, deps: [], resolves: msId, kind: 'access' }, 'Test fixture: resolver done') === 200, 'fixture: done resolver');
     await nav(`/data/${msId}`);
     console.log('# R4: pending until the data owner confirms live');
     ok(ENG.effectiveAvail((await state()).docs, msId) === 'pending', 'engine: resolver done -> pending');
@@ -854,7 +854,7 @@ const docsOf = st => st.docs;
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' is connected \(from: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
     await page.click('[data-dedit]');
-    ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.textContent).join('|')) === 'Connected (we have this today)|Sample only|Not available yet', 'R7: edit dialog offers the plain states');
+    ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.textContent).join('|')) === 'We have it (connected)|Sample only|Not available yet', 'R8: Advanced edit dialog offers the detailed states');
     await act('cancel');
     const prof = (st.docs.dataElement || []).map(d => d.data).find(d => d.sampleCsv && (d.fields || []).length);
     ok(!!prof, 'seed has a data element with a sample extract');
@@ -1010,12 +1010,19 @@ const docsOf = st => st.docs;
     let xml2 = xmlNow.replace(`name="${xEsc(ren.title)}"`, `name="${xEsc(ren.title)} (revised)"`);
     xml2 = xml2.replace('</bpmn:process>', '    <bpmn:textAnnotation id="TA_1"><bpmn:text>Reviewer note</bpmn:text></bpmn:textAnnotation>\n    <bpmn:task id="Orphan_1" name="Orphan task" />\n    <bpmn:dataObjectReference id="DO_1" name="Invoice PDF" />\n  </bpmn:process>');
     ok(xml2 !== xmlNow && xml2.includes('(revised)'), 'built a revised BPMN file');
+    /* R8 §8: the export carries each step's PMOFlow id, so a renamed task keeps its work */
+    ok(xmlNow.includes(`pmoflow:node id="${xEsc(ren.id)}"`), 'R8: export carries the PMOFlow id in extensionElements');
+    const wiRen = 'wi-e2e-ren' + Math.random().toString(36).slice(2, 6);
+    ok(await putDoc('workItem', wiRen, { id: wiRen, projectId: prjId, pid: impPid, step: ren.id, title: 'E2E work on the renamed step', owner: me, status: 'idle', start: st.today, due: st.today, deps: [], kind: 'build' }, 'Test fixture: work on a step to rename') === 200, 'fixture: work on the step that the file renames');
+    await nav(`/process/${impPid}?mode=tobe`); /* the page reads the new work item */
     fs.writeFileSync(`${OUT}/imp-revised.bpmn`, xml2);
     await page.setInputFiles('[data-bpmn-file]', `${OUT}/imp-revised.bpmn`);
     await page.waitForSelector('.overlay [data-impsum]');
     const dropTxt = await page.textContent('.overlay [data-dropped]');
     ok(+(await page.getAttribute('.overlay [data-dropped]', 'data-dropped')) === 3 && /Orphan task/.test(dropTxt) && /not connected/.test(dropTxt) && /Invoice PDF/.test(dropTxt) && /Reviewer note|TA_1/.test(dropTxt), 'dropped elements listed before confirming: ' + dropTxt.replace(/\s+/g, ' ').slice(0, 160));
-    ok(new RegExp(`${fl.length - 1}\\s*matched`).test(await page.textContent('.overlay [data-impsum]')) && /1\s*new/.test(await page.textContent('.overlay [data-impsum]')), 'import summary: matched / new by name: ' + (await page.textContent('.overlay [data-impsum]')).replace(/\s+/g, ' '));
+    const impSum = (await page.textContent('.overlay [data-impsum]')).replace(/\s+/g, ' ');
+    ok(new RegExp(`${fl.length}\\s*matched`).test(impSum) && /\D1\s*renamed/.test(impSum) && /\D0\s*new/.test(impSum), 'R8: import summary matches by PMOFlow id first: ' + impSum);
+    ok(await page.isVisible(`.overlay [data-renamed="${ren.id}"]:has-text("(revised)")`) && /keeps 1 work item/.test(await page.textContent(`.overlay [data-renamed="${ren.id}"]`)), 'R8: the preview says "renamed" and that the step keeps its work');
     await page.screenshot({ path: `${OUT}/import-version-modal.png` });
     await overflow('import version modal @1440');
     await saving(() => act('import'));
@@ -1028,9 +1035,12 @@ const docsOf = st => st.docs;
     ok((await page.textContent('[data-kpi-diff] b')).trim() === `${dsI.new}+${dsI.changed}` && (await page.textContent('.d-hdr .kpi >> nth=0')).includes(String(flat(ipi.tobe).length)), `R6: KPIs agree with diffSummary after import (${dsI.new}+${dsI.changed}, ${flat(ipi.tobe).length} steps)`);
     ok(new RegExp(`${flat(ipi.tobe).length} steps · ${dsI.new + dsI.changed} changed`).test(await page.textContent('[data-hdr-toggle]')), 'R6: phone summary row agrees too');
     const fi = flat(ipi.tobe);
-    const keptOk = fl.filter(n => n.id !== ren.id).every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === o.title && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
+    const keptOk = fl.every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === (o.id === ren.id ? o.title + ' (revised)' : o.title) && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
     ok(keptOk && fi.length === fl.length, 'matched steps keep id, data tags, sub-steps, owners and as-is links');
-    ok(fi.some(n => n.title === ren.title + ' (revised)' && n.id !== ren.id) && !fi.some(n => n.id === ren.id), 'renamed step comes in as new; the old one leaves the to-be');
+    ok(fi.some(n => n.title === ren.title + ' (revised)' && n.id === ren.id), 'R8: the renamed step keeps its id (matched by PMOFlow id, not by name)');
+    const wr = (await state()).docs.workItem.map(d => d.data).find(w => w.id === wiRen);
+    ok(wr && wr.step === ren.id && fi.some(n => n.id === wr.step), 'R8: BPMN rename round-trip keeps the work item attached to the renamed step');
+    await page.evaluate(async id => fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/workItem/${id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', summary: 'Test fixture removed' }) }), wiRen);
     ok(ipi.id === impPid && ipi.drafts.some(d => d.name === 'Before import of imp-revised.bpmn'), 'still the same process; the previous version was saved first');
     ok((await getProc(impPid)).asis.length === ipv.asis.length, 'as-is untouched by a to-be import');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
@@ -1078,7 +1088,7 @@ const docsOf = st => st.docs;
     await page.fill('.overlay [data-nd-name]', ndName); await page.click('.overlay [data-nd-create]');
     await saving(() => act('save'));
     const created = (await state()).docs.dataElement.map(d => d.data).find(d => d.name === ndName);
-    ok(created && created.owner === me && (sO.owner === me || created.owner !== sO.owner), `inline-created element is owned by the creator (${created && created.owner}), not the step owner (${sO.owner})`);
+    ok(created && created.owner === sO.owner, `R8: inline-created information is owned by whoever does the step (${created && created.owner}, step owner ${sO.owner})`);
     await nav(`/process/${impPid}?mode=tobe`); await page.click('[data-newdata]'); await page.waitForSelector('.overlay select[name=owner]');
     ok(await page.inputValue('.overlay select[name=owner]') === me, 'New data element dialog: owner defaults to the creator'); await act('cancel');
 
@@ -1134,7 +1144,7 @@ const docsOf = st => st.docs;
     await act('cancel');
     const xvo = await exportBpmn('r6-seed-pool', true);
     bpmnCheck(xvo, vo.tobe, 'seed to-be with pool');
-    ok(xvo.includes('xmlns:pmoflow="https://necogoode.com/pmoflow"') && /<bpmn:extensionElements>\s*<pmoflow:node nodeType="step"/.test(xvo), 'extensionElements in the pmoflow namespace');
+    ok(xvo.includes('xmlns:pmoflow="https://necogoode.com/pmoflow"') && /<bpmn:extensionElements>\s*<pmoflow:node id="[^"]+" nodeType="step"/.test(xvo), 'extensionElements in the pmoflow namespace');
     ok(xvo.includes(`<bpmn:callActivity id="N_${spN.id}"`) && xvo.includes(`calledElement="Process_${spN.calls}"`), 'subprocess -> callActivity with calledElement');
     ok(new RegExp(`<bpmn:intermediateCatchEvent id="N_${wN.id}"[^>]*>[\\s\\S]*?<bpmn:timerEventDefinition[^>]*>\\s*<bpmn:timeDuration>P2D</bpmn:timeDuration>`).test(xvo), 'wait -> intermediateCatchEvent with a timerEventDefinition (P2D)');
     ok(new RegExp(`<bpmn:intermediate${mN.direction === 'receive' ? 'Catch' : 'Throw'}Event id="N_${mN.id}"[^>]*>[\\s\\S]*?<bpmn:messageEventDefinition`).test(xvo) && /<bpmn:message id="Message_/.test(xvo), 'message -> intermediate throw/catch event with a messageEventDefinition');
@@ -1169,7 +1179,7 @@ const docsOf = st => st.docs;
     await page.fill('.overlay input[name=party]', 'Vendor');
     await page.fill('.overlay input[name=title]', 'Receive signed quote');
     const other2 = st.people.find(x => x.id !== me);
-    ok(await page.inputValue('.overlay [data-nd-owner]') === me, '"Create and tag": owner defaults to me');
+    ok(await page.inputValue('.overlay [data-nd-owner]') === '', 'R8: "Create and tag": owner defaults to whoever does the step');
     await page.fill('.overlay [data-nd-name]', 'E2E signed quote');
     await page.selectOption('.overlay [data-nd-owner]', other2.id);
     await page.fill('.overlay [data-nd-source]', 'Vendor portal inbox');
@@ -1210,7 +1220,8 @@ const docsOf = st => st.docs;
     await nav(`/process/${rtPid}?mode=tobe`);
     const x2 = await exportBpmn('r6-rt-2', true);
     const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
-    const n1 = norm(x1, np.tobe, newPid), n2 = norm(x2, rt.tobe, rtPid);
+    const noPid = x => x.replace(/(<pmoflow:node) id="[^"]*"/g, '$1'); /* R8: the PMOFlow id travels in the file; ids aside */
+    const n1 = norm(noPid(x1), np.tobe, newPid), n2 = norm(noPid(x2), rt.tobe, rtPid);
     ok(n1 === n2, 'export -> import -> export gives the same BPMN (ids aside)' + (n1 === n2 ? '' : ': ' + diffAt(n1, n2)));
     ok(JSON.stringify(modelOf(rt.tobe, dn)) === JSON.stringify(mA), 'the imported to-be fork has the same model');
     /* the seed map adds gateways (decision branches), data tags, sub-steps with data, SLA and system to the round trip */
@@ -1224,7 +1235,7 @@ const docsOf = st => st.docs;
     ok(allNodes(vo.tobe).some(isGw) && JSON.stringify(mV) === JSON.stringify(mR), 'seed map round trip (gateways, typed nodes, data, sub-steps, sla, system) is lossless' + (JSON.stringify(mV) === JSON.stringify(mR) ? '' : ': ' + diffAt(mV, mR)));
     await nav(`/process/${rvPid}?mode=tobe`);
     const xv2 = await exportBpmn('r6-rt-seed-2', true);
-    const v1n = norm(xv1, vo.tobe, vo.id), v2n = norm(xv2, rv.tobe, rvPid);
+    const v1n = norm(noPid(xv1), vo.tobe, vo.id), v2n = norm(noPid(xv2), rv.tobe, rvPid);
     ok(v1n === v2n, 'seed map: export -> import -> export gives the same BPMN (ids aside)' + (v1n === v2n ? '' : ': ' + diffAt(v1n, v2n)));
     /* a foreign file: callActivity, timer and message events without PMOFlow extension data still map */
     const foreign6 = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1249,13 +1260,24 @@ const docsOf = st => st.docs;
     st = await state();
     const prjOf = pid0 => (st.docs.project || []).map(d => d.data).find(j => (j.processes || []).includes(pid0) && j.status !== 'live');
     const vp = prjOf(vo.id);
-    const builtStep = flat(vo.tobe).find(n => { const s0 = ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today); return s0.status === 'done' && [...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])].some(d => ENG.effectiveAvail(st.docs, d) !== 'live'); });
-    ok(!!builtStep, 'seed has a step whose work is done but whose data is not live');
+    let builtStep = flat(vo.tobe).find(n => { const s0 = ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today); return s0.status === 'done' && [...(n.data || []), ...(n.subs || []).flatMap(x => x.data || [])].some(d => ENG.effectiveAvail(st.docs, d) !== 'live'); });
+    let builtRestore = null;
+    if (!builtStep) { /* R8: Today information is available, so the seed may have none: a done step gains information that is not available yet */
+      const ds = flat(vo.tobe).find(n => n.type === 'step' && ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today).status === 'done');
+      if (ds) {
+        const bid = 'de-e2e-built' + Math.random().toString(36).slice(2, 6); const vo0 = await getProc(vo.id); builtRestore = vo0;
+        const vo1 = JSON.parse(JSON.stringify(vo0)); const tgt = allNodes(vo1.tobe).find(n => n.id === ds.id); tgt.data = [bid, ...(tgt.data || [])];
+        ok(await putDoc('dataElement', bid, { id: bid, name: 'E2E built feed', owner: other.id, source: '', avail: 'missing', note: '', fields: [], samples: [], discovered: [] }, 'Test fixture: information not available yet') === 200
+          && await putDoc('process', vo.id, vo1, 'Test fixture: a done step needs it') === 200, 'fixture: a done step whose information is not available yet');
+        st = await state(); builtStep = tgt;
+      }
+    }
     await nav(`/process/${vo.id}/step/${builtStep.id}`);
     const bs = await page.evaluate(() => { const k = document.querySelector('[data-step-status]'); const b = k.querySelector('b'); return { st: k.dataset.stepStatus, txt: b.textContent.trim(), color: getComputedStyle(b).color }; });
     ok(bs.st === 'built' && bs.txt === 'Built · information not connected yet' && bs.color === 'rgb(180, 83, 9)', `done work + information not connected = amber "Built · information not connected yet", never green Done (${bs.txt}, ${bs.color})`);
     await nav(`/data/${builtStep.data[0]}`);
     ok(await page.isVisible(`[data-impact] tr[data-use="tobe"]:has-text("${builtStep.title}") [data-built]`), 'data page impact table shows the same combined status');
+    if (builtRestore) { await putDoc('process', vo.id, builtRestore, 'Test fixture restored'); st = await state(); }
     const lateStep = flat(vo.tobe).find(n => n.type === 'step' && ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today).status === 'prog');
     const ago = n => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
     ok(await putDoc('workItem', 'wi-e2e-late', { id: 'wi-e2e-late', projectId: vp.id, pid: vo.id, step: lateStep.id, title: 'E2E overdue check', owner: me, status: 'prog', start: ago(10), due: ago(3), deps: [], effortDays: 1 }, 'Test fixture: overdue item') === 200, 'fixture: an overdue item');
@@ -1288,6 +1310,7 @@ const docsOf = st => st.docs;
     await nav(`/process/${vo.id}/step/${sA.id}`);
     ok(await page.getAttribute('[data-step-impact]', 'data-step-impact') === 'conflict' && await page.isVisible('[data-conflict="same-step"]:has-text("E2E Parallel Change")') && +(await page.getAttribute('[data-imp-projects]', 'data-imp-projects')) === 2, 'two active projects on one step: Conflict, naming both');
     ok(await page.getAttribute('[data-impact-kpi]', 'data-impact-kpi') === 'conflict', 'step KPI shows the conflict');
+    ok(await page.isVisible('[data-conflict-line]:has-text("Another project is also changing this step")') && /E2E Parallel Change/.test(await page.textContent('[data-conflict-line]')), 'R8: one plain line "Another project is also changing this step", naming it');
     await shot('r6-step-impact');
     st = await state();
     const sB = flat(vo.tobe).find(n => n.id !== sA.id && (n.data || []).some(d => (sA.data || []).includes(d)) && (st.docs.workItem || []).some(d => d.data.step === n.id && d.data.pid === vo.id && d.data.status !== 'done' && d.data.projectId === vp.id));
@@ -1321,6 +1344,16 @@ const docsOf = st => st.docs;
     ok(!(await page.isChecked('#adv')), 'R7: back to Simple');
     /* no jargon on the stream-D pages in Simple mode (process descriptions are user text and are skipped) */
     const JARGON = /\b(As-is|To-be|Diff|BPMN|SLA|Touches|gateway|Fork)\b/i;
+    /* R8 §1: Simple never shows the detailed availability words */
+    const PLAIN = /\bconnected\b|waiting for confirmation|sample only/i;
+    const plainCheck = async label => {
+      const hit = await page.evaluate(src => {
+        const re = new RegExp(src, 'i'); const out = [];
+        const walk = el => { if (el.closest('.d-desc, [data-comments] .cmt, [data-history], [data-dropped]') || el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return; for (const n of el.childNodes) { if (n.nodeType === 3 && re.test(n.textContent)) out.push(n.textContent.trim().slice(0, 60)); else if (n.nodeType === 1) { if (n.title && re.test(n.title)) out.push('title: ' + n.title.slice(0, 50)); walk(n); } } };
+        walk(document.getElementById('app')); return out;
+      }, PLAIN.source);
+      ok(!hit.length, `${label}: no "connected / waiting for confirmation / sample only" in Simple${hit.length ? ' — found: ' + hit.slice(0, 4).join(' | ') : ''}`);
+    };
     const jargonCheck = async label => {
       const hit = await page.evaluate(src => {
         const re = new RegExp(src, 'i'); const out = [];
@@ -1329,11 +1362,22 @@ const docsOf = st => st.docs;
       }, JARGON.source);
       ok(!hit.length, `${label}: no jargon visible in Simple${hit.length ? ' — found: ' + hit.slice(0, 4).join(' | ') : ''}`);
     };
-    await jargonCheck('processes');
-    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'impact']) { await nav(`/process/${pid}?mode=${m}`); await jargonCheck('process ' + m); }
-    await nav(`/process/${pid}/step/${flat(seedP.tobe)[0].id}`); await jargonCheck('step');
-    await nav(`/data/${seedData.id}`); await jargonCheck('data');
-    if (prof) { await nav(`/data/${prof.id}`); await jargonCheck('data with a sample check'); }
+    await jargonCheck('processes'); await plainCheck('processes');
+    for (const m of ['asis', 'tobe', 'diff', 'lanes', 'impact']) { await nav(`/process/${pid}?mode=${m}`); await jargonCheck('process ' + m); await plainCheck('process ' + m); }
+    for (const sx of flat(seedP.tobe).slice(0, 4)) { await nav(`/process/${pid}/step/${sx.id}`); await jargonCheck('step ' + sx.title); await plainCheck('step ' + sx.title); }
+    await nav(`/data/${seedData.id}`); await jargonCheck('data'); await plainCheck('data');
+    ok((await page.textContent('.crumbs')).replace(/\s+/g, ' ').trim() === 'Home › Processes › Information', 'R8: data breadcrumbs use the nav words (Home › Processes)');
+    await nav(`/process/${pid}/step/${flat(seedP.tobe)[0].id}`);
+    ok(/^Home › Processes › /.test((await page.textContent('.crumbs')).replace(/\s+/g, ' ').trim()), 'R8: step breadcrumbs start Home › Processes, like the nav');
+    await nav(`/process/${pid}`);
+    ok(/^Home › Processes/.test((await page.textContent('.crumbs')).replace(/\s+/g, ' ').trim()) && (await page.textContent('#nav a.on')).trim() === 'Processes', 'R8: process breadcrumbs and the highlighted nav tab say Processes');
+    if (prof) { await nav(`/data/${prof.id}`); await jargonCheck('data with a sample check'); await plainCheck('data with a sample check');
+      /* R8 §4: one plain line per profiled column */
+      const S7 = await state(); const pd = S7.docs.profile.map(d => d.data).filter(x => x.dataId === prof.id).sort((a, b) => b.at.localeCompare(a.at))[0];
+      const lines = await page.$$eval('[data-profline]', els => els.map(e => e.textContent.replace(/\s+/g, ' ').replace(/^●\s*/, '').trim()));
+      ok(pd && lines.length >= (pd.columns || []).length && (pd.columns || []).every(c => lines.some(l => l.startsWith(c.name + ': ') && /\d+ values?/.test(l))), 'R8: Simple profile shows one plain line per column: ' + lines.slice(0, 3).join(' / '));
+      ok(!(await page.$('.d-tc')) && !/\bexpect\b/i.test(await page.textContent('[data-cases]')), 'R8: Simple tests list has no TC labels or "expect"');
+    }
 
     /* Simple header: name, description, Today · Future · What changed, "⋯ More"; KPIs hidden */
     await nav(`/process/${pid}?mode=tobe`);
@@ -1383,9 +1427,18 @@ const docsOf = st => st.docs;
     const dnm = id => (st.docs.dataElement.find(d => d.id === id) || { data: {} }).data.name;
     ok(sSteps.every((x, i) => (x.data || []).map(dnm).join(', ') === STEPS[i][2]), 'information chips saved per step (existing names reused, no duplicates)');
     const newInfo = ['Receipt', 'Amount', 'Cost centre', 'Bank details'].map(n => st.docs.dataElement.map(d => d.data).filter(d => d.name === n));
-    ok(newInfo.every(l => l.length === 1 && l[0].avail === 'live' && l[0].owner === me), 'new information on Today defaults to Connected, owned by the mapper, created once');
+    ok(newInfo.every(l => l.length === 1 && l[0].avail === 'live' && l[0].owner === me && l[0].ownerRole === (['Bank details', 'Cost centre'].includes(l[0].name) ? 'Manager' : 'Employee')), 'R8: new information on Today defaults to "We have it", owned by the step’s role (accountable: the process owner), created once');
     ok(await page.isVisible('#canvas .node [data-who][data-role]:has-text("Employee")'), 'the role shows on the card');
     await shot('simple-mapped-today');
+    /* R8 §1: information typed on a new Today map is information we have: no red or amber warnings anywhere */
+    const todayWarn = await page.evaluate(() => ({ miss: document.querySelectorAll('#canvas .d-miss, #canvas .d-pend, #canvas .d-needlive').length, blocked: !!document.querySelector('[data-side-blocked]'), notyet: [...document.querySelectorAll('[data-side-data] [data-avail]')].filter(a => !/We have it/.test(a.textContent)).length, rows: document.querySelectorAll('[data-side-data] [data-hl]').length }));
+    ok(todayWarn.miss === 0 && !todayWarn.blocked && todayWarn.notyet === 0 && todayWarn.rows === 4, `R8: a newly mapped Today process shows no red/missing warnings for typed information (${JSON.stringify(todayWarn)})`);
+    await plainCheck('new Today map');
+    /* a step needs a name: the dialog stays open with an inline message */
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
+    await act('save');
+    ok(await page.isVisible('.overlay [data-title-err]') && await page.isVisible('.overlay #d-f-title'), 'R8: an empty step name is refused inline; the dialog stays open');
+    await act('cancel');
 
     /* the step dialog: exactly 3 inputs before "More options" */
     await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
@@ -1410,6 +1463,15 @@ const docsOf = st => st.docs;
     await saving(() => act('save'));
     await settle(); st = await state();
     ok((st.docs.dataElement.map(d => d.data).find(d => d.name === 'Payment batch file') || {}).avail === 'missing', 'new information added on Future defaults to "Not available yet"');
+    /* R8 §1: the tick box. Unticking it on Future says we already have it */
+    await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
+    await page.fill('.overlay #d-f-title', 'Email the remittance advice');
+    await page.fill('.overlay #d-f-info', 'Remittance advice,'); await page.waitForSelector('.overlay [data-ichip] [data-ny]');
+    ok(await page.isChecked('.overlay [data-ichip] [data-ny]'), 'R8: new information on Future starts ticked "not available yet"');
+    await page.uncheck('.overlay [data-ichip] [data-ny]');
+    await saving(() => act('save')); await settle(); st = await state();
+    const ra = st.docs.dataElement.map(d => d.data).find(d => d.name === 'Remittance advice') || {};
+    ok(ra.avail === 'live' && ra.owner === me, 'R8: unticked = "We have it"; owner defaults to whoever does the step');
     await page.click('.d-modes [data-mode="diff"]'); await page.waitForURL(/mode=diff/);
     ok(await page.isVisible('#canvas .node:has-text("Pay by bank transfer automatically") .chip.diff-new'), 'What changed: the new Future step is marked NEW');
     await jargonCheck('new process, What changed');
@@ -1440,6 +1502,32 @@ const docsOf = st => st.docs;
       ok(!(await page.$('[data-fedit]')) && !(await page.$('[data-dedit]')), 'hide, don’t grey: a non-owner sees no rule or edit buttons');
       await page.selectOption('#persona', me); await page.waitForSelector('[data-fadd]');
     }
+    /* R8 §1: ?confirm=1 opens the confirm flow; "Confirm all" with one note for everything waiting for this owner */
+    {
+      const ids = ['a', 'b'].map(k => 'de-e2e-ca' + k + Math.random().toString(36).slice(2, 6));
+      for (const [i, id] of ids.entries()) {
+        ok(await putDoc('dataElement', id, { id, name: 'E2E fixed feed ' + (i + 1), owner: me, source: 'Northwind ERP', avail: 'missing', note: '', fields: [], samples: [], discovered: [] }, 'Test fixture: fixed feed') === 200
+          && await putDoc('workItem', 'wi-' + id, { id: 'wi-' + id, projectId: prjId, pid, step: flat(seedP.tobe)[0].id, title: 'Fix feed ' + (i + 1), owner: other.id, status: 'done', start: st.today, due: st.today, doneAt: st.today, deps: [], resolves: id, kind: 'build' }, 'Test fixture: finished fix') === 200, 'fixture: information fixed by someone else, waiting for its owner');
+      }
+      const S9 = await state();
+      ok(ids.every(id => ENG.effectiveAvail(S9.docs, id) === 'pending'), 'engine: both wait for the owner');
+      await nav(`/data/${ids[0]}?confirm=1`);
+      await page.waitForSelector('.overlay [data-act="confirm"]', { timeout: 5000 }).catch(() => {});
+      ok(await page.isVisible('.overlay [data-act="confirm"]:has-text("Confirm we have it")') && !/confirm=1/.test(page.url()), 'R8: /data/<id>?confirm=1 opens the confirm flow (once)');
+      await page.screenshot({ path: `${OUT}/r8-confirm-deeplink.png` }); await act('cancel');
+      ok(+(await page.getAttribute('[data-confirm-all]', 'data-confirm-all')) >= 2 && await page.isVisible('[data-confirm-all] [data-confirm-all-go]'), 'R8: the data page offers "Confirm all" when several items wait for this owner');
+      await plainCheck('data waiting for its owner'); await shot('r8-confirm-all');
+      await page.fill('[data-confirm-all] [name=canote]', 'Checked both in the ERP');
+      const nAll = +(await page.getAttribute('[data-confirm-all]', 'data-confirm-all'));
+      const wA = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes(ids[1]));
+      await page.click('[data-confirm-all-go]'); await wA; await settle();
+      const S10 = await state();
+      ok(ids.every(id => ENG.effectiveAvail(S10.docs, id) === 'live') && ids.every(id => (S10.docs.dataElement.find(d => d.id === id).data.liveEvidence || {}).note === 'Checked both in the ERP'), 'R8: "Confirm all" confirms every ticked item with the one note');
+      await nav(`/data/${ids[0]}`);
+      ok(await page.isVisible('.hdr [data-avail]:has-text("We have it")') && !(await page.$('[data-confirm-card]')), 'R8: after confirming, the header says "We have it"');
+      await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+      ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed we have 'E2E fixed feed 1'/.test(t)), 'history shows the confirmation');
+    }
     /* hide, don't grey on the process page */
     await page.selectOption('#persona', outsider.id); await nav(`/process/${pid}?mode=tobe`);
     ok(!(await page.$('[data-mode="edit"]')) && !(await page.$('[data-save-version]')) && !(await page.$('[data-bpmn-file]')) && !(await page.$('.d-locked')), 'hide, don’t grey: a non-editor sees no Edit, Save version or Import');
@@ -1451,8 +1539,39 @@ const docsOf = st => st.docs;
     const phS = await page.evaluate(() => document.querySelector('#canvas').getBoundingClientRect().top + scrollY);
     ok(phS < 300, `Simple phone: map starts near the top (${Math.round(phS)} px)`);
     await overflow('simple process @390'); await shot('simple-phone-process');
+    /* R8 §7: map first, side panels folded below it; the first step is on screen without scrolling */
+    const ph8 = await page.evaluate(() => { const c = document.querySelector('#canvas').getBoundingClientRect(), s = document.querySelector('aside.side').getBoundingClientRect(), f = document.querySelector('#canvas .node[data-step]').getBoundingClientRect();
+      const cards = [...document.querySelectorAll('.d-sidefold > .card')]; return { first: f.top + scrollY, firstBottom: f.bottom, vh: innerHeight, sideBelow: s.top >= c.bottom - 1, folded: cards.every(k => [...k.children].filter(x => x.tagName !== 'H3').every(x => x.offsetParent === null)), n: cards.length }; });
+    ok(ph8.firstBottom <= ph8.vh && ph8.sideBelow, `R8 phone: the map comes first and its first step is visible without scrolling (${Math.round(ph8.first)} px), side panels below`);
+    ok(ph8.folded && ph8.n >= 3, `R8 phone: the ${ph8.n} side panels are folded to their headings`);
+    await page.click('.d-sidefold > .card:has(h3:has-text("Information")) > h3');
+    ok(await page.isVisible('[data-side-data] [data-hl]'), 'R8 phone: tapping a panel heading opens it');
+    await shot('r8-phone-map-first');
     await page.click('[data-mode="edit"]'); await page.waitForURL(/mode=edit/); await page.click('[data-addstep]'); await page.waitForSelector('.overlay #d-f-title');
-    await overflow('simple step dialog @390'); await page.screenshot({ path: `${OUT}/simple-phone-step-dialog.png` }); await act('cancel');
+    await overflow('simple step dialog @390'); await page.screenshot({ path: `${OUT}/simple-phone-step-dialog.png` });
+    /* R8 §7: on a phone "Add step" works like Enter (the dialog stays for the next one); "Done adding" ends */
+    ok(await page.isVisible('.overlay [data-act="done"]:has-text("Done adding")'), 'R8 phone: a separate "Done adding" button');
+    const n0 = flat((await getProc(spId)).tobe).length;
+    await page.fill('.overlay #d-f-title', 'Phone step one');
+    let wP = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/')); await act('save'); await wP;
+    await page.waitForSelector('.overlay #d-f-title'); 
+    ok(await page.inputValue('.overlay #d-f-title') === '', 'R8 phone: "Add step" saves and opens the next empty step');
+    await page.fill('.overlay #d-f-title', 'Phone step two');
+    wP = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/')); await act('done'); await wP; await settle();
+    ok(!(await page.$('.overlay')), 'R8 phone: "Done adding" saves the last one and closes');
+    const tl = flat((await getProc(spId)).tobe).map(x => x.title);
+    ok(tl.length === n0 + 2 && tl.indexOf('Phone step one') + 1 === tl.indexOf('Phone step two'), 'R8 phone: both steps saved, in order');
+    /* R8 §7: branch cards fit inside the map at 390 (no clipping) */
+    await nav(`/process/${pid}?mode=tobe`);
+    const clip = await page.evaluate(() => { const c = document.querySelector('#canvas').getBoundingClientRect(); return [...document.querySelectorAll('#canvas .branches .node, #canvas .branches .passthru, #canvas .branches .d-goto, #canvas .diamond')].filter(e => { const r = e.getBoundingClientRect(); return r.left < c.left - 0.5 || r.right > c.right + 0.5; }).map(e => e.textContent.trim().slice(0, 30)); });
+    const nBr = await page.$$eval('#canvas .branches .node, #canvas .branches .passthru', e => e.length);
+    ok(nBr > 0 && !clip.length, `R8 phone: ${nBr} branch cards fit inside the map at 390${clip.length ? ' — clipped: ' + clip.join(' | ') : ''}`);
+    ok(await page.$eval('#canvas', c => c.scrollWidth <= c.clientWidth + 1), 'R8 phone: the map does not scroll sideways');
+    await shot('r8-phone-branches');
+    /* the next-step button text wraps instead of being cut off */
+    await nav(`/process/${pid}/step/${flat(seedP.tobe)[0].id}`);
+    const pnB = await page.$$eval('.d-prevnext .btn', bs => bs.map(b => ({ cut: b.scrollWidth > b.clientWidth + 1, ws: getComputedStyle(b).whiteSpace })));
+    ok(pnB.length && pnB.every(x => !x.cut && x.ws !== 'nowrap'), 'R8: next/previous step buttons wrap their text (no truncation)');
     await nav('/processes'); await overflow('simple processes @390'); await shot('simple-phone-processes');
     if (prof) { await nav(`/data/${prof.id}`); await overflow('simple data @390'); await shot('simple-phone-data'); }
     await page.setViewportSize({ width: 1440, height: 900 });
