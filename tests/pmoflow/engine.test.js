@@ -2531,3 +2531,154 @@ test('R10 "Not checked yet": imported information (avail unchecked) is never "We
   d.dataElement.find(e => e.id === 'DU').data.liveConfirmedBy = 'mc';
   assert.notEqual(E.effectiveAvail(d, 'DU'), 'unchecked');
 });
+
+/* ---------------- R10.1 stream R: the status report with a time window ---------------- */
+{
+  const SEEDR = require(path.join(ROOT, 'api', 'shared', 'pmoflow-seed.js'));
+  const RDAY = '2026-11-17';   // Tue; the week of Mon Nov 16; last week had Veterans Day (Wed Nov 11)
+  // a tiny project: one task done before the window, one inside, one problem raised before and still open
+  const tiny = () => {
+    const w = (id, x) => ({ id, data: Object.assign({ id, projectId: 'tp', title: id, owner: 'a', status: 'idle', start: '2026-11-02', due: '2026-11-30', effortDays: 1 }, x) });
+    return {
+      calendar: [{ id: 'workspace', data: { id: 'workspace', holidays: [] } }],
+      person: [{ id: 'a', data: { id: 'a', name: 'Ann Lee', bu: 'Ops', dayRate: 800 } }, { id: 'b', data: { id: 'b', name: 'Ben Ito', bu: 'IT', dayRate: 800 } }],
+      project: [{ id: 'tp', data: { id: 'tp', name: 'Tiny', desc: '', target: '2026-12-31', owner: 'a', processes: [], createdAt: '2026-11-02' } }],
+      process: [], dataElement: [], testRun: [], approval: [], risk: [],
+      workItem: [
+        w('before', { status: 'done', doneAt: '2026-11-06', createdAt: '2026-11-02' }),
+        w('inside', { status: 'done', doneAt: '2026-11-13', createdAt: '2026-11-02', time: [{ by: 'a', date: '2026-11-13', hours: 8 }, { by: 'a', date: '2026-11-06', hours: 4 }] }),
+        w('edgeMon', { status: 'done', doneAt: '2026-11-09', createdAt: '2026-11-02' }),
+        w('bug', { kind: 'defect', status: 'prog', createdAt: '2026-11-03', owner: 'b', due: '2026-11-20' }),
+      ],
+    };
+  };
+
+  test('R10.1 periodWindow: Mon–Fri weeks, holidays, clamping to the project start, presets', () => {
+    const d = tiny();
+    let w = E.periodWindow(d, 'tp', { preset: 'this-week' }, RDAY);
+    assert.deepEqual([w.from, w.to, w.label, w.partial, w.short], ['2026-11-16', '2026-11-17', 'Week of Mon Nov 16 – Fri Nov 20', true, 'week of Nov 16']);
+    w = E.periodWindow(d, 'tp', { preset: 'last-week' }, RDAY);
+    assert.deepEqual([w.from, w.to, w.label, w.days], ['2026-11-09', '2026-11-13', 'Week of Mon Nov 9 – Fri Nov 13', 4], 'Veterans Day is not a business day');
+    // a week whose Friday is a holiday ends on Thursday; a Monday holiday starts it on Tuesday
+    w = E.periodWindow(d, 'tp', { preset: 'last-week' }, '2026-12-29');
+    assert.deepEqual([w.from, w.to], ['2026-12-21', '2026-12-24'], 'Christmas Day (Fri) closes the week on Thu');
+    w = E.periodWindow(d, 'tp', { preset: 'this-week' }, '2027-01-20');
+    assert.equal(w.from, '2027-01-19', 'MLK Day (Mon Jan 18) opens the week on Tue');
+    // clamped to the project start
+    w = E.periodWindow(d, 'tp', { preset: 'this-month' }, '2026-11-04');
+    assert.deepEqual([w.from, w.to, w.clamped], ['2026-11-02', '2026-11-04', false]);
+    w = E.periodWindow(d, 'tp', { from: '2026-10-01', to: '2026-11-04' }, RDAY);
+    assert.deepEqual([w.preset, w.from, w.to, w.clamped], ['custom', '2026-11-02', '2026-11-04', true]);
+    // to never passes today; whole project starts at the project start
+    w = E.periodWindow(d, 'tp', { preset: 'custom', from: '2026-11-10', to: '2026-12-31' }, RDAY);
+    assert.equal(w.to, RDAY);
+    assert.equal(E.periodWindow(d, 'tp', { preset: 'whole-project' }, RDAY).from, '2026-11-02');
+    // since last report: no report yet -> this week, honestly noted; with one -> the day after it
+    w = E.periodWindow(d, 'tp', { preset: 'since-last-report' }, RDAY);
+    assert.equal(w.preset, 'this-week'); assert.match(w.note, /No earlier report/);
+    d.project[0].data.reportLog = [{ date: '2026-11-12' }];
+    w = E.periodWindow(d, 'tp', { preset: 'since-last-report' }, RDAY);
+    assert.deepEqual([w.preset, w.from, w.to], ['since-last-report', '2026-11-13', RDAY]);
+  });
+
+  test('R10.1 periodReport: window filtering, edge dates, a blocker opened before the window', () => {
+    const d = tiny();
+    const p = E.periodReport(d, 'tp', { preset: 'last-week' }, RDAY);
+    assert.deepEqual(p.completed.map(x => x.id), ['edgeMon', 'inside'], 'Mon and Fri are inside; a task finished before the window is not');
+    assert.equal(p.completed.some(x => x.id === 'before'), false);
+    assert.equal(p.spendInPeriod, 800, 'only hours logged inside the window');
+    // the problem was raised on Nov 3 and is still open: open at the end, not raised in the window
+    assert.equal(p.blockersRaised.length, 0);
+    assert.deepEqual(p.blockersOpenAtEnd.map(b => [b.id, b.daysOpen]), [['work:bug', 7]], 'Nov 3 → Nov 13 is 7 business days (Veterans Day skipped)');
+    const wk1 = E.periodReport(d, 'tp', { from: '2026-11-02', to: '2026-11-06' }, RDAY);
+    assert.deepEqual(wk1.blockersRaised.map(b => b.id), ['work:bug']);
+    assert.deepEqual(wk1.completed.map(x => x.id), ['before']);
+    // undated facts fall back to history events, never guessed
+    delete d.workItem[3].data.createdAt;
+    assert.equal(E.periodReport(d, 'tp', { from: '2026-11-02', to: '2026-11-06' }, RDAY).blockersRaised.length, 0, 'no date: left out');
+    const ev = [{ at: '2026-11-04T15:00:00.000Z', ref: 'workItem:bug', action: 'create' }];
+    assert.deepEqual(E.periodReport(d, 'tp', { from: '2026-11-02', to: '2026-11-06' }, RDAY, { events: ev }).blockersRaised.map(b => b.date), ['2026-11-04']);
+    // no description and no purpose: the report asks for one instead of inventing it
+    assert.equal(p.overall.needsPurpose, true);
+    // the "behind" list as the window ended in the past: a task finished after it is open again
+    d.workItem.push({ id: 'late1', data: { id: 'late1', projectId: 'tp', title: 'late1', owner: 'a', status: 'done', doneAt: '2026-11-16', start: '2026-11-02', due: '2026-11-11', effortDays: 1, createdAt: '2026-11-02' } });
+    const lw = E.periodReport(d, 'tp', { preset: 'last-week' }, RDAY);
+    assert.deepEqual(lw.behindAtEnd.map(x => [x.id, x.split]), [['late1', 'past-due']]);
+    assert.equal(lw.behindText, '1 late (1 past due)');
+  });
+
+  test('R10.1 periodReport: the slip from forecast snapshots, a baseline, or "not tracked"', () => {
+    const d = tiny();
+    let p = E.periodReport(d, 'tp', { preset: 'this-week' }, RDAY);
+    assert.equal(p.slipDays, null); assert.equal(p.forecastFinishThenSource, 'not-tracked'); assert.match(p.slipText, /not tracked/);
+    const now = p.forecastFinishNow;
+    d.project[0].data.baselines = [{ id: 'bl', at: '2026-11-02T16:00:00Z', label: 'Kickoff plan', items: { inside: { due: E.addBusinessDays(now, -4) } } }];
+    p = E.periodReport(d, 'tp', { preset: 'this-week' }, RDAY);
+    assert.deepEqual([p.forecastFinishThenSource, p.slipDays], ['baseline', 4]);
+    assert.match(p.slipText, /4 business days later than the “Kickoff plan” plan/);
+    d.project[0].data.forecastLog = [{ date: '2026-11-13', finish: E.addBusinessDays(now, -3) }, { date: '2026-11-16', finish: now }];
+    p = E.periodReport(d, 'tp', { preset: 'this-week' }, RDAY);
+    assert.deepEqual([p.forecastFinishThenSource, p.forecastFinishThen, p.forecastFinishEnd, p.slipDays], ['snapshot', E.addBusinessDays(now, -3), now, 3]);
+    assert.match(p.slipText, /^Expected finish moved 3 business days later this week/);
+  });
+
+  test('R10.1 areasOfConcern groups late and blocked tasks by category, step and team', () => {
+    const d = SEEDR.seed(RDAY).docs;
+    const c = E.periodReport(d, PRJ, { preset: 'this-week' }, RDAY).overall.concerns;
+    assert.deepEqual(c.map(x => [x.dimension, x.key, x.count, x.of]),
+      [['category', 'Banking', 4, 5], ['step', 'vendor-onboarding/s3', 3, 5], ['team', 'IT', 2, 5]]);
+    assert.equal(c[0].text, 'Banking (risk area): 4 of the 5 late or blocked tasks');
+    // fewer than two late or blocked tasks: no areas of concern
+    assert.deepEqual(E.periodReport(tiny(), 'tp', { preset: 'this-week' }, RDAY).overall.concerns, []);
+  });
+
+  test('R10.1 plan changes proposed or applied in the window (hand-made planChange docs)', () => {
+    const d = tiny();
+    d.planChange = [
+      { id: 'pc1', data: { id: 'pc1', projectId: 'tp', title: 'Moved go-live', reason: 'dependency slipped', category: 'schedule', requestedBy: 'a', at: '2026-11-10T10:00:00Z',
+        status: 'applied', decidedBy: 'b', decidedAt: '2026-11-11T10:00:00Z', appliedAt: '2026-11-16T09:00:00Z', edits: [], impact: { forecastBefore: '2026-12-01', forecastAfter: '2026-12-04', deadlineEffect: 3 } } },
+      { id: 'pc2', data: { id: 'pc2', projectId: 'tp', title: 'Add a training task', status: 'proposed', at: '2026-11-17T09:00:00Z', impact: {} } },
+      { id: 'pc3', data: { id: 'pc3', projectId: 'other', title: 'Not ours', status: 'proposed', at: '2026-11-17T09:00:00Z' } },
+      { id: 'pc4', data: { id: 'pc4', projectId: 'tp', title: 'Old', status: 'rejected', at: '2026-11-02T09:00:00Z' } },
+    ];
+    const p = E.periodReport(d, 'tp', { preset: 'this-week' }, RDAY);
+    assert.deepEqual(p.planChanges.map(c => [c.id, c.event, c.shiftDays]), [['pc1', 'applied', 3], ['pc2', 'proposed', null]]);
+    assert.equal(p.planChanges[0].text, 'Moved go-live (expected finish 3 business days later; dependency slipped; approved by Ben Ito)');
+    assert.equal(p.planChanges[1].text, 'Add a training task (waiting for a decision)');
+    assert.deepEqual(E.periodReport(d, 'tp', { preset: 'last-week' }, RDAY).planChanges.map(c => c.id), ['pc1'], 'proposed last week');
+    // the doc type may not exist yet
+    delete d.planChange;
+    assert.deepEqual(E.periodReport(d, 'tp', { preset: 'this-week' }, RDAY).planChanges, []);
+  });
+
+  test('R10.1 golden period values for Vendor Onboarding Modernization (GOLDEN-NUMBERS.md)', () => {
+    const d = SEEDR.seed(RDAY).docs;
+    const t = E.projectTruth(d, PRJ, RDAY);
+    const ids = a => a.map(x => x.id);
+    const tw = E.periodReport(d, PRJ, { preset: 'this-week' }, RDAY);
+    assert.equal(tw.window.label, 'Week of Mon Nov 16 – Fri Nov 20');
+    assert.deepEqual([ids(tw.completed), ids(tw.assigned), ids(tw.started)], [[], ['W12'], ['W12', 'W8']]);
+    assert.deepEqual([ids(tw.blockersRaised), ids(tw.blockersResolved), tw.blockersOpenAtEnd.map(b => [b.id, b.daysOpen])], [['work:W12'], [], [['data:D2', 21], ['work:W12', 1]]]);
+    assert.deepEqual([tw.behindAtEnd.length, tw.behindText, tw.testsRun.passed, tw.testsRun.failed], [5, '5 late (1 past due, 4 will finish after their due date)', 14, 1]);
+    assert.deepEqual([tw.approvalsGiven.map(a => a.bu), ids(tw.risksOpened), ids(tw.risksClosed), tw.spendInPeriod], [['Procurement'], ['R3'], [], 4350]);
+    assert.deepEqual([tw.forecastFinishThen, tw.forecastFinishNow, tw.slipDays], ['2026-12-07', '2026-12-09', 2]);
+    // consistency: the window ends today, so "behind" is exactly the project screen's late list
+    assert.deepEqual(ids(tw.behindAtEnd).sort(), t.late.slice().sort());
+    assert.equal(tw.behindText, t.lateText);
+    assert.deepEqual(tw.blockersOpenAtEnd.filter(b => b.kind === 'information').map(b => b.dataId), t.blockers.map(b => b.dataId));
+    const lw = E.periodReport(d, PRJ, { preset: 'last-week' }, RDAY);
+    assert.equal(lw.window.label, 'Week of Mon Nov 9 – Fri Nov 13');
+    assert.deepEqual([ids(lw.completed), ids(lw.assigned), ids(lw.started)], [['W3', 'W9', 'W5'], ['W11'], []]);
+    assert.deepEqual([ids(lw.blockersRaised), ids(lw.blockersResolved), lw.blockersOpenAtEnd.map(b => [b.id, b.daysOpen])], [[], ['data:D5'], [['data:D2', 19]]]);
+    assert.deepEqual([lw.behindAtEnd.length, lw.behindText, lw.testsRun.passed, lw.testsRun.failed], [4, '4 late (4 will finish after their due date)', 4, 0]);
+    assert.deepEqual([lw.approvalsGiven.length, ids(lw.risksOpened), ids(lw.risksClosed), lw.spendInPeriod], [0, [], ['R1'], 2468.75]);
+    assert.deepEqual([lw.forecastFinishThen, lw.forecastFinishEnd, lw.slipDays], ['2026-12-04', '2026-12-07', 1]);
+    assert.equal(tw.compare.text, '0 done this week vs 3 the week before');
+    // overall is projectTruth as of today
+    assert.deepEqual([tw.overall.label, tw.overall.lateText, tw.overall.budget.overBudget, tw.overall.budget.forecast], [t.label, t.lateText, true, 48847.12]);
+    assert.match(tw.overall.budget.text, /^Higher budget need expected/);
+    // since last report (Fri Nov 13) covers Mon Nov 16 to today
+    const sl = E.periodReport(d, PRJ, { preset: 'since-last-report' }, RDAY);
+    assert.deepEqual([sl.from, sl.to], ['2026-11-16', RDAY]);
+  });
+}

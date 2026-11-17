@@ -192,3 +192,30 @@ This replaces the R9 contradiction of "On track" next to SPI 0.00 and CPI 0.00.
   3. "Train the people who do the changed steps" (Tom Alvarez). It starts after task 1 finishes.
 
   No task is owned by a bare role, and no task starts before its prerequisite finishes.
+
+## Status report with a time window (R10.1, stream R)
+
+`E().periodReport(docs, projectId, {preset} | {from, to}, today, {events})`, Vendor Onboarding Modernization, seed day **Tue Nov 17 2026**. Weeks run Mon–Fri; the window ends today at the latest. Asserted by the engine test `R10.1 golden period values`. The e2e compares the screen with the engine on the real day, because "this week" depends on the weekday.
+
+The seed carries dated facts for this (business-day offsets): task `createdAt`/`assignedAt` (kickoff −21 bd; the problem W12 −1 bd; W11 reassigned −5 bd), risk `openedAt`/`closedAt`, `unavailableSince` on Bank remittance details (−21 bd), and two weekly report snapshots (`reportLog`, `forecastLog` at −6 bd and −2 bd, expected finish seed + 12 bd and + 13 bd). None of them changes a number above.
+
+| | This week | Last week |
+|---|---|---|
+| Window | Week of Mon Nov 16 – Fri Nov 20 (so far: Nov 16–17) | Week of Mon Nov 9 – Fri Nov 13 (4 business days; Veterans Day) |
+| Completed | **0** ("Nothing completed this week") | **3**: Connect the screening service, Send the "vendor is ready" messages, Make the extra-checks list |
+| Newly assigned | 1: the bank-form problem (Leo Park) | 1: Send each invoice to the right approver (Dev Kumar) |
+| Started | 2: the bank-form problem, Save new vendors in the ERP | 0 |
+| Blockers raised | 1: the bank-form problem | 0 |
+| Blockers resolved | 0 | 1: Sanctions screening result available (Tue Nov 10) |
+| Still open at the end | Bank remittance details (open 21 bd, work planned); the bank-form problem (open 1 bd) | Bank remittance details (open 19 bd) |
+| Behind at the end | **5 late (1 past due, 4 will finish after their due date)**, the same list and text as the project screen | 4 late (4 will finish after their due date), as the docs stood on Nov 13 |
+| Tests | 14 passed, 1 failed (2 runs) | 4 passed, 0 failed (1 run) |
+| Approvals | Procurement (Maya Chen) | none |
+| Risks | opened: Business testing overlaps the quarter-end close | closed: Screening vendor contract held up in legal review |
+| Spent | $4,350 | $2,468.75 |
+| Expected finish | Dec 7 → Dec 9: moved 2 bd later | Dec 4 → Dec 7: moved 1 bd later |
+| Compare | 0 done this week vs 3 the week before | 3 done last week vs 2 the week before |
+
+**Overall** (projectTruth today): label "Some tasks late"; "Expected Dec 9, 14 business days before the Dec 30 deadline"; "Higher budget need expected: expected cost $48,847 against the $48,000 budget ($847 over)". **Common areas of concern:** "Banking (risk area): 4 of the 5 late or blocked tasks", "The “Capture banking details” step: 3 of the 5 late or blocked tasks", "IT team: 2 of the 5 late or blocked tasks".
+
+**Since last report** = Mon Nov 16 – Tue Nov 17 (last report Fri Nov 13). Email subject: "Vendor Onboarding Modernization: status, week of Nov 16".

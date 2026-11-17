@@ -287,6 +287,17 @@ async function goldenNumbers(browser, ymd, at, errors) {
     await page.click('[data-report]');
     await page.waitForSelector('[data-rep-facts]', { timeout: 20000 });
     seen[x.id].report = norm(await readIn('[data-prj-rep]', '.rag'));
+    /* R10.1: the window ends today, so the period's "behind" list is the project screen's late list */
+    {
+      const late = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, prj, store.state.today);
+        const by = Object.fromEntries(store.list('workItem').map(w => [w.id, w.title])); return { text: t.lateText, titles: t.late.map(id => by[id]) }; }, [STORE, x.id]);
+      const shownB = await page.$$eval('[data-prj-rep] [data-psec="behind"] li', ls => ls.map(l => l.textContent));
+      const emptyB = await page.locator('[data-prj-rep] [data-psec="behind"][data-psec-empty]').count();
+      check(`${x.name}: period "behind" (window ends today) = the screen's late list`, late.titles.length
+        ? shownB[0] === late.text && shownB.length === late.titles.length + 1 && late.titles.every(tl => shownB.some(l => l.includes('“' + tl + '”')))
+        : emptyB === 1, { late, shownB });
+      check(`${x.name}: report header shows this week's window`, /^Week of [A-Z][a-z]{2} [A-Z][a-z]{2} \d+ – /.test(await page.innerText('[data-prj-rep] [data-rep-window]')));
+    }
     /* the written report (server) is dated with the visitor's today, so its words agree with the facts strip */
     const words = await page.innerText('[data-prj-rep] .pmo-rep-p').catch(() => '');
     const shownF = await page.innerText('[data-prj-rep] [data-t="forecast"]').catch(() => '');

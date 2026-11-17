@@ -10,6 +10,7 @@ const ROUTES = [
   [/^\/process\/([\w-]+)$/, 'process', m => ({ pid: m[1] })],
   [/^\/new$/, 'process', () => ({ pid: null, create: true })],
   [/^\/data\/([\w-]+)$/, 'data', m => ({ did: m[1] })],
+  [/^\/project\/([\w-]+)\/changes$/, 'changes', m => ({ prj: m[1] })],
   [/^\/project\/([\w-]+)$/, 'project', m => ({ prj: m[1] })],
   [/^\/portfolio$/, 'portfolio', () => ({})],
   [/^\/dashboard$/, 'dashboard', () => ({})],
@@ -19,7 +20,7 @@ const ROUTES = [
   [/^\/connections$/, 'connections', () => ({})],
   [/^\/admin(?:\/([\w-]+))?$/, 'admin', m => ({ tab: m[1] || 'people' })],
 ];
-const NAV = { home: 'home', processes: 'process', projects: 'project', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process', connections: 'connections', admin: 'admin' };
+const NAV = { home: 'home', processes: 'process', projects: 'project', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process', connections: 'connections', admin: 'admin', changes: 'project' };
 
 const pageCache = {};
 async function loadPage(name) {

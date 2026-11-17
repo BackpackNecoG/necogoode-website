@@ -522,6 +522,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot('25-report-print', true);
   await page.emulateMedia({ media: 'screen' });
   await shot('26-report-1440');
+  /* ---- R10.1 stream R: the report's time window ---- */
+  console.log('R10.1 report window');
+  {
+    const eng = (preset) => page.evaluate(async ([u, prj, preset]) => { const { store } = await import(u); const E = window.PMOEngine;
+      const p = E.periodReport(store.state.docs, prj, { preset }, store.state.today);
+      return { label: p.window.label, partial: p.window.partial, short: p.window.short, completed: p.completed.length, assigned: p.assigned.length, raised: p.blockersRaised.length,
+        open: p.blockersOpenAtEnd.length, behind: p.behindAtEnd.length, behindText: p.behindText, lateText: E.projectTruth(store.state.docs, prj, store.state.today).lateText }; }, [STORE, PRJ, preset]);
+    const win = async () => (await page.innerText('[data-prj-rep] [data-rep-window]')).trim();
+    const items = async key => page.locator(`[data-prj-rep] [data-psec="${key}"] li`).count();
+    const emptyOf = async key => (await page.locator(`[data-prj-rep] [data-psec="${key}"][data-psec-empty]`).count()) === 1;
+    for (const preset of ['this-week', 'last-week']) {
+      await page.click(`[data-rep-preset="${preset}"]`);
+      await page.waitForSelector(`[data-rep-preset="${preset}"].on`); await page.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await settle();
+      const x = await eng(preset);
+      check(`R10.1 ${preset}: header shows the window in words`, (await win()).startsWith(x.label) && /^Week of (Mon|Tue|Wed|Thu|Fri) [A-Z][a-z]{2} \d+ – (Mon|Tue|Wed|Thu|Fri) /.test(await win()), { shown: await win(), x });
+      check(`R10.1 ${preset}: the period heading carries the window`, (await page.textContent('[data-rep-period-h]')).includes(x.label.replace(/^Week of /, '')));
+      check(`R10.1 ${preset}: completed matches the engine`, x.completed ? await items('completed') === x.completed : await emptyOf('completed'), { x, shown: await items('completed') });
+      check(`R10.1 ${preset}: assigned and blockers raised match the engine`, (x.assigned ? await items('assigned') === x.assigned : await emptyOf('assigned')) && (x.raised ? await items('raised') === x.raised : await emptyOf('raised')), x);
+      check(`R10.1 ${preset}: blockers still open match the engine`, x.open ? await items('open') === x.open : await emptyOf('open'), x);
+      check(`R10.1 ${preset}: behind = the engine's list (first line is the late split)`, x.behind ? (await items('behind')) === x.behind + 1 && (await page.innerText('[data-psec="behind"] li >> nth=0')).trim() === x.behindText : await emptyOf('behind'), x);
+      check(`R10.1 ${preset}: no empty headings`, await page.evaluate(() => [...document.querySelectorAll('[data-prj-rep] [data-psec] h5')].every(h => h.nextElementSibling && h.nextElementSibling.querySelectorAll('li').length > 0)));
+      const mailU = new URL(await page.getAttribute('[data-rep-mail]', 'href'));
+      check(`R10.1 ${preset}: email subject contains the window`, mailU.searchParams.get('subject').endsWith(': status, ' + x.short) && /: status, week of [A-Z][a-z]{2} \d+$/.test(mailU.searchParams.get('subject')), mailU.searchParams.get('subject'));
+      check(`R10.1 ${preset}: email body carries the window`, mailU.searchParams.get('body').includes(x.label));
+      if (preset === 'this-week') check('R10.1 this-week: "behind" equals the project screen\'s late text', x.behindText === x.lateText, x);
+    }
+    check('R10.1 overall: purpose, schedule, budget', await page.locator('[data-prj-rep] [data-rep-purpose]').count() === 1 && await page.locator('[data-prj-rep] [data-rep-sched]').count() === 1);
+    check('R10.1 the chosen preset is remembered per project', await page.evaluate(prj => JSON.parse(localStorage.getItem('pmoflow.reportPeriod.' + prj)).preset, PRJ) === 'last-week');
+    await shot('27-report-window-1366', false);
+    await page.setViewportSize({ width: 390, height: 844 }); await settle();
+    check('R10.1 report at 390: no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await page.locator('[data-prj-rep]').screenshot({ path: `${SHOTS}/27-report-window-390.png` });
+    await page.setViewportSize({ width: 1440, height: 900 }); await settle();
+    await page.click('[data-rep-preset="this-week"]'); await page.waitForSelector('[data-rep-preset="this-week"].on'); await page.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await settle();
+  }
   await page.click('[data-rep-close]'); await settle();
   check('report closes', await page.locator('[data-prj-rep]').count() === 0);
 
@@ -696,6 +731,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await act('save'); await settle();
   check('risk edited (score 3)', (await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('.pmo-sev').innerText()).trim() === '3');
 
+  /* R10.1: "This week across all projects": per-project counts from the engine */
+  {
+    await page.waitForSelector('[data-pf-period]');
+    const want = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+      return store.list('project').map(j => { const p = E.periodReport(store.state.docs, j.id, { preset: 'this-week' }, store.state.today); return [j.id, p.completed.length, p.blockersRaised.length, p.behindAtEnd.length]; }); }, STORE);
+    const got = await page.$$eval('[data-pf-prow]', rows => rows.map(r => [r.dataset.pfProw, +r.querySelector('[data-c="completed"]').textContent, +r.querySelector('[data-c="raised"]').textContent, +r.querySelector('[data-c="behind"]').textContent]));
+    check('R10.1 portfolio: this week across all projects = engine counts', JSON.stringify(got) === JSON.stringify(want) && /^This week across all projects/.test(await page.textContent('[data-pf-period-h]')), { got, want });
+  }
   await page.click('[data-gen-rep]');
   await page.waitForSelector('.pmo-rep', { timeout: 30000 });
   const repTop = await page.locator('.pmo-rep-top').innerText();

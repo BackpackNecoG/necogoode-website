@@ -404,6 +404,80 @@ function statusRules(f, opts) {
   if (opts && opts.advanced) out.appendix = appendixOf(f);
   return out;
 }
+/* ---------- R10.1 stream R: the report's time window ---------- */
+/* {preset} or {from, to} from the request; anything else is ignored (the engine defaults to this week). */
+const PRESETS = ['this-week', 'last-week', 'last-2-weeks', 'this-month', 'since-last-report', 'whole-project', 'custom'];
+const isDay = d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && isFinite(Date.parse(d + 'T12:00:00Z'));
+function rangeOf(body) {
+  const r = {};
+  if (typeof body.preset === 'string' && PRESETS.includes(body.preset)) r.preset = body.preset;
+  if (isDay(body.from)) r.from = body.from;
+  if (isDay(body.to)) r.to = body.to;
+  if ((r.from || r.to) && !r.preset) r.preset = 'custom';
+  return r;
+}
+/* history events the page passes so undated facts can fall back to them: {at, ref, action} only, at most 1000 */
+function eventsOf(body) {
+  return (Array.isArray(body.events) ? body.events : []).slice(0, 1000)
+    .filter(e => e && typeof e.at === 'string' && typeof e.ref === 'string' && typeof e.action === 'string')
+    .map(e => ({ at: e.at.slice(0, 40), ref: e.ref.slice(0, 140), action: e.action.slice(0, 32) }));
+}
+const fdl = d => (d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(',', '') : '');
+const fds = d => (d ? new Date(String(d).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
+/* "This period (Mon Nov 16 – Fri Nov 20, so far)" */
+function periodHeading(p) {
+  const w = p.window;
+  return `This period (${String(w.label).replace(/^Week of /, '')}${w.partial ? ', so far' : ''})`;
+}
+/* Every period section, in order. An empty section reads plainly ("Nothing completed this week"); never an empty heading. */
+function periodSections(p, opts) {
+  const n = p.window.noun, sec = [];
+  const add = (key, heading, items, empty) => sec.push({ key, heading, items: items.filter(Boolean), empty: items.filter(Boolean).length ? null : empty });
+  const who = x => (x.ownerName && x.ownerName !== 'Nobody' ? ` (${x.ownerName})` : '');
+  add('completed', 'Completed', p.completed.map(x => `${q(x.title)}${who(x)}, done ${fdl(x.date)}`), `Nothing completed ${n}`);
+  add('assigned', 'Newly assigned', p.assigned.map(x => `${q(x.title)} to ${x.ownerName}${x.due ? `, due ${fds(x.due)}` : ''}`), `Nothing newly assigned ${n}`);
+  add('started', 'Started', p.started.map(x => `${q(x.title)}${who(x)}, started ${fdl(x.date)}`), `No work started ${n}`);
+  const bl = x => x.kind === 'problem' ? `Problem: ${x.title}${who(x)}` : `${x.title}${who(x)}`;
+  add('raised', 'Blockers raised', p.blockersRaised.map(x => `${bl(x)}, raised ${fdl(x.date)}`), `No new blockers ${n}`);
+  add('resolved', 'Blockers resolved', p.blockersResolved.map(x => `${x.kind === 'problem' ? `Fixed: ${x.title}` : x.title}, ${fdl(x.date)}`), `No blockers resolved ${n}`);
+  add('open', 'Blockers still open', p.blockersOpenAtEnd.map(x => `${bl(x)}${x.kind === 'information' ? (x.planned ? '; work is planned to get it' : '; no work is planned to get it') : ''}; ` +
+    (x.daysOpen != null ? `open ${plural(x.daysOpen, 'business day')}` : 'open since: not tracked')), 'No blockers open at the end of the period');
+  add('behind', 'Behind', p.behindAtEnd.length ? [p.behindText].concat(p.behindAtEnd.map(x => x.split === 'past-due'
+    ? `${q(x.title)}${who(x)} was due ${fds(x.due)}`
+    : `${q(x.title)}${who(x)} will finish after its ${fds(x.due)} due date${x.forecast ? ` (expected ${fds(x.forecast)})` : ''}`)) : [], 'Nothing late at the end of the period');
+  const tr = p.testsRun;
+  add('tests', 'Tests', tr.runs ? [`${tr.passed} passed, ${tr.failed} failed (${plural(tr.runs, 'test run')})`] : [], `No tests run ${n}`);
+  add('approvals', 'Approvals', p.approvalsGiven.map(a => `${a.bu}'s part approved by ${a.approverName}, ${fdl(a.date)}`), `No approvals ${n}`);
+  add('risks', 'Risks', p.risksOpened.map(r => `New risk: ${r.title} (${r.ownerName})`).concat(p.risksClosed.map(r => `Closed: ${r.title}`)), `No risks opened or closed ${n}`);
+  add('changes', p.planChanges.length ? `Plan changes: ${p.planChanges.length}` : 'Plan changes', p.planChanges.map(c => c.text), `No plan changes ${n}`);
+  if (opts && opts.showCost) add('spend', 'Spent', [`${money(p.spendInPeriod)} of logged work ${n}`], null);
+  add('schedule', 'Expected finish', [p.slipText].concat(p.compare ? [capFirst(p.compare.text)] : []), null);
+  return sec;
+}
+const capFirst = s => String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1);
+/* "Overall": purpose, status, schedule, budget, areas of concern and who acts (projectTruth as of today) */
+function overallSection(p) {
+  const o = p.overall;
+  return { name: o.name, description: o.description, purpose: o.purpose, needsPurpose: o.needsPurpose,
+    purposeText: o.needsPurpose ? 'Add a one-line purpose' : null,
+    label: o.label, rag: o.rag, sentence: o.sentence, lateText: o.lateText, schedule: o.schedule, behindSchedule: o.behindSchedule,
+    budget: o.budget.text, higherBudgetNeed: o.budget.overBudget, concerns: o.concerns.map(c => c.text),
+    who: o.who.map(w => `${w.name}: ${w.what}`) };
+}
+/* one plain sentence about the period, built from the counts above */
+function periodSummaryOf(p) {
+  const n = p.window.noun, bits = [];
+  bits.push(`${plural(p.completed.length, 'task')} done ${n}`);
+  if (p.assigned.length) bits.push(`${p.assigned.length} newly assigned`);
+  bits.push(`${plural(p.blockersRaised.length, 'blocker')} raised and ${p.blockersResolved.length} resolved`);
+  bits.push(p.behindAtEnd.length ? `${p.behindText} at the end` : 'nothing late at the end');
+  return capFirst(bits.join(', ')) + '. ' + p.slipText + '.';
+}
+/* facts for the model: the period lines and the overall lines only, so it cannot invent items */
+function periodFactsForAI(p, sections) {
+  return { period: { heading: periodHeading(p), window: p.window.label, sections: sections.map(s => ({ heading: s.heading, items: s.items, empty: s.empty })) },
+    overall: overallSection(p) };
+}
 /* R7: the default report never uses jargon. AI text is mapped to plain words; a line that still needs jargon is dropped. */
 const JARGON = /\b(SPI|CPI|EAC|earned value|slip\w*|amber|UAT|SIT|go\/no-go|hypercare|RAG)\b/i;
 function plainWords(t) {
@@ -988,6 +1062,16 @@ async function run(kind, body, docs, today) {
     /* R9 §11: Simple mode never says "Rules-based"; pages show sourceLabel as given */
     const rulesLabel = { source: 'rules', sourceLabel: advanced ? 'Rules-based' : 'Written from the project\'s facts' };
     const fallback = Object.assign(L.scrub(statusRules(facts, { advanced })), { recipients });
+    /* R10.1: the time window. "Overall" is projectTruth as of today; "This period" is what happened in the window. */
+    let period = null;
+    if (engine && typeof engine.periodReport === 'function') {
+      try { period = engine.periodReport(docs, projectId, rangeOf(body), today, { events: eventsOf(body) }); } catch (e) { period = null; }
+    }
+    if (period) {
+      const sections = periodSections(period, { showCost: !!costLineOf(facts) });
+      Object.assign(fallback, L.scrub({ window: period.window, periodHeading: periodHeading(period), periodSummary: periodSummaryOf(period),
+        sections, overall: overallSection(period) }), { period });
+    }
     if (!configured()) return { status: 200, body: Object.assign(fallback, rulesLabel, { facts }) };
     try {
       /* the model gets plain facts only: no earned value, "behind" instead of "slip" (unless the reader asked for advanced) */
@@ -1017,8 +1101,10 @@ async function run(kind, body, docs, today) {
         'For testing, use testing.next word for word. Mention cost only when cost is supplied. ' +
         'Use the numbers, dates, counts and blockers exactly as given (truth); never say all work is done or nothing needs attention while blockers exist. ' +
         'When hypercare (support after launch) is supplied, report days left and open problems; an open severity 1 problem means "consider rolling back".' +
-        (advanced ? ' The reader asked for advanced detail: you may add earned value (SPI, CPI) in one highlight.' : ''),
-        JSON.stringify(sent), 900);
+        (advanced ? ' The reader asked for advanced detail: you may add earned value (SPI, CPI) in one highlight.' : '') +
+        (period ? ' The report covers a time window: periodFacts holds what happened in it (period) and the overall status (overall). ' +
+          'Also return "periodSummary": 1-2 sentences about that window only, using only periodFacts.period; name no task, person or number that is not in it.' : ''),
+        JSON.stringify(period ? Object.assign(sent, { periodFacts: periodFactsForAI(period, fallback.sections) }) : sent), 900);
       if (typeof out.headline !== 'string' || typeof out.summary !== 'string') throw new Error('shape');
       /* the headline must agree with the label (R3/R7) and the summary leads with the sentence */
       /* the label is ours; the model's text after it may not name any other status */
@@ -1044,6 +1130,12 @@ async function run(kind, body, docs, today) {
       if (!res.risks.length) res.risks = fallback.risks.slice();
       Object.assign(res, { rag: sum.rag, label: sum.label, sentence: sum.sentence, date: today, recipients, source: 'ai', sourceLabel: 'Generated by AI', facts });
       if (advanced) res.appendix = fallback.appendix;
+      if (period) {
+        /* the period lists are the engine's, word for word; the model may only add the plain summary of the window */
+        const ps = typeof out.periodSummary === 'string' ? plainWords(out.periodSummary.trim()).slice(0, 600) : '';
+        Object.assign(res, { window: fallback.window, periodHeading: fallback.periodHeading, sections: fallback.sections, overall: fallback.overall, period,
+          periodSummary: ps && plainOk(ps) ? L.scrub(ps) : fallback.periodSummary });
+      }
       return { status: 200, body: res };
     } catch (e) { return { status: 200, body: Object.assign(fallback, rulesLabel, { facts }) }; }
   }
@@ -1065,4 +1157,4 @@ async function run(kind, body, docs, today) {
   return { status: 400, body: { error: 'unknown ai kind' } };
 }
 
-module.exports = { run, KINDS, configured, sopRules, statusRules, statusFacts, labeler, _sanitizeSop: sanitizeSop };
+module.exports = { run, KINDS, configured, sopRules, statusRules, statusFacts, labeler, periodSections, periodHeading, _sanitizeSop: sanitizeSop };

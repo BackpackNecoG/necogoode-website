@@ -451,7 +451,7 @@ async function rollback(wsId, docs, project, actor, body, today) {
   return { status: 200, body: { ok: true, release, project: proj } };
 }
 
-const ROUTE_MODULES = ['pmoflow-routes-buyer', 'pmoflow-routes-connect', 'pmoflow-routes-admin']
+const ROUTE_MODULES = ['pmoflow-routes-buyer', 'pmoflow-routes-connect', 'pmoflow-routes-admin', 'pmoflow-routes-change']
   .map(n => { try { return require('../shared/' + n); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; return null; } })
   .filter(m => m && typeof m.handle === 'function');
 

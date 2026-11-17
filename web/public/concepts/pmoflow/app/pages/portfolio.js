@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, reportEvents, reportSubject, windowWords } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -319,8 +319,28 @@ function varianceHTML(projects) {
 
 /* ---------------------------------------------------------------- status report */
 const txt = x => x == null ? '' : typeof x === 'string' ? x : (x.text || x.title || x.summary || x.detail || JSON.stringify(x));
+/* R10.1: the same period picker; "This week across all projects" counts per project come from E().periodReport */
+const PF_KEY = 'pmoflow.reportPeriod.portfolio';
+function pfRange() {
+  try { const v = JSON.parse(localStorage.getItem(PF_KEY) || 'null'); if (v && typeof v.preset === 'string') return v; } catch (e) { /* storage unavailable */ }
+  return { preset: 'this-week' };
+}
+function setPfRange(r) { try { localStorage.setItem(PF_KEY, JSON.stringify(r)); } catch (e) { /* storage unavailable */ } }
+const pfEvents = { list: [] };
+function periodOf(j, range) { return eng('periodReport', null, docs(), j.id, range, today(), { events: pfEvents.list }); }
+function acrossHTML(projects, range) {
+  const rows = projects.map(j => ({ j, p: periodOf(j, range) })).filter(x => x.p);
+  if (!rows.length) return '';
+  const w = rows[0].p.window;
+  const head = w.preset === 'this-week' ? 'This week across all projects' : w.preset === 'last-week' ? 'Last week across all projects' : `${w.presetLabel} across all projects`;
+  return `<div class="pmo-pf-period" data-pf-period><h4 class="pmo-rep-part" data-pf-period-h>${esc(head)} · <span data-pf-window>${esc(windowWords(w))}</span></h4>
+    <div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Project</th><th>Done</th><th>Blockers raised</th><th>Behind at the end</th></tr></thead><tbody>
+    ${rows.map(({ j, p }) => `<tr data-pf-prow="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link>${esc(j.name)}</a></td><td data-c="completed">${p.completed.length}</td><td data-c="raised">${p.blockersRaised.length}</td><td data-c="behind">${p.behindAtEnd.length}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+}
 function reportHTML(projects) {
   if (!projects.length) return '<div class="card"><h3>Status report</h3><div class="empty">No projects to report on.</div></div>';
+  const range = pfRange();
   const j = projects.find(p => p.id === st.repPrj) || projects[0];
   const rep = reports[j.id];
   let out = '<div class="pmo-rep-empty hint">Pick a project and generate a one-page status report from its live facts: progress, forecast, blockers, risks and approvals.</div>';
@@ -331,20 +351,23 @@ function reportHTML(projects) {
     const list = (h, arr, cls) => (arr && arr.length) ? `<div class="pmo-rep-sec ${cls}"><h4>${h}</h4><ul>${arr.map(x => `<li>${esc(txt(x))}</li>`).join('')}</ul></div>` : '';
     out = `<div class="pmo-rep">
       <div class="pmo-rep-top"><span class="pmo-src ${ai ? 'ai' : ''}" data-rep-src>${esc(d.sourceLabel ? String(d.sourceLabel) : ai ? '✦ Written by AI' : 'Written from the project’s facts')}</span><span class="hint">${ai ? 'From the project’s facts only. Check before sending.' : 'Check before sending.'}</span><span class="pmo-rep-btns"><button class="btn sm" data-copy-rep>Copy</button><button class="btn sm" data-print-pf-rep>Print / PDF</button></span></div>
-      <div class="pmo-rep-print-h">${ragBadge(rag(j))} <b>${esc(j.name)}</b> · status report · ${esc(fmt(today()))}</div>
+      <div class="pmo-rep-print-h">${ragBadge(rag(j))} <b>${esc(j.name)}</b> · status report · ${esc(d.window ? windowWords(d.window) : fmt(today()))}</div>
+      ${d.window ? `<div class="pmo-rep-window" data-rep-window>${esc(windowWords(d.window))}</div>` : ''}
       <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
-      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div></div>`;
+      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div>
+      ${Array.isArray(d.sections) ? `<h4 class="pmo-rep-part">${esc(d.periodHeading || 'This period')}</h4>${d.periodSummary ? `<p class="pmo-rep-p">${esc(d.periodSummary)}</p>` : ''}<div class="pmo-rep-period">${d.sections.map(x => x.items.length ? `<div class="pmo-rep-psec"><h5>${esc(x.heading)}</h5><ul>${x.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>` : x.empty ? `<div class="pmo-rep-psec none">${esc(x.empty)}</div>` : '').join('')}</div>` : ''}</div>`;
   }
-  return `<div class="card" data-pf-rep><h3>Status report</h3>
+  return `<div class="card" data-pf-rep><h3>Status report</h3>${periodPickerHTML(range, { noSince: true })}${acrossHTML(projects, range)}
     <div class="pmo-tlbar"><select class="pmo-sel" data-rep-prj aria-label="Project for status report">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === j.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
       <button class="btn sm primary" data-gen-rep ${rep && rep.loading ? 'disabled' : ''}>${rep && rep.data ? 'Refresh' : '✦ Write the report'}</button></div>${out}</div>`;
 }
 async function generate(prj) {
   reports[prj] = { loading: true }; rerender();
   try {
-    const r = await store.api('/ai/status-report', { projectId: prj, today: today() });
+    const range = pfRange();
+    const r = await store.api('/ai/status-report', Object.assign({ projectId: prj, today: today(), events: pfEvents.list }, range.preset === 'custom' ? range : { preset: range.preset }));
     reports[prj] = { data: (r && (r.report || r)) || {} };
   } catch (e) { reports[prj] = { error: e.message || 'service unavailable' }; }
   rerender();
@@ -419,6 +442,12 @@ export function bind(root) {
   chg('[data-bl-id]', v => { st.blId = v; rerender(); });
   chg('[data-rep-prj]', v => { st.repPrj = v; rerender(); });
   chg('[data-burn-prj]', v => { st.burnPrj = v; rerender(); });
+  /* R10.1: the period picker re-counts every project and refreshes an open report */
+  const pick = r => { setPfRange(r); const sel = root.querySelector('[data-rep-prj]'); const prj = sel ? sel.value : st.repPrj; if (prj && reports[prj] && reports[prj].data) generate(prj); else rerender(); };
+  on('[data-rep-preset]', el => pick({ preset: el.dataset.repPreset }));
+  on('[data-rep-apply]', () => { const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-to]'); const from = f && f.value, to = (t && t.value) || today();
+    if (!from) { toast('Choose a start date'); return; } pick({ preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from }); });
+  if (!pfEvents.loaded) { pfEvents.loaded = true; reportEvents().then(list => { pfEvents.list = list; }); }   /* used from the next render on */
   on('[data-gen-rep]', () => { const sel = root.querySelector('[data-rep-prj]'); generate(sel ? sel.value : st.repPrj); });
   on('[data-copy-rep]', async () => {
     const sel = root.querySelector('[data-rep-prj]'); const j = store.get('project', sel && sel.value); const rep = j && reports[j.id];

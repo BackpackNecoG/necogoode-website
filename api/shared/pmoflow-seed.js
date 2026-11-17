@@ -9,7 +9,9 @@
 const DOC_TYPES = ['person', 'dataElement', 'process', 'project', 'workItem', 'grant', 'approval',
   'release', 'profile', 'testCase', 'testRun', 'comment', 'notification', 'risk', 'calendar',
   /* R10: S5 workspace settings and S4 tool connections */
-  'workspace', 'connection'];
+  'workspace', 'connection',
+  /* R10.2: traceable plan changes */
+  'planChange'];
 const ENGINE = require('./pmoflow-engine');
 
 function dayOf(input) {
@@ -567,6 +569,39 @@ function enrichR6(docs, day, at) {
     const dates = businessDaysFrom(w.start, n).map(x => (x <= until ? x : (until < w.start ? w.start : until)));
     w.time = dates.map((date, i) => ({ by: w.owner, date, hours: (i + effort) % 3 === 0 ? 6 : (i % 2 ? 7 : 8), note: TIME_NOTES[w.kind] || 'Work' }));
   });
+  enrichR101(docs, day);
+}
+
+/* ---------- Round 10.1 stream R: dated facts for the status report's time window ----------
+   Offsets here are BUSINESS days from the seed day (past offsets count back from the business day on or before it).
+   Nothing below is read by projectTruth, so the golden numbers do not move. */
+/* when each task was created and assigned (kickoff for the planned work; the problem found in a test run this week) */
+const CREATED_AT = { W12: -1, W13: -14 };
+const ASSIGNED_AT = { W11: -5 };   /* moved from Ana Ruiz to Dev Kumar early last week */
+const RISK_DATES = { R1: { openedAt: -21, closedAt: -4 }, R2: { openedAt: -6 }, R3: { openedAt: -1 }, R5: { openedAt: -14 }, R4: { openedAt: -18 }, R6: { openedAt: -18 } };
+function enrichR101(docs, day) {
+  const back = n => ENGINE.addBusinessDays(weekdayBack(day), n), fwd = n => ENGINE.addBusinessDays(weekday(day), n);
+  const byId = type => Object.fromEntries(docs[type].map(d => [d.id, d.data]));
+  const projects = byId('project');
+  const kickoff = { 'vendor-modernization': -21, 'access-review-automation': -18, 'erp-upgrade-readiness': -2 };
+  docs.workItem.forEach(d => {
+    const w = d.data;
+    const c = CREATED_AT[w.id] != null ? CREATED_AT[w.id] : kickoff[w.projectId];
+    if (c == null) return;
+    w.createdAt = back(c);
+    w.assignedAt = back(ASSIGNED_AT[w.id] != null ? ASSIGNED_AT[w.id] : c);
+  });
+  docs.risk.forEach(d => { const r = RISK_DATES[d.id]; if (!r) return;
+    d.data.openedAt = back(r.openedAt); if (r.closedAt != null && d.data.status === 'closed') d.data.closedAt = back(r.closedAt); });
+  /* Bank remittance details has been missing since kickoff */
+  const d2 = byId('dataElement').D2; if (d2) d2.unavailableSince = back(-21);
+  /* forecast snapshots saved with the last two weekly reports (Fridays before this week and last week) */
+  const vm = projects['vendor-modernization'];
+  if (vm) {
+    vm.forecastLog = [{ date: back(-6), finish: fwd(12) }, { date: back(-2), finish: fwd(13) }];
+    vm.reportLog = [{ date: back(-6), preset: 'this-week' }, { date: back(-2), preset: 'this-week' }];
+    vm.lastReportAt = back(-2);
+  }
 }
 
 module.exports = { seed, DOC_TYPES, addDays, dayOf, bizDay };

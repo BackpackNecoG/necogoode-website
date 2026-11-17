@@ -2,6 +2,7 @@
    /project/:prj?mode=map|timeline|work
    Also exports small PMO helpers reused by home.js and portfolio.js. */
 import { store } from '../store.js';
+import { renderChangesSection, bindChangesSection, taskChangesHTML } from './changes.js';
 import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, commentsPanel, historyPanel } from '../ui.js';
 
 /* ---------------------------------------------------------------- shared helpers */
@@ -423,8 +424,17 @@ export const pmOnly = (j, what) => `Only ${pname(j && j.owner)} (project manager
    say what happened and mark the error handled so it never surfaces as an unhandled rejection. */
 const denied = e => e && e.status === 403 ? `Not saved: ${e.message && !/^HTTP/.test(e.message) ? e.message : 'you don’t have permission to change this'}` : `Not saved: ${(e && e.message) || 'the server refused the change'}`;
 export async function psave(type, id, data, summary) {
+  if (type === 'workItem' && data) data = stampWork(store.get('workItem', id), data);
   try { return await store.save(type, id, data, summary); }
   catch (e) { toast(denied(e)); if (e && typeof e === 'object') e.pmoHandled = true; throw e; }
+}
+/* R10.1: the dated facts the status report's time window reads (local dates): created, assigned, started. */
+export function stampWork(prev, data) {
+  const out = Object.assign({}, data), d = today();
+  if (!prev && !out.createdAt) out.createdAt = d;
+  if (out.owner && (!prev ? !out.assignedAt : prev.owner !== out.owner)) out.assignedAt = d;
+  if (out.status && out.status !== 'idle' && !out.startedAt && (!prev || prev.status === 'idle' || !prev.status)) out.startedAt = d;
+  return out;
 }
 export async function premove(type, id, summary) {
   try { return await store.remove(type, id, summary); }
@@ -1561,47 +1571,118 @@ export function dataNotLive(j) {
 }
 export const notLiveText = x => `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not connected yet${x.n ? ` (${[x.by.missing ? x.by.missing + ' not available yet' : '', x.by.example ? x.by.example + ' sample only' : '', x.by.pending ? x.by.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`;
 const esc0 = x => String(x == null ? '' : x);
+/* R10.1 stream R: the report's time window. Presets are the engine's (periodWindow); the last choice is kept per project. */
+export const REPORT_PRESETS = [['this-week', 'This week'], ['last-week', 'Last week'], ['last-2-weeks', 'Last 2 weeks'], ['this-month', 'This month'], ['since-last-report', 'Since last report'], ['whole-project', 'Whole project']];
+const REP_KEY = prj => 'pmoflow.reportPeriod.' + prj;
+export function reportRange(prj) {
+  try { const v = JSON.parse(localStorage.getItem(REP_KEY(prj)) || 'null'); if (v && typeof v.preset === 'string') return v; } catch (e) { /* storage unavailable */ }
+  return { preset: 'this-week' };
+}
+export function setReportRange(prj, r) { try { localStorage.setItem(REP_KEY(prj), JSON.stringify(r)); } catch (e) { /* storage unavailable */ } }
+/* "Vendor Onboarding Modernization: status, week of Nov 16" */
+export function reportSubject(j, d) { return `${j.name}: status, ${d && d.window ? d.window.short : fmt(today())}`; }
+/* the window in words, for the report header: "Week of Mon Nov 16 – Fri Nov 20 (so far)" */
+export function windowWords(w) { return w ? `${w.label}${w.partial ? ' (so far)' : ''}` : ''; }
 export function reportText(j, d) {
   const sec = (h, arr) => (arr && arr.length) ? `\n${h}\n` + arr.map(x => '- ' + txt(x)).join('\n') + '\n' : '';
   const t = truthOf(j), c = t.cost;
   const nb = blockerWho(t).length;
   const facts = `Status: ${t.label}. ${t.finished || j.status === 'live' ? 'Finished' : 'Expected'} ${t.total || j.status === 'live' ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${nb} blocking.${t.stepsLeft ? ` ${plural(t.stepsLeft, 'step')} left to launch.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}`;
-  return `${j.name}: status report (${fmt(today())})\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', d.asks)}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
+  const o = d.overall;
+  const overall = o ? `\nOVERALL\n${o.needsPurpose ? 'Purpose: not written yet (add a one-line purpose in the project settings).' : `Purpose: ${o.purpose || o.description}`}\n` +
+    [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
+  const period = Array.isArray(d.sections) ? `\n${(d.periodHeading || 'THIS PERIOD').toUpperCase()}\n${d.periodSummary ? d.periodSummary + '\n' : ''}` +
+    d.sections.map(x => x.items.length ? `${x.heading}\n` + x.items.map(i => '- ' + i).join('\n') : x.empty ? '- ' + x.empty : '').filter(Boolean).join('\n') + '\n' : '';
+  return `${reportSubject(j, d)}${d.window ? ` (${windowWords(d.window)})` : ` (${fmt(today())})`}\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${overall}${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', d.asks)}${period}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
 }
 /* R5: the email draft goes to the project's resources (the PM is always one), as first.last@northwind.example. */
 export function reportRecipients(j) {
   const ids = [...new Set([j.owner, ...(j.resources || [])])].filter(id => store.person(id));
   return ids.map(id => ({ id, name: pname(id), email: emailOf(id) })).filter(x => x.email);
 }
+/* the period picker: preset chips (Simple), plus a custom date range in Advanced */
+export function periodPickerHTML(range, opts) {
+  opts = opts || {};
+  const chips = REPORT_PRESETS.filter(([k]) => !(opts.noSince && k === 'since-last-report'))
+    .map(([k, l]) => `<button type="button" class="pmo-chipbtn ${range.preset === k ? 'on' : ''}" data-rep-preset="${k}" aria-pressed="${range.preset === k}">${esc(l)}</button>`).join('');
+  const custom = !isSimple() ? `<span class="pmo-rep-custom" data-rep-custom><label>From <input type="date" data-rep-from value="${esc(range.preset === 'custom' ? range.from || '' : '')}" max="${esc(today())}"></label><label>To <input type="date" data-rep-to value="${esc(range.preset === 'custom' ? range.to || '' : '')}" max="${esc(today())}"></label><button type="button" class="btn sm ${range.preset === 'custom' ? 'primary' : ''}" data-rep-apply>Use these dates</button></span>` : '';
+  return `<div class="pmo-rep-picker" data-rep-picker role="group" aria-label="Report period">${chips}${custom}</div>`;
+}
+function periodHTML(d) {
+  if (!Array.isArray(d.sections)) return '';
+  const secs = d.sections.map(x => x.items.length
+    ? `<div class="pmo-rep-psec" data-psec="${esc(x.key)}"><h5>${esc(x.heading)}</h5><ul>${x.items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>`
+    : x.empty ? `<div class="pmo-rep-psec none" data-psec="${esc(x.key)}" data-psec-empty>${esc(x.empty)}</div>` : '').join('');
+  return `<h4 class="pmo-rep-part" data-rep-period-h>${esc(d.periodHeading || 'This period')}</h4>
+    ${d.periodSummary ? `<p class="pmo-rep-p" data-rep-psum>${esc(d.periodSummary)}</p>` : ''}<div class="pmo-rep-period" data-rep-period>${secs}</div>`;
+}
+function overallHTML(j, o) {
+  if (!o) return '';
+  const owner = store.state.me === j.owner;
+  const purpose = o.needsPurpose
+    ? `<div class="pmo-rep-purpose missing" data-rep-purpose><b>Add a one-line purpose</b> so readers know why this project exists. ${owner ? '<button class="btn sm" data-settings>Edit the description</button>' : `<span class="hint">${esc(pname(j.owner))} (project manager) can add it in Settings.</span>`}</div>`
+    : `<div class="pmo-rep-purpose" data-rep-purpose><span class="lbl">Purpose</span> ${esc(o.purpose || o.description)}</div>`;
+  const lines = [o.schedule ? `<li data-rep-sched>${esc(o.schedule)}</li>` : '', o.budget ? `<li data-rep-budget class="${o.higherBudgetNeed ? 'warn' : ''}">${esc(o.budget)}</li>` : ''].join('');
+  const conc = o.concerns && o.concerns.length ? `<div class="pmo-rep-sec rk" data-rep-concerns><h4>Common areas of concern</h4><ul>${o.concerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul></div>` : '';
+  return `${purpose}${lines ? `<ul class="pmo-rep-overall" data-rep-overall>${lines}</ul>` : ''}${conc}`;
+}
 function reportPanelHTML(j, r) {
   const rep = reports[j.id]; if (!rep) return '';
+  const range = rep.range || reportRange(j.id);
   let body;
   if (rep.loading) body = '<div class="pmo-rep-loading"><span class="pmo-spin"></span> Generating the report…</div>';
   else if (rep.error) body = `<div class="banner">Couldn’t generate the report: ${esc(rep.error)}</div>`;
   else {
     const d = rep.data || {}, ai = String(d.source || '').toLowerCase() === 'ai';
     const list = (h, arr, cls) => (arr && arr.length) ? `<div class="pmo-rep-sec ${cls}"><h4>${h}</h4><ul>${arr.map(x => `<li>${esc(txt(x))}</li>`).join('')}</ul></div>` : '';
-    const subject = `${j.name}: status ${r.label} (${fmt(today())})`;
+    const subject = reportSubject(j, d);
     const to = reportRecipients(j);
     const mail = `mailto:${to.map(x => x.email).join(',')}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(reportText(j, d))}`;
     body = `<div class="pmo-rep" data-rep-body>
+      ${d.window ? `<div class="pmo-rep-window" data-rep-window>${esc(windowWords(d.window))}${d.window.note ? ` <span class="hint">${esc(d.window.note)}</span>` : ''}</div>` : ''}
       <div class="pmo-rep-top">${ragBadge(r)}<span class="pmo-src ${ai ? 'ai' : ''}" data-rep-src>${esc(d.sourceLabel ? String(d.sourceLabel) : ai ? '✦ Written by AI' : 'Written from the project’s facts')}</span><span class="hint">${esc(fmt(today()))} · ${ai ? 'from the project’s facts only; check before sending' : 'check before sending'}</span></div>
-      <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
+      <h4 class="pmo-rep-part">Overall</h4>
+      ${overallHTML(j, d.overall)}
+      <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-fact hint" data-rep-notlive>Information: ${esc(notLiveText(dataNotLive(j)))}.</div>
-      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div></div>
+      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div>
+      ${periodHTML(d)}</div>
       <div class="pmo-rep-to" data-rep-to><span class="lbl">Email to</span>${to.map(x => `<span class="chip" data-rcpt="${esc(x.email)}" title="${esc(x.name)}">${esc(x.email)}</span>`).join('') || '<span class="hint">No project resources yet.</span>'}<span class="hint">project resources (fictional addresses)</span></div>
-      <div class="pmo-rep-acts"><button class="btn sm primary" data-rep-print>Print / PDF</button><a class="btn sm" data-rep-mail href="${esc(mail)}">Email draft</a><button class="btn sm" data-rep-regen>Refresh</button></div>`;
+      <div class="pmo-rep-acts"><button class="btn sm primary" data-rep-print>Print / PDF</button><a class="btn sm" data-rep-mail href="${esc(mail)}" data-subject="${esc(subject)}">Email draft</a><button class="btn sm" data-rep-regen>Refresh</button></div>`;
   }
-  return `<section class="card pmo-prj-rep" data-prj-rep><h3 class="pmo-h3row">Status report · ${esc(j.name)} <button class="btn sm" data-rep-close aria-label="Close the status report">Close</button></h3>${body}</section>`;
+  return `<section class="card pmo-prj-rep" data-prj-rep><h3 class="pmo-h3row">Status report · ${esc(j.name)} <button class="btn sm" data-rep-close aria-label="Close the status report">Close</button></h3>${periodPickerHTML(range)}${body}</section>`;
 }
-async function openReport(j) {
-  reports[j.id] = { loading: true }; rerender();
-  try { const r = await store.api('/ai/status-report', { projectId: j.id, today: today() }); reports[j.id] = { data: (r && (r.report || r)) || {} }; }
-  catch (e) { reports[j.id] = { error: e.message || 'service unavailable' }; }
+/* history events let the engine date facts that carry no date of their own */
+export async function reportEvents() {
+  try { return (await store.events(null, 500)).map(e => ({ at: e.at, ref: e.ref, action: e.action })).filter(e => e.at && e.ref && e.action); } catch (e) { return []; }
+}
+async function openReport(j, range) {
+  range = range || (reports[j.id] && reports[j.id].range) || reportRange(j.id);
+  setReportRange(j.id, range);
+  reports[j.id] = { loading: true, range }; rerender();
+  try {
+    const events = await reportEvents();
+    const r = await store.api('/ai/status-report', Object.assign({ projectId: j.id, today: today(), events }, range.preset === 'custom' ? { preset: 'custom', from: range.from, to: range.to } : { preset: range.preset }));
+    reports[j.id] = { data: (r && (r.report || r)) || {}, range };
+    rememberReport(j, reports[j.id].data);
+  }
+  catch (e) { reports[j.id] = { error: e.message || 'service unavailable', range }; }
   rerender();
   requestAnimationFrame(() => { const el = document.querySelector('[data-prj-rep]'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+}
+/* "Since last report" reads the project's reportLog; each report also keeps that day's expected finish (forecastLog),
+   so a later report can say how far the finish moved. Saved once per project per day. */
+async function rememberReport(j, d) {
+  const cur = store.get('project', j.id); if (!cur) return;
+  const log = Array.isArray(cur.reportLog) ? cur.reportLog : [];
+  if (log.some(x => x && x.date === today())) return;
+  const t = truthOf(cur);
+  const fl = (Array.isArray(cur.forecastLog) ? cur.forecastLog : []).filter(x => x && x.date !== today());
+  const next = Object.assign({}, cur, { lastReportAt: today(), reportLog: log.concat([{ date: today(), preset: d.window ? d.window.preset : null }]).slice(-30),
+    forecastLog: t.forecast ? fl.concat([{ date: today(), finish: t.forecast }]).slice(-60) : fl });
+  try { await store.save('project', cur.id, next, `Generated a status report (${d.window ? d.window.short : fmt(today())})`); } catch (e) { /* the report still shows */ }
 }
 
 /* ---------------------------------------------------------------- "Why this date?" popover */
@@ -1698,7 +1779,7 @@ export function render(params) {
       <div class="kpi"><b style="color:${blockerWho(T).length ? 'var(--late)' : 'inherit'}" data-t="blockers">${blockerWho(T).length}</b><span>Blocking</span></div>
       ${finishKpi}</div></div></section>
     <div class="pmo-toolbar"><nav class="seg pmo-tabs" role="tablist" aria-label="Project views">${tab('map', 'Plan')}${tab('timeline', 'Timeline')}${tab('board', 'Board')}${tab('sprints', 'Sprints')}${tab('work', 'Work')}</nav>
-      <div class="pmo-actions"><button class="btn sm primary" data-report>Status report</button>${isOwner ? `<button class="btn sm" data-settings>Settings</button><button class="btn sm" data-link-proc>Link a process</button><button class="btn sm" data-suggest title="Propose tasks for new and changed steps and for information that isn’t available yet">✦ Suggest a plan</button><button class="btn sm" data-baseline>Save plan</button>` : ''}
+      <div class="pmo-actions"><button class="btn sm primary" data-report>Status report</button>${isOwner ? `<button class="btn sm" data-settings>Settings</button><button class="btn sm" data-link-proc>Link a process</button><button class="btn sm" data-suggest title="Propose tasks for new and changed steps and for information that isn’t available yet">✦ Suggest a plan</button><button class="btn sm" data-baseline>Save plan</button>` : ''}<button class="btn sm" data-chg-open="${esc(j.id)}">Change the plan</button>
       <a class="btn sm" href="${link('/release/' + encodeURIComponent(prj))}" data-link>Launch ›</a><a class="btn sm" href="${link('/testing/' + encodeURIComponent(prj))}" data-link>Testing ›</a></div></div>`;
   const fbar = FILTER_MODES.includes(mode) && all.length ? filterBarHTML(j, f, mode, list.length, all.length, view) : '';
   const main = mode === 'timeline' ? `<section class="pmo-main">${fbar}${timelineHTML(j, fcT, list, D, sc)}</section>`
@@ -1707,7 +1788,7 @@ export function render(params) {
     : mode === 'sprints' ? `<section class="pmo-main pmo-wide-main">${fbar}${sprintsHTML(j, fc, list)}</section>`
     : `<section class="canvas pm" id="canvas">${mapHTML(j)}</section>`;
   const wide = mode === 'board' || mode === 'sprints';
-  return hdr + conflictHTML(j) + reportPanelHTML(j, r) + `<div class="grid pmo-grid ${wide ? 'pmo-grid-wide' : ''}">${main}<aside class="side">${sideHTML(j, fc, mode, { D, fc: fcT, f, list })}</aside></div>`;
+  return hdr + conflictHTML(j) + reportPanelHTML(j, r) + `<div class="grid pmo-grid ${wide ? 'pmo-grid-wide' : ''}">${main}<aside class="side">${sideHTML(j, fc, mode, { D, fc: fcT, f, list })}${renderChangesSection(j.id)}</aside></div>`;
 }
 
 /* R7: Simple shows Plan · Timeline · Work; Board and Sprints are Advanced views of the same tasks. */
@@ -1747,13 +1828,13 @@ function simpleRender(j, mode, fc, params) {
       <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}${factsHTML(j)}<span>Deadline <b>${esc(fmt(j.target))}</b></span><span>Project manager <b>${esc(pname(j.owner))}</b></span>${rm !== j.owner ? `<span>Launch owner <b>${esc(pname(rm))}</b></span>` : ''}</div></div></section>
     ${blockingHTML(j)}
     <div class="pmo-toolbar"><nav class="seg pmo-tabs pmo-tabs-big" role="tablist" aria-label="Project views">${tab('map', 'Plan')}${tab('timeline', 'Timeline')}${tab('work', 'Work')}</nav>
-      <div class="pmo-actions">${pm && gapSteps ? '<button class="btn primary" data-suggest>✦ Suggest a plan</button>' : ''}<button class="btn" data-report>Status report</button>${pm ? '<button class="btn" data-settings>Settings</button>' : ''}<a class="btn" href="${link('/release/' + encodeURIComponent(prj))}" data-link>Launch ›</a><a class="btn" href="${link('/testing/' + encodeURIComponent(prj))}" data-link>Testing ›</a></div></div>`;
+      <div class="pmo-actions">${pm && gapSteps ? '<button class="btn primary" data-suggest>✦ Suggest a plan</button>' : ''}<button class="btn" data-report>Status report</button><button class="btn" data-chg-open="${esc(prj)}">Change the plan</button>${pm ? '<button class="btn" data-settings>Settings</button>' : ''}<a class="btn" href="${link('/release/' + encodeURIComponent(prj))}" data-link>Launch ›</a><a class="btn" href="${link('/testing/' + encodeURIComponent(prj))}" data-link>Testing ›</a></div></div>`;
   const main = mode === 'timeline' ? `<section class="pmo-main">${timelineHTML(j, fc, projectItems(prj), null, null)}</section>`
     : mode === 'work' ? `<section class="pmo-main">${simpleWorkHTML(j, fc)}</section>`
     : `<section class="canvas pm" id="canvas">${mapHTML(j)}</section>`;
   const side = mode === 'map' ? myTasksHTML(j, fc) + launchHTML(j) + simpleLegend()
     : mode === 'timeline' ? myTasksHTML(j, fc) : launchHTML(j);
-  return hdr + conflictHTML(j) + reportPanelHTML(j, rag(j)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${activityToggle(j)}</aside></div>`;
+  return hdr + conflictHTML(j) + reportPanelHTML(j, rag(j)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${renderChangesSection(j.id)}${activityToggle(j)}</aside></div>`;
 }
 
 /* ---------------------------------------------------------------- actions */
@@ -1851,6 +1932,7 @@ async function editWork(j, w, err) {
     <div class="frow"><div class="field"><label>Status</label><select name="status">${statusesOf(j).map(x => `<option value="${esc(x.id)}" ${statusOf(w, j).id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
       <div class="field"><label>Effort (person-days)</label><input type="number" name="effortDays" min="0.5" max="200" step="0.5" value="${esc(effortOf(w))}" /></div></div>
     ${customFieldInputs(j, w)}
+    ${isNew ? '' : taskChangesHTML(w.id)}
     ${isNew ? '' : `<div class="hint" data-time-sum>Time logged: <b>${fmtHours(hoursOf(w))}</b>${(w.time || []).length ? ` in ${(w.time || []).length} entr${(w.time || []).length === 1 ? 'y' : 'ies'}` : ''}. Use “Log time” on the Work tab to add hours.</div>`}
     <div class="field"><label>Resolves (makes data available)</label><select name="resolves"><option value="">— nothing —</option>${resolvesOptions(j, w.resolves)}</select><div class="hint">Only data used by this project’s processes.</div></div>
     <div class="field"><label>Depends on</label>${others.length || ext.length ? `<div class="pmo-checks pmo-depl">${others.map(depRow).join('') || '<div class="hint">No other work in this project.</div>'}</div>
@@ -2546,12 +2628,21 @@ export function bind(root, params) {
   on('[data-rep-regen]', () => openReport(cur()));
   on('[data-rep-close]', () => { delete reports[j.id]; rerender(); });
   on('[data-rep-print]', () => window.print());
+  /* R10.1: the report's period */
+  on('[data-rep-preset]', el => openReport(cur(), { preset: el.dataset.repPreset }));
+  on('[data-rep-apply]', () => {
+    const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-to]');
+    const from = f && f.value, to = (t && t.value) || today();
+    if (!from) { toast('Choose a start date'); return; }
+    openReport(cur(), { preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from });
+  });
   /* the mailto link must open the mail client, not be swallowed by the router */
   root.querySelectorAll('[data-rep-mail]').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
   /* timeline: start scrolled so "today" is in view on narrow screens */
   const tl = root.querySelector('#pmoTl .tday');
   if (tl) { const box = root.querySelector('#pmoTl'); const lane = tl.parentElement; requestAnimationFrame(() => { const x = lane.offsetLeft + tl.offsetLeft - box.clientWidth / 2; if (x > 0 && box.scrollWidth > box.clientWidth) box.scrollLeft = x; }); }
   bindActivity(root);
+  bindChangesSection(root, j.id);
   const ids = new Set(projectItems(j.id).map(w => w.id));
   bindFeed(root, 'prj-work', e => { const [t, id] = String(e.ref || '').split(':'); return t === 'workItem' && (ids.has(id) || String(e.summary || '').includes(j.name)); });
 }

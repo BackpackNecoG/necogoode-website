@@ -3344,6 +3344,10 @@
       add({ kind: 'confirm', projectId: pr ? pr.id : null, id: did, title: 'Confirm ' + dataName(docs, did) + ' is available', due: null, late: false, href: '/data/' + did,
         oneTap: { action: 'confirm', label: 'Confirm' }, why: 'info', rank: WHO_RANK.info, what: 'Confirm ' + dataName(docs, did) + ' is available' });
     });
+    // R10.2: plan changes waiting for this person's decision (same output as PMOChange.queueFor)
+    list(docs, 'planChange').filter(c => c.status === 'proposed' && (c.approvers || []).some(a => a.person === person && !a.decision)).forEach(c =>
+      add({ kind: 'planChange', projectId: c.projectId, id: c.id, title: 'Approve the plan change “' + c.title + '”', due: null, late: false,
+        href: '/project/' + c.projectId + '/changes?change=' + encodeURIComponent(c.id), oneTap: null, why: 'approval', rank: WHO_RANK.approval, what: 'Approve the plan change “' + c.title + '”' }));
     return out.sort((a, b) => a.rank - b.rank || (b.late - a.late) || String(a.due || '9999').localeCompare(String(b.due || '9999')) || String(a.title).localeCompare(String(b.title)));
   }
 
@@ -3378,7 +3382,309 @@
   function toBusinessDay(d) { return isDate(d) ? addBusinessDays(String(d).slice(0, 10), 0) : d; }
   function fmtDayLong(d) { const ms = toMs(d); return isNaN(ms) ? String(d || '') : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekday(ms)] + ' ' + fmtDay(d); }
 
+  /* ------------------------------------------------------------------ */
+  /* R10.1 stream R: the status report with a time window                */
+  /* ------------------------------------------------------------------ */
+  // Presets: this-week | last-week | last-2-weeks | this-month | since-last-report | whole-project | custom.
+  // Weeks run Monday–Friday; a window starts on its first business day and ends on its last (holidays skipped),
+  // never after `today`, never before the project started. Dates are inclusive YYYY-MM-DD.
+  const PERIOD_PRESETS = ['this-week', 'last-week', 'last-2-weeks', 'this-month', 'since-last-report', 'whole-project', 'custom'];
+  const PERIOD_LABEL = { 'this-week': 'This week', 'last-week': 'Last week', 'last-2-weeks': 'Last 2 weeks', 'this-month': 'This month',
+    'since-last-report': 'Since last report', 'whole-project': 'Whole project', custom: 'Custom' };
+  const PERIOD_NOUN = { 'this-week': 'this week', 'last-week': 'last week', 'last-2-weeks': 'in the last 2 weeks', 'this-month': 'this month',
+    'since-last-report': 'since the last report', 'whole-project': 'so far', custom: 'in this period' };
+  // A date or timestamp as a day. Plain days are kept; ISO timestamps use their UTC date.
+  function dayOfValue(v) { if (v == null || v === '') return null; const s = String(v); return isDate(s) ? s.slice(0, 10) : null; }
+  function firstBizFrom(d) { return addBusinessDays(d, 0); }
+  function lastBizOnOrBefore(d) { let ms = toMs(d); for (let g = 0; offMs(ms) && g < 400; g++) ms -= DAY; return iso(ms); }
+  function projectStart(docs, project) {
+    const items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    return minDate([project.start, dayOfValue(project.createdAt)].concat((project.baselines || []).map(b => dayOfValue(b && b.at)),
+      items.map(w => w.start), items.map(w => dayOfValue(w.createdAt))));
+  }
+  function lastReportDay(project, today) {
+    const log = (Array.isArray(project.reportLog) ? project.reportLog : []).map(r => dayOfValue(r && r.date)).filter(Boolean);
+    const all = log.concat([dayOfValue(project.lastReportAt)]).filter(d => d && d < today).sort();
+    return all.length ? all[all.length - 1] : null;
+  }
+  // {preset, from, to, label, short, noun, partial, note, weekEnd}
+  function periodWindow(docs, prj, range, today) {
+    const project = projOf(docs, prj);
+    range = range || {};
+    if (!isDate(today)) today = range.to || null;
+    let preset = PERIOD_PRESETS.includes(range.preset) ? range.preset : (range.from || range.to ? 'custom' : 'this-week');
+    const td = String(today).slice(0, 10);
+    let from, to = td, label = null, note = null, weekEnd = null;
+    const week = (d, label0) => {
+      const mon = mondayOf(d), fri = addDays(mon, 4);
+      let f = firstBizFrom(mon); if (f > fri) f = mon;
+      let e = lastBizOnOrBefore(fri); if (e < f) e = fri;
+      weekEnd = e;
+      return { from: f, to: e < td ? e : td, label: label0 + fmtDayLong(f) + ' – ' + fmtDayLong(e) };
+    };
+    if (preset === 'since-last-report') {
+      const last = project ? lastReportDay(project, td) : null;
+      if (last) { from = firstBizFrom(addDays(last, 1)); if (from > td) from = td; note = 'Since the last report on ' + fmtDayLong(last) + '.'; }
+      else { preset = 'this-week'; note = 'No earlier report yet, so this shows this week.'; }
+    }
+    if (preset === 'this-week') { const w = week(td, 'Week of '); from = w.from; to = w.to; label = w.label; }
+    else if (preset === 'last-week') { const w = week(addDays(mondayOf(td), -7), 'Week of '); from = w.from; to = w.to; label = w.label; }
+    else if (preset === 'last-2-weeks') from = firstBizFrom(addDays(mondayOf(td), -7));
+    else if (preset === 'this-month') from = firstBizFrom(td.slice(0, 8) + '01');
+    else if (preset === 'whole-project') from = project ? projectStart(docs, project) || td : td;
+    else if (preset === 'custom') {
+      to = isDate(range.to) ? String(range.to).slice(0, 10) : td;
+      if (to > td) to = td;
+      from = isDate(range.from) ? String(range.from).slice(0, 10) : mondayOf(to);
+    }
+    if (from > to) { const x = from; from = to; to = x; if (to > td) to = td; }
+    const start = project ? projectStart(docs, project) : null;
+    let clamped = false;
+    if (start && from < start && start <= to) { from = start; clamped = true; if (label) label = fmtDayLong(from) + ' – ' + fmtDayLong(weekEnd || to); }
+    if (!label) label = from === to ? fmtDayLong(from) : fmtDayLong(from) + ' – ' + fmtDayLong(to);
+    const partial = !!(weekEnd && to < weekEnd);
+    const short = /^Week of /.test(label) ? 'week of ' + fmtDay(from) : from === to ? fmtDay(from) : fmtDay(from) + ' – ' + fmtDay(to);
+    return { preset, presetLabel: PERIOD_LABEL[preset], from, to, label, short, noun: PERIOD_NOUN[preset], partial, weekEnd, clamped, note,
+      days: businessDaysBetween(addDays(from, -1), to) };
+  }
+  // The same docs as they stood at the end of day `to`: tasks created later are left out, tasks finished later
+  // are open again (in progress when they had started by then), and hours logged later are dropped.
+  function docsAsOf(docs, projectId, to, facts) {
+    const items = (docs.workItem || []).map(e => {
+      const w = e && (e.data || e); if (!w || w.projectId !== projectId) return e;
+      const f = facts(w);
+      if (f.created && f.created > to) return null;
+      const d = Object.assign({}, w);
+      if (d.status === 'done' && f.done && f.done > to) { d.status = f.started && f.started <= to ? 'prog' : 'idle'; delete d.doneAt; }
+      if (Array.isArray(d.time)) d.time = d.time.filter(t => !(t && dayOfValue(t.date) && dayOfValue(t.date) > to));
+      return { id: e.id, data: d };
+    }).filter(Boolean);
+    return Object.assign({}, docs, { workItem: items });
+  }
+  // periodReport(docs, projectId, {from, to, preset}, today, {events}) -> what happened in the window plus the
+  // overall status as of today (projectTruth). Every fact is dated: a task's createdAt/assignedAt/startedAt/doneAt,
+  // logged hours, test runs, approvals, risks (openedAt/closedAt), information (unavailableSince/liveConfirmedAt),
+  // plan changes and the project's forecastLog snapshots. A fact without a date falls back to the history events
+  // passed in opts.events ({at, ref, action}); otherwise it is left out (never guessed).
+  function periodReport(docs, prj, range, today, opts) {
+    const project = projOf(docs, prj);
+    if (!project) return null;
+    opts = opts || {};
+    const win = periodWindow(docs, project, range, today);
+    const { from, to } = win;
+    const within = d => !!d && d >= from && d <= to;
+    const t = projectTruth(docs, project, today);
+    const people = personMap(docs);
+    const pn = id => (id && people[id] && people[id].name) || (id ? 'someone' : 'Nobody');
+    // history events: earliest "create" per ref
+    const created = {};
+    (Array.isArray(opts.events) ? opts.events : []).forEach(e => {
+      if (!e || typeof e.ref !== 'string' || e.action !== 'create') return;
+      const d = dayOfValue(e.at); if (!d) return;
+      if (!created[e.ref] || d < created[e.ref]) created[e.ref] = d;
+    });
+    const runs = list(docs, 'testRun').filter(r => r.projectId === project.id);
+    const runDay = id => { const r = runs.find(x => x.id === id); return r ? dayOfValue(r.at) : null; };
+    const factsOf = w => {
+      const c = dayOfValue(w.createdAt) || created['workItem:' + w.id] || (w.kind === 'defect' && w.testRef ? runDay(w.testRef.runId) : null);
+      const times = (Array.isArray(w.time) ? w.time : []).map(x => x && dayOfValue(x.date)).filter(Boolean);
+      const started = dayOfValue(w.startedAt) || (w.status !== 'idle' ? minDate(times) : null);
+      return { created: c, assigned: dayOfValue(w.assignedAt) || (w.owner ? c : null), started, done: w.status === 'done' ? dayOfValue(w.doneAt) : null };
+    };
+    const items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    const row = (w, date, extra) => Object.assign({ id: w.id, title: w.title || 'Untitled task', owner: w.owner || null, ownerName: pn(w.owner), kind: w.kind || null, date }, extra || {});
+    const byDate = (a, b) => String(a.date || '').localeCompare(String(b.date || '')) || String(a.title).localeCompare(String(b.title));
+    const completed = [], assigned = [], started = [];
+    items.forEach(w => {
+      const f = factsOf(w);
+      if (within(f.done)) completed.push(row(w, f.done, { due: w.due || null }));
+      if (within(f.assigned)) assigned.push(row(w, f.assigned, { due: w.due || null }));
+      if (within(f.started)) started.push(row(w, f.started));
+    });
+    // blockers: information not available yet (projectTruth's list) and problems (defect tasks)
+    const raised = [], resolved = [], openAtEnd = [];
+    const nowOpen = to >= String(today).slice(0, 10);
+    const procs = linkedProcesses(docs, project), used = new Set();
+    procs.forEach(p => flatSteps(p.tobe).forEach(s => stepData(s).forEach(id => used.add(id))));
+    const infoBlockers = t.blockers.slice();
+    const infoIds = new Set(infoBlockers.map(b => b.dataId));
+    used.forEach(id => {
+      const d = get(docs, 'dataElement', id); if (!d) return;
+      const since = dayOfValue(d.unavailableSince);
+      const res = items.find(w => w.resolves === id);
+      const liveAt = !infoIds.has(id) ? dayOfValue(d.liveConfirmedAt) : null;
+      const b = { kind: 'information', id: 'data:' + id, dataId: id, title: (d.name || 'some information') + ' is not available yet', name: d.name || 'some information',
+        owner: dataOwnerOf(docs, d) || null, raisedAt: since };
+      b.ownerName = pn(b.owner);
+      if (within(since)) raised.push(Object.assign({}, b, { date: since }));
+      if (liveAt && (since || res) && within(liveAt)) resolved.push(Object.assign({}, b, { title: (d.name || 'Some information') + ' is available', date: liveAt }));
+      const openThen = infoIds.has(id) ? (!since || since <= to) : (!!liveAt && liveAt > to && !!since && since <= to);
+      if (nowOpen ? infoIds.has(id) : openThen) {
+        const ib = infoBlockers.find(x => x.dataId === id);
+        openAtEnd.push(Object.assign({}, b, { planned: ib ? !!ib.planned : !!res, daysOpen: since ? businessDaysBetween(since, to) : null }));
+      }
+    });
+    items.filter(w => w.kind === 'defect').forEach(w => {
+      const f = factsOf(w);
+      const b = { kind: 'problem', id: 'work:' + w.id, workId: w.id, title: problemTitle(w), owner: w.owner || null, ownerName: pn(w.owner), raisedAt: f.created };
+      if (within(f.created)) raised.push(Object.assign({}, b, { date: f.created }));
+      if (within(f.done)) resolved.push(Object.assign({}, b, { date: f.done }));
+      const open = nowOpen ? w.status !== 'done' : (!f.created || f.created <= to) && (!f.done || f.done > to) && !(w.status === 'done' && !f.done);
+      if (open) openAtEnd.push(Object.assign({}, b, { daysOpen: f.created ? businessDaysBetween(f.created, to) : null }));
+    });
+    // behind at the end of the window: projectTruth's late lists when it ends today, else the docs as they stood then
+    let core;
+    if (nowOpen) core = { pastDue: t.pastDue, finishAfterDue: t.finishAfterDue, late: t.late, fc: forecastAll(docs, today), items };
+    else {
+      const d2 = docsAsOf(docs, project.id, to, factsOf);
+      const c2 = scheduleCore(d2, projOf(d2, project.id), to);
+      core = { pastDue: c2.pastDue, finishAfterDue: c2.finishAfterDue, late: c2.late, fc: c2.fc, items: c2.items };
+    }
+    const wById = byId(core.items);
+    const behindAtEnd = core.late.map(id => {
+      const w = wById[id] || {}, f = core.fc[id] || {};
+      return { id, title: w.title || 'Untitled task', owner: w.owner || null, ownerName: pn(w.owner), due: w.due || null, forecast: f.forecast || null,
+        split: core.pastDue.includes(id) ? 'past-due' : 'finish-after-due', daysPastDue: f.pastDueDays || 0, slipDays: f.slipDays || 0, kind: w.kind || null };
+    });
+    const behindText = lateText({ lateCount: core.late.length, pastDueCount: core.pastDue.length, finishAfterDueCount: core.finishAfterDue.length });
+    // tests, approvals, risks, spend
+    const testsRun = { passed: 0, failed: 0, runs: 0 };
+    runs.forEach(r => { if (!within(dayOfValue(r.at))) return; testsRun.runs++;
+      (r.results || []).forEach(x => { if (x && x.outcome === 'pass') testsRun.passed++; else if (x && x.outcome === 'fail') testsRun.failed++; }); });
+    const approvalsGiven = list(docs, 'approval').filter(a => a.projectId === project.id && a.decision === 'approved')
+      .map(a => ({ id: a.id, bu: a.bu || null, approver: a.approver || null, approverName: pn(a.approver), date: dayOfValue(a.date) || dayOfValue(a.at) }))
+      .filter(a => within(a.date)).sort(byDate);
+    const risksOpened = [], risksClosed = [];
+    list(docs, 'risk').filter(r => r.projectId === project.id).forEach(r => {
+      const o = dayOfValue(r.openedAt) || dayOfValue(r.createdAt) || created['risk:' + r.id] || null;
+      const c = r.status === 'closed' ? dayOfValue(r.closedAt) : null;
+      const base = { id: r.id, title: r.title || 'Untitled risk', impact: r.impact || null, owner: r.owner || null, ownerName: pn(r.owner) };
+      if (within(o)) risksOpened.push(Object.assign({}, base, { date: o }));
+      if (within(c)) risksClosed.push(Object.assign({}, base, { date: c }));
+    });
+    let spend = 0;
+    items.forEach(w => (Array.isArray(w.time) ? w.time : []).forEach(x => {
+      if (!x || !within(dayOfValue(x.date))) return;
+      const h = isFinite(+x.hours) ? +x.hours : 0;
+      spend += h * (rateOf(docs, x.by) ?? rateOf(docs, w.owner) ?? DEFAULT_DAY_RATE) / 8;
+    }));
+    spend = Math.round(spend * 100) / 100;
+    // forecast finish when the window opened vs at its end (and now): saved snapshots, else a baseline, else not tracked
+    const snaps = (Array.isArray(project.forecastLog) ? project.forecastLog : []).map(s => ({ date: dayOfValue(s && s.date), finish: dayOfValue(s && s.finish) }))
+      .filter(s => s.date && s.finish).sort((a, b) => a.date.localeCompare(b.date));
+    const before = snaps.filter(s => s.date < from).pop() || null;
+    let thenF = null, thenSource = 'not-tracked', thenNote = null;
+    if (before) { thenF = before.finish; thenSource = 'snapshot'; thenNote = 'saved ' + fmtDayLong(before.date); }
+    else {
+      const bl = (project.baselines || []).filter(b => b && dayOfValue(b.at) && dayOfValue(b.at) < from).sort((a, b) => String(a.at).localeCompare(String(b.at))).pop();
+      const blFinish = bl && bl.items ? maxDate(Object.keys(bl.items).map(k => bl.items[k] && bl.items[k].due)) : null;
+      if (blFinish) { thenF = blFinish; thenSource = 'baseline'; thenNote = 'the “' + (bl.label || 'saved plan') + '” plan (saved ' + fmtDayLong(dayOfValue(bl.at)) + ')'; }
+    }
+    const endSnap = snaps.filter(s => s.date <= to).pop() || null;
+    const endF = nowOpen ? t.forecastFinish : endSnap ? endSnap.finish : null;
+    const slipDays = thenF && endF ? businessDaysBetween(thenF, endF) : null;
+    const bdw = n => nWord(Math.abs(n), 'business day');
+    let slipText;
+    if (slipDays == null) slipText = thenF || endF ? 'Change in the expected finish: not tracked (no saved forecast ' + (thenF ? 'at the end of this period' : 'from before this period') + ')'
+      : 'Change in the expected finish: not tracked (no saved forecast or plan from before this period)';
+    else if (thenSource === 'baseline') slipText = slipDays === 0 ? 'Expected finish ' + fmtDay(endF) + ', the same as ' + thenNote
+      : 'Expected finish ' + fmtDay(endF) + ', ' + bdw(slipDays) + (slipDays > 0 ? ' later' : ' earlier') + ' than ' + thenNote;
+    else slipText = slipDays === 0 ? 'Expected finish did not move ' + win.noun + ' (' + fmtDay(endF) + ')'
+      : 'Expected finish moved ' + bdw(slipDays) + (slipDays > 0 ? ' later ' : ' earlier ') + win.noun + ' (' + fmtDay(thenF) + ' → ' + fmtDay(endF) + ')';
+    // plan changes proposed or applied in the window (doc type planChange; read defensively)
+    const planChanges = [];
+    list(docs, 'planChange').filter(c => c && c.projectId === project.id).forEach(c => {
+      const ap = c.status === 'applied' ? dayOfValue(c.appliedAt) : null, pr = dayOfValue(c.at);
+      const ev = within(ap) ? 'applied' : within(pr) ? 'proposed' : null;
+      if (!ev) return;
+      const im = c.impact && typeof c.impact === 'object' ? c.impact : {};
+      const de = im.deadlineEffect;
+      const shift = typeof de === 'number' && isFinite(de) ? Math.round(de)
+        : dayOfValue(im.forecastBefore) && dayOfValue(im.forecastAfter) ? businessDaysBetween(dayOfValue(im.forecastBefore), dayOfValue(im.forecastAfter)) : null;
+      const decided = c.decidedBy ? pn(c.decidedBy) : null;
+      const st = c.status === 'applied' || c.status === 'approved' ? (decided ? 'approved by ' + decided : 'approved') : c.status === 'rejected' ? 'rejected' + (decided ? ' by ' + decided : '') : 'waiting for a decision';
+      const bits = [shift ? 'expected finish ' + bdw(shift) + (shift > 0 ? ' later' : ' earlier') : '', c.reason ? String(c.reason) : '', st].filter(Boolean);
+      planChanges.push({ id: c.id, title: c.title || 'Plan change', reason: c.reason || null, category: c.category || null, status: c.status || 'proposed', event: ev,
+        date: ev === 'applied' ? ap : pr, requestedBy: c.requestedBy || null, decidedBy: c.decidedBy || null, decidedByName: decided, shiftDays: shift,
+        text: (c.title || 'Plan change') + ' (' + bits.join('; ') + ')' });
+    });
+    planChanges.sort(byDate);
+    // overall: projectTruth as of today, plus the common areas of concern
+    const cost = t.cost || {};
+    const money0 = n => '$' + Math.round(+n || 0).toLocaleString('en-US');
+    let budgetText = null;
+    if (cost.planned != null && cost.forecast != null) budgetText = cost.overBudget
+      ? 'Higher budget need expected: expected cost ' + money0(cost.forecast) + ' against the ' + money0(cost.planned) + ' budget (' + money0(cost.forecast - cost.planned) + ' over)'
+      : 'Within budget: expected cost ' + money0(cost.forecast) + ' against the ' + money0(cost.planned) + ' budget';
+    else if (cost.show && cost.forecast != null) budgetText = 'Expected cost ' + money0(cost.forecast) + ' (no budget set)';
+    const concerns = areasOfConcern(docs, project, t);
+    const desc = String(project.desc || project.description || '').trim(), purpose = String(project.purpose || '').trim();
+    const overall = {
+      name: project.name || '', description: desc || null, purpose: purpose || null, needsPurpose: !desc && !purpose,
+      label: t.label, rag: t.rag, sentence: t.sentence, reasons: t.reasons.slice(), lateText: t.lateText, lateCount: t.lateCount,
+      forecastFinish: t.forecastFinish, deadline: t.target, bufferDays: t.bufferDays,
+      schedule: t.forecastFinish && t.target ? (t.forecastFinish > t.target ? 'Behind schedule: expected ' + fmtDay(t.forecastFinish) + ', ' + bdw(t.bufferDays) + ' after the ' + fmtDay(t.target) + ' deadline'
+        : 'Expected ' + fmtDay(t.forecastFinish) + ', ' + (t.forecastFinish === t.target ? 'right on' : bdw(t.bufferDays) + ' before') + ' the ' + fmtDay(t.target) + ' deadline') : null,
+      behindSchedule: !!(t.forecastFinish && t.target && t.forecastFinish > t.target),
+      budget: { planned: cost.planned != null ? cost.planned : null, actual: cost.actual != null ? cost.actual : null, forecast: cost.forecast != null ? cost.forecast : null,
+        overBudget: !!cost.overBudget, variance: cost.variance != null ? cost.variance : null, text: budgetText },
+      who: t.who.slice(0, 5).map(x => ({ person: x.person, name: x.name, what: x.what, why: x.why })), whoCount: t.who.length,
+      tasks: Object.assign({}, t.tasks), pctDone: t.pctDone, stepsLeft: t.stepsLeft,
+      testingNext: t.testing && t.testing.next ? t.testing.next : null, concerns,
+    };
+    // compare with the previous week (week presets only)
+    let compare = null;
+    if (win.preset === 'this-week' || win.preset === 'last-week') {
+      const pw = periodWindow(docs, project, { preset: 'custom', from: firstBizFrom(addDays(mondayOf(from), -7)), to: lastBizOnOrBefore(addDays(mondayOf(from), -3)) }, today);
+      const n = items.filter(w => { const d = factsOf(w).done; return d && d >= pw.from && d <= pw.to; }).length;
+      compare = { from: pw.from, to: pw.to, completed: completed.length, prevCompleted: n,
+        text: completed.length + ' done ' + win.noun + ' vs ' + n + ' the week before' };
+    }
+    return {
+      projectId: project.id, today: String(today).slice(0, 10), window: win, from, to,
+      completed: completed.sort(byDate), assigned: assigned.sort(byDate), started: started.sort(byDate),
+      blockersRaised: raised.sort(byDate), blockersResolved: resolved.sort(byDate), blockersOpenAtEnd: openAtEnd,
+      behindAtEnd, behindText, behindPastDue: core.pastDue.length, behindFinishAfterDue: core.finishAfterDue.length,
+      testsRun, approvalsGiven, risksOpened: risksOpened.sort(byDate), risksClosed: risksClosed.sort(byDate),
+      spendInPeriod: spend, forecastFinishThen: thenF, forecastFinishThenSource: thenSource, forecastFinishThenNote: thenNote,
+      forecastFinishEnd: endF, forecastFinishNow: t.forecastFinish, slipDays, slipText, planChanges, compare, overall,
+    };
+  }
+  // The 2–3 recurring places late and blocked work sits: grouped by category (the project's first select field, e.g.
+  // "Risk area"), by step and by team. A group needs 2+ items; a group with the same items as a stronger one is skipped.
+  function areasOfConcern(docs, project, t) {
+    const items = byId(list(docs, 'workItem').filter(w => w.projectId === project.id));
+    const ids = new Set(t.late);
+    Object.keys(items).forEach(id => { const w = items[id]; if (w.status !== 'done' && w.kind === 'defect') ids.add(id); });
+    t.blockers.forEach(b => Object.keys(items).forEach(id => {
+      const w = items[id]; if (w.status === 'done') return;
+      const st = findStep(docs, w.pid, w.step); if (st && stepData(st).includes(b.dataId)) ids.add(id);
+    }));
+    const all = [...ids].map(id => items[id]).filter(Boolean);
+    if (all.length < 2) return [];
+    const people = personMap(docs);
+    const field = (project.fields || []).find(f => f && f.type === 'select');
+    const groups = {};
+    const put = (dim, key, label, w) => { if (!key) return; const k = dim + ':' + key; (groups[k] = groups[k] || { dimension: dim, key, label, items: [] }).items.push(w.id); };
+    all.forEach(w => {
+      if (field && w.custom && w.custom[field.key]) put('category', w.custom[field.key], String(w.custom[field.key]), w);
+      const st = findStep(docs, w.pid, w.step); if (st) put('step', w.pid + '/' + w.step, '“' + (st.title || 'a step') + '”', w);
+      const bu = people[w.owner] && people[w.owner].bu; if (bu) put('team', bu, bu, w);
+    });
+    const order = { category: 0, step: 1, team: 2 }, word = { category: field ? String(field.label || 'category').toLowerCase() : 'category', step: 'step', team: 'team' };
+    const picked = [];
+    Object.keys(groups).map(k => groups[k]).filter(g => g.items.length >= 2)
+      .sort((a, b) => b.items.length - a.items.length || order[a.dimension] - order[b.dimension] || a.label.localeCompare(b.label))
+      .forEach(g => { if (picked.length >= 3) return; const sig = g.items.slice().sort().join(','); if (picked.some(p => p.items.slice().sort().join(',') === sig)) return; picked.push(g); });
+    return picked.map(g => ({ dimension: g.dimension, key: g.key, label: g.label, count: g.items.length, of: all.length, items: g.items,
+      titles: g.items.map(id => items[id].title || 'Untitled task'),
+      text: (g.dimension === 'step' ? 'The ' + g.label + ' step: ' : g.dimension === 'team' ? g.label + ' team: ' : g.label + ' (' + word.category + '): ') +
+        g.items.length + ' of the ' + all.length + ' late or blocked tasks' }));
+  }
+
   return {
+    // R10.1 stream R
+    periodReport, periodWindow, areasOfConcern, PERIOD_PRESETS,
     // R10
     federalHolidays, holidays, isHoliday, holidayName, syncCalendar, changeSummary, changeText, lateText, launchDate, checkLaunchWindow,
     // R9
