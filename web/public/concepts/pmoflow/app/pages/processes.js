@@ -1,5 +1,6 @@
 /* Process index (stream D, R4): /processes — every process with version, owner, step count, new + changed,
-   data state counts and linked projects; search; "+ New workflow", "Import BPMN" and "Import SOP". */
+   data state counts and linked projects; search; "+ Map a process", "Paste a procedure", "Start from a template" and
+   "Import Visio or BPMN" (R10). */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname } from '../ui.js';
 import { flat, stepChangeCounts, changeText, effAvail, projectsFor, importBtn, bindImport, isAdv, AV, HAVE, NOTYET } from './process.js';
@@ -46,7 +47,7 @@ export function render() {
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Processes</div><h1>Processes</h1>
       <p>Every process: how it works today, how it should work in future, and whether the information it needs is ready.</p>
-      <div class="d-pacts"><a class="btn sm" href="${link('/import')}" data-link data-import-sop>Paste a procedure</a><a class="btn primary" href="${link('/new')}" data-link data-new-workflow>+ Map a process</a>${adv ? importBtn() : ''}</div></div>
+      <div class="d-pacts"><a class="btn sm" href="${link('/import')}" data-link data-import-sop>Paste a procedure</a><a class="btn sm" href="${link('/import')}?template=1" data-link data-start-template>Start from a template</a>${importBtn(adv ? 'Import Visio or BPMN' : 'Import a Visio file')}<a class="btn primary" href="${link('/new')}" data-link data-new-workflow>+ Map a process</a></div></div>
     ${adv ? `<div class="hdr-side"><div class="kpis"><div class="kpi"><b>${rows.length}</b><span>Processes</span></div><div class="kpi"><b>${totals.steps}</b><span>Future steps</span></div><div class="kpi"><b style="color:${totals.missing ? 'var(--late)' : totals.pending ? '#b45309' : 'inherit'}">${totals.missing}/${totals.pending}</b><span>Not available yet / waiting</span></div></div></div>` : ''}</section>
   <div class="card d-pindex">
     <div class="d-psearch"><input type="search" data-psearch value="${esc(query)}" placeholder="Search processes, owners, steps or projects" aria-label="Search processes" />

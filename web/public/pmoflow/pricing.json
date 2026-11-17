@@ -1,0 +1,69 @@
+{
+  "currency": "USD",
+  "billing": "billed annually",
+  "freeSeats": {
+    "id": "free",
+    "name": "Viewers and approvers",
+    "priceLabel": "Free",
+    "unit": "always free, on every plan",
+    "includes": [
+      "See every process, project and launch",
+      "Approve your department's part",
+      "Comment and get notified"
+    ]
+  },
+  "plans": [
+    {
+      "id": "team",
+      "name": "Team",
+      "perEditorMonthly": 45,
+      "maxEditors": 25,
+      "summary": "For one team running process changes end to end, on its own.",
+      "includes": [
+        "Up to 25 editors",
+        "Process maps with what changed",
+        "Information each step needs",
+        "Plans built from the change",
+        "Department sign-off",
+        "Tests from real data",
+        "Launch with an undo plan"
+      ]
+    },
+    {
+      "id": "business",
+      "name": "Business",
+      "perEditorMonthly": 65,
+      "summary": "Adds sign-in with Microsoft, and optional sync with the tools you already use.",
+      "highlight": true,
+      "includes": [
+        "Everything in Team",
+        "Sign in with Microsoft (Entra ID)",
+        "Two-way Jira and Azure DevOps sync (optional)",
+        "Teams and Outlook notifications",
+        "Audit export",
+        "Holiday calendars"
+      ]
+    },
+    {
+      "id": "enterprise",
+      "name": "Enterprise",
+      "custom": true,
+      "priceLabel": "Custom",
+      "summary": "For regulated or large organisations.",
+      "includes": [
+        "Everything in Business",
+        {
+          "text": "SCIM user provisioning",
+          "planned": true
+        },
+        "Data residency in your own tenant's region",
+        "Dedicated support"
+      ]
+    }
+  ],
+  "pilot": {
+    "price": 7500,
+    "days": 90,
+    "note": "credited to your first year"
+  }
+}

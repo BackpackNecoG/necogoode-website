@@ -11,7 +11,12 @@
 
 **Rule #1 still governs:** ease for non-technical users.
 
-**Positioning (from both experts):** PMOFlow is an **overlay** on the tools a company already owns (Jira, Azure DevOps, ServiceNow, Planner, M365). It is not a PPM replacement. Never add PPM-parity features: no timesheets, no report builder, no process mining.
+**Positioning (founder ruling, Nov 17, supersedes the earlier "overlay" line).** PMOFlow is a complete platform for operational change, whether a team starts fresh or arrives with existing tools.
+- **Lead with the outcome, not the stack.** Use: *"Whether you bring your existing tools or start fresh with us, PMOFlow does the heavy lifting for your operations."*
+- **Integrations are an on-ramp, never a dependency.** "Keep using Jira/ADO/Planner. PMOFlow syncs with them" is an option, never the premise.
+- **Never say:** "overlay", "sits on top of", "requires", "add-on to", or "replace".
+- **Never imply anyone has to rip anything out.** Say "No migration project. Connect what you have, or don't."
+- **Stay honest about scope.** It is the platform for process change: map → plan → track → test → approve → launch. Don't claim general PPM features we don't have (timesheets, report builder). Don't add them either.
 
 ## Lessons applied (why R1–R9 cycled)
 
@@ -272,3 +277,51 @@ The same 4 reviewer personas re-run against the deployed build, using the same 2
 - no category's consensus Ease grade drops versus `CONSOLIDATED.md`.
 
 New findings go to `R11-BACKLOG.md`. They are not exit criteria.
+
+## Appendix: R10 engine API (published by S1)
+
+All functions are on `window.PMOEngine` (web) and `require('api/shared/pmoflow-engine.js')` (API). Dates are `YYYY-MM-DD`.
+
+### Holiday calendar (§3) — S5 reads and writes this
+
+**Storage.** A new doc type `calendar` (added to `DOC_TYPES` in `pmoflow-seed.js`, so the generic `PUT/DELETE /ws/:ws/doc/calendar/:id` works). One doc per workspace, id **`workspace`**, seeded as `{ id: 'workspace', holidays: [] }`:
+
+```js
+{ id: 'workspace', holidays: [
+  { date: '2026-12-24', name: 'Christmas Eve' },   // a custom day off
+  { date: '2026-10-12', off: true },               // the workspace WORKS this federal holiday (removes it)
+] }
+```
+Save it with `store.save('calendar', 'workspace', {...}, 'Added Christmas Eve to the holiday calendar')`.
+
+**Functions.**
+- `federalHolidays(year) -> [{date, name, source: 'federal'}]` — the 11 US federal holidays, observed dates (Sat → Fri before, Sun → Mon after), computed for any year.
+- `holidays(docs, {today?, fromYear?, years = 3}) -> [{date, name, source: 'federal'|'custom', weekday, worked?}]` — every holiday for the current and next two years (from `today`'s year). Federal days the workspace works carry `worked: true`. This is the list the Calendar admin page shows.
+- `isHoliday(date, docs?)`, `holidayName(date, docs?) -> string|null`.
+- `isBusinessDay(date, docs?)` — false on weekends and holidays.
+- `addBusinessDays(date, n)`, `businessDaysBetween(a, b)`, `toBusinessDay(date)` — all skip weekends **and** holidays. `addBusinessDays(d, 0)` rolls a weekend/holiday forward.
+- `syncCalendar(docs)` — selects a workspace's calendar. Every engine function that takes `docs` does this itself; call it only before a bare `addBusinessDays` on a different workspace's docs.
+
+### Change counts (§1)
+- `diffSummary(process)` now also returns `added` (= `new`): `{added, new, changed, removed, same}`. Gateways, waits and messages count; removed Today steps count.
+- `changeSummary(processOrProject, docs?) -> {added, changed, removed, text}` — `text` is the one phrase every screen shows, e.g. `"5 new · 6 changed · 1 removed"` (`''` when nothing changes). For a project it sums its linked processes.
+
+### Work items (for S4)
+- Status changes go through the normal doc save of `workItem` (`status: 'idle'|'prog'|'done'`, `doneAt` when done). The engine derives every count from the docs; nothing else needs updating.
+
+### Earned value, status and late split (§2, §5)
+- `earnedValue(...)` adds `pctDone` (0–1), `pct` (rounded %) and `started`. `SPI`/`CPI` are `null` until work has started (EV > 0) **and** AC > 0; `EAC` is `null` when `CPI` is. Show `null` as "—".
+- `projectFinancials(...).forecastBasis`: `'eac'` or `'estimate'` (the cost forecast falls back to the bottom-up estimate).
+- `projectTruth` adds: `pctDone` (the "% done" tile), `lateText` ("5 late (1 past due, 4 will finish after their due date)"), `behindEffort`, `noPlan` (show "No plan yet"), `launch` (`{date, source: 'window'|'deadline', problem}`).
+- `projectStats(...).pct` is now the same `pctDone`; the task-count share is `taskPct`.
+- SPI < 0.9 adds the reason "Behind on effort: N% of the work planned by today is done"; a project that would be green reads label "Behind on effort" (rag amber).
+- `lateText(truthLike)` formats the split for any `{lateCount, pastDueCount, finishAfterDueCount}`.
+
+### Launch date (§3)
+- `launchDate(docs, prj) -> {date, source, problem}` — the one launch date (window day, else deadline). `checkLaunchWindow(date, docs?) -> null | "Fri Dec 25, Christmas Day"`. The `cutover-plan` readiness check fails when the window is on a weekend/holiday.
+
+### Testing (§4)
+- `projectTruth.testing.haveTests` counts changed information with cases **and** a case for every rule field. Coverage tiles read `testing.stages` (`system`, `uat`), whose `uat.total` equals `testing.total`.
+
+### Suggested plans (§6)
+- `suggestWorkFromDiff` items may carry `tag: 'retire'|'train'|'tell'`, `retires` (the removed Today step id, with `step: null`), and `note` (e.g. the step's role). Owners are always people (`ownerRole` is no longer returned). `planToWork` copies `note`, `tag`, `retires`.

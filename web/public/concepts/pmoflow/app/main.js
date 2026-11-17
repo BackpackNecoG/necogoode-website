@@ -119,3 +119,14 @@ window.addEventListener('popstate', render);
 window.addEventListener('pmo:route', render);
 store.subscribe(() => render());
 store.load();
+
+/* R10 S5: optional "Sign in with Microsoft" (Azure Static Web Apps). Only on the hosted site: /.auth doesn't exist locally. */
+(function signInMenu() {
+  const box = document.getElementById('signin'); if (!box) return;
+  if (/^(localhost|127\.)/.test(location.hostname)) { box.innerHTML = '<div class="hint">Sign in with Microsoft is available on the hosted site.</div>'; return; }
+  import('./pages/admin.js').then(m => m.authPrincipal().then(p => {
+    box.innerHTML = p
+      ? `<div class="hint">Signed in as <b>${esc(p.name)}</b>. The demo still uses its sample people.</div><a href="${m.signOutURL()}">Sign out</a>`
+      : `<a class="msbtn" href="${m.signInURL()}">Sign in with Microsoft</a><div class="hint">Optional. The demo works without signing in.</div>`;
+  })).catch(() => {});
+})();

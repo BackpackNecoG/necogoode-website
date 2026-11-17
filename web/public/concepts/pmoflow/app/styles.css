@@ -265,3 +265,6 @@
 .top .bookdemo{white-space:nowrap;font-size:13px;font-weight:600;color:#fff;background:var(--accent,#5b5bd6);border-radius:8px;padding:6px 10px;text-decoration:none;margin-left:4px}
 @media (max-width:640px){.top .bookdemo{font-size:12px;padding:6px 8px}}
 @media (max-width:380px){.top .bookdemo{display:none}}
+.top .viewmenu .vm-signin{margin-top:10px;padding-top:10px;border-top:1px solid #e3e5f0;font-size:13px}
+.top .viewmenu .vm-signin a{color:var(--accent,#5b5bd6);font-weight:600}
+.top .viewmenu .vm-signin .msbtn{display:inline-block;border:1px solid #c9cbe0;border-radius:8px;padding:6px 10px;text-decoration:none}

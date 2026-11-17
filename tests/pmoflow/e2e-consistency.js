@@ -85,6 +85,130 @@ function parseCSV(text) {
   return rows;
 }
 
+/* R10 Part D. Literal values from GOLDEN-NUMBERS.md. Dates are business-day offsets from the seed day (the sandbox's
+   today), computed with the engine's calendar. On a seed day that is a weekend or holiday, SPI and the buffer are read
+   from the engine instead (planned value shifts by a day there; see the doc). */
+const G = {
+  vm: { id: 'vendor-modernization', label: 'Some tasks late', done: 7, total: 13, pct: 48, late: 5, lateSplit: '1 past due, 4 will finish after their due date', blocking: 0,
+    who: 7, whoShown: 5, spi: '0.80', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
+    tests: '12/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
+    change: '7 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
+  erp: { id: 'erp-upgrade-readiness', label: 'On track', done: 0, total: 2, pct: 0, late: 0, blocking: 0, who: 2, spi: '—', cpi: '—', cost: '$5,000', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
+    tests: '0/20', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '0/8', uat: '0/20',
+    change: '5 new · 6 changed · 1 removed', deadlineBd: 41, forecastBd: 16, buffer: 25 },
+  procs: { 'vendor-onboarding': '5 new · 6 changed · 1 removed', 'invoice-approval': '2 new · 3 changed', 'access-review': '3 changed', 'expense-reimbursement': '1 changed' },
+};
+async function goldenNumbers(browser, ymd, at, errors) {
+  const E = require('../../api/shared/pmoflow-engine.js');
+  const ip = `198.51.100.${(Math.random() * 200 | 0) + 20}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, timezoneId: TZ, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  if (page.clock && page.clock.setFixedTime) await page.clock.setFixedTime(at);
+  page.on('pageerror', e => errors.push('D pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('D console: ' + m.text()); });
+  const STORE = ROOT + '/app/store.js';
+  const txt = async sel => (await page.locator(sel).first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+  const attr = async (sel, a) => page.locator(sel).first().getAttribute(a).catch(() => null);
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]', { timeout: 20000 });
+  const day = await page.evaluate(async u => (await import(u)).store.state.today, STORE);
+  const bizSeed = E.isBusinessDay(day);
+  const D = n => E.addBusinessDays(day, n);
+  const eng = await page.evaluate(async u => { const { store } = await import(u); const t = id => window.PMOEngine.projectTruth(store.state.docs, id, store.state.today);
+    return { vm: t('vendor-modernization'), erp: t('erp-upgrade-readiness') }; }, STORE);
+  const fmtD = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  /* engine = the doc (dates and the two seed-day-sensitive values) */
+  for (const k of ['vm', 'erp']) {
+    const g = G[k], t = eng[k];
+    check(`D ${k}: deadline = seed + ${g.deadlineBd} bd`, t.target === D(g.deadlineBd), [t.target, D(g.deadlineBd)]);
+    check(`D ${k}: expected finish = seed + ${g.forecastBd} bd`, t.forecastFinish === D(g.forecastBd), [t.forecastFinish, D(g.forecastBd)]);
+    check(`D ${k}: buffer ${g.buffer} business days`, !bizSeed || t.bufferDays === g.buffer, t.bufferDays);
+    check(`D ${k}: no date on a weekend or holiday`, [t.target, t.forecastFinish, t.launch.date].every(x => E.isBusinessDay(x)), [t.target, t.forecastFinish, t.launch.date]);
+  }
+  check('D vm: launch window = seed + 28 bd (the business day before the deadline)', eng.vm.launch.date === D(G.vm.launchBd) && eng.vm.launch.source === 'window', eng.vm.launch);
+  check('D erp: launch date = the deadline (no window yet)', eng.erp.launch.date === eng.erp.target && eng.erp.launch.source === 'deadline', eng.erp.launch);
+  const spiVm = bizSeed ? G.vm.spi : eng.vm.ev.SPI.toFixed(2);
+
+  /* Home: project cards and process cards (Simple) */
+  for (const k of ['vm', 'erp']) {
+    const g = G[k], c = `[data-ptile="${g.id}"]`;
+    check(`D home ${k}: label "${g.label}"`, (await txt(c + ' [data-summary-label]')) === g.label, await txt(c + ' [data-summary-label]'));
+    check(`D home ${k}: late ${g.late}${g.lateSplit ? ' (' + g.lateSplit + ')' : ''}`, (await txt(c + ' [data-t="late"]')) === String(g.late) && (!g.lateSplit || (await txt(c + ' [data-late-breakdown]')) === `(${g.lateSplit})`), await txt(c + ' [data-tile-facts]'));
+    check(`D home ${k}: blocking ${g.blocking}`, (await txt(c + ' [data-t="blockers"]')) === String(g.blocking));
+    if (g.total) check(`D home ${k}: ${g.done} of ${g.total} tasks, bar = ${g.pct}%`, (await txt(c + ' .pmo-prog b')) === `${g.done} of ${g.total}` && (await attr(c + ' [data-tile-pct]', 'data-tile-pct')) === String(g.pct));
+  }
+  for (const [pid, ph] of Object.entries(G.procs)) check(`D home process ${pid}: "${ph}"`, (await txt(`[data-proctile="${pid}"] [data-diffcount]`)) === ph, await txt(`[data-proctile="${pid}"] [data-diffcount]`));
+
+  /* Project header, Simple */
+  await page.goto(ROOT + '/project/' + G.vm.id); await page.waitForSelector('[data-who-acts]');
+  check('D vm header: label', (await txt('.pmo-shdr [data-summary-label]')) === G.vm.label);
+  check('D vm header: 7 of 13 tasks done', (await txt('.pmo-shdr .pmo-sline')).includes('7 of 13 tasks done'), await txt('.pmo-shdr .pmo-sline'));
+  check('D vm header: "5 late (1 past due, 4 will finish after their due date)" in Simple', /\b5 late \(1 past due, 4 will finish after their due date\)/.test(await txt('.pmo-shdr .pmo-sline')), await txt('.pmo-shdr .pmo-sline'));
+  check('D vm header: expected finish and deadline', (await txt('.pmo-shdr .pmo-sline')).includes('Expected ' + fmtD(eng.vm.forecastFinish)) && (await txt('.pmo-shdr .pmo-sline')).includes('Deadline ' + fmtD(eng.vm.target)));
+  check('D vm: who needs to act = 7, 5 shown, "+2 more" opens the rest in place with their own links', (await txt('[data-who-count]')) === '7' && await page.locator('[data-who-acts] > .pmo-who-list [data-who-row], [data-who-acts] > .pmo-bl-box [data-who-row]').count() === 5
+    && /^\+2 more$/.test(await txt('[data-who-more] summary')));
+  await page.click('[data-who-more] summary');
+  const moreHrefs = await page.$$eval('[data-who-more] [data-who-row]', as => as.map(a => a.getAttribute('href')));
+  check('D vm: the 2 extra rows link to the approval (Launch) and to Testing, not the Work tab', moreHrefs.length === 2 && moreHrefs.some(h => /\/release\/vendor-modernization\?bu=Compliance/.test(h)) && moreHrefs.some(h => /\/testing\/vendor-modernization/.test(h)), moreHrefs);
+  check('D vm: steps to launch "1 of 7 done", 6 left', (await txt('[data-launch-steps] h3 .n')).toLowerCase() === G.vm.stepsDone && (await attr('[data-launch-steps]', 'data-steps-left')) === '6', [await txt('[data-launch-steps] h3 .n'), await attr('[data-launch-steps]', 'data-steps-left')]);
+  check('D vm: approvals step waits for parts whose work is not done', /Waiting for Compliance to approve its part\. Accounts Payable, IT and Treasury approve their parts once the work on them is done\./.test(await txt('[data-ls="approvals"]')), await txt('[data-ls="approvals"]'));
+  /* Project header, Advanced: % done, EV, money */
+  await page.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await page.waitForTimeout(300);
+  for (const k of ['vm', 'erp']) {
+    const g = G[k];
+    await page.goto(ROOT + '/project/' + g.id); await page.waitForSelector('[data-hfin]');
+    const spi = k === 'vm' ? spiVm : g.spi;
+    check(`D ${k} advanced: % done tile ${g.pct}% (= EV ÷ budget)`, (await txt('[data-t="pct"]')) === g.pct + '%' && Math.round(eng[k].ev.EV / eng[k].ev.BAC * 100) === g.pct, await txt('[data-t="pct"]'));
+    check(`D ${k} advanced: SPI ${spi}, CPI ${g.cpi}`, (await txt('[data-ev-spi] b')) === spi && (await txt('[data-ev-cpi] b')) === g.cpi, [await txt('[data-ev-spi] b'), await txt('[data-ev-cpi] b')]);
+    check(`D ${k} advanced: budget ${g.planned}, spent ${g.spent}, expected cost ${g.cost}`, (await txt('[data-hfin] [data-t="planned"]')) === g.planned && (await txt('[data-hfin] [data-t="actual"]')) === g.spent && (await txt('[data-hfin] [data-t="cost"]')) === g.cost,
+      [await txt('[data-hfin] [data-t="planned"]'), await txt('[data-hfin] [data-t="actual"]'), await txt('[data-hfin] [data-t="cost"]')]);
+    check(`D ${k} advanced: late tile ${g.late}${g.late ? '' : ', no "0 past due" text'}`, (await txt('.kpis [data-t="late"]')) === String(g.late) && (g.late ? (await txt('.kpis [data-late-breakdown]')) === G.vm.lateSplit : !(await page.locator('.kpis [data-late-breakdown]').count())));
+    check(`D ${k} advanced: label "${g.label}" (never "On track" with SPI < 0.9)`, (await txt('.hdr [data-summary-label]')) === g.label && !(g.label === 'On track' && eng[k].ev.SPI != null && eng[k].ev.SPI < 0.9));
+  }
+  /* Testing (Advanced tiles, then Simple) */
+  for (const k of ['vm', 'erp']) {
+    const g = G[k];
+    await page.goto(ROOT + '/testing/' + g.id); await page.waitForSelector('[data-cov="dev"]');
+    check(`D ${k} testing advanced: Try it out ${g.dev}, Business sign-off ${g.uat} (one denominator)`, (await attr('[data-cov="dev"]', 'data-cov-n')) === g.dev && (await attr('[data-cov="uat"]', 'data-cov-n')) === g.uat && (await attr('[data-trace-uat]', 'data-trace-uat')) === g.uat.replace(/^\d+/, String(eng[k].testing.stages[1].passed)));
+    check(`D ${k} testing advanced: the go-live check never says "Tests passed" beside ✕`, !/Go-live check: Tests passed/.test(await txt('[data-tests-check]')) && /tests not passed yet/.test(await txt('[data-tests-check]')), await txt('[data-tests-check]'));
+  }
+  await page.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await page.waitForTimeout(300);
+  for (const k of ['vm', 'erp']) {
+    const g = G[k];
+    await page.goto(ROOT + '/testing/' + g.id); await page.waitForSelector('[data-tests-number]');
+    check(`D ${k} testing: ${g.tests} passed, ${g.haveTests} have tests, next "${g.next}"`, (await attr('[data-tests-number]', 'data-tests-number')) === g.tests && (await attr('[data-s2-count]', 'data-s2-count')) === g.haveTests && (await txt('[data-testing-next]')) === g.next);
+    check(`D ${k} testing: "Add tests" is not Done while a piece of information lacks tests`, (await attr('[data-guide-step="2"]', 'data-step-done')) === '0');
+  }
+  await page.goto(ROOT + '/testing/' + G.vm.id + '?de=D2'); await page.waitForSelector('[data-tests-number]'); await page.waitForTimeout(400);
+  check('D testing ?de=D2 focuses Bank remittance details', (await attr('[data-focus]', 'data-s1')) === 'D2');
+  /* Launch page and dashboard: one launch date (Advanced shows the window line and the dashboard to everyone) */
+  await page.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await page.waitForTimeout(300);
+  await page.goto(ROOT + '/release/' + G.vm.id); await page.waitForTimeout(1200);
+  check('D vm launch page: window on the golden launch day', (await attr('[data-launch-window]', 'data-launch-date')) === D(G.vm.launchBd), await attr('[data-launch-window]', 'data-launch-date'));
+  await page.goto(ROOT + '/dashboard'); await page.waitForSelector('[data-dash-golive]');
+  check('D dashboard: Upcoming launches uses the same launch date as the Launch page', (await attr(`[data-dash-golive="${G.vm.id}"]`, 'data-launch-date')) === D(G.vm.launchBd) && (await attr(`[data-dash-golive="${G.erp.id}"]`, 'data-launch-date')) === eng.erp.target);
+  await page.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await page.waitForTimeout(300);
+  /* New project dialog: the same change phrase */
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-new-project]');
+  await page.click('[data-new-project]'); await page.waitForSelector('.overlay #np-from');
+  check('D new-project dialog: Vendor Onboarding "5 new · 6 changed · 1 removed"', (await attr('.overlay #np-from option[value="vendor-onboarding"]', 'data-np-from-change')) === G.procs['vendor-onboarding']);
+  await page.keyboard.press('Escape'); await page.waitForTimeout(300);
+  /* a project before a plan exists: "No plan yet" */
+  await page.evaluate(async u => { const { store } = await import(u); await store.save('project', 'prj-golden-noplan', { id: 'prj-golden-noplan', name: 'Expense Golden Check', owner: 'mc', releaseManager: 'mc', resources: ['mc'], processes: ['expense-reimbursement'], status: 'active', target: window.PMOEngine.addBusinessDays(store.state.today, 40), baselines: [] }, 'Created project (e2e golden)'); }, STORE);
+  await page.goto(ROOT + '/project/prj-golden-noplan'); await page.waitForSelector('[data-launch-steps]');
+  check('D new project: "No plan yet", never "1 of 7 done" or "Information available ✓"', await page.locator('[data-launch-steps][data-no-plan]').count() === 1 && !/of 7 done/.test(await txt('[data-launch-steps]')) && !/Information available/.test(await txt('[data-launch-steps] .done')));
+  const plan = await page.evaluate(async u => { const { store } = await import(u); return window.PMOEngine.suggestWorkFromDiff(store.state.docs, 'prj-golden-noplan', store.state.today); }, STORE);
+  check('D new project plan: a task per changed step, tell + train, every owner a person (role in the note)', plan.map(x => x.tag || x.step).join(',') === 'x1,tell,train' && plan.every(x => x.owner === 'mc' && !x.ownerRole) && /role "Employee"/.test(plan[0].note), plan.map(x => [x.title, x.owner, x.note]));
+  for (const w of [1366, 390]) {
+    await page.setViewportSize({ width: w, height: 900 });
+    for (const u of ['/', '/project/' + G.vm.id, '/testing/' + G.vm.id, '/dashboard']) {
+      await page.goto(ROOT + u); await page.waitForTimeout(900);
+      check(`D ${w}: no horizontal overflow on ${u}`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      await page.screenshot({ path: `${SHOTS}/golden-${w}${u.replace(/\W+/g, '-')}.png`, fullPage: true });
+    }
+  }
+  await ctx.close();
+}
+
 (async () => {
   const { ymd, at } = chicagoNow1830();
   const utcYmd = at.toISOString().slice(0, 10);
@@ -399,6 +523,10 @@ function parseCSV(text) {
     const tl = await page.evaluate(id => { const r = [...document.querySelectorAll('.pmo-actual')].map(x => x.getAttribute('title')); return r; }, pick.wid);
     check('timeline shows the same done date', tl.some(t => t && t.startsWith('Done ' + want)), tl);
   } else check('a task to mark done exists', false);
+
+  /* ======================= Part D (R10): the golden numbers (docs/pmoflow/GOLDEN-NUMBERS.md), on the screens ======================= */
+  console.log('\nPart D: R10 golden numbers (fresh sandbox, seed day 0)');
+  await goldenNumbers(browser, ymd, at, errors);
 
   check('no console errors', errors.length === 0, errors);
   await browser.close();

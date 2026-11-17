@@ -11,6 +11,8 @@ const fs = require('fs');
 
 const PORT = Number(process.argv[2] || 8794);
 const ROOT = `http://localhost:${PORT}/concepts/pmoflow`;
+/* R10: runbook times are a business day about two weeks ahead (a fixed date goes stale and becomes overdue) */
+const FUT = (() => { const E = require('../../api/shared/pmoflow-engine.js'); return E.addBusinessDays(new Date().toISOString().slice(0, 10), 10); })();
 const SHOTS = '/tmp/pmo-r';
 const AR = 'access-review-automation';
 const VM = 'vendor-modernization';
@@ -162,7 +164,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     const tru = await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today);`, AR);
     ok(sent.trim() === `Not ready to launch: ${tru.stepsLeft} step${tru.stepsLeft === 1 ? '' : 's'} left` && (await page.$$('[data-launch-step][data-done="0"]')).length === tru.stepsLeft, 'launch page leads with one sentence, steps left = projectTruth.stepsLeft = undone rows: ' + sent.trim());
     ok((await page.$$('[data-launch-step]')).length === steps.length && steps.filter(x => !x.done).every(x => true), `the plain list follows E().launchSteps (${steps.length} steps)`);
-    ok(await page.$('[data-launch-step="approvals"][data-done="0"] [data-who]') && await page.$('[data-launch-step="work"] [data-step-act]'), 'open steps say who acts and offer a one-tap action');
+    /* R10 §6: a part is only asked to approve once its work is done; until then the step says so instead of naming an approver */
+    const apprTxt = await txt('[data-launch-step="approvals"][data-done="0"]');
+    ok((await page.$('[data-launch-step="approvals"][data-done="0"] [data-who]') || /once the work on/.test(apprTxt)) && await page.$('[data-launch-step="work"] [data-step-act]'), 'open steps say who acts (or that approval waits for the work) and offer a one-tap action');
     const secOpen = await page.$$eval('details[data-sec]', ds => Object.fromEntries(ds.map(d => [d.dataset.sec, d.open])));
     const coFail = (await check(AR, 'cutover-plan')).status === 'fail' || !(await check(AR, 'cutover-plan')).pass;
     ok(secOpen.audit === false && secOpen.comments === false && secOpen.plan === coFail && secOpen.access === !(await check(AR, 'grants-closed')).pass, 'launch-day plan, temporary data access and audit log are folded; open only when they block launch: ' + JSON.stringify(secOpen));
@@ -378,6 +382,10 @@ The process starts when an employee asks to buy something.
       await page.fill('.overlay input[name=windowDate]', '2026-11-14');
       await page.click('.overlay [data-act=save]'); await settle(300);
       ok(/business day/.test(await txt('.overlay [data-err]')), `${w}: a Saturday launch window is refused`);
+      /* R10 §3: a holiday is refused too, by name (the engine's calendar) */
+      await page.fill('.overlay input[name=windowDate]', '2026-12-25');
+      await page.click('.overlay [data-act=save]'); await settle(300);
+      ok(/Christmas Day/.test(await txt('.overlay [data-err]')) && /business day/.test(await txt('.overlay [data-err]')), `${w}: a holiday launch window is refused: ` + (await txt('.overlay [data-err]')).trim());
       await shot(`r9-cutover-form-${w}`);
       await dismiss();
     }
@@ -501,23 +509,23 @@ The process starts when an employee asks to buy something.
       await page.fill(`${row} >> [data-td]`, '30');
       if (gng) await page.check(`${row} >> [data-tg]`);
     };
-    await fillTask(0, 'Freeze manual access changes', 'dk', '2026-11-14T08:00', false);
+    await fillTask(0, 'Freeze manual access changes', 'dk', FUT + 'T08:00', false);
     await page.click('.overlay [data-tadd]');
-    await fillTask(1, 'Go/no-go call with Compliance', '', '2026-11-14T08:30', true);
+    await fillTask(1, 'Go/no-go call with Compliance', '', FUT + 'T08:30', true);
     await page.click('.overlay [data-tadd]');
-    await fillTask(2, 'Enable the auto-removal job', 'dk', '2026-11-14T09:00', false);
+    await fillTask(2, 'Enable the auto-removal job', 'dk', FUT + 'T09:00', false);
     await page.click('.overlay [data-act=save]'); await settle(300);
     ok(await page.$('.overlay [data-err]:not([hidden])') && /final check, so it needs an owner/.test(await txt('.overlay [data-err]')), 'final yes/no step without an owner: dialog stays open with the reason');
     await page.selectOption('.overlay [data-trow] >> nth=1 >> [data-to]', 'ps');
     await page.click('.overlay [data-act=save]'); await settle(1000);
     const tasks = await st(`return store.get('project', a).cutover.tasks;`, AR);
     const gngId = tasks[1].id;
-    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && /^2026-11-14T08:30/.test(tasks[1].plannedStart) && tasks[1].durationMins === 30, 'runbook saved in order with plannedStart and durationMins; the go/no-go task is owned by Priya Shah');
+    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && tasks[1].plannedStart.startsWith(FUT + 'T08:30') && tasks[1].durationMins === 30, 'runbook saved in order with plannedStart and durationMins; the go/no-go task is owned by Priya Shah');
     /* overdue: a task whose planned end has passed shows a warning */
     await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '2026-01-05T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved into the past (e2e)');`, AR);
     await settle(800);
     ok(await page.$(`[data-rbtask="${tasks[2].id}"][data-overdue]`) && /1 launch-day step is overdue/.test(await txt('[data-runbook-overdue]')), 'overdue runbook task: warning on the runbook and an "Overdue" badge');
-    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '2026-11-14T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved back (e2e)');`, AR);
+    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '${FUT}T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved back (e2e)');`, AR);
     await settle(800);
     ok(!(await page.$('[data-runbook-overdue]')), 'warning clears once the task is back on schedule');
     /* checklist density: one line per check, detail on demand, plain labels */
@@ -1018,7 +1026,9 @@ The process starts when an employee asks to buy something.
     ok(skRes && skRes.outcome === 'not-run' && ci2.ciSkipped === 1 && ci2.ciUnmatched === 1, '<skipped/> recorded as not-run (skipped), counted, not dropped; 1 unmatched');
     ok(await page.$(`[data-run="${ci2.id}"] [data-run-skipped="1"]`), 'run header shows "1 skipped"');
     const devAfter = (await txt('[data-cov=dev]')).trim();
-    ok(devAfter.split(' ')[0].split('/')[0] === devFull.split(' ')[0].split('/')[0] && /1 fail/.test(devAfter), 'skipped never replaces an earlier pass; only the new fail changes coverage: ' + devAfter);
+    /* R10 §4: the tile is projectTruth's "Try it out" stage (tests passed / one denominator): the skipped case keeps its earlier pass, so only the new fail drops it by one */
+    const nOf = t => +String(t).split('/')[0], dOf = t => parseInt(String(t).split('/')[1], 10);
+    ok(nOf(devAfter) === nOf(devFull) - 1 && dOf(devAfter) === dOf(devFull) && /1 failed/.test(devAfter), 'skipped never replaces an earlier pass; only the new fail changes coverage: ' + devAfter);
     /* a SIT import */
     await page.click('[data-ci]'); await page.waitForSelector('.overlay [data-ci-xml]');
     await page.selectOption('.overlay [data-ci-env]', 'sit');
@@ -1064,7 +1074,8 @@ The process starts when an employee submits an expense claim.
     const noBr = await page.$$eval('.is-branch', bs => bs.map(b => ({ label: b.querySelector('[data-blabel]').value, steps: [...b.querySelectorAll('.is-bstep [data-f=title]')].map(t => t.value) })));
     ok(noBr.some(b => b.label === 'No' && b.steps.some(t => /approves? the exception/i.test(t))), '"otherwise …" lands in the No branch: ' + JSON.stringify(noBr.find(b => b.label === 'No' && b.steps.length) || {}));
     ok(/Step 1: /.test(await txt('.is-goto.on')), '"go back to step 1" loops back to step 1: ' + (await txt('.is-goto.on')).trim().slice(0, 60));
-    ok(await page.$eval('.is-step[data-i="0"] [data-f=owner]', s => s.value) === 'ar', 'full-name owner "Ana Ruiz" matched to Ana Ruiz');
+    /* R10 (S2 demo-data isolation): a visitor's import never links a demo person by name; the name stays as written */
+    ok(await page.$eval('.is-step[data-i="0"] [data-f=owner]', s => s.value) !== 'ar' && /Who: Ana Ruiz/.test(await txt('.is-step[data-i="0"]')), 'full-name owner "Ana Ruiz" kept as written, never linked to the demo person');
     ok(await page.$$eval('.is-sub textarea', t => t.some(x => /audit retention purposes$/.test(x.value))), 'long sub-step kept in full');
     const noOwn = await page.$$('[data-noowner]');
     ok(noOwn.length >= 1 && await page.$('[data-owner-prompt]'), `unmatched owners left blank and highlighted (${noOwn.length}) with a prompt to choose`);
@@ -1116,9 +1127,14 @@ The process starts when an employee submits an expense claim.
     const pid2 = page.url().match(/process\/([\w-]+)/)[1]; await settle(800);
     await st(`store.api = window.__api;`);
     const made = await st(`const p = store.get('process', a); const ids = new Set(); const walk = ns => (ns || []).forEach(n => { (n.data || []).forEach(d => ids.add(d)); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(p.asis);
-      const des = store.list('dataElement', d => d.source === 'From a pasted procedure' && /Dispute/.test(d.name));
+      const des = store.list('dataElement', d => ids.has(d.id) && /Dispute/.test(d.name));   /* R10: created fresh in the visitor's process */
       return { n: des.length, linked: des.every(d => ids.has(d.id)), owners: des.map(d => d.owner || d.ownerRole || ''), names: des.map(d => d.name), kinds: p.asis.map(n => n.type), titles: p.asis.map(n => n.title), wait: (p.asis.find(n => n.type === 'wait') || {}).wait, msg: p.asis.find(n => n.type === 'message') };`, pid2);
-    ok(!made.owners.includes(await st(`return store.state.me;`)), 'new information is owned by whoever does its step, never the importer: ' + made.owners.join(', '));
+    /* R10: the injected step "logs the dispute" is owned by mc, so its new information is mc's (the step owner), not because mc imported it */
+    const stepOwners = await st(`const p = store.get('process', a); const out = {}; const walk = ns => (ns || []).forEach(n => { (n.data || []).forEach(d => { (out[d] = out[d] || []).push(n.owner || n.ownerRole || ''); }); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(p.asis);
+      return store.list('dataElement', d => out[d.id] && /Dispute/.test(d.name)).map(d => out[d.id].includes(d.owner) || (d.ownerRole && out[d.id].includes(d.ownerRole)) || (!out[d.id].some(Boolean) && !!d.owner));`, pid2);
+    /* R10 (S2 isolation): demo names in a paste are not linked, so the step keeps the name as a role; its new information then
+       carries that role, held by a named person (S2's rule). Either way it follows the step, never a guessed demo person. */
+    ok(stepOwners.length === 2 && stepOwners.every(Boolean), 'new information follows whoever does its step: ' + made.owners.join(', '));
     ok(made.n === 2 && made.linked && !made.names.some(n => /\(/.test(n)), 'the 2 proposed elements were created and both are in the new process\'s data requirements: ' + made.names.join(', '));
     ok(made.kinds.includes('wait') && made.kinds.includes('message') && made.wait === '2 business days' && made.msg.party === 'Vendor' && made.msg.direction === 'send', 'wait and message nodes kept on create: ' + made.kinds.join(','));
     ok(!made.titles.some(t => /\(\s*\)/.test(t)), 'created process titles have no "()"');

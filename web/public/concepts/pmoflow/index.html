@@ -10,6 +10,8 @@
 <link rel="stylesheet" href="/concepts/pmoflow/app/css/design.css" />
 <link rel="stylesheet" href="/concepts/pmoflow/app/css/pmo.css" />
 <link rel="stylesheet" href="/concepts/pmoflow/app/css/release.css" />
+<link rel="stylesheet" href="/concepts/pmoflow/app/css/admin.css" />
+<link rel="stylesheet" href="/concepts/pmoflow/app/css/connect.css" />
 </head>
 <body>
 <header class="top">
@@ -20,7 +22,8 @@
     <div class="who"><span>Viewing as</span><select id="persona" aria-label="Viewing as"></select>
       <details class="viewmenu" id="viewmenu"><summary title="View options">⚙ View</summary>
         <div class="vm-pop"><label class="advtog"><input type="checkbox" id="adv" /> <span>Advanced tools</span></label>
-        <div class="hint">Adds earned value, sprints, BPMN and version compare. Everything else stays the same.</div></div></details>
+        <div class="hint">Adds earned value, sprints, BPMN and version compare. Everything else stays the same.</div>
+        <div class="vm-signin" id="signin"></div></div></details>
     </div>
   </div>
   <a class="bookdemo" href="/pmoflow/demo">Book a demo</a>
@@ -29,6 +32,8 @@
 <main id="app"><div class="empty">Loading workspace…</div></main>
 <!-- engine: classic UMD script shared byte-for-byte with the API -->
 <script src="/concepts/pmoflow/app/engine.js"></script>
+<script src="/concepts/pmoflow/app/sync.js"></script>
+<script src="/concepts/pmoflow/app/import.js"></script>
 <script type="module" src="/concepts/pmoflow/app/main.js"></script>
 </body>
 </html>

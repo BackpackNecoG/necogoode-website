@@ -1,0 +1,18 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "KEY_VAULT_URI": "https://<your-vault-name>.vault.azure.net/",
+    "ALLOWED_JIRA_SITE": "<yourcompany>.atlassian.net",
+    "ALLOWED_ADO_ORG": "<your-azure-devops-organization>",
+    "ALLOWED_PROJECTS": "<JIRA-KEY or Azure DevOps project name>,<another>",
+    "ALLOWED_PMOFLOW_PROJECTS": "",
+    "ADO_AUTH": "managed-identity",
+    "MAIL_SENDER": "<pmoflow-notices@yourcompany.com>",
+    "ALLOWED_MAIL_DOMAINS": "<yourcompany.com>",
+    "ALLOWED_ORIGIN": "",
+    "NONCE_TABLE_URL": "",
+    "NONCE_TABLE": "relaynonces"
+  }
+}

@@ -3,7 +3,7 @@
    three big choices, then projects and processes (each labelled, one plain sentence each). */
 import { store } from '../store.js';
 import { esc, fmt, link, go, av, pname, LOCK } from '../ui.js';
-import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, availText, diffCounts, factsHTML } from './project.js';
+import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, availText, changePhrase, factsHTML, truthOf, WAIT_IC } from './project.js';
 
 const PRJ_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M7 13h4M7 17h7"/></svg>';
 const PROC_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="5" rx="1.5"/><rect x="7" y="17" width="10" height="5" rx="1.5"/><path d="M12 7v3M12 14v3"/><path d="M12 10l3 2-3 2-3-2z"/></svg>';
@@ -22,7 +22,7 @@ export function waitingFor() { const list = personQueue(); return { list, total:
 
 /* §7: an approval opens that team's part page */
 const hrefOf = x => x.kind === 'approval' && x.projectId && x.id ? `/release/${encodeURIComponent(x.projectId)}?bu=${encodeURIComponent(x.id)}` : (x.href || '/');
-const KIND_IC = { work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', information: LOCK, action: '›' };
+const KIND_IC = { work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', information: WAIT_IC, action: '›' };
 const KIND_CLS = { work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', information: 'notready', action: 'mention' };
 function waitHTML() {
   const { list } = waitingFor();
@@ -62,20 +62,20 @@ function projectTile(j) {
     <span class="pmo-kind pmo-kind-prj">${PRJ_IC}Project</span>
     <h4>${esc(j.name)}</h4>
     ${summaryHTML(sm)}
-    ${s.total ? `<div class="pmo-prog"><div class="bar"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done</span></div>` : ''}
+    ${s.total ? `<div class="pmo-prog" data-tile-pct="${s.pct}"><div class="bar" title="${s.pct}% of the budgeted work done"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done</span></div>` : truthOf(j).noPlan ? '<div class="pmo-prog" data-no-plan><span class="hint">No plan yet</span></div>' : ''}
     <div class="pmo-sline pmo-tfacts" data-tile-facts>${factsHTML(j, { cost: store.advanced })}</div>
     ${whoLineHTML(j, 2)}</a>`;
 }
 function processTile(p) {
-  const st = flatSteps(p.tobe), dc = diffCounts(p);
+  const st = flatSteps(p.tobe), dc = changePhrase(p);
   const dl = [...new Set(st.flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])]))];
   const notYet = dl.filter(d => availText(d).key === 'missing').length;
-  const changed = dc.new + dc.changed;
+  /* R10 §1: the one change phrase (removed steps count), from E().changeSummary */
   return `<a class="tile pmo-tile" href="${link('/process/' + encodeURIComponent(p.id))}" data-link data-proctile="${esc(p.id)}">
     <span class="pmo-kind pmo-kind-proc">${PROC_IC}Process</span>
     <h4>${esc(p.name)}</h4>
     ${p.desc ? `<p>${esc(p.desc)}</p>` : ''}
-    <div class="chips"><span class="chip">${plural(st.length, 'step')}</span>${changed ? `<span class="chip" data-diffcount>${changed} changing in the future version</span>` : ''}${notYet ? `<span class="chip block" data-miss>${LOCK} ${notYet} not available yet</span>` : ''}</div>
+    <div class="chips"><span class="chip">${plural(st.length, 'step')}</span>${dc.text ? `<span class="chip" data-diffcount="${dc.added}/${dc.changed}/${dc.removed}">${esc(dc.text)}</span>` : ''}${notYet ? `<span class="chip block" data-miss>${WAIT_IC} ${notYet} not available yet</span>` : ''}</div>
     <div class="pmo-tile-f">${av(p.owner)}<span class="hint">${esc(pname(p.owner))}</span></div></a>`;
 }
 

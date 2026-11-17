@@ -4,8 +4,13 @@
    (W6 due seed-1 and still idle, target seed+41, and so on).
    All names are fictional (Northwind Traders). Never add a real company or client name. */
 
+/* R10 §3: 'calendar' holds the workspace's own holidays (one doc, id 'workspace'): {id, holidays: [{date, name}]};
+   {date, off: true} means the workspace works that federal holiday. The engine reads it (see federalHolidays/holidays). */
 const DOC_TYPES = ['person', 'dataElement', 'process', 'project', 'workItem', 'grant', 'approval',
-  'release', 'profile', 'testCase', 'testRun', 'comment', 'notification', 'risk'];
+  'release', 'profile', 'testCase', 'testRun', 'comment', 'notification', 'risk', 'calendar',
+  /* R10: S5 workspace settings and S4 tool connections */
+  'workspace', 'connection'];
+const ENGINE = require('./pmoflow-engine');
 
 function dayOf(input) {
   const s = String(input || new Date().toISOString()).slice(0, 10);
@@ -17,14 +22,24 @@ function addDays(day, n) {
   return d.toISOString().slice(0, 10);
 }
 const clone = o => JSON.parse(JSON.stringify(o));
-/* the same day, or the Monday after it when it falls on a weekend */
-const weekday = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 ? addDays(d, 2) : w === 0 ? addDays(d, 1) : d; };
-/* the same day, or the Friday before it when it falls on a weekend */
-const weekdayBack = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 ? addDays(d, -1) : w === 0 ? addDays(d, -2) : d; };
+/* R10 §3: a business day is a weekday that is not a US federal holiday (the engine's calendar; the seed has no custom days) */
+const offDay = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 6 || w === 0 || ENGINE.federalHolidays(+d.slice(0, 4)).some(h => h.date === d); };
+/* the same day, or the next business day when it falls on a weekend or holiday */
+const weekday = d => { let x = d; for (let g = 0; offDay(x) && g < 10; g++) x = addDays(x, 1); return x; };
+/* the same day, or the business day before it when it falls on a weekend or holiday */
+const weekdayBack = d => { let x = d; for (let g = 0; offDay(x) && g < 10; g++) x = addDays(x, -1); return x; };
 /* R9 §3: no seeded date lands on a Saturday or Sunday. A past offset rolls back to Friday and today or a future offset
    rolls forward to Monday, so the mapping is monotonic: an item that is late stays late, a future item stays ahead of
    today, and start <= due and done <= due keep holding. */
-const bizDay = (day, n) => (n < 0 ? weekdayBack : weekday)(addDays(day, n));
+/* R10 §3/§8: offsets are calendar days converted to BUSINESS days (n × 5/7, rounded) counted with the engine's calendar
+   (weekends and US federal holidays skipped), so every business-day gap between two seeded dates (forecasts, lateness,
+   buffers, planned value, logged hours) is the same whatever day the sandbox is made: the golden numbers never drift.
+   A seed day that is itself a weekend or holiday counts from the business day before it for past offsets and the next
+   one for today and future offsets. */
+const bizDay = (day, n) => {
+  const k = Math.sign(n) * Math.round(Math.abs(n) * 5 / 7);
+  return n < 0 ? ENGINE.addBusinessDays(weekdayBack(day), k) : ENGINE.addBusinessDays(weekday(day), k);
+};
 
 /* ---------- people ---------- */
 const PEOPLE = [
@@ -155,6 +170,8 @@ function processes() {
         { id: 'a1', type: 'step', title: 'Email vendor for W-9 and COI', owner: 'mc', data: ['D1', 'D3'], touches: ['Procurement', 'Email'] },
         { id: 'a2', type: 'step', title: 'Manual sanctions lookup', owner: 'ps', data: ['D1', 'D8'], touches: ['Compliance', 'Public lists'] },
         { id: 'a3', type: 'step', title: 'Receive bank letter by email', owner: 'lp', data: ['D2'], touches: ['Treasury', 'Email'] },
+        /* R10 §1: a Today step the Future way drops (bank details are captured in the portal), so "1 removed" shows */
+        { id: 'a3b', type: 'step', title: 'Print and file the bank letter', owner: 'lp', data: [], touches: ['Treasury', 'Paper files'] },
         { id: 'a4', type: 'step', title: 'Key vendor into ERP by hand', owner: 'ar', data: ['D1', 'D2'], touches: ['Accounts Payable', 'ERP'] },
         { id: 'a5', type: 'step', title: 'Activate contract', owner: 'mc', data: ['D6'], touches: ['Procurement', 'Contract repository'] },
         { id: 'a6', type: 'step', title: 'Email requester when done', owner: 'mc', data: [], touches: ['Procurement', 'Email'] },
@@ -269,8 +286,8 @@ const WORK = [
   ['A3', 'access-review-automation', 'access-review', 'r3', 'Write and approve the steps for removing access', 'dk', 'done', -6, -1, ['A1'], null, 'access'],
   ['A4', 'access-review-automation', 'access-review', 'r2', 'Practice review with Compliance', 'ps', 'idle', 5, 9, ['A2', 'A3'], null, 'test'],
   /* R8: a second project changing a Vendor Onboarding step (s4), so "Another project is also changing this step" shows */
-  ['E1', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Add the new ERP fields to the vendor record', 'ar', 'prog', -2, 13, [], null, 'build'],
-  ['E2', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Try a vendor record in the upgraded ERP', 'dk', 'idle', 14, 18, ['E1'], null, 'test'],
+  ['E1', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Add the new ERP fields to the vendor record', 'ar', 'prog', -2, 17, [], null, 'build'],
+  ['E2', 'erp-upgrade-readiness', 'vendor-onboarding', 's4', 'Try a vendor record in the upgraded ERP', 'dk', 'idle', 18, 22, ['E1'], null, 'test'],
 ];
 /* kickoff-plan dues that differ from today's plan (so baseline variance shows) */
 const BASELINE_DUE = { W2: -13, W6: -5, W7: 2, W8: 6, W10: 12, W3: -7, A3: -2, A4: 8 };
@@ -282,6 +299,7 @@ function seed(createdAtISODate) {
   const add = (type, data) => docs[type].push({ id: data.id, data });
 
   PEOPLE.forEach(p => add('person', clone(p)));
+  add('calendar', { id: 'workspace', holidays: [] });
   dataElements().forEach(d => add('dataElement', d));
   processes().forEach(p => add('process', p));
 
@@ -333,7 +351,7 @@ function seed(createdAtISODate) {
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract is held up in legal review', impact: 'high', likelihood: 'med', owner: 'ps',
     mitigation: 'Interim manual screening checklist; escalate redlines weekly.', status: 'closed' });
-  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'Bank details form not started; holds up the test deposit and saving vendors in the ERP', impact: 'high', likelihood: 'high', owner: 'lp',
+  add('risk', { id: 'R2', projectId: 'vendor-modernization', title: 'The bank details form holds up the test deposit and saving vendors in the ERP', impact: 'high', likelihood: 'high', owner: 'lp',
     mitigation: 'Daily check-in with Treasury; pull Integration Eng. in to pair.', status: 'open' });
   add('risk', { id: 'R3', projectId: 'vendor-modernization', title: 'Business testing overlaps the quarter-end close', impact: 'med', likelihood: 'med', owner: 'ta',
     mitigation: 'Book AP testers now; keep a fallback testing week after the close.', status: 'open' });
@@ -516,8 +534,7 @@ const TIME_NOTES = { build: 'Build and unit test', other: 'Coordination and foll
 function businessDaysFrom(start, n) {
   const out = []; let d = start;
   for (let guard = 0; out.length < n && guard < 60; guard++) {
-    const dow = new Date(d + 'T12:00:00Z').getUTCDay();
-    if (dow !== 0 && dow !== 6) out.push(d);
+    if (!offDay(d)) out.push(d);
     d = addDays(d, 1);
   }
   return out;
@@ -530,7 +547,7 @@ function enrichR6(docs, day, at) {
   const vm = projects['vendor-modernization'];
   vm.fields = [{ key: 'riskArea', label: 'Risk area', type: 'select', options: RISK_AREAS.slice() }];
   /* runbook (R6 shape): owner, plannedStart, durationMins, done, gonogo. Rollback plan still open, so the gate keeps it as an item. */
-  const cut = weekdayBack(vm.target ? addDays(vm.target, -1) : addDays(day, 40));
+  const cut = vm.target ? ENGINE.addBusinessDays(vm.target, -1) : bizDay(day, 40);   /* R10 §3: the business day before the deadline */
   vm.cutover = { window: cut + ' 07:30–10:00', tasks: [
     { id: 'VT1', order: 1, task: 'Freeze manual vendor changes in the ERP', owner: 'ar', plannedStart: cut + 'T07:30', planned: cut + 'T07:30', durationMins: 30, gonogo: false, done: false },
     { id: 'VT2', order: 2, task: 'Final check with Treasury and Compliance', owner: 'ta', plannedStart: cut + 'T08:00', planned: cut + 'T08:00', durationMins: 15, gonogo: true, done: false },
@@ -546,10 +563,10 @@ function enrichR6(docs, day, at) {
     const effort = w.effortDays || 1;
     const until = w.status === 'done' ? (w.doneAt || w.due) : bizDay(day, -1);
     const n = w.status === 'done' ? Math.min(effort, 7) : Math.max(1, Math.min(Math.ceil(effort / 2), 4));
-    const dates = businessDaysFrom(w.start, n).filter(x => x <= until);
-    if (!dates.length) dates.push(until < w.start ? w.start : until);
+    /* R10 §2: always n entries (a date past `until` is logged on `until`), so actual cost never depends on the calendar */
+    const dates = businessDaysFrom(w.start, n).map(x => (x <= until ? x : (until < w.start ? w.start : until)));
     w.time = dates.map((date, i) => ({ by: w.owner, date, hours: (i + effort) % 3 === 0 ? 6 : (i % 2 ? 7 : 8), note: TIME_NOTES[w.kind] || 'Work' }));
   });
 }
 
-module.exports = { seed, DOC_TYPES, addDays, dayOf };
+module.exports = { seed, DOC_TYPES, addDays, dayOf, bizDay };

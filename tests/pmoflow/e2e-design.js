@@ -38,6 +38,9 @@ function checkXml(xml) {
 const isGw = n => n && (n.type === 'decision' || n.type === 'parallel');
 const flat = ns => (ns || []).flatMap(n => isGw(n) ? (n.branches || []).flatMap(b => flat(b.nodes)) : (n.type === 'trigger' || n.type === 'end') ? [] : [n]);
 const allNodes = ns => (ns || []).flatMap(n => [n, ...(isGw(n) ? (n.branches || []).flatMap(b => allNodes(b.nodes)) : [])]);
+/* R10 S2: lanes are roles (the step's role, else the person's job title); information is exported as data objects */
+let PEOPLE = [];
+const laneRole = n => n.ownerRole || (() => { const p = PEOPLE.find(x => x.id === n.owner); return p ? (p.role || p.name) : ''; })();
 function expectedBpmn(nodes) {
   const all = allNodes(nodes), st = flat(nodes);
   /* a gateway emits a split plus a join, unless every branch loops back */
@@ -45,8 +48,11 @@ function expectedBpmn(nodes) {
   /* R6 node types: subprocess -> callActivity, wait -> timer catch event, message -> throw (send) / catch (receive) event */
   return { userTask: st.filter(n => !['subprocess', 'wait', 'message'].includes(n.type)).length, callActivity: st.filter(n => n.type === 'subprocess').length,
     intermediateCatchEvent: st.filter(n => n.type === 'wait' || (n.type === 'message' && n.direction === 'receive')).length, intermediateThrowEvent: st.filter(n => n.type === 'message' && n.direction !== 'receive').length,
-    exclusiveGateway: gws('decision'), parallelGateway: gws('parallel'), startEvent: 1, endEvent: 1, lane: Math.max(1, new Set(st.map(n => n.owner || '')).size) };
+    exclusiveGateway: gws('decision'), parallelGateway: gws('parallel'), startEvent: 1, endEvent: 1, lane: Math.max(1, new Set(st.map(laneRole)).size) };
 }
+/* data objects: one per piece of information read by a task (wait and message events carry it only as extension data) */
+const dataObjectsOf = nodes => new Set(flat(nodes).filter(n => !['wait', 'message'].includes(n.type)).flatMap(n => n.data || [])).size;
+const dataAssocsOf = nodes => flat(nodes).filter(n => !['wait', 'message'].includes(n.type)).reduce((a, n) => a + (n.data || []).length, 0);
 /* R6: a node-type/field model of a map, ids replaced by positions, for lossless round-trip comparison */
 function modelOf(nodes, dataName) {
   const all = allNodes(nodes); const pos = {}; all.forEach((n, i) => pos[n.id] = i);
@@ -124,7 +130,11 @@ const docsOf = st => st.docs;
     ok((r.counts.sequenceFlow || 0) >= exp.userTask + 1, `${label}: sequence flows connect the map (${r.counts.sequenceFlow})`);
     ok(!r.danglingRefs.length, `${label}: every sequenceFlow ref resolves${r.danglingRefs.length ? ' — dangling: ' + r.danglingRefs.join(',') : ''}`);
     const parts = r.counts.participant || 0, mflows = r.counts.messageFlow || 0;
-    ok((r.counts.BPMNShape || 0) === Object.values(exp).reduce((a, v) => a + v, 0) + parts && (r.counts.BPMNEdge || 0) === r.counts.sequenceFlow + mflows, `${label}: diagram has a shape per element, lane and pool, and an edge per flow`);
+    const dobj = dataObjectsOf(nodes), dassoc = dataAssocsOf(nodes);
+    ok((r.counts.dataObject || 0) === dobj && (r.counts.dataObjectReference || 0) === dobj && (r.counts.dataInputAssociation || 0) === dassoc, `${label}: R10 information exported as BPMN data objects (${r.counts.dataObject || 0}/${dobj} objects, ${r.counts.dataInputAssociation || 0}/${dassoc} associations)`);
+    ok((r.counts.BPMNShape || 0) === Object.values(exp).reduce((a, v) => a + v, 0) + parts + dobj && (r.counts.BPMNEdge || 0) === r.counts.sequenceFlow + mflows + dassoc, `${label}: diagram has a shape per element, lane, pool and data object, and an edge per flow and association`);
+    const roles = [...new Set(flat(nodes).map(laneRole))].filter(Boolean);
+    ok(roles.every(x => xml.includes(`name="${x.replace(/&/g, '&amp;')}"`)) && !flat(nodes).some(n => n.owner && !n.ownerRole && PEOPLE.find(p => p.id === n.owner) && PEOPLE.find(p => p.id === n.owner).role && new RegExp(`<bpmn:lane id="Lane_\\d+" name="${PEOPLE.find(p => p.id === n.owner).name}"`).test(xml)), `${label}: R10 lanes are named by role (${roles.slice(0, 3).join(', ')}…), people are a lane property`);
     const flowNodes = Object.entries(exp).filter(([k]) => k !== 'lane').reduce((a, [, v]) => a + v, 0);
     ok((r.counts.flowNodeRef || 0) === flowNodes, `${label}: every flow node sits in exactly one lane (${r.counts.flowNodeRef} === ${flowNodes})`);
   };
@@ -134,7 +144,9 @@ const docsOf = st => st.docs;
     ok(!bad.length, `${label}: icon-only controls have aria-labels${bad.length ? ' — missing: ' + bad.join(' | ') : ''}`);
   };
   const countNodes = nodes => ({ steps: flat(nodes).length, decisions: allNodes(nodes).filter(n => n.type === 'decision').length, parallels: allNodes(nodes).filter(n => n.type === 'parallel').length, ends: allNodes(nodes).filter(n => n.type === 'end').length });
-  const importFile = async file => { const w = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }); const before = page.url(); await page.setInputFiles('[data-bpmn-file]', file); const r = await w; ok(r.ok(), 'import saved ' + r.status()); await page.waitForURL(u => String(u) !== before && /mode=edit/.test(String(u))); await settle(); return page.url().match(/process\/([\w-]+)/)[1]; };
+  /* R10: a new process from a file shows a preview first ("Import as a new process") */
+  const confirmImport = async () => { await page.waitForSelector('.overlay [data-imp-preview]', { timeout: 10000 }); await act('import'); };
+  const importFile = async file => { const w = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }); const before = page.url(); await page.setInputFiles('[data-bpmn-file]', file); await confirmImport(); const r = await w; ok(r.ok(), 'import saved ' + r.status()); await page.waitForURL(u => String(u) !== before && /mode=edit/.test(String(u))); await settle(); return page.url().match(/process\/([\w-]+)/)[1]; };
 
   try {
     console.log('# boot');
@@ -145,6 +157,7 @@ const docsOf = st => st.docs;
     await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '1')); await nav('/');
     ok(await page.isChecked('#adv'), 'R7: Advanced turned on for the power-tool coverage');
     let st = await state();
+    PEOPLE = st.people || [];
     let futureHelp = '';
     const me = await page.$eval('#persona', s => s.value);
     const meName = st.people.find(p => p.id === me).name;
@@ -165,10 +178,10 @@ const docsOf = st => st.docs;
       const p = procs.find(x => x.id === r.id); const ds = ENG.diffSummary(p); const ids = [...new Set(flat(p.tobe).flatMap(s => s.data || []))];
       const c = k => ids.filter(d => ENG.effectiveAvail(st.docs, d) === k).length;
       const projs = (st.docs.project || []).map(d => d.data).filter(j => (j.processes || []).includes(p.id));
-      const exp = { ver: 'v' + (p.version || 1), steps: String(flat(p.tobe).length), diff: (() => { const dd = ENG.diffProcess(p); const fs_ = flat(p.tobe); return `${fs_.filter(x => dd.nodes[x.id] === 'new').length}/${fs_.filter(x => dd.nodes[x.id] === 'changed').length}/${(dd.removed || []).filter(g => g && !isGw(g) && g.type !== 'trigger' && g.type !== 'end').length}`; })(), data: ids.length ? `${c('live')}/${c('pending')}/${c('example')}/${c('missing')}` : '' };
+      const exp = { ver: 'v' + (p.version || 1), steps: String(flat(p.tobe).length), diff: (() => { const c = ENG.changeSummary(p); return `${c.added}/${c.changed}/${c.removed}`; })(), data: ids.length ? `${c('live')}/${c('pending')}/${c('example')}/${c('missing')}` : '' };
       if (r.ver !== exp.ver || r.steps !== exp.steps || r.diff !== exp.diff || r.data !== exp.data || !r.owner.includes(st.people.find(x => x.id === p.owner).name) || !projs.every(j => r.prj.includes(j.name))) { rowsOk = false; console.log('    row mismatch', r, exp); }
     }
-    ok(rowsOk, 'each row: version, owner, steps, R9 step-level new/changed/removed (diffProcess), live/pending/examples/missing (effectiveAvail), projects');
+    ok(rowsOk, 'each row: version, owner, steps, R10 new/changed/removed (engine changeSummary), live/pending/examples/missing (effectiveAvail), projects');
     ok(await page.getAttribute('[data-new-workflow]', 'href') === '/concepts/pmoflow/new' && await page.getAttribute('[data-import-sop]', 'href') === '/concepts/pmoflow/import' && !!(await page.$('label.d-import [data-bpmn-file]')), '"+ Map a process", "Import BPMN" (Advanced) and "Paste a procedure" actions');
     await page.fill('[data-psearch]', seedP.name.split(' ')[0].toLowerCase());
     const vis = await page.$$eval('.d-prow', rs => rs.filter(r => !r.hidden).map(r => r.dataset.prow));
@@ -207,8 +220,8 @@ const docsOf = st => st.docs;
     ok(sawMiss || sawAmber, `seed shows at least one data warning (missing ${sawMiss}, examples ${sawAmber})`);
     /* R9 §13: the KPI counts steps only, so "new + changed" never exceeds the step count */
     const dsp = ENG.diffProcess(seedP), sfl = flat(seedP.tobe);
-    const sum = { new: sfl.filter(x => dsp.nodes[x.id] === 'new').length, changed: sfl.filter(x => dsp.nodes[x.id] === 'changed').length };
-    ok((await page.textContent('[data-kpi-diff] b')).trim() === `${sum.new}+${sum.changed}` && sum.new + sum.changed <= sfl.length, `R9: KPI new+changed steps = diffProcess ${sum.new}+${sum.changed} (of ${sfl.length} steps)`);
+    const cs0 = ENG.changeSummary(seedP), sum = { new: cs0.added, changed: cs0.changed };
+    ok((await page.textContent('[data-kpi-diff] b')).trim() === `${sum.new}+${sum.changed}`, `R9: KPI new+changed steps = diffProcess ${sum.new}+${sum.changed} (of ${sfl.length} steps)`);
 
     console.log('# swimlanes: gateways in their own row, lanes fit or scroll inside the canvas');
     await nav(`/process/${pid}?mode=lanes`);
@@ -663,7 +676,7 @@ const docsOf = st => st.docs;
     await nav(`/process/${pid}?mode=tobe`);
     ok(!!(await page.$('[data-more] label.d-import:has-text("Import diagram file") [data-bpmn-file]')), 'R7: "⋯ More" offers "Import diagram file" (a new version)');
     await nav('/processes');
-    ok(await page.isVisible('label.d-import:has-text("Import BPMN")'), 'process index offers Import BPMN (new process)');
+    ok(await page.isVisible('label.d-import:has-text("Visio or BPMN")'), 'process index offers Import Visio or BPMN (new process)');
     const impPid = await importFile(`${OUT}/seed-tobe.bpmn`);
     const imp = await getProc(impPid);
     const cs = countNodes(seedP.tobe), ci = countNodes(imp.asis);
@@ -716,14 +729,18 @@ const docsOf = st => st.docs;
     ok(!(await page.$('.overlay')), 'create modal does not re-open after choosing import');
     const [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('label.d-import')]);
     const wf = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'));
-    await fc.setFiles(`${OUT}/foreign.bpmn`); await wf; await page.waitForURL(/mode=edit/); await settle();
+    await fc.setFiles(`${OUT}/foreign.bpmn`);
+    await page.waitForSelector('.overlay [data-imp-preview]');
+    ok((await page.getAttribute('.overlay [data-imp-choices]', 'data-imp-choices')) === '1' && !(await page.$('.overlay [data-imp-together]')) && /Pat Nobody/.test(await page.textContent('.overlay [data-imp-roles]')), 'R10 preview: 1 choice, nothing at the same time, lanes listed as roles');
+    await page.screenshot({ path: `${OUT}/r10-import-preview.png` });
+    await act('import'); await wf; await page.waitForURL(/mode=edit/); await settle();
     const imp3 = await getProc(page.url().match(/process\/([\w-]+)/)[1]);
     const f3 = flat(imp3.asis);
     ok(imp3.name === 'Northwind returns' && f3.map(n => n.title).join('|') === 'Log the return|Inspect item|Restock', 'foreign BPMN: tasks became steps in order');
     ok(imp3.asis[0].type === 'trigger' && imp3.asis[0].title === 'Return requested' && imp3.asis[imp3.asis.length - 1].type === 'end', 'foreign BPMN: start event -> trigger, end event -> end');
     const g3 = imp3.asis.find(isGw);
     ok(g3 && g3.type === 'decision' && g3.branches.map(b => b.label).join('|') === 'Yes|No', 'foreign BPMN: exclusive gateway -> decision with Yes/No branches');
-    ok(f3[0].owner === me && f3[1].owner === other1.id, 'foreign BPMN: lane names match people; unknown lane -> current persona');
+    ok(!f3[0].owner && f3[0].ownerRole === 'Pat Nobody' && !f3[1].owner && f3[1].ownerRole === other1.name, 'R10 foreign BPMN: lanes become roles; a lane is never matched to a workspace person by name');
     await shot('process-imported-foreign'); await overflow('imported process edit @1440');
 
     console.log('# R3: start a project from this to-be');
@@ -1051,7 +1068,7 @@ const docsOf = st => st.docs;
     ok(ipi.tobeRev === 2 && (await page.textContent('[data-ver-label]')).trim() === `v${ipi.version || 1} · Future rev 2` && /imp-revised\.bpmn/.test(await page.textContent('[data-ver-from]')), 'R6: header version label updates to "Future rev 2" from the imported file');
     ok(/Future rev 2/.test(await page.textContent('[data-ver-current]')), 'R6: version picker "Current" shows the new revision');
     ok((await page.textContent('[data-kpi-diff] b')).trim() === `${dsI.new}+${dsI.changed}` && (await page.textContent('.d-hdr .kpi >> nth=0')).includes(String(flat(ipi.tobe).length)), `R6: KPIs agree with diffSummary after import (${dsI.new}+${dsI.changed}, ${flat(ipi.tobe).length} steps)`);
-    ok(new RegExp(`${flat(ipi.tobe).length} steps · ${dsI.new + dsI.changed} changed`).test(await page.textContent('[data-hdr-toggle]')), 'R6: phone summary row agrees too');
+    ok((await page.textContent('[data-hdr-toggle]')).includes(ENG.changeSummary(ipi).text || 'steps'), 'R6: phone summary row agrees too (engine changeSummary)');
     const fi = flat(ipi.tobe);
     const keptOk = fl.every(o => { const n = fi.find(x => x.id === o.id); return n && n.title === (o.id === ren.id ? o.title + ' (revised)' : o.title) && JSON.stringify(n.data || []) === JSON.stringify(o.data || []) && JSON.stringify(n.subs || []) === JSON.stringify(o.subs || []) && n.owner === o.owner && (n.from || '') === (o.from || ''); });
     ok(keptOk && fi.length === fl.length, 'matched steps keep id, data tags, sub-steps, owners and as-is links');
@@ -1124,8 +1141,11 @@ const docsOf = st => st.docs;
     ok(await page.isVisible(`#canvas .node.d-nt-wait[data-node="${wN.id}"] [data-wait]:has-text("${wN.wait}")`) && /^Wait (up to|for) /.test((await page.textContent(`#canvas .node[data-node="${wN.id}"] [data-wait]`)).trim()), 'wait card: distinct (pill) and shows the wait ("Wait up to …")');
     ok(!/\bwait\s*·\s*\d/i.test(await page.textContent(`#canvas .node[data-node="${wN.id}"] .num`)), 'R9 §11: the wait card never reads "WAIT · 2"');
     ok(await page.isVisible(`#canvas .node.d-nt-msg[data-node="${mN.id}"] [data-msg="${mN.direction === 'receive' ? 'receive' : 'send'}"] .d-party:has-text("${mN.party}")`), 'message card: distinct, shows direction and party');
-    const icons = await page.$$eval('#canvas .node[data-ntype] .ic', els => els.map(e => e.closest('.node').dataset.ntype + ':' + !!e.querySelector('svg')));
-    ok(['subprocess:true', 'wait:true', 'message:true'].every(x => icons.includes(x)) && icons.includes('step:false'), 'typed nodes carry their own icon; plain steps keep their number');
+    /* R10: typed nodes are numbered like steps (map numbering includes Wait and Message); their icon sits in the kicker */
+    const icons = await page.$$eval('#canvas .node[data-ntype]:not(.trigger)', els => els.map(e => e.dataset.ntype + ':' + !!e.querySelector('.num .d-ntki svg') + ':' + /^\d+$/.test(e.querySelector('.ic').textContent.trim())));
+    ok(['subprocess:true:true', 'wait:true:true', 'message:true:true'].every(x => icons.includes(x)) && icons.includes('step:false:true'), 'typed nodes carry their own icon; every node, typed or not, keeps its number');
+    const nums = await page.$$eval('#canvas > .flow > .node[data-ntype]:not(.trigger) .ic', els => els.map(e => +e.textContent.trim()));
+    ok(nums.length > 1 && nums.every((v, i) => i === 0 || v > nums[i - 1]), `R10: map numbers run in order through waits and messages (${nums.join(',')})`);
     await shot('r6-typed-map');
     await page.click(spCard + ' [data-open-sub]'); await page.waitForURL(new RegExp(`/process/${called.id}$`)); await settle();
     ok((await page.textContent('#app h1')).trim() === called.name, '"Open" on a subprocess drills into the called process');
@@ -1238,7 +1258,7 @@ const docsOf = st => st.docs;
     ok(!st.docs.dataElement.some(d => d.data.note && /BPMN import of r6-rt-1/.test(d.data.note)), 'round trip in the same workspace creates no duplicate data elements');
     await nav(`/process/${rtPid}?mode=tobe`);
     const x2 = await exportBpmn('r6-rt-2', true);
-    const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
+    const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|_p\\d|_in\\d|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
     const noPid = x => x.replace(/(<pmoflow:node) id="[^"]*"/g, '$1'); /* R8: the PMOFlow id travels in the file; ids aside */
     const n1 = norm(noPid(x1), np.tobe, newPid), n2 = norm(noPid(x2), rt.tobe, rtPid);
     ok(n1 === n2, 'export -> import -> export gives the same BPMN (ids aside)' + (n1 === n2 ? '' : ': ' + diffAt(n1, n2)));
@@ -1492,7 +1512,7 @@ const docsOf = st => st.docs;
     await page.check('.overlay [data-ichip] [data-have]');
     await saving(() => act('save')); await settle(); st = await state();
     const ra = st.docs.dataElement.map(d => d.data).find(d => d.name === 'Remittance advice') || {};
-    ok(ra.avail === 'live' && ra.owner === me, 'R9: switched on = "We have it"; owner defaults to whoever does the step');
+    ok(ra.avail === 'live' && ra.owner === me, 'R9: switched on = "We have it"; owner defaults to whoever does the step' + (ra.avail === 'live' && ra.owner === me ? '' : ` (avail ${ra.avail}, owner ${ra.owner}, me ${me})`));
     await page.click('.d-modes [data-mode="diff"]'); await page.waitForURL(/mode=diff/);
     ok(await page.isVisible('#canvas .node:has-text("Pay by bank transfer automatically") .chip.diff-new'), 'What changed: the new Future step is marked NEW');
     await jargonCheck('new process, What changed');
@@ -1629,19 +1649,19 @@ const docsOf = st => st.docs;
       const okDec = D.nodes.find(n => n.type === 'decision' && /^request ok\?$/i.test(n.title));
       ok(!!okDec && !okDec.branches.some(b => b.steps.some(t => /legal|returned/i.test(t))), 'R9 §9 (B1): step 3’s choice no longer carries step 5’s clause');
       ok(!!okDec && okDec.branches[1].end && !okDec.branches[0].steps.some(t => /^forward/i.test(t)) && /ends here/i.test(okDec.branches[1].hint), 'R9 §9: "If OK, forwards to IT": Yes carries on to IT, No ends the process ("Ends here")');
-      ok(D.persons.includes('mc') && D.nodes.some(n => /^update the employee exit form$/i.test(n.title)), 'R9 §9: "HR Manager (Maya Chen) updates…" -> owner Maya Chen, title "Update the employee exit form"');
+      ok(!D.persons.length && D.nodes.some(n => /^update the employee exit form$/i.test(n.title)) && /Who: HR Manager/.test(D.page) && /Named in the procedure: Maya Chen/.test(D.page), 'R10 §2: "HR Manager (Maya Chen) updates…" -> role HR Manager (name kept as written), never linked to the workspace person; title "Update the employee exit form"');
       ok(D.systems.includes('ServiceNow') && D.systems.includes('HRIS') && D.nodes.some(n => /^disable accounts$/i.test(n.title)), 'R9 §9: ServiceNow and HRIS become the step system (and leave the title)');
       ok(!/Doesn.t go back|Sub-step/i.test(D.page) && /Detail step/.test(D.page), 'R9 §11: import uses "Detail step" and never "Doesn’t go back"');
-      const ndExit = D.ndOwners; ok(ndExit.includes('Maya Chen') && ndExit.includes('Clerk') && !ndExit.includes('—'), 'R9 §8: proposed information shows the step owner (Maya Chen, Clerk), never "—": ' + ndExit.join(', '));
+      const ndExit = D.ndOwners; ok(ndExit.includes('HR Manager') && ndExit.includes('Clerk') && !ndExit.includes('—') && !ndExit.includes('Maya Chen'), 'R9 §8 / R10: proposed information shows the step’s role (HR Manager, Clerk), never "—" and never a workspace person: ' + ndExit.join(', '));
       await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
       ok(await page.inputValue('.overlay [data-pname]') === 'Employee offboarding', 'R9 §9 (B2): the name comes from the title line: ' + await page.inputValue('.overlay [data-pname]'));
       const wS = page.waitForURL(/\/process\/[\w-]+\?mode=asis/, { timeout: 20000 }); await act('create'); await wS; await settle();
       const offPid = page.url().match(/process\/([\w-]+)/)[1];
       const off = await getProc(offPid); const S9 = await state(); const des = S9.docs.dataElement.map(d => d.data);
       const offAll = allNodes(off.asis);
-      ok(offAll.some(n => n.type === 'end' && /request rejected/i.test(n.title)) && offAll.filter(n => n.type === 'step').some(n => n.system === 'ServiceNow') && offAll.some(n => n.owner === 'mc' && /exit form/i.test(n.title)), 'R9 §9: the saved map keeps the "Stop: request rejected" end, the system and the named owner');
+      ok(offAll.some(n => n.type === 'end' && /request rejected/i.test(n.title)) && offAll.filter(n => n.type === 'step').some(n => n.system === 'ServiceNow') && offAll.some(n => !n.owner && n.ownerRole === 'HR Manager' && /Maya Chen/.test(n.note || '') && /exit form/i.test(n.title)) && !offAll.some(n => n.owner === 'mc'), 'R9 §9 / R10: the saved map keeps the "Stop: request rejected" end, the system and the role (the name stays in the note)');
       const exitDe = des.find(d => /employee exit form/i.test(d.name)), reqDe = des.find(d => /access request form/i.test(d.name));
-      ok(exitDe && exitDe.owner === 'mc' && reqDe && reqDe.ownerRole === 'Clerk', 'R9 §8: pasted information is owned by its step’s owner (Maya Chen) or role (Clerk)');
+      ok(exitDe && exitDe.ownerRole === 'HR Manager' && exitDe.owner === me && reqDe && reqDe.ownerRole === 'Clerk' && exitDe.avail === 'unchecked', 'R9 §8 / R10: pasted information shows its step’s role (HR Manager, Clerk), the importer checks it, and it starts "Not checked yet"');
       if (reqDe) { await nav(`/data/${reqDe.id}`); const ow = (await page.textContent('.hdr .res')).replace(/\s+/g, ' '); ok(/Clerk/.test(ow) && !/—|None\b/.test(ow), 'R9 §8: the data page shows the role as owner, never "—": ' + ow.slice(0, 80)); }
       await nav(`/process/${offPid}?mode=asis`); await shot('r9-import-saved-map');
       ok(await page.isVisible('#canvas .node.end:has-text("Stop: request rejected")'), 'R9 §9: the map draws the rejected path ending');
@@ -1655,6 +1675,141 @@ const docsOf = st => st.docs;
       ok(/name/i.test(await page.textContent('.overlay [data-name-err]')), 'R9 §9: saving without a name asks for one');
       await act('cancel');
     }
+
+    /* ===================== R10 S2: process import and rigor ===================== */
+    console.log('# R10 §1: paste parser, sentence level (the reviewers\' vendor onboarding SOP)');
+    {
+      const VENDOR = ['Vendor Onboarding',
+        '1. The requester submits a new vendor request form with the vendor name and contact details.',
+        '2. Procurement sends the vendor the onboarding packet, usually by email, sometimes fax.',
+        '3. The vendor returns the signed W-9 and the certificate of insurance.',
+        '4. Enter the vendor into the ERP and check the tax ID against the W-9.',
+        '5. Compliance screens the vendor against the restricted-party list within 2 business days.',
+        '6. If the annual spend is over $25,000, the Finance Manager approves the vendor. Otherwise, the Procurement Manager approves.',
+        '7. Treasury collects the bank details through the secure supplier form and confirms them with a call-back.',
+        '8. Accounts Payable creates the vendor master record and verifies the remittance address.',
+        '9. Procurement emails the vendor a welcome letter and closes the request.'].join('\n');
+      await nav('/import');
+      await page.fill('[data-sop]', VENDOR); await page.dispatchEvent('[data-sop]', 'input');
+      await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+      const V = await page.evaluate(() => ({ tops: [...document.querySelectorAll('.is-steps > .is-step')].map(li => ({ type: li.dataset.type, title: (li.querySelector('.is-title') || {}).value || '', n: (li.querySelector(':scope > .is-n') || {}).textContent || '' })),
+        roles: [...document.querySelectorAll('[data-owner-role]')].map(e => e.dataset.ownerRole), notes: [...document.querySelectorAll('[data-step-note]')].map(e => e.textContent),
+        found: (document.querySelector('[data-found]') || {}).textContent || '', head: (document.querySelector('.is-draft h3 .n') || {}).textContent || '', nd: [...document.querySelectorAll('[data-nd-name]')].map(e => e.value), dup: document.querySelectorAll('.is-dupmsg').length }));
+      ok(V.tops.length === 9, `R10: nine numbered lines, nine items in the draft (${V.tops.length})`);
+      ok(V.tops[1].title === 'Send the vendor the onboarding packet' && V.notes.some(t => /usually by email, sometimes fax/.test(t)) && !V.tops.some(t => /^usually|^sometimes/i.test(t.title)), 'R10 (Karen): "usually by email, sometimes fax" stays in step 2’s note, never its own step');
+      ok(!V.roles.some(r => /^enter\b/i.test(r)), 'R10 (Karen): no role made from a verb phrase ("Enter the vendor")');
+      ok(V.tops[3].title === 'Enter the vendor into the ERP and check the tax ID against the W-9', 'R10 (Jordan): no truncation ("…and check the tax ID against the W-9")');
+      ok(/Teams involved: .*Procurement.*Compliance.*Treasury/.test(V.found) && /Accounts Payable/.test(V.found), 'R10: the teams in the text are listed: ' + V.found.replace(/\s+/g, ' ').slice(0, 160));
+      ok(V.nd.includes('Bank details') && !V.nd.some(n => /remittance details/i.test(n)) && !V.dup, 'R10 §2: "bank details" is proposed fresh; nothing links to the seed’s "Bank remittance details"');
+      await shot('r10-vendor-draft');
+      /* delete a step: the count recomputes */
+      const before = +(/(\d+) steps?/.exec(V.head) || [])[1];
+      await page.click('.is-steps > .is-step:nth-child(9) > .is-ctl [data-rm]'); await settle();
+      const after = +(/(\d+) steps?/.exec(await page.textContent('.is-draft h3 .n')) || [])[1];
+      ok(after === before - 1 && (await page.textContent('[data-found]')).includes(`${after} steps`), `R10: deleting a step recomputes the count everywhere (${before} -> ${after})`);
+      await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+      const desc0 = await page.inputValue('.overlay textarea[name=desc]');
+      ok(!/\d+\s+steps?/.test(desc0), 'R10: the description carries no step count that could go stale: ' + desc0);
+      ok(await page.inputValue('.overlay [data-pname]') === 'Vendor onboarding', 'R10: name from the title line');
+      await page.fill('.overlay [data-pname]', 'Vendor onboarding (pasted)');
+      const wS = page.waitForURL(/\/process\/[\w-]+\?mode=asis/, { timeout: 20000 }); await act('create'); await wS; await settle();
+      const vPid = page.url().match(/process\/([\w-]+)/)[1];
+      const vp = await getProc(vPid); const S10 = await state(); const des = S10.docs.dataElement.map(d => d.data);
+      const used = [...new Set(allNodes(vp.asis).flatMap(n => n.data || []))];
+      const seedBank = des.find(d => d.name === 'Bank remittance details');
+      ok(used.length > 0 && !used.includes(seedBank && seedBank.id) && used.every(id => (des.find(d => d.id === id) || {}).avail === 'unchecked'), `R10 §2: ${used.length} pieces of information created fresh in this process, none from the seed, each "Not checked yet"`);
+      ok(!flat(vp.asis).some(n => n.owner && n.owner !== me) && flat(vp.asis).filter(n => n.ownerRole).length >= 8, 'R10 §2: owners come only from the text (roles), never a seed person');
+      ok(!/\d+\s+steps?/.test(vp.desc || ''), 'R10: the saved description has no step count');
+      ok(await page.isVisible('[data-touches] [data-touch="Procurement"]') && await page.isVisible('[data-touches] [data-touch="Treasury"]'), 'R10: "Teams involved" on the saved process lists the teams from the text');
+      const bank = des.find(d => d.name === 'Bank details' && used.includes(d.id));
+      if (bank) {
+        await nav(`/data/${bank.id}`);
+        ok(/Not checked yet/.test(await page.textContent('#app')) && !/Connected/.test(await page.textContent('.hdr')) && await page.isVisible('[data-unchecked] [data-confirm-live]'), 'R10: pasted information reads "Not checked yet" (never "Connected") and its owner can confirm it');
+        await shot('r10-data-unchecked');
+      } else ok(false, 'R10: "Bank details" was created');
+      /* the step count on the map follows edits and deletes */
+      await nav(`/process/${vPid}?mode=asis`);
+      const n0 = flat(vp.asis).length;
+      ok((await page.textContent('[data-hdr-toggle]')).includes(`${n0} steps`), `R10: the header counts ${n0} steps`);
+      const vp2 = JSON.parse(JSON.stringify(vp)); vp2.asis = vp2.asis.filter(n => n.type !== 'step' || n !== vp2.asis.find(x => x.type === 'step'));
+      ok(await putDoc('process', vPid, vp2, 'E2E: remove a step') === 200, 'fixture: one step removed');
+      await nav(`/process/${vPid}?mode=asis`);
+      ok((await page.textContent('[data-hdr-toggle]')).includes(`${n0 - 1} steps`), `R10: after a delete the header counts ${n0 - 1} steps`);
+      await shot('r10-vendor-map');
+    }
+
+    console.log('# R10 §6: start from a template');
+    {
+      await nav('/processes');
+      ok(await page.isVisible('[data-start-template]') && await page.isVisible('label.d-import:has-text("Visio")'), 'R10: the process list offers "Start from a template" and Visio import (Simple)');
+      await page.click('[data-start-template]'); await page.waitForURL(/\/import\?template=1/); await page.waitForSelector('[data-templates][open] [data-template]', { timeout: 15000 });
+      const names = await page.$$eval('[data-template] b', els => els.map(e => e.textContent));
+      ok(names.join('|') === 'Vendor onboarding|Employee onboarding|Employee offboarding|Invoice approval|Purchase request|Customer refund', 'R10: six templates: ' + names.join(', '));
+      await shot('r10-templates'); await overflow('templates @1440');
+      await page.click('[data-template="employee-offboarding"]'); await page.waitForSelector('.is-draft'); await settle();
+      const T = await page.evaluate(() => ({ roles: [...document.querySelectorAll('[data-owner-role]')].map(e => e.dataset.ownerRole), nd: [...document.querySelectorAll('[data-nd-name]')].map(e => e.value), persons: document.querySelectorAll('[data-owner-person]').length }));
+      ok(T.roles.includes('HR manager') && T.roles.includes('IT technician') && !T.persons && T.nd.includes('Termination record'), 'R10: the template drafts editable steps with roles and information');
+      await page.fill('.is-steps > .is-step:first-child .is-title', 'Record the termination, last day and reason'); await page.dispatchEvent('.is-steps > .is-step:first-child .is-title', 'input');
+      await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+      ok(await page.inputValue('.overlay [data-pname]') === 'Employee offboarding', 'R10: the template names the process');
+      await page.fill('.overlay [data-pname]', 'Employee offboarding (template)');
+      const wT = page.waitForURL(/\/process\/[\w-]+\?mode=asis/, { timeout: 20000 }); await act('create'); await wT; await settle();
+      const tp = await getProc(page.url().match(/process\/([\w-]+)/)[1]);
+      ok(flat(tp.asis)[0].title === 'Record the termination, last day and reason' && flat(tp.asis).every(n => n.ownerRole && !(n.owner && n.owner !== me)) && allNodes(tp.asis).some(n => n.type === 'decision'), 'R10: the saved template keeps the edit, the roles and the choice');
+      await shot('r10-template-map');
+    }
+
+    console.log('# R10 §3: Visio (.vsdx) import with the same preview as BPMN');
+    {
+      await nav('/processes');
+      const w = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 20000 });
+      await page.setInputFiles('[data-bpmn-file]', '/tmp/pmo-design/purchase-request.vsdx');
+      await page.waitForSelector('.overlay [data-imp-preview]', { timeout: 15000 });
+      const P = await page.evaluate(() => ({ kind: document.querySelector('.overlay [data-impsum]').dataset.impKind, steps: document.querySelector('.overlay [data-imp-steps]').dataset.impSteps, choices: document.querySelector('.overlay [data-imp-choices]').dataset.impChoices, roles: (document.querySelector('.overlay [data-imp-roles]') || {}).textContent || '', nd: (document.querySelector('.overlay [data-imp-newdata]') || {}).textContent || '' }));
+      ok(P.kind === 'vsdx' && P.steps === '4' && P.choices === '1' && /Requester/.test(P.roles) && /Purchasing/.test(P.roles) && /Purchase request form/.test(P.nd), `R10: Visio preview: ${P.steps} steps, ${P.choices} choice, lanes as roles, a document shape as information`);
+      await page.screenshot({ path: `${OUT}/r10-visio-preview.png` });
+      await act('import'); await w; await page.waitForURL(/mode=edit/); await settle();
+      const vx = await getProc(page.url().match(/process\/([\w-]+)/)[1]);
+      const fx = flat(vx.asis);
+      ok(vx.name === 'Purchase request' && fx.map(n => n.title).join('|') === 'Submit purchase request|Check budget & quotes|Director approves|Raise purchase order', 'R10: Visio shapes became steps in flow order: ' + fx.map(n => n.title).join(' | '));
+      ok(fx[0].ownerRole === 'Requester' && fx.slice(1).every(n => n.ownerRole === 'Purchasing') && !fx.some(n => n.owner), 'R10: swimlanes became roles');
+      const g = allNodes(vx.asis).find(n => n.type === 'decision');
+      ok(g && g.title === 'Over $5,000?' && g.branches.map(b => b.label).join('|') === 'Yes|No', 'R10: the decision shape became a choice with its connector labels');
+      ok((fx[0].data || []).length === 1, 'R10: the document shape connected to step 1 is its information');
+      await shot('r10-visio-imported');
+    }
+
+    console.log('# R10 §5: RACI per step (folded, optional)');
+    {
+      const procs = (await state()).docs.process.map(d => d.data);
+      const rp = procs.find(p => p.name === 'Employee offboarding (template)');
+      const s0 = flat(rp.tobe && rp.tobe.length ? rp.tobe : rp.asis)[0];
+      const verKey = rp.tobe && rp.tobe.length ? 'tobe' : 'asis';
+      await nav(`/process/${rp.id}?mode=edit&v=${verKey}`);
+      await page.click(`[data-ed="edit"][data-id="${s0.id}"]`); await page.waitForSelector('.overlay [data-raci-fields]');
+      ok(!(await page.getAttribute('.overlay [data-raci-fields]', 'open')) && await page.isVisible('.overlay [data-raci-fields] summary:has-text("Who else is involved (optional)")'), 'R10: "Who else is involved (optional)" is folded by default');
+      await page.click('.overlay [data-raci-fields] summary');
+      await page.fill('.overlay [name=raci_a]', 'HR director'); await page.fill('.overlay [name=raci_c]', 'Legal, Payroll'); await page.fill('.overlay [name=raci_i]', other1.name);
+      await overflow('RACI dialog @1440'); await page.screenshot({ path: `${OUT}/r10-raci-dialog.png` });
+      await saving(() => act('save'));
+      const rp2 = await getProc(rp.id); const s1 = flat(rp2[verKey]).find(n => n.id === s0.id);
+      ok(s1.raci && s1.raci.a === 'HR director' && s1.raci.c.join('|') === 'Legal|Payroll' && s1.raci.i[0] === other1.id, 'R10: RACI saved on the step (roles as text, a typed person name as that person)');
+      await nav(`/process/${rp.id}/step/${s0.id}`);
+      const rr = (await page.innerText('[data-raci]')).replace(/\s+/g, ' ');
+      ok(/Responsible/i.test(rr) && /Accountable HR director/i.test(rr) && /Consulted Legal Payroll/i.test(rr) && rr.toLowerCase().includes('informed ' + other1.name.toLowerCase()), 'R10: the step page shows R, A, C and I: ' + rr);
+      await shot('r10-raci-step');
+      {
+        const ax = await (async () => { await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '1')); await nav(`/process/${rp.id}?mode=${verKey}`); const x = await exportBpmn('r10-raci'); await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0')); return x; })();
+        ok(/<pmoflow:raci accountable="HR director"[^>]*consulted="Legal, Payroll"/.test(ax) && /Accountable: HR director/.test(ax), 'R10: the BPMN export carries RACI (extension and documentation)');
+        ok(/<pmoflow:duration of="sla" text="[^"]+" businessDays="\d+" iso="P\d+D"/.test(ax), 'R10: durations export as business-day text plus an ISO duration');
+        ok(/<bpmn:lane id="Lane_\d+" name="HR manager">/.test(ax) && /<bpmn:dataObjectReference /.test(ax), 'R10: lanes by role and information as BPMN data objects');
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await nav('/import?template=1'); await page.waitForSelector('[data-templates][open] [data-template]'); await overflow('templates @390'); await shot('r10-templates-390');
+    await page.click('[data-template="vendor-onboarding"]'); await page.waitForSelector('.is-draft'); await overflow('template draft @390'); await shot('r10-template-draft-390');
+    await nav('/processes'); await overflow('processes R10 @390'); await shot('r10-processes-390');
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     console.log('# R9 §8: the data page is consistent (samples, rules)');
     {
@@ -1677,7 +1832,8 @@ const docsOf = st => st.docs;
       const S = await state(); const P = S.docs.process.find(d => d.id === pid).data; const dd = ENG.diffProcess(P); const fs_ = flat(P.tobe);
       const hl = (await page.textContent('[data-hdr-toggle]')).replace(/\s+/g, ' ');
       const expN = fs_.filter(x => dd.nodes[x.id] === 'new').length, expC = fs_.filter(x => dd.nodes[x.id] === 'changed').length;
-      ok(hl.includes(`${fs_.length} steps`) && (!expN || hl.includes(`${expN} new`)) && (!expC || hl.includes(`${expC} changed`)) && expN + expC <= fs_.length, `R9 §13: headline counts make sense: "${hl.trim()}"`);
+      const cs1 = ENG.changeSummary(P);
+      ok(cs1.text ? hl.includes(cs1.text) : hl.includes(`${fs_.length} steps`), `R10 §1: headline shows the one change count: "${hl.trim()}"`);
       const sysTxt = await page.textContent('[data-systems]').catch(() => ''); const teamTxt = await page.textContent('[data-touches]').catch(() => '');
       ok(/ERP/.test(sysTxt) && !/\bERP\b/.test(teamTxt), 'R9 §13: "Teams involved" lists teams only; ERP sits under "Systems touched"');
       const dia = await page.$$eval('#canvas .diamond', ds => ds.map(d => !!d.querySelector('[data-gw-label]')));
@@ -1740,9 +1896,11 @@ const docsOf = st => st.docs;
     await nav(`/process/${pid}?mode=tobe`);
     const ph = await page.evaluate(() => ({ top: document.querySelector('#canvas').getBoundingClientRect().top - document.querySelector('#app').getBoundingClientRect().top, tabs: !!document.querySelector('.d-hdr .d-modes').offsetParent, kpis: !!document.querySelector('.d-hdr .kpis').offsetParent, desc: !!(document.querySelector('.d-hdr .d-desc') || {}).offsetParent, sum: !!document.querySelector('[data-hdr-toggle]').offsetParent }));
     ok(ph.sum && ph.tabs && !ph.kpis && !ph.desc, 'phone: tabs plus one summary row; description and KPIs collapsed');
-    ok(ph.top < 220, `phone (Advanced, five tabs): process map starts near the top of the page content (${Math.round(ph.top)} px)`);
+    /* R10: the summary row now also says "· 1 removed" (S1's one change count), which wraps to a second line on a phone */
+    ok(ph.top < 240, `phone (Advanced, five tabs): process map starts near the top of the page content (${Math.round(ph.top)} px)`);
+    if (ph.top >= 220) console.log('    debug header:', await page.evaluate(() => [...document.querySelectorAll('.d-hdr > div > *, .d-hdr .hdr-side > *, #canvas > *')].slice(0, 14).map(e => e.className + ':' + Math.round(e.getBoundingClientRect().height)).join(' | ')));
     { const hl = await page.textContent('[data-hdr-toggle]'); const [vs, nn, cc] = (await page.getAttribute('[data-headline]', 'data-headline')).split('/').map(Number);
-      ok(/Future · \d+ steps · (\d+ new|\d+ changed)/.test(hl) && nn + cc <= vs, 'R9 §13 phone summary row: which map, steps, then new/changed steps that add up: ' + hl.replace(/\s+/g, ' ').trim()); }
+      ok(/Future · (\d+ new|\d+ changed|\d+ removed)/.test(hl), 'R10 phone summary row: which map, then the one change count: ' + hl.replace(/\s+/g, ' ').trim()); }
     await page.click('[data-hdr-toggle]');
     ok(await page.isVisible('.d-hdr .d-desc') && await page.isVisible('.d-hdr .kpis') && await page.getAttribute('[data-hdr-toggle]', 'aria-expanded') === 'true', 'phone: expand shows the description and KPIs');
     await overflow('phone header expanded @390'); await shot('phone-process-expanded');

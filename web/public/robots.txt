@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Disallow: /concepts/pmoflow/
+Sitemap: https://www.necogoode.com/pmoflow/sitemap.xml

@@ -135,8 +135,10 @@ function statusFacts(docs, projectId, today, engine) {
 function applyTruth(facts, t, docs, today, engine, L) {
   const wById = Object.fromEntries(list(docs, 'workItem').map(w => [w.id, w]));
   const lateIds = new Set(t.late || []), runIds = new Set(t.runningLate || []);
-  facts.stats = Object.assign({}, facts.stats, { total: t.tasks.total, done: t.tasks.done, pct: t.tasks.total ? Math.round(100 * t.tasks.done / t.tasks.total) : 0,
-    late: t.lateCount, slip: t.runningLateCount, runningLate: t.runningLateCount, finish: t.forecastFinish, target: t.target, actualFinish: t.actualFinish });
+  /* R10 §2/§5: pct is the share of the budgeted work done (EV ÷ budget), and lateText the one late split */
+  facts.stats = Object.assign({}, facts.stats, { total: t.tasks.total, done: t.tasks.done, pct: t.pctDone != null ? t.pctDone : (t.tasks.total ? Math.round(100 * t.tasks.done / t.tasks.total) : 0),
+    late: t.lateCount, lateText: t.lateText || null, pastDue: t.pastDueCount, finishAfterDue: t.finishAfterDueCount,
+    slip: t.runningLateCount, runningLate: t.runningLateCount, finish: t.forecastFinish, target: t.target, actualFinish: t.actualFinish });
   /* the late and running-late tasks are exactly projectTruth's lists, in that order */
   const fc = engine.forecastAll ? engine.forecastAll(docs, today) : {};
   /* R9 §1: one list of late tasks (past due, or will finish after its due date); days are business days */
@@ -166,7 +168,7 @@ function applyTruth(facts, t, docs, today, engine, L) {
   facts.stepsLeft = t.stepsLeft != null && isFinite(+t.stepsLeft) ? +t.stepsLeft : (t.launchSteps || []).filter(x => !x.done).length;
   facts.burndown = t.burndown || null;
   facts.truth = { forecastFinish: t.forecastFinish, actualFinish: t.actualFinish, target: t.target, bufferDays: t.bufferDays, bufferUnit: t.bufferUnit || 'business days',
-    lateCount: t.lateCount, blockers: facts.blockers.map(b => b.name), label: t.label, rag: t.rag, sentence: facts.summary.sentence,
+    lateCount: t.lateCount, lateText: t.lateText || null, blockers: facts.blockers.map(b => b.name), label: t.label, rag: t.rag, sentence: facts.summary.sentence,
     tasks: Object.assign({}, t.tasks), cost: facts.cost, testing: facts.testing ? facts.testing.next : null, stepsLeft: facts.stepsLeft };
 }
 /* R9 §13: "waiting on" only along a real dependency edge: the task the forecast waits for must be one of this task's own deps */
@@ -940,7 +942,7 @@ async function run(kind, body, docs, today) {
     const text = typeof body.text === 'string' ? body.text : '';
     if (!text.trim()) return { status: 400, body: { error: 'text is required' } };
     if (text.length > MAX_SOP) return { status: 413, body: { error: `text exceeds ${MAX_SOP} characters` } };
-    const fallback = sopRules(text, docs);
+    const fallback = require('./pmoflow-import').sopRules(text, docs);   /* R10 S2: the rules parser lives in pmoflow-import.js */
     if (!configured()) return { status: 200, body: Object.assign(fallback, { source: 'rules' }) };
     try {
       const people = list(docs, 'person').map(p => ({ id: p.id, name: p.name, role: p.role, bu: p.bu }));

@@ -154,7 +154,7 @@ export function render(params) {
   const projects = store.list('project');
   if (!prj) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · Testing</div><h1>Testing</h1><p>Project not found.</p></div></section>
     <div class="home-grid">${projects.map(p => `<a class="tile" href="${link('/testing/' + p.id)}" data-link><h4>${esc(p.name)}</h4><p>${esc(p.desc || '')}</p></a>`).join('') || '<div class="empty">No projects yet.</div>'}</div>`;
-  if (!isAdv(prjId)) return simpleRender(prj);
+  if (!isAdv(prjId)) return simpleRender(prj, params.q && params.q.de);
   const des = projectData(prj);
   let did = params.q && params.q.de && des.some(d => d.id === params.q.de) ? params.q.de : ui.sel[prjId];
   if (!des.some(d => d.id === did)) did = des[0] && des[0].id;
@@ -166,19 +166,23 @@ export function render(params) {
   const sc = scriptsFor(prj);
   const scn = scenariosFor(prj);
   const uatIds = uatItems(prj).map(x => x.id);
-  const devCov = runs.some(r => r.env === 'dev') ? coverageOf(latestBy(prjId, 'dev'), caseIds) : null;
-  const uatCov = runs.some(r => r.env === 'uat') ? coverageOf(latestBy(prjId, 'uat'), caseIds.concat(uatIds)) : null;
+  /* R10 §4 ONE denominator: both coverage tiles are projectTruth.testing's stages (Try it out / Business sign-off), the
+     same numbers the Simple page, the Launch page and the trace strip show. Never "—" next to a failing check. */
+  const tt = (eng('projectTruth', store.state.docs, prjId, store.state.today) || {}).testing || {};
+  const stg = k => (Array.isArray(tt.stages) ? tt.stages : []).find(x => x && x.key === k) || null;
+  const covOf = st => st ? { covered: +st.passed || 0, total: +st.total || 0, fails: (+st.failed || 0), blocked: +st.blocked || 0, run: !!st.run } : null;
+  const devCov = covOf(stg('system')), uatCov = covOf(stg('uat'));
   const covKpi = (label, cov, attr) => { const full = cov && cov.covered === cov.total && !cov.fails && !cov.blocked;
-    return `<div class="kpi" data-cov="${attr}"><b class="${cov ? (full ? 'pass' : 'fail') : ''}">${cov ? `${cov.covered}/${cov.total}` : '—'}</b><span>${label}${cov && cov.fails ? ` · ${cov.fails} fail` : ''}${cov && cov.skipped ? ` · ${cov.skipped} skipped` : ''}</span></div>`; };
+    return `<div class="kpi" data-cov="${attr}" data-cov-n="${cov ? `${cov.covered}/${cov.total}` : '0/0'}"><b class="${cov && cov.total ? (full ? 'pass' : 'fail') : ''}">${cov ? `${cov.covered}/${cov.total}` : '0/0'}</b><span>${label}${cov && cov.fails ? ` · ${cov.fails} failed` : ''}${cov && cov.total && !cov.run ? ' · not run yet' : ''}</span></div>`; };
   const openDefects = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done').length;
 
   const header = `<section class="hdr"><div>
       <div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
       <div class="rl-title"><h1>Testing</h1><select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>${!store.advanced && ui.advLocal[prjId] ? '<button class="btn sm rs-link" data-hide-adv>Hide advanced tools</button>' : ''}</div>
       <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch; end-to-end scenarios walk each whole path. Environments: Dev, SIT, UAT and Prod verify. Coverage counts each item's latest result across every run in that environment.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Dev coverage · latest per case', devCov, 'dev')}${covKpi('UAT coverage · latest per item', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Try it out · tests passed', devCov, 'dev')}${covKpi('Business sign-off · tests passed', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
     ${tc ? `<div class="ts-strip ${tc.pass ? 'pass' : 'fail'}" data-tests-check="${tc.pass ? 'pass' : 'fail'}"><span class="rl-ic ${tc.pass ? 'pass' : 'fail'}">${tc.pass ? '✓' : '✕'}</span>
-      <div><b>Go-live check: ${esc(tc.label)}</b> — ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}
+      <div><b>Go-live check: ${tc.pass ? 'tests passed' : 'tests not passed yet'}</b>. ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}
     ${traceStrip(prj, des)}`;
 
   const projectCards = `<div class="ts-proj">${coverageCard(prj, des, runs, sc)}${cyclesCard(prj, des, sc)}${scriptsCard(prj, sc)}${scenariosCard(prj, scn)}${runsCard(prj, des, runs, caseIds, sc)}${defectsCard(prj)}
@@ -662,7 +666,8 @@ function genList(de, adv) {
     return `<li data-gen-case="${esc(c.id)}"><code>${c.input === '' ? '(empty)' : short(c.input)}</code><span class="${c.expect === 'reject' ? 'rej' : 'acc'}">${c.expect === 'reject' ? 'should be rejected' : 'should be accepted'}</span>${c.note ? `<small class="hint">${esc(c.note)}</small>` : ''}${adv && r != null ? `<span class="ts-row-src" data-sample-row="${esc(r)}">from sample row ${esc(r)}</span>` : ''}</li>`; }).join('')}${cs.length > 12 ? `<li class="hint">and ${cs.length - 12} more</li>` : ''}</ul>`;
 }
 
-function simpleRender(prj) {
+/* R10 §7: ?de=<data element> focuses that element's "Check sample data" row (opened and highlighted). */
+function simpleRender(prj, focusDe) {
   const prjId = prj.id;
   const projects = store.list('project');
   const f = testingFacts(prj);
@@ -679,9 +684,9 @@ function simpleRender(prj) {
   const step4Done = anyTests && f.stage === 'done' && f.passed === f.total;
   const cur = f.stage === 'create' ? 2 : f.stage === 'tryout' ? 3 : f.stage === 'business' ? 4 : 0;
   const problems = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done');
-  const fold = (rows, label, key) => rows.length ? `<details class="ts-fold" ${ui.fold && ui.fold[key] ? 'open' : ''} data-fold="${key}"><summary>${label}</summary><ul class="ts-srs">${rows.join('')}</ul></details>` : '';
+  const fold = (rows, label, key) => rows.length ? `<details class="ts-fold" ${(ui.fold && ui.fold[key]) || (key === 's1' && focusDe && rows.some(r => r.includes('data-focus'))) ? 'open' : ''} data-fold="${key}"><summary>${label}</summary><ul class="ts-srs">${rows.join('')}</ul></details>` : '';
   const row1 = d => { const p = latestProfile(d.id); const nr = !(d.fields || []).length;
-    return `<li class="ts-sr" data-s1="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b>
+    return `<li class="ts-sr${d.id === focusDe ? ' ts-focus' : ''}" data-s1="${esc(d.id)}" ${d.id === focusDe ? 'data-focus tabindex="-1"' : ''}><div class="ts-sr-t"><b>${esc(d.name)}</b>
         <small>${p ? `Sample checked ${esc(fmt(p.at))}: ${esc(plural(rowsOf(p), 'row'))}. No values were kept.` : d.sampleCsv ? 'A sample file is ready to check.' : 'No sample file yet (optional).'}</small>
         ${p ? `<ul class="ts-cols" data-col-lines>${columnLines(d, p)}</ul>` : ''}</div>
       <div class="ts-sr-a">${p ? (nr ? `<button class="btn" data-use-cols="${esc(d.id)}">Use these columns as the rules to test</button>` : '<span class="ts-okt">✓ Checked</span>')
@@ -755,6 +760,7 @@ async function useColumns(dataId) {
   toast(`${fields.length} rules to test added to ${de.name}. Next: create the tests.`);
 }
 function bindSimple(root, prj) {
+  const fx = root.querySelector('[data-focus]'); if (fx && !fx.dataset.focused) { fx.dataset.focused = '1'; try { fx.scrollIntoView({ block: 'center' }); fx.focus({ preventScroll: true }); } catch (e) { /* older browsers */ } }
   const adv = root.querySelector('[data-show-adv]'); if (adv) adv.onclick = () => { ui.advLocal[prj.id] = true; store.emit(); toast('Advanced testing tools shown on this page'); };
   root.querySelectorAll('details[data-fold]').forEach(d => d.addEventListener('toggle', () => { ui.fold = ui.fold || {}; ui.fold[d.dataset.fold] = d.open; }));
   const prof = async (d, csv, label) => {

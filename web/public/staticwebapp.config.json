@@ -7,10 +7,54 @@
       "/assets/*",
       "/ByteSizedTraining/*",
       "/concepts/bytesized-lesson1/*",
-      "/*.{svg,png,jpg,jpeg,gif,webp,ico,css,js,json,txt,xml,woff,woff2,ttf,otf,eot,map}"
+      "/*.{svg,png,jpg,jpeg,gif,webp,ico,css,js,json,txt,xml,woff,woff2,ttf,otf,eot,map}",
+      "/pmoflow/*"
     ]
   },
   "routes": [
+    {
+      "route": "/.auth/login/github",
+      "statusCode": 404
+    },
+    {
+      "route": "/pmoflow",
+      "redirect": "/pmoflow/",
+      "statusCode": 301
+    },
+    {
+      "route": "/pmoflow/pricing",
+      "rewrite": "/pmoflow/pricing.html",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      }
+    },
+    {
+      "route": "/pmoflow/security",
+      "rewrite": "/pmoflow/security.html",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      }
+    },
+    {
+      "route": "/pmoflow/demo",
+      "rewrite": "/pmoflow/demo.html",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      }
+    },
+    {
+      "route": "/pmoflow/compare",
+      "rewrite": "/pmoflow/compare.html",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      }
+    },
+    {
+      "route": "/pmoflow/",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      }
+    },
     {
       "route": "/ByteSizedTraining",
       "redirect": "/ByteSizedTraining/",

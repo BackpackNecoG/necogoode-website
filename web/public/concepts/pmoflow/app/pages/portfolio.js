@@ -194,7 +194,9 @@ function matrixHTML(risks) {
 function linkedWork(r) {
   const ws = (r.workItems || []).map(id => store.get('workItem', id)).filter(Boolean);
   if (!ws.length) return '';
-  return `<div class="pmo-rlinks"><span class="hint">Affects</span>${ws.map(w => `<a class="chip" href="${link('/project/' + encodeURIComponent(w.projectId) + '?mode=work')}" data-link>${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</a>`).join('')}</div>`;
+  /* R10 §7: each linked task shows its LIVE state (never a status frozen into the risk's text) */
+  const STATE = { idle: 'not started', prog: 'in progress', done: 'done' };
+  return `<div class="pmo-rlinks"><span class="hint">Affects</span>${ws.map(w => `<a class="chip" href="${link('/project/' + encodeURIComponent(w.projectId) + '?task=' + encodeURIComponent(w.id))}" data-link data-risk-work="${esc(w.id)}" data-risk-work-state="${esc(w.status)}">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)} · <span class="pmo-rstate">${esc(STATE[w.status] || 'not started')}</span></a>`).join('')}</div>`;
 }
 /* R8: an open risk whose linked work is all done is probably over. Say so, and offer one tap to close it. */
 export function likelyResolved(r) {

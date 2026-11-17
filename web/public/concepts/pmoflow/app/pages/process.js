@@ -11,6 +11,18 @@ export function eng(name, args, fallback) {
   try { const P = E(); if (!P || typeof P[name] !== 'function') return fallback; const r = P[name](...args); return r == null ? fallback : r; }
   catch (e) { console.warn('PMOEngine.' + name + ' failed:', e && e.message); return fallback; }
 }
+/* R10 S2: the import module (window.PMOImport, app/import.js). The lead loads it in index.html; until then it is loaded here. */
+let importMod = null;
+export async function loadImport() {
+  if (typeof window !== 'undefined' && window.PMOImport) return window.PMOImport;
+  if (!importMod) importMod = import('../import.js').then(() => window.PMOImport).catch(e => { importMod = null; throw e; });
+  return importMod;
+}
+/* RACI (R10 S2 §5): Responsible is the step's owner; Accountable / Consulted / Informed are optional people or roles */
+const raciNorm = n => { const r = (n && n.raci) || {}; const l = v => (Array.isArray(v) ? v : String(v || '').split(/\s*[,;]\s*/)).map(x => String(x).trim()).filter(Boolean); return { a: String(Array.isArray(r.a) ? r.a[0] || '' : r.a || '').trim(), c: l(r.c), i: l(r.i) }; };
+export const raciName = v => { const p = v && store.person(v); return p ? p.name : v; };
+export function raciParts(n) { const r = raciNorm(n); return [r.a ? ['Accountable', [r.a]] : null, r.c.length ? ['Consulted', r.c] : null, r.i.length ? ['Informed', r.i] : null].filter(Boolean).map(([k, v]) => ({ label: k, names: v.map(raciName) })); }
+export const raciLine = n => raciParts(n).map(x => `${x.label}: ${x.names.join(', ')}`).join(' · ');
 export const isGw = n => !!n && (n.type === 'decision' || n.type === 'parallel');
 export const isStep = n => !!n && n.type !== 'trigger' && n.type !== 'end' && !isGw(n);
 export function flat(nodes) {
@@ -103,7 +115,7 @@ const LBL_KEY = { connected: 'live', 'we have it': 'live', 'sample only': 'examp
 export const isAdv = () => !!store.advanced;
 /* R8 §1: Simple has two states only. "We have it" (effectively live) and "Not available yet" (everything else).
    The words connected / waiting for confirmation / sample only are Advanced-only detail. */
-export const HAVE = 'We have it', NOTYET = 'Not available yet', PROBLEM = 'Has a problem';
+export const HAVE = 'We have it', NOTYET = 'Not available yet', PROBLEM = 'Has a problem', UNCHECKED = 'Not checked yet';
 export const SIMPLE_AV = { live: { label: HAVE, color: 'var(--live)' }, notyet: { label: NOTYET, color: 'var(--missing)' } };
 /* {key, label, tone, simple} for a data element. key is the detailed state (live/example/missing/pending);
    label is the plain label for the current mode. The engine's availLabel decides when it gives a usable answer. */
@@ -116,6 +128,10 @@ export function availInfo(id) {
     label = r.label || avOf(key).label; tone = r.tone || '';
   }
   const simple = key === 'live' ? HAVE : key === 'problem' ? PROBLEM : NOTYET;
+  /* R10 S2: information created from a pasted procedure or a template is "Not checked yet" until its owner confirms it */
+  const dd = dataEl(id);
+  if ((r && r.state === 'unchecked') || k0 === 'unchecked' || (dd && dd.avail === 'unchecked' && !dd.liveConfirmedBy && (key === 'live' || key === 'unchecked')))
+    return { key: 'unchecked', label: UNCHECKED, tone: 'amber', simple: UNCHECKED, have: true, unchecked: true };
   return { key, label: isAdv() ? label : simple, tone, simple, have: key === 'live' };
 }
 export const avText = id => availInfo(id).label;
@@ -123,7 +139,7 @@ export const avText = id => availInfo(id).label;
 export const awaitingText = id => { const d = dataEl(id); const who = d && d.owner ? pname(d.owner) : 'the owner';
   return isAdv() ? `Waiting for ${who} to confirm it's connected` : `Fixed. ${who} needs to confirm we have it`; };
 /* dot coloured by the plain state (two colours in Simple) */
-export function effDot(id) { const i = availInfo(id), a = isAdv() || i.key === 'problem' ? avOf(i.key) : SIMPLE_AV[i.have ? 'live' : 'notyet']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
+export function effDot(id) { const i = availInfo(id), a = i.unchecked ? { color: 'var(--soon)' } : isAdv() || i.key === 'problem' ? avOf(i.key) : SIMPLE_AV[i.have ? 'live' : 'notyet']; return `<span class="dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${a.color}" title="${esc(i.label)}" aria-hidden="true"></span>`; }
 export const NEEDS_LIVE_ADV = 'Needs to be connected before launch';
 /* kept as a constant for the pages that import it; reads plainly in Simple */
 export const NEEDS_LIVE = NEEDS_LIVE_ADV;
@@ -235,11 +251,9 @@ export function diffCounts(p) {
 /* R9 §13: headline counts that add up: Future steps, and how many of those steps are new or changed (gateways,
    the trigger and the end are not steps), plus steps removed from Today. Read from the engine's diffProcess. */
 export function stepChangeCounts(p) {
-  const d = eng('diffProcess', [p], { nodes: {}, removed: [] });
-  const steps = flat(p && p.tobe);
-  const st = id => (d.nodes || {})[id];
-  return { steps: steps.length, new: steps.filter(s => st(s.id) === 'new').length, changed: steps.filter(s => st(s.id) === 'changed').length,
-    removed: (d.removed || []).filter(g => g && isStep(g)).length };
+  /* R10 §1: the ONE change count is the engine's changeSummary (same numbers as Home and the new-project dialog) */
+  const c = eng('changeSummary', [p], null) || {};
+  return { steps: flat(p && p.tobe).length, new: c.added || 0, changed: c.changed || 0, removed: c.removed || 0, text: c.text || '' };
 }
 export const changeText = c => [c.new ? `${c.new} new` : '', c.changed ? `${c.changed} changed` : '', c.removed ? `${c.removed} removed` : ''].filter(Boolean).join(' · ');
 /* plain-language profile pattern (R3): '9{8}' -> '8 digits' */
@@ -357,8 +371,8 @@ function nodeHTML(n, ctx, idx) {
   const goAttr = !ctx.edit && !trig && ctx.pid && !ctx.readonly ? `data-go="/process/${esc(ctx.pid)}/step/${esc(n.id)}" tabindex="0" role="link" aria-label="Open step ${esc(n.title)}"` : '';
   const who = esc(whoOf(n));
   return `<div class="node ${trig ? 'trigger' : ''} ${sp ? sp.cls : ''} ${ctx.edit ? 'd-editing' : ''}" data-node="${esc(n.id)}" ${trig ? '' : `data-step="${esc(n.id)}"`} data-ntype="${esc(n.type || 'step')}" data-data="${esc((n.data || []).join(','))}" ${goAttr}>
-    <div class="nh"><span class="ic" ${sp ? `title="${esc(sp.label)}" data-idx="${idx}"` : ''}>${trig ? '⚡' : sp ? sp.icon : idx}</span>
-      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts it? e.g. A vendor sends a request</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'What starts it' : sp ? `<span class="d-ntk" data-ntk>${esc(kickerOf(n))}</span> · <span data-who>${who}</span>` : `<span data-who${n.ownerRole ? ' data-role' : ''}>${who}</span>`}</div></div>
+    <div class="nh"><span class="ic ${sp ? 'd-icn' : ''}" ${sp ? `title="${esc(sp.label)} · step ${idx}" data-idx="${idx}"` : ''}>${trig ? '⚡' : idx}</span>
+      <div style="min-width:0"><div class="ttl">${trig && !trigTitle(n) ? '<span class="d-ph" data-trigger-empty>What starts it? e.g. A vendor sends a request</span>' : esc(trig ? trigTitle(n) : n.title)}</div><div class="num">${trig ? 'What starts it' : sp ? `<span class="d-ntki" aria-hidden="true">${sp.icon}</span><span class="d-ntk" data-ntk>${esc(kickerOf(n))}</span> · <span data-who>${who}</span>` : `<span data-who${n.ownerRole ? ' data-role' : ''}>${who}</span>`}</div></div>
       <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diffChip}${trig ? '' : whoAv(n)}</div></div>
     ${body ? `<div class="nb">${body}</div>` : ''}${ctx.edit ? `<div class="d-tools">${toolbar(n, ctx)}</div>` : ''}</div>`;
 }
@@ -479,12 +493,23 @@ export function durationText(iso) {
   return `${m[2]} ${w}${m[2] === '1' ? '' : 's'}`;
 }
 const attr = (k, v) => v == null || v === '' ? '' : ` ${k}="${xe(v)}"`;
+/* "2 business days" -> {iso: 'P2D', businessDays: 2}; the module's reader when loaded, else the same rule locally */
+function durInfo(t) {
+  if (!t) return null;
+  if (typeof window !== 'undefined' && window.PMOImport) return window.PMOImport.durationInfo(t);
+  const iso = isoDuration(t); if (!iso) return null;
+  const m = /(\d+(?:\.\d+)?)\s*(business\s+|working\s+|calendar\s+)?(day|week)s?\b/i.exec(t);
+  return { iso, businessDays: m && !/calendar/i.test(m[2] || '') ? (+m[1]) * (/week/i.test(m[3]) ? 5 : 1) : null };
+}
 function extXml(n, ind) {
   const ref = d => `<pmoflow:data ref="${xe(d)}" name="${xe(dataName(d))}" />`;
   const c = n.type === 'subprocess' ? calledOf(n) : null;
   const lines = [`<pmoflow:node${attr('id', n.id)}${attr('nodeType', n.type || 'step')}${attr('owner', n.owner)}${attr('ownerName', n.owner ? pname(n.owner) : '')}${attr('ownerRole', n.ownerRole)}${attr('sla', n.sla)}${attr('system', n.system)}${attr('durationHrs', n.durationHrs)}${n.type === 'wait' ? attr('wait', n.wait) : ''}${n.type === 'message' ? attr('direction', n.direction === 'receive' ? 'receive' : 'send') + attr('party', n.party) : ''}${c ? attr('calls', n.calls) + attr('callsName', c.p ? c.p.name : c.name) : ''} />`];
   (n.data || []).forEach(d => lines.push(ref(d)));
   (n.touches || []).forEach(t => lines.push(`<pmoflow:touch name="${xe(t)}" />`));
+  /* R10 S2: durations keep their business-day meaning beside the ISO value; RACI travels with the step */
+  [['sla', n.sla], ['wait', n.type === 'wait' ? n.wait : '']].forEach(([of, t]) => { const d = durInfo(t); if (d) lines.push(`<pmoflow:duration of="${of}" text="${xe(t)}"${d.businessDays != null ? ` businessDays="${d.businessDays}"` : ''} iso="${d.iso}" />`); });
+  const rc = raciNorm(n); if (rc.a || rc.c.length || rc.i.length) lines.push(`<pmoflow:raci${attr('accountable', rc.a)}${attr('accountableName', rc.a ? raciName(rc.a) : '')}${attr('consulted', rc.c.join(', '))}${attr('consultedNames', rc.c.map(raciName).join(', '))}${attr('informed', rc.i.join(', '))}${attr('informedNames', rc.i.map(raciName).join(', '))} />`);
   (n.subs || []).forEach(sb => lines.push((sb.data || []).length ? `<pmoflow:sub title="${xe(sb.title)}">\n${sb.data.map(d => `${ind}    ${ref(d)}`).join('\n')}\n${ind}  </pmoflow:sub>` : `<pmoflow:sub title="${xe(sb.title)}" />`));
   return `${ind}<bpmn:extensionElements>\n${lines.map(l => ind + '  ' + l).join('\n')}\n${ind}</bpmn:extensionElements>`;
 }
@@ -492,13 +517,14 @@ export function bpmnXml(p, nodes, label, opts) {
   opts = opts || {};
   const els = [], flows = [], pos = {}, messages = [], msgFlows = []; let y = TOP, fi = 0;
   const SZ = { startEvent: [36, 36], endEvent: [36, 36], userTask: [170, 70], callActivity: [170, 70], intermediateCatchEvent: [36, 36], intermediateThrowEvent: [36, 36], exclusiveGateway: [50, 50], parallelGateway: [50, 50] };
-  /* lanes: one per step owner, in order of first appearance */
-  const laneKeys = []; flat(nodes).forEach(n => { const k = n.owner || ''; if (!laneKeys.includes(k)) laneKeys.push(k); });
-  if (!laneKeys.length) laneKeys.push((nodes || []).find(n => n.type === 'trigger' && n.owner) ? nodes.find(n => n.type === 'trigger').owner : '');
+  /* R10 S2: lanes by ROLE (the step's role, else the person's job title), with the people in each lane as a property */
+  const roleKey = n => { if (!n) return ''; if (n.ownerRole) return n.ownerRole; const pp = n.owner && store.person(n.owner); return pp ? (pp.role || pp.name) : ''; };
+  const laneKeys = [], lanePeople = {}; flat(nodes).forEach(n => { const k = roleKey(n); if (!laneKeys.includes(k)) laneKeys.push(k); if (n.owner && store.person(n.owner)) (lanePeople[k] = lanePeople[k] || new Set()).add(n.owner); });
+  if (!laneKeys.length) laneKeys.push(roleKey((nodes || []).find(n => n.type === 'trigger')));
   const laneOf = k => Math.max(0, laneKeys.indexOf(k));
   const laneRefs = laneKeys.map(() => []);
   const trig = (nodes || []).find(n => n.type === 'trigger');
-  let curLane = trig && trig.owner && laneKeys.includes(trig.owner) ? laneOf(trig.owner) : 0;
+  let curLane = trig && laneKeys.includes(roleKey(trig)) ? laneOf(roleKey(trig)) : 0;
   const add = (tag, id, inner, name, lane, extra) => {
     if (lane != null) curLane = lane;
     const [w, h] = SZ[tag]; const cx = LANE_X0 + curLane * LANE_W + LANE_W / 2;
@@ -510,23 +536,32 @@ export function bpmnXml(p, nodes, label, opts) {
   const doc = n => { const bits = [];
     if (isSpecial(n)) bits.push(typeLabel(n) + ': ' + typeDetail(n));
     if (n.ownerRole) bits.push('Role: ' + n.ownerRole); if (n.owner) bits.push('Owner: ' + pname(n.owner));
+    if (raciLine(n)) bits.push(raciLine(n));
     if ((n.data || []).length) bits.push('Data: ' + n.data.map(d => dataName(d) + ' (' + avOf(availOf(d)).short + ')').join(', '));
     if (n.system) bits.push('System: ' + n.system); if (n.sla) bits.push('SLA: ' + n.sla); if (n.durationHrs) bits.push('Duration: ' + n.durationHrs + 'h');
     if ((n.subs || []).length) bits.push('Sub-steps: ' + n.subs.map(x => x.title).join('; '));
     return bits.length ? `      <bpmn:documentation>${xe(bits.join('. '))}</bpmn:documentation>` : ''; };
   const body = (n, tail) => [doc(n), extXml(n, '      '), tail || ''].filter(Boolean).join('\n');
+  /* R10 S2: information is exported as BPMN data objects (not only as PMOFlow extension data) */
+  const dataObjs = [], assocs = [];
+  const doId = d => 'DataObject_' + String(d).replace(/[^\w.-]/g, '_');
+  const dataAssoc = (n, id) => (n.data || []).map((d, k) => {
+    if (!dataObjs.some(x => x.d === d)) dataObjs.push({ d, id: doId(d), name: dataName(d), first: id });
+    assocs.push({ id: `${id}_in${k}`, from: doId(d) + '_ref', to: id });
+    return `      <bpmn:property id="${id}_p${k}" name="__targetRef_placeholder" />\n      <bpmn:dataInputAssociation id="${id}_in${k}">\n        <bpmn:sourceRef>${doId(d)}_ref</bpmn:sourceRef>\n        <bpmn:targetRef>${id}_p${k}</bpmn:targetRef>\n      </bpmn:dataInputAssociation>`;
+  }).join('\n');
   const ids = new Set(allNodes(nodes).map(n => n.id));
   let ended = false;
   function emitTask(n, id) {
-    const lane = laneOf(n.owner || '');
-    if (n.type === 'subprocess') add('callActivity', id, body(n), n.title, lane, n.calls ? ` calledElement="${xe('Process_' + String(n.calls).replace(/[^\w.-]/g, '_'))}"` : '');
+    const lane = laneOf(roleKey(n));
+    if (n.type === 'subprocess') add('callActivity', id, body(n, dataAssoc(n, id)), n.title, lane, n.calls ? ` calledElement="${xe('Process_' + String(n.calls).replace(/[^\w.-]/g, '_'))}"` : '');
     else if (n.type === 'wait') { const iso = isoDuration(n.wait); add('intermediateCatchEvent', id, body(n, `      <bpmn:timerEventDefinition id="${id}_timer">${iso ? `\n        <bpmn:timeDuration>${iso}</bpmn:timeDuration>\n      ` : ''}</bpmn:timerEventDefinition>`), n.title, lane); }
     else if (n.type === 'message') {
       const send = n.direction !== 'receive', mid = 'Message_' + id.slice(2);
       messages.push({ id: mid, name: (n.party || 'External party') + ': ' + n.title });
       msgFlows.push({ id: 'MessageFlow_' + id.slice(2), node: id, send, name: n.party || 'External party' });
       add(send ? 'intermediateThrowEvent' : 'intermediateCatchEvent', id, body(n, `      <bpmn:messageEventDefinition id="${id}_msg" messageRef="${mid}" />`), n.title, lane);
-    } else add('userTask', id, body(n), n.title, lane);
+    } else add('userTask', id, body(n, dataAssoc(n, id)), n.title, lane);
   }
   function emit(list, tails) {
     for (const n of list || []) {
@@ -554,7 +589,9 @@ export function bpmnXml(p, nodes, label, opts) {
   if (tails.length || !ended) { add('endEvent', 'EndEvent_1', '', 'End'); connect(tails, 'EndEvent_1'); }
   const pidX = 'Process_' + String(p.id).replace(/[^\w.-]/g, '_');
   const height = y - ROW_GAP + 40;
-  const lanes = laneKeys.map((k, i) => ({ id: 'Lane_' + (i + 1), name: k ? pname(k) : 'Unassigned', refs: laneRefs[i] }));
+  const lanes = laneKeys.map((k, i) => ({ id: 'Lane_' + (i + 1), name: k || 'Unassigned', people: [...(lanePeople[k] || [])], refs: laneRefs[i] }));
+  /* data object references sit beside the first task that reads them */
+  const doShapes = dataObjs.map(o => { const t = pos[o.first]; const b = { x: t.x + t.w + 14, y: t.y + 8, w: 36, h: 50 }; pos[o.id + '_ref'] = Object.assign({ tag: 'dataObjectReference' }, b); return o; });
   const pool = !!opts.pool && msgFlows.length > 0;
   const poolW = laneKeys.length * LANE_W, extX = LANE_X0 + poolW + EXT_GAP;
   const c = b => ({ x: b.x + b.w / 2, top: b.y, bot: b.y + b.h, mid: b.y + b.h / 2, right: b.x + b.w });
@@ -562,6 +599,7 @@ export function bpmnXml(p, nodes, label, opts) {
     if (t.top > s.bot) pts = s.x === t.x ? [[s.x, s.bot], [t.x, t.top]] : [[s.x, s.bot], [s.x, (s.bot + t.top) / 2], [t.x, (s.bot + t.top) / 2], [t.x, t.top]];
     else { const rx = Math.max(s.right, t.right) + 30; pts = [[s.right, s.mid], [rx, s.mid], [rx, t.mid], [t.right, t.mid]]; } /* loop back */
     return { id: f.id, pts }; });
+  assocs.forEach(a => { const s = pos[a.from], t = pos[a.to]; if (s && t) edges.push({ id: a.id, pts: [[s.x, s.y + s.h / 2], [t.x + t.w, t.y + t.h / 2]] }); });
   if (pool) msgFlows.forEach(m => { const b = c(pos[m.node]); edges.push({ id: m.id, pts: m.send ? [[b.right, b.mid], [extX, b.mid]] : [[extX, b.mid], [b.right, b.mid]] }); });
   const edgeXml = e => `      <bpmndi:BPMNEdge id="${e.id}_di" bpmnElement="${e.id}">\n${e.pts.map(([px, py]) => `        <di:waypoint x="${Math.round(px)}" y="${Math.round(py)}" />`).join('\n')}\n      </bpmndi:BPMNEdge>`;
   const procName = p.name + ' (' + label + ')';
@@ -578,9 +616,10 @@ ${msgFlows.map(m => `    <bpmn:messageFlow id="${m.id}" name="${xe(m.name)}" sou
 ${messages.map(m => `  <bpmn:message id="${m.id}" name="${xe(m.name)}" />`).join('\n')}${messages.length ? '\n' : ''}${collab}  <bpmn:process id="${pidX}" name="${xe(procName)}" isExecutable="false">
     <bpmn:documentation>${xe((p.desc || '') + ' Exported from PMOFlow, ' + label + '.')}</bpmn:documentation>
     <bpmn:laneSet id="LaneSet_1">
-${lanes.map(l => `      <bpmn:lane id="${l.id}" name="${xe(l.name)}">\n${l.refs.map(r => `        <bpmn:flowNodeRef>${r}</bpmn:flowNodeRef>`).join('\n')}\n      </bpmn:lane>`).join('\n')}
+${lanes.map(l => `      <bpmn:lane id="${l.id}" name="${xe(l.name)}">\n${l.people.length ? `        <bpmn:documentation>${xe('People: ' + l.people.map(pname).join(', '))}</bpmn:documentation>\n        <bpmn:extensionElements>\n${l.people.map(x => `          <pmoflow:person id="${xe(x)}" name="${xe(pname(x))}" />`).join('\n')}\n        </bpmn:extensionElements>\n` : ''}${l.refs.map(r => `        <bpmn:flowNodeRef>${r}</bpmn:flowNodeRef>`).join('\n')}\n      </bpmn:lane>`).join('\n')}
     </bpmn:laneSet>
 ${els.join('\n')}
+${doShapes.map(o => `    <bpmn:dataObject id="${o.id}" name="${xe(o.name)}" />\n    <bpmn:dataObjectReference id="${o.id}_ref" name="${xe(o.name)}" dataObjectRef="${o.id}" />`).join('\n')}
 ${flows.map(f => `    <bpmn:sequenceFlow id="${f.id}" sourceRef="${f.from}" targetRef="${f.to}"${f.name ? ` name="${xe(f.name)}"` : ''} />`).join('\n')}
   </bpmn:process>
   <bpmndi:BPMNDiagram id="Diagram_1">
@@ -604,14 +643,16 @@ ${edges.map(edgeXml).join('\n')}
 const TASKS = new Set(['task', 'userTask', 'manualTask', 'serviceTask', 'scriptTask', 'sendTask', 'receiveTask', 'businessRuleTask', 'callActivity', 'subProcess']);
 const GWS = { exclusiveGateway: 'decision', inclusiveGateway: 'decision', eventBasedGateway: 'decision', complexGateway: 'decision', parallelGateway: 'parallel' };
 /* structural children that carry no flow element of their own */
-const IGNORED = new Set(['sequenceFlow', 'laneSet', 'documentation', 'extensionElements', 'ioSpecification', 'property', 'association']);
+const IGNORED = new Set(['sequenceFlow', 'laneSet', 'documentation', 'extensionElements', 'ioSpecification', 'property', 'association', 'dataObject', 'dataObjectReference', 'dataStoreReference']);
 /* PMOFlow extension data on an element, or null */
 function extOf(el) {
   const ee = [...el.children].find(c => c.localName === 'extensionElements'); if (!ee) return null;
   const kids = [...ee.children].filter(c => c.namespaceURI === PMO_NS); if (!kids.length) return null;
   const a = {}; const ne = kids.find(c => c.localName === 'node'); if (ne) [...ne.attributes].forEach(x => { if (!x.name.startsWith('xmlns')) a[x.localName] = x.value; });
   const refs = list => list.filter(c => c.localName === 'data').map(c => ({ id: c.getAttribute('ref') || c.getAttribute('id') || '', name: (c.getAttribute('name') || '').trim() }));
-  return { a, data: refs(kids), touches: kids.filter(c => c.localName === 'touch').map(c => (c.getAttribute('name') || c.textContent || '').trim()).filter(Boolean),
+  const rc = kids.find(c => c.localName === 'raci');
+  const raci = rc ? { a: (rc.getAttribute('accountable') || '').trim(), c: (rc.getAttribute('consulted') || '').split(/\s*,\s*/).filter(Boolean), i: (rc.getAttribute('informed') || '').split(/\s*,\s*/).filter(Boolean) } : null;
+  return { a, raci, data: refs(kids), touches: kids.filter(c => c.localName === 'touch').map(c => (c.getAttribute('name') || c.textContent || '').trim()).filter(Boolean),
     subs: kids.filter(c => c.localName === 'sub').map(c => ({ title: (c.getAttribute('title') || '').trim(), data: refs([...c.children].filter(x => x.namespaceURI === PMO_NS)) })).filter(s => s.title) };
 }
 export function parseBpmn(text, people, me) {
@@ -643,24 +684,31 @@ export function parseBpmn(text, people, me) {
     if (nodes[s]) msgParty[s] = { party: nm || partName[t] || '', send: true }; if (nodes[t]) msgParty[t] = { party: nm || partName[s] || '', send: false };
   });
   const msgName = {}; [...doc.getElementsByTagNameNS('*', 'message')].forEach(m => { msgName[m.getAttribute('id')] = (m.getAttribute('name') || '').trim(); });
-  /* lanes -> owner ids by person name (exact, then first name), else the current persona */
-  const laneOwner = {}, laneMatched = {}; const unknownLanes = new Set();
-  const byName = nm => { const k = nm.toLowerCase(); return people.find(x => x.name.toLowerCase() === k) || people.find(x => x.name.split(' ')[0].toLowerCase() === k) || null; };
+  /* R10 S2: lanes are ROLES. A lane's name becomes the role of the steps in it; it is never matched to a workspace person
+     by name (demo-data isolation). Only PMOFlow's own export, which carries the person's id, restores a person. */
+  const laneRole = {}, laneMatched = {}; const unknownLanes = new Set(), laneRoles = [];
   [...proc.getElementsByTagNameNS('*', 'lane')].forEach(l => {
-    const nm = (l.getAttribute('name') || '').trim(); const person = nm ? byName(nm) : null;
-    if (!person && nm && nm !== 'Unassigned') unknownLanes.add(nm);
-    [...l.getElementsByTagNameNS('*', 'flowNodeRef')].forEach(r => { laneOwner[r.textContent.trim()] = person ? person.id : me; if (person) laneMatched[r.textContent.trim()] = true; });
+    const nm = (l.getAttribute('name') || '').trim();
+    if (nm && nm !== 'Unassigned' && !laneRoles.includes(nm)) laneRoles.push(nm);
+    [...l.getElementsByTagNameNS('*', 'flowNodeRef')].forEach(r => { laneRole[r.textContent.trim()] = nm && nm !== 'Unassigned' ? nm : ''; });
   });
-  /* owner: a lane naming a person, else the extension's owner (by id, then name), else the current persona */
-  const extOwner = a => a && ((a.owner && people.find(x => x.id === a.owner)) || (a.ownerName && byName(a.ownerName)));
-  const ownerOf = (id, a) => laneMatched[id] ? laneOwner[id] : (extOwner(a) || {}).id || laneOwner[id] || me;
+  /* owner: the person id PMOFlow's own export carries, if that person is in this workspace; otherwise nobody (the lane is the role) */
+  const extOwner = a => a && a.owner && people.find(x => x.id === a.owner);
+  const ownerOf = (id, a) => (extOwner(a) || {}).id || '';
+  void me;
+  /* data objects and data stores: reference id -> name; a task's data associations name the information it uses */
+  const doName = {}; const doDef = {};
+  [...proc.getElementsByTagNameNS('*', 'dataObject')].forEach(o => { doDef[o.getAttribute('id')] = (o.getAttribute('name') || '').trim(); });
+  [...proc.getElementsByTagNameNS('*', 'dataObjectReference'), ...proc.getElementsByTagNameNS('*', 'dataStoreReference')].forEach(o => { const nm = (o.getAttribute('name') || '').trim() || doDef[o.getAttribute('dataObjectRef')] || ''; if (nm) doName[o.getAttribute('id')] = nm; });
+  const doUsed = new Set();
+  const assocData = el => { const out = []; [...el.children].filter(c => c.localName === 'dataInputAssociation' || c.localName === 'dataOutputAssociation').forEach(a => [...a.children].forEach(c => { const k = c.textContent.trim(); if ((c.localName === 'sourceRef' || c.localName === 'targetRef') && doName[k]) { doUsed.add(k); out.push({ id: '', name: doName[k] }); } })); return out; };
   const docText = el => { const d = [...el.children].find(c => c.localName === 'documentation'); return d ? d.textContent : ''; };
-  /* data references: by id when it exists in this workspace, else by name; unknown names become new data elements */
+  /* data references: by id when it exists in this workspace (PMOFlow's own export); anything named only by name is new
+     information in this process (R10 S2: never linked to existing workspace information by name) */
   const newData = [], newByName = {};
   const resolveRef = r => {
     if (r.id && store.get('dataElement', r.id)) return r.id;
     const k = (r.name || '').toLowerCase(); if (!k) return null;
-    const hit = store.list('dataElement').find(d => String(d.name || '').trim().toLowerCase() === k); if (hit) return hit.id;
     if (!newByName[k]) { newByName[k] = { id: store.newId('de'), name: r.name }; newData.push(newByName[k]); }
     return newByName[k].id;
   };
@@ -684,6 +732,7 @@ export function parseBpmn(text, people, me) {
     const n = nodes[id]; const d = docText(n.el); const x = extOf(n.el); const a = x ? x.a : {};
     let type = a.nodeType === 'step' || NT[a.nodeType] ? a.nodeType : n.tag === 'callActivity' ? 'subprocess' : n.def === 'timer' ? 'wait' : n.def === 'message' ? 'message' : 'step';
     const out = { id: store.newId('n'), type, title: n.name, owner: ownerOf(id, a), data: [], touches: [], subs: [] };
+    if (!out.owner && !(a && a.ownerRole) && ((a && a.ownerName) || laneRole[id])) out.ownerRole = (a && a.ownerName) || laneRole[id];
     const pid0 = pmoIdOf(id, a); if (pid0) out.pmoId = pid0;
     if (laneMatched[id] || extOwner(a)) laneHit.add(out.id);
     if (type === 'wait') {
@@ -705,6 +754,10 @@ export function parseBpmn(text, people, me) {
     if (!out.title) out.title = 'Untitled step';
     if (x) { applyExt(out, x); extIds.add(out.id); }
     else { const sys = d.match(/System: ([^.]+)/), sla = d.match(/SLA: ([^.]+)/); if (sys) out.system = sys[1].trim(); if (sla) out.sla = sla[1].trim(); }
+    /* data objects the task reads or writes (a PMOFlow file lists the same information in its extension: not twice) */
+    const have = new Set((out.data || []).map(dataName).map(v => String(v).toLowerCase()));
+    out.data = [...new Set((out.data || []).concat(refs(assocData(n.el).filter(r => !have.has(r.name.toLowerCase())))))];
+    if (x && x.raci) out.raci = x.raci;
     stepN++; return out;
   };
   /* nodes reachable from start without passing through already-emitted nodes, with BFS distance */
@@ -763,6 +816,8 @@ export function parseBpmn(text, people, me) {
   let list = seq(first, null).list;
   /* nodes the walk from the start never reached are not connected to the flow */
   Object.keys(nodes).forEach(id => { if (!(id in emitted)) { const n = nodes[id]; dropped.push({ name: n.name || id, type: n.tag.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(), reason: 'not connected to the flow' }); } });
+  /* data objects no task reads or writes */
+  Object.keys(doName).forEach(k => { if (!doUsed.has(k)) dropped.push({ name: doName[k], type: 'data object', reason: 'not linked to a step' }); });
   /* loop-back targets that resolved to null (a skipped merge gateway with nothing after it) are dropped */
   allNodes(list).forEach(n => isGw(n) && n.branches.forEach(b => { if (b.goto == null) delete b.goto; }));
   if (!trigger) list.unshift({ id: store.newId('n'), type: 'trigger', title: 'Process starts', owner: me, touches: [], data: [] });
@@ -770,13 +825,13 @@ export function parseBpmn(text, people, me) {
   const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
   /* only data a node still references after the walk is created */
   const usedIds = new Set(allNodes(list).flatMap(n => [...(n.data || []), ...(n.subs || []).flatMap(s => s.data || [])]));
-  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], dropped, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
+  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
 }
 /* create the data elements an import references by name but this workspace does not have yet */
 export async function createImportedData(list, fileName) {
   for (const d of list || []) {
     if (store.get('dataElement', d.id)) continue;
-    await store.save('dataElement', d.id, { id: d.id, name: d.name, owner: store.state.me, source: '', avail: 'missing', note: `Created by the BPMN import of ${fileName}.`, fields: [], samples: [], discovered: [] }, `Created data element '${d.name}' from the BPMN import of ${fileName}`);
+    await store.save('dataElement', d.id, { id: d.id, name: d.name, owner: store.state.me, source: '', avail: 'missing', note: `Created by the import of ${fileName}.`, fields: [], samples: [], discovered: [] }, `Created information '${d.name}' from the import of ${fileName}`);
   }
 }
 
@@ -876,13 +931,13 @@ export function render(params) {
       ${!adv || rel || !editor ? '' : importBtn('Import diagram file (BPMN)', 'Import a diagram file (BPMN 2.0) as a new version of this process', 'd-mi')}
     </div></details>`;
   const editBtn = rel || !editor ? '' : editing ? `<button class="btn sm primary" data-edit-done>✓ Done</button>` : `<button class="btn sm d-editbtn" data-mode="edit" aria-label="Edit steps">✎ Edit<span class="d-long"> steps</span></button>`;
-  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed steps</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information connected</span></div></div>` : '';
+  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information available</span></div></div>` : '';
   /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
   const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : 'Who’s affected';
   const vcount = flat(view.nodes).length;
   /* R9 §13: "10 steps · 4 new · 2 changed" (step counts only, so the parts never exceed the whole) */
-  const sc = stepChangeCounts(p), scText = view.key === 'tobe' || mode === 'diff' ? changeText(sc) : '';
-  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span data-headline="${vcount}/${sc.new}/${sc.changed}/${sc.removed}"><b>${esc(vlabel)}</b> · ${vcount} step${vcount === 1 ? '' : 's'}${scText ? ` · ${esc(scText)}` : ''}</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
+  const sc = stepChangeCounts(p), scText = view.key === 'tobe' || mode === 'diff' ? sc.text : '';
+  const sumrow = `<button type="button" class="d-sumrow" data-hdr-toggle aria-expanded="${hdrOpen}" aria-controls="d-hdrmore"><span data-headline="${vcount}/${sc.new}/${sc.changed}/${sc.removed}"><b>${esc(vlabel)}</b> · ${scText ? esc(scText) : `${vcount} step${vcount === 1 ? '' : 's'}`}</span><span class="d-sumtog">${hdrOpen ? 'Less ▴' : 'Details ▾'}</span></button>`;
   const side = `<div class="d-tabrow"><div class="seg d-modes" role="tablist" aria-label="Which map">${modes.map(([k, l]) => `<button role="tab" aria-selected="${tabOn(k)}" data-mode="${k}" class="${tabOn(k) ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>${editBtn}${more}</div>
     ${sumrow}<div class="d-collapse" id="d-hdrmore">${editor ? '' : `<span class="d-only d-ro" data-readonly>View only · ${esc(askAccess(p))}</span>`}${kpis}</div>`;
 
@@ -1063,6 +1118,16 @@ const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" dat
    message sets the direction and the external party. Waits carry no information or sub-steps.
    R7: three fields up front (name, who, information); everything else under "More options".
    Returns { node, next } where next means "Enter: add this step and open the next one". */
+/* R10 S2 §5: Accountable / Consulted / Informed, folded away by default (Rule #1); open when the step already has them */
+function raciFields(node) {
+  const r = raciNorm(node), any = r.a || r.c.length || r.i.length;
+  const v = list => list.map(raciName).join(', ');
+  return `<details class="d-raci" data-raci-fields${any ? ' open' : ''}><summary>Who else is involved (optional)</summary><div class="d-raci-b">
+    <p class="hint" style="margin:0 0 6px">The person or role in “Who does it” is responsible. Add anyone who signs off, is asked first, or is told.</p>
+    <div class="field"><label for="d-f-ra">Signs off (accountable)</label><input id="d-f-ra" name="raci_a" list="d-people" value="${esc(r.a ? raciName(r.a) : '')}" placeholder="e.g. Finance manager" autocomplete="off" /></div>
+    <div class="frow"><div class="field"><label for="d-f-rc">Asked first (consulted)</label><input id="d-f-rc" name="raci_c" value="${esc(v(r.c))}" placeholder="e.g. Legal, Tax" autocomplete="off" /></div>
+    <div class="field"><label for="d-f-ri">Told when done (informed)</label><input id="d-f-ri" name="raci_i" value="${esc(v(r.i))}" placeholder="e.g. Requester" autocomplete="off" /></div></div></div></details>`;
+}
 const PH = { step: 'e.g. Check the invoice', subprocess: 'e.g. Run vendor onboarding', wait: 'e.g. Wait 2 business days for the vendor', message: 'e.g. Tell the vendor' };
 async function stepModal(p, ver, node, opts) {
   opts = opts || {};
@@ -1087,6 +1152,7 @@ async function stepModal(p, ver, node, opts) {
     body: `${kind !== 'step' ? `<div class="d-ntbanner ${NT[kind].cls}">${NT[kind].icon}<b>${esc(NT[kind].label)}</b></div>` : ''}${typeFields}
       <div class="field"><label for="d-f-title">Step name</label><input id="d-f-title" name="title" value="${esc(node.title || '')}" placeholder="${esc(PH[kind])}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" />${kind !== 'step' ? '<span class="hint">Leave blank for a name made from the fields above.</span>' : ''}</div>
       <div class="field"><label for="d-f-who">Who does it</label><input id="d-f-who" name="who" list="d-people" value="${esc(whoVal)}" placeholder="A person, or a role such as Manager" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" data-who-input />${peopleList()}</div>
+      ${kind === 'wait' ? '' : raciFields(node)}
       ${hasData ? `<div class="field"><label for="d-f-info">What information it needs</label><div class="d-chipbox" data-chipbox>${chips.map(chipHTML).join('')}<input id="d-f-info" list="d-infos" data-info-input placeholder="${chips.length ? 'Add more…' : 'e.g. Invoice number, Due date'}" autocomplete="off" enterkeyhint="${isNew && opts.quick ? 'next' : 'done'}" aria-describedby="d-f-info-h" /></div>${infoList()}
         <span class="hint" id="d-f-info-h" data-avail-help>Separate several with commas. Each new piece of information has a “${HAVE}” switch. Here it starts ${ver === 'asis' ? 'on' : 'off'}.</span></div>` : ''}
       ${isNew && opts.quick ? `<div class="hint d-quickhint">${phoneQuick ? 'Tap “Add step” to save it and start the next one. Tap “Done adding” when you have finished.' : 'Press Enter to add this step and start the next one.'}</div>` : ''}
@@ -1196,6 +1262,13 @@ async function stepModal(p, ver, node, opts) {
     subs: [...root.querySelectorAll('[data-subrow]')].map(row => ({ title: row.querySelector('[name=sub_title]').value.trim(), data: [...row.querySelectorAll('input[name=sub_data]:checked')].map(i => i.value) })).filter(s => s.title),
   });
   if (who.ownerRole) out.ownerRole = who.ownerRole; else delete out.ownerRole;
+  /* RACI: a typed name that matches a person is that person; anything else is a role, kept as written */
+  if (kind !== 'wait') {
+    const pick = v => { const t = String(v || '').trim(); const hit = t && store.state.people.find(x => x.name.toLowerCase() === t.toLowerCase()); return hit ? hit.id : t; };
+    const listOf = v => String(v || '').split(/\s*[,;]\s*/).map(pick).filter(Boolean);
+    const rc = { a: pick(r.form.raci_a), c: listOf(r.form.raci_c), i: listOf(r.form.raci_i) };
+    if (rc.a || rc.c.length || rc.i.length) out.raci = rc; else delete out.raci;
+  }
   if (kind === 'wait') out.data = [];
   ['sla', 'system'].forEach(k => { const v = (r.form[k] || '').trim(); if (v) out[k] = v; else delete out[k]; });
   if (isFinite(hrs) && hrs > 0) out.durationHrs = hrs; else delete out.durationHrs;
@@ -1270,7 +1343,43 @@ async function simpleNodeModal(node) {
 export const confirmBox = async (title, text, label) => (await modal({ title, body: `<p style="margin:0">${esc(text)}</p>`, actions: [{ id: 'yes', label: label || 'Confirm', danger: true }] })).action === 'yes';
 
 /* ---------- BPMN import + start project ---------- */
-export function importBtn(label, aria, cls) { return `<label class="${cls || 'btn sm'} d-import">${esc(label || 'Import BPMN')}<input type="file" accept=".bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="${esc(aria || 'Import a BPMN 2.0 file (.bpmn or .xml)')}" /></label>`; }
+export function importBtn(label, aria, cls) { return `<label class="${cls || 'btn sm'} d-import">${esc(label || 'Import Visio or BPMN')}<input type="file" accept=".vsdx,.bpmn,.xml,application/xml,text/xml" data-bpmn-file class="d-sr" aria-label="${esc(aria || 'Import a Visio (.vsdx) or BPMN 2.0 (.bpmn, .xml) file')}" /></label>`; }
+/* R10 S2: what an import holds, counted one way for both previews (a parallel gateway "runs at the same time", never "a choice") */
+export function importCounts(nodes) {
+  const all = allNodes(nodes);
+  return { steps: flat(nodes).length, choices: all.filter(n => n.type === 'decision').length, together: all.filter(n => n.type === 'parallel').length,
+    roles: [...new Set(flat(nodes).map(n => n.ownerRole).filter(Boolean))], people: [...new Set(flat(nodes).map(n => n.owner).filter(Boolean))] };
+}
+const countBits = c => [`<span data-imp-steps="${c.steps}"><b>${c.steps}</b> step${c.steps === 1 ? '' : 's'}</span>`, `<span data-imp-choices="${c.choices}"><b>${c.choices}</b> choice${c.choices === 1 ? '' : 's'}</span>`,
+  c.together ? `<span data-imp-together="${c.together}"><b>${c.together}</b> ${c.together === 1 ? 'set of steps that runs' : 'sets of steps that run'} at the same time</span>` : ''].filter(Boolean).join('');
+/* R10 S2: one preview for a new process from a BPMN or Visio file: what was found, who does it (lanes are roles), what is new */
+async function importPreview(r, fileName, kind) {
+  const c = importCounts(r.nodes);
+  const steps = flat(r.nodes);
+  const res = await modal({
+    title: `Import ${kind === 'vsdx' ? 'a Visio diagram' : 'a diagram file'}`,
+    body: `<p style="margin:0">We read <b>${esc(fileName)}</b>. Check what we found, then import it as a new process. You can change anything afterwards.</p>
+      <div class="d-impsum" data-impsum data-imp-kind="${esc(kind)}">${countBits(c)}</div>
+      <div class="d-imprev" data-imp-preview><ol>${steps.slice(0, 12).map(n => `<li><b>${esc(n.title)}</b>${n.ownerRole ? ` <span class="chip is-role">${esc(n.ownerRole)}</span>` : n.owner ? ` <span class="chip">${esc(pname(n.owner))}</span>` : ' <span class="hint">nobody yet</span>'}${(n.data || []).length ? ` <span class="hint">· ${n.data.length} information</span>` : ''}</li>`).join('')}${steps.length > 12 ? `<li class="hint">and ${steps.length - 12} more</li>` : ''}</ol></div>
+      ${c.roles.length ? `<div class="hint" data-imp-roles>Who does them (from the lanes): ${esc(c.roles.join(', '))}. These are roles; pick a person for each step whenever you like.</div>` : ''}
+      ${r.newData.length ? `<div class="hint" data-imp-newdata="${r.newData.length}">New information in this process: ${esc(r.newData.map(d => d.name).join(', '))}. It starts as “${UNCHECKED}”.</div>` : ''}
+      ${droppedHTML(r.dropped)}`,
+    actions: [{ id: 'import', label: 'Import as a new process', primary: true }],
+  });
+  return res.action === 'import';
+}
+async function readDiagram(file) {
+  if (/\.vsdx$/i.test(file.name)) {
+    const PI = await loadImport();
+    const v = await PI.parseVsdx(await file.arrayBuffer(), { name: '' });
+    const r = parseBpmn(v.bpmn, store.state.people, store.state.me);
+    r.name = v.name || file.name.replace(/\.vsdx$/i, '');
+    r.dropped = (v.dropped || []).concat(r.dropped || []);
+    r.kind = 'vsdx'; r.desc = `Imported from the Visio file ${file.name}.`;
+    return r;
+  }
+  const r = parseBpmn(await file.text(), store.state.people, store.state.me); r.kind = 'bpmn'; return r;
+}
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const droppedHTML = list => `<div class="d-dropped" data-dropped="${list.length}"><b>Dropped elements <span class="n">${list.length}</span></b>${list.length ? `<ul>${list.slice(0, 25).map(d => `<li><b>${esc(d.name)}</b> <span class="hint">${esc(d.type)}: ${esc(d.reason)}</span></li>`).join('')}${list.length > 25 ? `<li class="hint">and ${list.length - 25} more</li>` : ''}</ul>` : '<div class="hint">None: every element in the file maps to PMOFlow.</div>'}</div>`;
 /* bindImport(root): the process index and /new create a new process from the file.
@@ -1280,11 +1389,13 @@ export function bindImport(root, pid) {
     const file = inp.files && inp.files[0]; inp.value = ''; if (!file) return;
     if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB. Export a single process.'); return; }
     let r;
-    try { r = parseBpmn(await file.text(), store.state.people, store.state.me); }
-    catch (e) { await modal({ title: 'Could not import BPMN', body: `<p style="margin:0">${esc(e.message)}</p><p class="hint">PMOFlow reads BPMN 2.0 XML: start and end events, tasks, exclusive and parallel gateways, sequence flows and lanes.</p>`, actions: [] }); return; }
-    if (!r.steps) { toast('No tasks found in that BPMN file'); return; }
+    const vis = /\.vsdx$/i.test(file.name);
+    try { r = await readDiagram(file); }
+    catch (e) { await modal({ title: vis ? 'Could not import the Visio file' : 'Could not import BPMN', body: `<p style="margin:0">${esc(e.message)}</p><p class="hint">${vis ? 'PMOFlow reads Visio flowcharts (.vsdx): process, decision and start/end shapes, connectors, swimlanes, and data or document shapes connected to a step.' : 'PMOFlow reads BPMN 2.0 XML: start and end events, tasks, exclusive and parallel gateways, sequence flows, lanes and data objects.'}</p>`, actions: [] }); return; }
+    if (!r.steps) { toast(vis ? 'No process shapes found in that Visio file' : 'No tasks found in that BPMN file'); return; }
     if (pid) { await importVersion(pid, r, file.name); return; }
-    const name = r.name || file.name.replace(/\.(bpmn|xml)$/i, '') || 'Imported process';
+    if (!(await importPreview(r, file.name, r.kind))) return;
+    const name = r.name || file.name.replace(/\.(bpmn|xml|vsdx)$/i, '') || 'Imported process';
     const id = store.newId('proc');
     allNodes(r.nodes).forEach(n => delete n.pmoId); /* a new process: the ids in the file belong to some other map */
     const asis = r.nodes, tobe = forkNodes(asis);
@@ -1292,8 +1403,9 @@ export function bindImport(root, pid) {
     const p = { id, name, desc: r.desc || `Imported from ${file.name}.`, owner: store.state.me, resources: [...new Set([store.state.me, ...owners])], version: 1, asis, tobe, released: [] };
     try {
       await createImportedData(r.newData, file.name);
-      await store.save('process', id, p, `Imported process '${name}' from BPMN (${plural(r.steps, 'step')}, ${plural(r.gateways, 'gateway')})`);
-      toast(`Imported '${name}': ${plural(r.steps, 'step')}, ${plural(r.gateways, 'gateway')}${r.dropped.length ? `, ${r.dropped.length} dropped` : ''}${r.newData.length ? `, ${plural(r.newData.length, 'new data element')}` : ''}${r.unknownLanes.length ? `. Lanes not matched to a person were assigned to you: ${r.unknownLanes.join(', ')}` : ''}`);
+      const ic = importCounts(asis);
+      await store.save('process', id, p, `Imported process '${name}' from ${r.kind === 'vsdx' ? 'Visio' : 'BPMN'} (${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''})`);
+      toast(`Imported '${name}': ${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''}${r.dropped.length ? `, ${r.dropped.length} dropped` : ''}${r.newData.length ? `, ${plural(r.newData.length, 'new piece')} of information` : ''}`);
       go(`/process/${id}?mode=edit`);
     } catch (e) { toast('Could not import: ' + e.message); }
   });
@@ -1351,12 +1463,12 @@ async function importVersion(pid, r, fileName) {
   const res = await modal({
     title: 'Import as a new version of this process',
     body: `<p style="margin:0">The Future map of <b>${esc(p0.name)}</b> is replaced by <b>${esc(fileName)}</b>. Steps that were in this map before keep their work, information, detail steps and owners, even if they were renamed.</p>
-      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span data-imp-renamed="${m.renamed.length}"><b>${m.renamed.length}</b> renamed</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span><span><b>${r.gateways}</b> choice${r.gateways === 1 ? '' : 's'}</span></div>
+      <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span data-imp-renamed="${m.renamed.length}"><b>${m.renamed.length}</b> renamed</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span>${(() => { const c = importCounts(r.nodes); return `<span data-imp-choices="${c.choices}"><b>${c.choices}</b> choice${c.choices === 1 ? '' : 's'}</span>${c.together ? `<span data-imp-together="${c.together}"><b>${c.together}</b> run${c.together === 1 ? 's' : ''} at the same time</span>` : ''}`; })()}</div>
       ${m.renamed.length ? `<ul class="d-renamed" data-renamed-list>${m.renamed.slice(0, 12).map(x => { const wn = store.list('workItem', w => w.pid === pid && w.step === x.id).length; return `<li data-renamed="${esc(x.id)}">Renamed: “${esc(x.from)}” → “<b>${esc(x.to)}</b>”${wn ? ` <span class="hint">keeps ${plural(wn, 'work item')}</span>` : ''}</li>`; }).join('')}${m.renamed.length > 12 ? `<li class="hint">and ${m.renamed.length - 12} more</li>` : ''}</ul>` : ''}
       ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
       ${droppedHTML(r.dropped)}
       ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (you own it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
-      ${r.unknownLanes.length ? `<div class="hint">Lanes that match nobody (new steps there are assigned to you): ${esc(r.unknownLanes.join(', '))}</div>` : ''}
+      ${(r.roles || []).length ? `<div class="hint" data-imp-roles>Lanes become roles: ${esc(r.roles.join(', '))}</div>` : ''}
       ${room ? `<label class="d-check"><input type="checkbox" name="snap" value="yes" checked /> Save the current version as “Before import of ${esc(fileName)}” first</label>` : `<div class="hint">You have ${MAX_DRAFTS} saved versions, so the current one is not saved first. “Undo last change” still restores it in this session.</div>`}`,
     actions: [{ id: 'import', label: 'Import as new version', primary: true }],
   });

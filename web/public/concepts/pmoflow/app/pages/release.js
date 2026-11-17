@@ -552,8 +552,12 @@ async function chooseApprover(prj, bu, pid) {
   if (!canChoose(cur)) { toast(`Only ${pname(cur.owner)} (project manager) can choose who approves.`); return; }
   if (!pid || pid === cur.owner || pid === rmOf(cur)) { toast("Pick someone other than the project manager or the launch owner."); return; }
   await store.save('project', prj.id, Object.assign({}, cur, { approvers: Object.assign({}, cur.approvers || {}, { [bu]: pid }) }), `Chose ${pname(pid)} to approve the ${bu} part of ${cur.name}`);
-  await store.notify([pid], `${pname(store.state.me)} chose you to approve the ${bu} part of ${cur.name}`, 'project:' + prj.id);
-  toast(`${pname(pid)} can now approve the ${bu} part`);
+  /* R10 §6: nobody is asked to approve before the part's work is done; they are told when it is ready */
+  const br = E() && E().buReady ? E().buReady(store.state.docs, prj.id, bu) : null;
+  if (!br || br.ready) {
+    await store.notify([pid], `${pname(store.state.me)} chose you to approve the ${bu} part of ${cur.name}`, 'project:' + prj.id);
+    toast(`${pname(pid)} can now approve the ${bu} part`);
+  } else toast(`${pname(pid)} will approve the ${bu} part. They’re asked once its work is done.`);
 }
 
 /* Cutover runbook (R6): project.cutover.tasks = [{id, order, task, owner, plannedStart, durationMins, gonogo, done, doneAt?, doneBy?}], in order.
@@ -682,7 +686,13 @@ async function editCutover(prj) {
     if (bad) return 'A step has a person or a time but no description. Describe it or remove the row.';
     const gng = rows.find(r => r.querySelector('[data-tt]').value.trim() && r.querySelector('[data-tg]').checked && !r.querySelector('[data-to]').value);
     if (gng) { gng.querySelector('[data-to]').setAttribute('aria-invalid', 'true'); return `“${gng.querySelector('[data-tt]').value.trim()}” is a final check, so it needs an owner: only that owner can confirm it before launch.`; }
-    if (f.windowDate) { const wd = new Date(f.windowDate + 'T12:00:00Z').getUTCDay(); if (wd === 0 || wd === 6) return { msg: 'Pick a business day (Monday to Friday) for the launch window.', field: 'windowDate' }; }
+    /* R10 §3: the launch window refuses a weekend or a holiday (the engine's calendar: federal + this workspace's own) */
+    if (f.windowDate) {
+      const prob = E() && E().checkLaunchWindow ? E().checkLaunchWindow(f.windowDate, store.state.docs) : null;
+      const wd = new Date(f.windowDate + 'T12:00:00Z').getUTCDay();
+      if (prob) return { msg: `The launch window can’t be on ${prob}. Pick a business day.`, field: 'windowDate' };
+      if (wd === 0 || wd === 6) return { msg: 'Pick a business day (Monday to Friday) for the launch window.', field: 'windowDate' };
+    }
     if (f.windowStart && f.windowEnd && f.windowEnd <= f.windowStart) return { msg: 'The launch window must end after it starts.', field: 'windowEnd' };
     const hd = String(f.hypercareDays || '').trim();
     if (hd && (!/^\d+$/.test(hd) || +hd > 90)) return { msg: 'Days of support must be a whole number from 0 to 90.', field: 'hypercareDays' };
@@ -767,7 +777,7 @@ function goLiveCard(prj, rd, live) {
       : `<p class="rl-p">${rd.pass ? 'Everything is done. Launching runs the delivery pipeline first; only if it succeeds do the future versions become today’s, the procedure get published and temporary data access close.' : 'Locked until everything above is done.'}</p>`}
     <div class="rl-procs">${procs.map(p => `<div><a href="${link('/process/' + p.id)}" data-link>${esc(p.name)}</a><span class="chip">v${esc(p.version || 1)}${live ? '' : ` → v${esc((p.version || 1) + 1)}`}</span></div>`).join('')}</div>
     ${!live && gngOf(prj).length ? `<div class="rl-gngsum ${open.length ? 'fail' : 'pass'}" data-gng-summary><span class="rl-ic ${open.length ? 'fail' : 'pass'}">${open.length ? ICON.fail : ICON.pass}</span> Final checks: ${gngOf(prj).length - open.length} of ${gngOf(prj).length} confirmed by their owners</div>` : ''}
-    ${!live && fmtWindow(prj.cutover) ? `<div class="rl-window" data-launch-window><span class="lbl">Launch window</span> <b>${esc(fmtWindow(prj.cutover))}</b></div>` : ''}
+    ${!live && fmtWindow(prj.cutover) ? `<div class="rl-window" data-launch-window data-launch-date="${esc(((E() && E().launchDate ? E().launchDate(store.state.docs, prj.id) : null) || {}).date || '')}"><span class="lbl">Launch window</span> <b>${esc(fmtWindow(prj.cutover))}</b></div>` : ''}
     <button class="btn primary rl-gobtn" data-golive ${ready && isRm ? '' : 'disabled'}>${live ? 'Launched' : 'Launch now'}</button>
     ${why}
     ${!live && gateOk && !guard.ok ? `<div class="hint rl-why" data-why="guard">Launch now is locked: ${esc(joinAnd(guard.why))}.</div>
@@ -1141,7 +1151,9 @@ function teamsSystems(sec) {
 }
 function windowLine(prj) {
   const w = fmtWindow(prj.cutover);
-  return w ? `<div class="rs-window" data-launch-window><span class="rs-lbl">Launch window</span> <b>${esc(w)}</b></div>` : '';
+  /* R10 §3: a window that sits on a weekend or holiday is called out (the gate also refuses it) */
+  const l = (E() && E().launchDate ? E().launchDate(store.state.docs, prj.id) : null) || {};
+  return w ? `<div class="rs-window" data-launch-window data-launch-date="${esc(l.date || '')}"><span class="rs-lbl">Launch window</span> <b>${esc(w)}</b>${l.problem ? ` <span class="fail" data-window-holiday>· ${esc(l.problem)}: pick a business day</span>` : ''}</div>` : '';
 }
 /* R9 §13: after launch, every team that approved (approvals current at launch; nothing dropped). */
 function approvedAtLaunch(prj, lastGo) {

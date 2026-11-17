@@ -15,7 +15,7 @@ if (connFile && !process.env.EMCEE_STORAGE_CONNECTION) process.env.EMCEE_STORAGE
 const API = path.join(__dirname, '../../api');
 const fn = require(path.join(API, 'pmoflow/index.js'));
 const store = require(path.join(API, 'shared/pmoflow-store.js'));
-const { seed, DOC_TYPES } = require(path.join(API, 'shared/pmoflow-seed.js'));
+const { seed, DOC_TYPES, bizDay } = require(path.join(API, 'shared/pmoflow-seed.js'));
 const ai = require(path.join(API, 'shared/pmoflow-ai.js'));
 let engine = null;
 try { engine = require(path.join(API, 'shared/pmoflow-engine.js')); } catch (e) { engine = null; }
@@ -201,13 +201,13 @@ test('AI endpoints fall back to rules when Azure OpenAI is not configured', asyn
   assert.equal(r.body.nodes[0].type, 'trigger');
   const steps = r.body.nodes.slice(1);
   assert.equal(steps.length, 5);
-  assert.equal(steps[0].owner, 'mc');
-  assert.deepEqual(steps[0].data, ['D1']);
-  /* R8: a team or role is kept as written (ownerRole); only a full name links a person */
-  assert.deepEqual([steps[1].owner, steps[1].ownerRole, steps[1].title], [undefined, 'Compliance SME', 'Check sanctions']);
-  assert.equal(steps[2].owner, 'lp');
-  assert.deepEqual(steps[2].data, ['D2']);
-  assert.equal(steps[4].owner, undefined, '"Dev environment" must not map to a person');
+  /* R10 (S2 demo-data isolation): a visitor's import never links to the demo's people or information by name. Names stay
+     as written (ownerRole); no seeded data element is attached. */
+  assert.ok(!steps[0].owner); assert.equal(steps[0].ownerRole, 'Maya Chen');
+  assert.ok(!(steps[0].data || []).includes('D1'));
+  assert.ok(!steps[1].owner); assert.deepEqual([steps[1].ownerRole, steps[1].title], ['Compliance SME', 'Check sanctions']);
+  assert.ok(!steps[2].owner); assert.ok(!(steps[2].data || []).includes('D2'), 'bank details never attach the demo element');
+  assert.ok(!steps[4].owner && !steps[4].ownerRole, '"Dev environment" must not map to a person');
   assert.equal(typeof r.body.notes, 'string');
 
   r = await call('POST', `ws/${ws}/ai/suggest-work`, { projectId: 'vendor-modernization' });
@@ -250,7 +250,7 @@ test('seed: relative dates, edge-case CSVs, fictional data', () => {
   assert.equal(w('W6').status, 'idle');
   assert.equal(w('W6').resolves, 'D2');
   assert.equal(w('W2').resolves, 'D5');
-  assert.equal(w('W1').start, '2027-02-11');
+  assert.equal(w('W1').start, '2027-02-10');   // R10: -27 calendar days = 19 business days back (Presidents' Day skipped)
   assert.equal(s.docs.project.find(d => d.id === 'vendor-modernization').data.target, '2027-04-20');
   const d2 = s.docs.dataElement.find(d => d.id === 'D2').data;
   const rn = d2.fields.find(f => f.name === 'Routing number');
@@ -1487,7 +1487,12 @@ test('R8 dates: the client today dates the sandbox, state, releases, approvals a
   assert.equal((await store.getWorkspace(ws)).seedDate, yday);
   let st = (await call('GET', `ws/${ws}/state`, null, { today: yday })).body;
   assert.equal(st.today, yday);
-  assert.equal(find(st, 'project', 'vendor-modernization').data.target, shiftDay(yday, 41), 'seed offsets run from the client today');
+  /* R10 §8: the expectation uses the seed's own business-day normaliser (a weekend or holiday rolls to the next business day) */
+  assert.equal(find(st, 'project', 'vendor-modernization').data.target, bizDay(yday, 41), 'seed offsets run from the client today');
+  /* R10: +41 calendar days = 29 business days, Thanksgiving and Christmas skipped, so the gap never depends on the day */
+  assert.equal(bizDay('2026-11-17', 41), '2026-12-30');
+  assert.equal(engine.businessDaysBetween('2026-11-17', bizDay('2026-11-17', 41)), 29);
+  assert.equal(engine.businessDaysBetween('2027-03-10', bizDay('2027-03-10', 41)), 29);
   assert.equal((await call('GET', `ws/${ws}/state`, null, { today: shiftDay(server, -9) })).body.today, server, 'a far-off date is ignored');
   /* approvals carry the approver's date; the ISO timestamp is untouched */
   const at = new Date().toISOString();

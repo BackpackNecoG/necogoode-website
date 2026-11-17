@@ -12,6 +12,7 @@
   // Returns the data objects of one doc type. The entry id is authoritative;
   // when data.id is missing or differs, a shallow copy carrying the entry id is returned.
   function list(docs, type) {
+    syncCalendar(docs);
     const arr = (docs && Array.isArray(docs[type])) ? docs[type] : [];
     const out = [];
     for (const e of arr) {
@@ -177,27 +178,125 @@
   }
 
   // Counts for every UI badge: gateways count as nodes in new/changed.
+  // R10 §1: `added` is the same number as `new`; removed Today steps and gateways count.
   function diffSummary(process) {
     const d = diffProcess(process);
     const out = { new: 0, changed: 0, removed: d.removed.length, same: 0 };
     Object.keys(d.nodes).forEach(k => { out[d.nodes[k]]++; });
+    out.added = out.new;
+    return out;
+  }
+  // R10 §1 the ONE change phrase: "5 new · 6 changed · 1 removed" ('' when nothing changes). Pass a process, or a
+  // project with docs (sums its linked processes). Every screen that counts changes shows this text.
+  function changeText(c) {
+    c = c || {};
+    return [c.added ? c.added + ' new' : '', c.changed ? c.changed + ' changed' : '', c.removed ? c.removed + ' removed' : ''].filter(Boolean).join(' · ');
+  }
+  function changeSummary(x, docs) {
+    const procs = x && Array.isArray(x.processes) && !x.tobe ? (docs ? linkedProcesses(docs, x) : []) : x ? [x] : [];
+    const out = { added: 0, changed: 0, removed: 0 };
+    procs.forEach(p => { if (!p || !Array.isArray(p.tobe) || !p.tobe.length) return; const d = diffSummary(p); out.added += d.added; out.changed += d.changed; out.removed += d.removed; });
+    out.total = out.added + out.changed + out.removed;
+    out.text = changeText(out);
     return out;
   }
 
   /* ------------------------------------------------------------------ */
   /* Forecast                                                            */
   /* ------------------------------------------------------------------ */
-  // Business-day calendar: Monday–Friday. addBusinessDays(d, 0) rolls a weekend date forward to Monday.
+  // R10 §3 business-day calendar: Monday–Friday, minus US federal holidays (observed dates, computed for any year)
+  // and the workspace's own calendar (docs.calendar[0].holidays: [{date, name}] adds a day off; {date, off: true}
+  // works a federal holiday). Every engine function that receives `docs` selects that workspace's calendar first
+  // (see syncCalendar), so addBusinessDays / businessDaysBetween / isBusinessDay all skip the same days.
+  // addBusinessDays(d, 0) rolls a weekend or holiday forward to the next business day.
   function weekday(ms) { return new Date(ms).getUTCDay(); }
+  function nthWeekday(y, m, wd, n) { // n-th (1-based) weekday wd of month m (0-based); n = -1 is the last one
+    if (n > 0) { const first = Date.UTC(y, m, 1); return first + (((wd - weekday(first)) + 7) % 7 + (n - 1) * 7) * DAY; }
+    const last = Date.UTC(y, m + 1, 0); return last - (((weekday(last) - wd) + 7) % 7) * DAY;
+  }
+  function observed(ms) { const wd = weekday(ms); return wd === 6 ? ms - DAY : wd === 0 ? ms + DAY : ms; }
+  const FED_CACHE = {};
+  // US federal holidays observed in calendar year y: [{date, name}] sorted by date. A Saturday holiday is observed on
+  // the Friday before, a Sunday one on the Monday after (so New Year's Day can be observed on Dec 31 of the year before).
+  function federalHolidays(year) {
+    const y = Math.round(+year);
+    if (!isFinite(y)) return [];
+    if (FED_CACHE[y]) return FED_CACHE[y].map(h => Object.assign({}, h));
+    const raw = yy => [
+      ['New Year’s Day', observed(Date.UTC(yy, 0, 1))],
+      ['Martin Luther King Jr. Day', nthWeekday(yy, 0, 1, 3)],
+      ['Presidents’ Day', nthWeekday(yy, 1, 1, 3)],
+      ['Memorial Day', nthWeekday(yy, 4, 1, -1)],
+      ['Juneteenth', observed(Date.UTC(yy, 5, 19))],
+      ['Independence Day', observed(Date.UTC(yy, 6, 4))],
+      ['Labor Day', nthWeekday(yy, 8, 1, 1)],
+      ['Columbus Day', nthWeekday(yy, 9, 1, 2)],
+      ['Veterans Day', observed(Date.UTC(yy, 10, 11))],
+      ['Thanksgiving Day', nthWeekday(yy, 10, 4, 4)],
+      ['Christmas Day', observed(Date.UTC(yy, 11, 25))],
+    ];
+    const out = raw(y).concat(raw(y + 1).filter(x => x[0] === 'New Year’s Day'))
+      .map(([name, ms]) => ({ date: iso(ms), name, source: 'federal' }))
+      .filter(h => +h.date.slice(0, 4) === y)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    FED_CACHE[y] = out;
+    return out.map(h => Object.assign({}, h));
+  }
+  // The active workspace calendar: custom days off and federal days worked. Selected by syncCalendar(docs).
+  let CAL = { add: {}, off: {}, entries: null };
+  function calendarEntries(docs) {
+    const arr = docs && Array.isArray(docs.calendar) ? docs.calendar : null;
+    if (!arr) return [];
+    const out = [];
+    arr.forEach(e => { const d = e && (e.data || e); (d && Array.isArray(d.holidays) ? d.holidays : []).forEach(h => { if (h && isDate(h.date)) out.push(h); }); });
+    return out;
+  }
+  function syncCalendar(docs) {
+    if (!docs || typeof docs !== 'object') return;
+    const arr = Array.isArray(docs.calendar) ? docs.calendar : null;
+    const refs = arr ? arr.map(e => e && (e.data || e)) : [];
+    const prev = CAL.entries;
+    if (prev && prev.length === refs.length && refs.every((r, i) => r === prev[i]) && CAL.docs === docs.calendar) return;
+    const add = {}, off = {};
+    calendarEntries(docs).forEach(h => { const d = String(h.date).slice(0, 10); if (h.off) off[d] = true; else add[d] = String(h.name || 'Company holiday'); });
+    CAL = { add, off, entries: refs, docs: docs.calendar };
+  }
+  // Name of the holiday on day d under the active calendar, or null (weekends are not holidays).
+  function holidayName(d, docs) {
+    if (docs) syncCalendar(docs);
+    if (!isDate(d)) return null;
+    const day = String(d).slice(0, 10);
+    if (CAL.add[day]) return CAL.add[day];
+    if (CAL.off[day]) return null;
+    const f = federalHolidays(+day.slice(0, 4)).find(h => h.date === day);
+    return f ? f.name : null;
+  }
+  function isHoliday(d, docs) { return holidayName(d, docs) != null; }
+  function offMs(ms) { const wd = weekday(ms); return wd === 0 || wd === 6 || holidayName(iso(ms)) != null; }
+  // Every holiday the workspace observes from Jan 1 of `fromYear` (default: this year of `today`, else of the first
+  // custom holiday) for `years` years (default 3: the current and next two): [{date, name, source:'federal'|'custom',
+  // weekday}] sorted by date. Federal holidays the workspace works ({date, off:true}) are listed with worked: true.
+  function holidays(docs, opts) {
+    if (docs) syncCalendar(docs);
+    opts = opts || {};
+    const today = isDate(opts.today) ? String(opts.today).slice(0, 10) : null;
+    const y0 = opts.fromYear != null && isFinite(+opts.fromYear) ? Math.round(+opts.fromYear) : today ? +today.slice(0, 4) : new Date().getUTCFullYear();
+    const n = opts.years != null && isFinite(+opts.years) ? Math.max(1, Math.round(+opts.years)) : 3;
+    const out = [];
+    for (let y = y0; y < y0 + n; y++) federalHolidays(y).forEach(h => out.push(Object.assign(h, CAL.off[h.date] ? { worked: true } : {})));
+    Object.keys(CAL.add).forEach(d => { const y = +d.slice(0, 4); if (y >= y0 && y < y0 + n && !out.some(h => h.date === d && !h.worked)) out.push({ date: d, name: CAL.add[d], source: 'custom' }); });
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.source.localeCompare(b.source))
+      .map(h => Object.assign(h, { weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekday(toMs(h.date))] }));
+  }
   function addBusinessDays(s, n) {
     if (!isDate(s)) return null;
     let ms = toMs(s), left = Math.abs(Math.round(n || 0));
     const step = n < 0 ? -1 : 1;
-    if (!left) { while (weekday(ms) === 0 || weekday(ms) === 6) ms += DAY; return iso(ms); }
-    while (left > 0) { ms += step * DAY; const wd = weekday(ms); if (wd !== 0 && wd !== 6) left--; }
+    if (!left) { for (let g = 0; offMs(ms) && g < 400; g++) ms += DAY; return iso(ms); }
+    for (let g = 0; left > 0 && g < 100000; g++) { ms += step * DAY; if (!offMs(ms)) left--; }
     return iso(ms);
   }
-  // Weekdays in (a, b]; negative when b < a.
+  // Business days in (a, b]; negative when b < a.
   function businessDaysBetween(a, b) {
     if (!isDate(a) || !isDate(b)) return 0;
     let x = toMs(a), y = toMs(b), sign = 1;
@@ -205,6 +304,13 @@
     const days = Math.round((y - x) / DAY), full = Math.floor(days / 7);
     let n = full * 5;
     for (let ms = x + (full * 7 + 1) * DAY; ms <= y; ms += DAY) { const wd = weekday(ms); if (wd !== 0 && wd !== 6) n++; }
+    // minus the weekday holidays inside (x, y]
+    const lo = iso(x), hi = iso(y);
+    const ya = +lo.slice(0, 4), yb = +hi.slice(0, 4);
+    const seen = {};
+    for (let yy = ya; yy <= yb + 1; yy++) federalHolidays(yy).forEach(h => { seen[h.date] = true; });
+    Object.keys(CAL.add).forEach(d => { seen[d] = true; });
+    Object.keys(seen).forEach(d => { if (d > lo && d <= hi && holidayName(d) != null) { const wd = weekday(toMs(d)); if (wd !== 0 && wd !== 6) n--; } });
     return sign * n;
   }
 
@@ -307,7 +413,10 @@
     // R9 §6 (B14): an open problem keeps it from "We have it", even when its fix task is done.
     return (st === 'live' || st === 'pending') && ctx.problem && ctx.problem.has(d.id) ? 'problem' : st;
   }
+  // R10: imported or new information starts as avail 'unchecked' ("Not checked yet"): not available until its owner
+  // confirms it (liveConfirmedBy) or a fix task resolves it, even when a Today step uses it.
   function availCore(d, work, docs, ctx) {
+    if (d.avail === 'unchecked' && !d.liveConfirmedBy) return work.some(w => w.resolves === d.id && w.status === 'done') ? 'pending' : 'unchecked';
     if (ctx.asis.has(d.id) && d.avail !== 'missing') return 'live';
     const owner = dataOwnerOf(docs, d, ctx);
     const confirmed = d.avail === 'live' || !!(d.liveConfirmedBy && d.liveConfirmedBy === owner && d.liveSource);
@@ -520,7 +629,7 @@
       sched: status === 'done' ? 'done' : worstSched(open.map(w => fc[w.id].sched)),
       // Red blockers: effectively MISSING data only. Examples-only and pending (awaiting owner confirmation) are amber.
       blockers: open.length && step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'missing') : [],
-      needsLive: step ? (step.data || []).filter(d => { const e = effectiveAvail(docs, d); return e === 'example' || e === 'pending' || e === 'problem'; }) : [],
+      needsLive: step ? (step.data || []).filter(d => { const e = effectiveAvail(docs, d); return e === 'example' || e === 'unchecked' || e === 'pending' || e === 'problem'; }) : [],
       pending: step ? (step.data || []).filter(d => effectiveAvail(docs, d) === 'pending') : [],
       // R6: work done but data not effectively live = "Built · awaiting live data" (amber), never green Done.
       built: status === 'done',
@@ -555,6 +664,10 @@
     const h = healthOf(docs, project, items, fc, finish, allDone, today);
     out.rag = h.rag;
     out.ragReason = h.reasons.join('; ');
+    // R10 §2: "% done" is the share of the budgeted work done (EV ÷ budget), the same % earned value uses.
+    // taskPct keeps the plain task-count share (done ÷ total).
+    out.taskPct = out.pct;
+    out.pct = h.ev ? h.ev.pct : 0;
     return out;
   }
 
@@ -577,7 +690,7 @@
       if (seen.has(id)) return; seen.add(id);
       const d = get(docs, 'dataElement', id);
       const st = availOf(d, work, docs, ctx);
-      if (st !== 'missing' && st !== 'example') return;
+      if (st !== 'missing' && st !== 'example' && st !== 'unchecked') return;
       const res = work.filter(w => w.resolves === id);
       const resolver = res.find(w => w.status !== 'done') || res[0] || null;
       let steps = 0, held = 0;
@@ -614,8 +727,13 @@
     const blockers = project ? blockersOf(docs, project, items) : [];
     const unplanned = blockers.filter(b => !b.planned), plannedB = blockers.filter(b => b.planned);
     const misses = !!(target && finish && finish > target);
+    // R10 §2: a project with SPI < 0.9 never reads "On track": the label stays driven by lateness, "Behind on effort"
+    // joins the reasons, and a project that would otherwise be green is amber "Behind on effort".
+    const ev = project && items.length ? earnedValue(docs, project.id, today) : null;
+    const behindEffort = !!(ev && ev.SPI != null && ev.SPI < 0.9);
+    const effortReason = behindEffort ? 'Behind on effort: ' + Math.round(ev.SPI * 100) + '% of the work planned by today is done' : null;
     const reasons = [];
-    let rag;
+    let rag, effortOnly = false;
     if (!items.length) { rag = 'grey'; reasons.push('Not planned: no work yet'); }
     else if (misses || unplanned.length) {
       rag = 'red';
@@ -623,19 +741,56 @@
       if (unplanned.length) reasons.push(joinList(unplanned.map(b => b.name), 3) + ' ' + isAre(unplanned.length) + ' not available yet and no work is planned to get ' + (unplanned.length === 1 ? 'it' : 'them'));
     } else if (late.length) {
       rag = 'amber';
-      reasons.push(nWord(late.length, 'task') + ' late' + (target ? ', but the finish still meets the deadline' : ''));
+      reasons.push(nWord(late.length, 'task') + ' late' + lateSplit(pastDue.length, finishAfterDue.length) + (target ? ', but the finish still meets the deadline' : ''));
+      if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
+    } else if (behindEffort && !allDone) {
+      rag = 'amber'; effortOnly = true;
       if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
     } else {
       rag = 'green';
       reasons.push(allDone ? 'All work done' : bufferDays == null ? 'On track; no deadline set' : 'On track: ' + nWord(bufferDays, 'business day') + ' of buffer');
       if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
     }
+    if (effortReason && rag !== 'grey' && !allDone) reasons.splice(effortOnly ? 0 : 1, 0, effortReason);
+    const label = effortOnly ? 'Behind on effort' : RAG_LABEL[rag], labelAdvanced = effortOnly ? 'Behind on effort' : RAG_LABEL_ADVANCED[rag];
     return { project, items, open, allDone, finish, target, bufferDays, late, pastDue, finishAfterDue, runningLate: finishAfterDue, blockers, rag,
-      label: RAG_LABEL[rag], labelAdvanced: RAG_LABEL_ADVANCED[rag], reasons, fc };
+      label, labelAdvanced, reasons, fc, ev, behindEffort };
+  }
+  // R10 §3 the ONE launch date: the launch window's day when set, else the deadline. Every screen (Launch page,
+  // dashboard "Upcoming launches", project header) shows this. {date, source: 'window'|'deadline'|null, problem}
+  // where problem names a weekend or holiday the window sits on ("Fri Dec 25, Christmas Day").
+  function windowDate(w) { const m = /(\d{4}-\d{2}-\d{2})/.exec(String(w || '')); return m ? m[1] : null; }
+  function launchWindowProblem(d) {
+    if (!isDate(d)) return null;
+    const h = holidayName(d), wd = weekday(toMs(d));
+    if (h) return fmtDayLong(d) + ', ' + h;
+    if (wd === 0 || wd === 6) return fmtDayLong(d) + ', a weekend';
+    return null;
+  }
+  function launchDate(docs, prj) {
+    const project = projOf(docs, prj);
+    if (!project) return { date: null, source: null, problem: null };
+    const w = windowDate(project.cutover && project.cutover.window);
+    if (w) return { date: w, source: 'window', problem: launchWindowProblem(w) };
+    return { date: isDate(project.target) ? project.target : null, source: isDate(project.target) ? 'deadline' : null, problem: null };
+  }
+  // A launch window the user is about to pick: null when fine, else the plain reason ("Fri Dec 25, Christmas Day").
+  function checkLaunchWindow(date, docs) { if (docs) syncCalendar(docs); return launchWindowProblem(date); }
+
+  // R10 §5 the late split, shown in Simple and in the report: "5 late (1 past due, 4 will finish after their due date)".
+  function lateSplit(pd, fad) {
+    const parts = [pd ? pd + ' past due' : '', fad ? fad + ' will finish after ' + (fad === 1 ? 'its' : 'their') + ' due date' : ''].filter(Boolean);
+    return parts.length ? ' (' + parts.join(', ') + ')' : '';
+  }
+  function lateText(t) {
+    if (!t) return '';
+    const n = t.lateCount != null ? t.lateCount : (t.late || []).length;
+    if (!n) return 'Nothing late';
+    return n + ' late' + lateSplit(t.pastDueCount != null ? t.pastDueCount : (t.pastDue || []).length, t.finishAfterDueCount != null ? t.finishAfterDueCount : (t.finishAfterDue || []).length);
   }
   function healthOf(docs, project, items, fc, finish, allDone, today) {
     const c = scheduleCore(docs, project, today, fc);
-    return { rag: c.rag, label: c.label, reasons: c.reasons };
+    return { rag: c.rag, label: c.label, reasons: c.reasons, ev: c.ev };
   }
   function projectHealth(docs, projectId, today) {
     const c = scheduleCore(docs, projOf(docs, projectId), today);
@@ -848,7 +1003,7 @@
     // data-live: examples-only data fails here (it needs a live source before go-live).
     const av = availMap(docs);
     const missing = usedData.filter(d => (av[d] || 'missing') === 'missing');
-    const examples = usedData.filter(d => av[d] === 'example');
+    const examples = usedData.filter(d => av[d] === 'example' || av[d] === 'unchecked');
     const pendingD = usedData.filter(d => av[d] === 'pending');
     const problemD = usedData.filter(d => av[d] === 'problem');
     const dl = [];
@@ -1130,8 +1285,11 @@
     if (notSet.length) coDetail.push(capFirst(joinList(notSet)) + ' ' + (notSet.length === 1 ? 'is' : 'are') + ' not set.');
     if (gonogoNoOwner.length) coDetail.push(nWord(gonogoNoOwner.length, 'go/no-go task') + ' ' + (gonogoNoOwner.length === 1 ? 'has' : 'have') + ' no owner: ' + joinList(gonogoNoOwner.map(x => '"' + (x.task || x.step || x.title || 'untitled task') + '"')) + '.');
     if (!coDetail.length) coDetail.push('Rollback owner (' + pn(co.rollbackOwner) + '), rollback plan, hypercare owner (' + pn(co.hypercareOwner) + ') and ' + nWord(tasks.length, 'runbook task') + ' are set.');
-    checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: !missingCo.length && tasks.length > 0 && !gonogoNoOwner.length,
-      detail: coDetail.join(' '), items: missingCo.concat(tasks.length ? [] : ['tasks'], gonogoNoOwner.map(x => 'task:' + (x.id || x.task || x.step || ''))) });
+    // R10 §3: the launch window must be a business day (never a weekend or a holiday)
+    const lw = launchWindowProblem(windowDate(co.window));
+    if (lw) coDetail.unshift('The launch window is on ' + lw + '; pick a business day.');
+    checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: !missingCo.length && tasks.length > 0 && !gonogoNoOwner.length && !lw,
+      detail: coDetail.join(' '), items: missingCo.concat(tasks.length ? [] : ['tasks'], gonogoNoOwner.map(x => 'task:' + (x.id || x.task || x.step || '')), lw ? ['window'] : []) });
 
     // exceptions (warning only), R6: computed from the same staleness function (changedSince) as bu-signoff, so the
     // two always agree. Items: work ids, "process:<id>" and "cutover". Stale ones block through bu-signoff.
@@ -1992,60 +2150,74 @@
   // R8: no make-work. Tasks only for new/changed Future steps (never wait/message nodes) and for information that is
   // not available yet; owners are the step (or information) owners; default effort 3 business days; never late on
   // day one (every start is today or later).
+  // R10 §6 suggested plans are real plans:
+  //  - one task per new or changed step (waits, messages and calls to other processes included, 1 day of effort) and
+  //    per new or changed choice; one "Make X available" per piece of information not available yet;
+  //  - one "Retire the old step: X" per Today step the Future drops; then "Train the people who do the changed steps"
+  //    and "Tell affected teams about the change" (once per project, unless the project already has them);
+  //  - owners are PEOPLE: the step's owner, else the project manager with the step's role in `note`; never a bare role;
+  //  - every task starts the business day after each prerequisite finishes, and nobody does two suggested tasks at
+  //    once (levelled per owner); every due date is at least its own forecast, so nothing is late on day one.
   const SUGGEST_EFFORT = 3;
   function suggestWorkFromDiff(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
     if (!project) return [];
     const work = list(docs, 'workItem');
+    const own = work.filter(w => w.projectId === projectId);
     const data = byId(list(docs, 'dataElement'));
     const av = availMap(docs);
     const fc = forecastAll(docs, today);
-    const anchorRaw = isDate(today) ? today : maxDate(work.filter(w => w.projectId === projectId).map(w => w.due));
+    const pm = project.owner || null;
+    const anchorRaw = isDate(today) ? today : maxDate(own.map(w => w.due));
     const anchor = anchorRaw ? addBusinessDays(anchorRaw, 0) : null;
     const out = [], resolverKey = {};
     let n = 0;
+    const minDue = {};
     const finishOf = dep => {
       const sg = out.find(x => x.key === dep); if (sg) return sg.due;
       const w = work.find(x => x.id === dep);
       return w ? (w.status === 'done' ? (w.doneAt || w.due) : fc[w.id] && fc[w.id].forecast) : null;
     };
-    // R9 §4 (B11) owners come from the step: its owner, else its role (ownerRole, shown in Simple), and only when
-    // the step has neither, the PM.
-    const ownerOf = (st, fallbackPerson) => st && st.owner ? { owner: st.owner } : st && String(st.ownerRole || '').trim() ? { owner: null, ownerRole: String(st.ownerRole).trim() }
-      : fallbackPerson ? { owner: fallbackPerson } : { owner: project.owner || null };
+    // R10 §6: a person always: the step's owner, else the PM with the role (or "nobody named") in the note.
+    const ownerOf = (st, fallbackPerson) => {
+      if (st && st.owner) return { owner: st.owner };
+      const role = st && String(st.ownerRole || '').trim();
+      if (role) return { owner: pm, note: 'The step is done by the role "' + role + '"; the project manager owns this task until a person is named.' };
+      if (fallbackPerson) return { owner: fallbackPerson };
+      return { owner: pm, note: 'Nobody is named on this step, so the project manager owns this task.' };
+    };
     const push = sg => {
       sg.key = 'sug-' + (++n);
-      sg.effortDays = SUGGEST_EFFORT;
-      if (!sg.owner && !sg.ownerRole) sg.owner = project.owner || null;
-      if (!sg.ownerRole) delete sg.ownerRole;
+      if (!sg.effortDays) sg.effortDays = SUGGEST_EFFORT;
+      if (!sg.owner) sg.owner = pm;
+      if (!sg.note) delete sg.note;
       out.push(sg);
       return sg;
     };
-    // R6 dates: an item with no open dependency ("can start now") starts on the anchor (today); otherwise the
-    // business day after its latest dependency finishes (FS). Spans = effortDays stretched by one factor (1–2×)
-    // so the chain spreads toward the target while keeping a buffer of max(5, 15%) business days before it.
-    // R9 §4 levelled: one suggested task at a time per person (or role), in dependency order, so nobody is double
-    // booked; a person's next task starts the business day after their previous one is due.
-    const schedule = factor => {
-      const span = Math.max(1, Math.round(SUGGEST_EFFORT * factor));
+    // Dates. An item with no open prerequisite starts on the anchor (today); otherwise the business day after its
+    // latest prerequisite finishes (FS). Spans = effortDays × one stretch factor (1–2×) toward the deadline, keeping
+    // max(5, 15%) business days of buffer. One suggested task at a time per owner. minDue holds each task's forecast.
+    let factor = 1;
+    const schedule = () => {
       const free = {};
       out.forEach(sg => {
         if (!anchor) { sg.start = null; sg.due = null; return; }
         const fins = sg.deps.map(finishOf).filter(isDate);
-        const who = sg.owner || ('role:' + (sg.ownerRole || ''));
+        const who = sg.owner || '';
         sg.start = maxDate([anchor, fins.length ? addBusinessDays(maxDate(fins), 1) : anchor, free[who] || anchor]);
-        sg.due = addBusinessDays(sg.start, span);
+        const span = Math.max(1, Math.round(sg.effortDays * factor));
+        sg.due = maxDate([addBusinessDays(sg.start, span), minDue[sg.key]].filter(isDate));
         free[who] = addBusinessDays(sg.due, 1);
       });
     };
-    const hasWork = (pid, nodeId) => work.some(w => w.projectId === projectId && w.pid === pid && w.step === nodeId);
+    const hasWork = (pid, nodeId) => own.some(w => w.pid === pid && w.step === nodeId);
     const resolversFor = (p, st) => {
       const needs = [];
       stepData(st).forEach(d => {
         const de = data[d];
         const eff = av[d] || 'missing';
         // R8: only information that is not available yet (missing or example); never "We have it" or pending.
-        if (!de || (eff !== 'missing' && eff !== 'example')) return;
+        if (!de || (eff !== 'missing' && eff !== 'example' && eff !== 'unchecked')) return;
         const existing = work.find(w => w.resolves === d);
         if (existing) { if (existing.status !== 'done') needs.push(existing.id); return; }
         if (!resolverKey[d]) {
@@ -2057,16 +2229,21 @@
       });
       return [...new Set(needs)];
     };
+    const stepTasks = [], changedPeople = new Set(), changedRoles = new Set();
+    let anyChange = false;
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
+      let flowPrev = [];
       const visit = nodes => (nodes || []).forEach(nd => {
         if (!nd) return;
         if (isGateway(nd)) {
           const st = diff.nodes[nd.id];
+          if (st === 'new' || st === 'changed') anyChange = true;
           if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
             const firstStep = flatSteps((nd.branches || []).flatMap(b => (b && b.nodes) || []))[0];
             const g = push(Object.assign({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
               kind: 'build', deps: flowPrev.slice() }, ownerOf(firstStep, p.owner)));
+            stepTasks.push(g.key);
             flowPrev = [g.key];
           }
           // each branch follows the gateway; the step after the gateway follows every branch's last work
@@ -2076,36 +2253,69 @@
           return;
         }
         if (!isStep(nd)) return;
-        if (nd.type === 'wait' || nd.type === 'message') return;   // R8: wait/message nodes create no build tasks
         const needs = resolversFor(p, nd);
         const st = diff.nodes[nd.id];
+        if (st === 'new' || st === 'changed') {
+          anyChange = true;
+          if (nd.owner) changedPeople.add(nd.owner); else if (String(nd.ownerRole || '').trim()) changedRoles.add(String(nd.ownerRole).trim());
+        }
         if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
+          const light = nd.type === 'wait' || nd.type === 'message';
           const sg = push(Object.assign({ pid: p.id, step: nd.id, title: (st === 'new' ? 'Stand up new step: ' : 'Implement changes: ') + (nd.title || 'untitled step'), kind: 'build',
-            deps: [...new Set(flowPrev.concat(needs))] }, ownerOf(nd)));
+            deps: [...new Set(flowPrev.concat(needs))] }, light ? { effortDays: 1 } : {}, ownerOf(nd)));
+          stepTasks.push(sg.key);
           flowPrev = [sg.key];
         } else {
-          const open = work.filter(w => w.projectId === projectId && w.pid === p.id && w.step === nd.id && w.status !== 'done').map(w => w.id);
+          const open = own.filter(w => w.pid === p.id && w.step === nd.id && w.status !== 'done').map(w => w.id);
           if (hasWork(p.id, nd.id)) flowPrev = open;   // all done: nothing to wait for
         }
       });
-      // R6 flow order: a step's build item depends (FS) on the nearest preceding step's work in map order
-      // (its suggested build item, else its open work items), plus its data resolvers.
-      let flowPrev = [];
       visit(p.tobe);
+      // R10 §6: a "Retire" task for every Today step the Future drops, after the new way of that process is built
+      diff.removed.filter(r => r && isStep(r)).forEach(r => {
+        anyChange = true;
+        if (own.some(w => w.retires === r.id && w.pid === p.id)) return;
+        const sg = push(Object.assign({ pid: p.id, step: null, retires: r.id, title: 'Retire the old step: ' + (r.title || 'untitled step'), kind: 'other', tag: 'retire',
+          deps: flowPrev.slice() }, ownerOf(r)));
+        stepTasks.push(sg.key);
+      });
     });
-    schedule(1);
+    // R10 §6: train the people who do the changed steps, and tell the affected teams (once per project)
+    if (anyChange) {
+      const ends = stepTasks.slice();
+      const people = [...changedPeople].map(id => nameOf(docs, id)), roles = [...changedRoles];
+      // telling the teams happens early (1 day, can start now); training follows the changed steps' work
+      if (!own.some(w => w.tag === 'tell')) push({ pid: null, step: null, title: 'Tell affected teams about the change', kind: 'other', tag: 'tell', owner: pm, deps: [], effortDays: 1,
+        note: 'Teams: ' + (joinList(sectionBus(docs, project, personMap(docs)), 8) || 'everyone the change touches') + '.' });
+      if (!own.some(w => w.tag === 'train')) push({ pid: null, step: null, title: 'Train the people who do the changed steps', kind: 'other', tag: 'train', owner: pm, deps: ends,
+        note: 'Who: ' + (joinList(people.concat(roles.map(r => r + ' (role)')), 8) || 'the people on the changed steps') + '.' });
+    }
+    schedule();
     if (anchor && out.length) {
       const target = isDate(project.target) && project.target > anchor ? project.target : defaultTarget(anchor);
       const avail = businessDaysBetween(anchor, target);
       const usable = avail - Math.max(5, Math.ceil(avail * 0.15));
       const needed = businessDaysBetween(anchor, maxDate(out.map(x => x.due)));
-      if (needed > 0 && usable > needed) schedule(Math.min(2, usable / needed));
-      // R9 §4: each due date is its own forecast finish (+0 buffer) once accepted, so nothing is late on day 0.
-      for (let i = 0; i < 6; i++) {
-        const fc2 = forecastAll(withPlan(docs, projectId, out), today);
-        let moved = false;
-        out.forEach(sg => { const f = fc2[sg.key] && fc2[sg.key].forecast; if (isDate(f) && f > sg.due) { sg.due = f; moved = true; } });
-        if (!moved) break;
+      if (needed > 0 && usable > needed) { factor = Math.min(2, usable / needed); schedule(); }
+      // R9 §4 / R10 §6: each due date is at least its own forecast (nothing late on day one), and after any due date
+      // moves, the tasks after it move too (a task never starts before its prerequisite finishes).
+      const settle = () => {
+        for (let i = 0; i < 12; i++) {
+          const fc2 = forecastAll(withPlan(docs, projectId, out), today);
+          let moved = false;
+          out.forEach(sg => { const f = fc2[sg.key] && fc2[sg.key].forecast; if (isDate(f) && f > sg.due) { minDue[sg.key] = f; moved = true; } });
+          if (!moved) break;
+          schedule();
+        }
+      };
+      settle();
+      // the stretch never eats the buffer: when settling pushed the end past it, shrink the stretch and settle again
+      for (let k = 0; k < 4 && factor > 1; k++) {
+        const end = businessDaysBetween(anchor, maxDate(out.map(x => x.due)));
+        if (end <= usable) break;
+        factor = Math.max(1, factor * usable / end - 0.05);
+        Object.keys(minDue).forEach(key => { delete minDue[key]; });
+        schedule(); settle();
       }
     }
     return out;
@@ -2117,6 +2327,7 @@
         effortDays: s.effortDays, deps: (s.deps || []).slice(), kind: s.kind || 'build' };
       if (s.ownerRole) w.ownerRole = s.ownerRole;
       if (s.resolves) w.resolves = s.resolves;
+      ['note', 'tag', 'retires'].forEach(k => { if (s[k]) w[k] = s[k]; });
       return w;
     });
   }
@@ -2370,10 +2581,11 @@
     const planned = project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) ? +project.budget.planned : null;
     return costOf(project, planned, earnedValue(docs, projectId, today));
   }
+  // R10 §2: the cost forecast is EAC once CPI exists; before that it is the bottom-up estimate (forecastBasis says which).
   function costOf(project, planned, ev) {
     const r2 = n => Math.round(n * 100) / 100;
-    const forecastCost = ev.EAC, actualCost = ev.AC;
-    return { planned, estimate: ev.estimate, forecastCost, actualCost, remainingCost: r2(Math.max(0, forecastCost - actualCost)),
+    const forecastCost = ev.EAC != null ? ev.EAC : ev.estimate, actualCost = ev.AC;
+    return { planned, estimate: ev.estimate, forecastCost, forecastBasis: ev.EAC != null ? 'eac' : 'estimate', actualCost, remainingCost: r2(Math.max(0, forecastCost - actualCost)),
       variance: planned == null ? null : r2(forecastCost - planned), overBudget: planned != null && forecastCost > planned,
       program: project && project.program || null };
   }
@@ -2417,14 +2629,14 @@
         AC += h * rate / 8;
       });
     });
-    // R9 §5: SPI only once PV > 0 and at least one task has started (in progress, done, progress or hours logged).
-    // ("started" = done, logged progress or logged hours: an "in progress" flag alone earns nothing to compare).
-    const started = items.some(w => w.status === 'done' || progressOf(w) > 0 || (Array.isArray(w.time) && w.time.length));
-    const SPI = PV > 0 && started ? r2(EV / PV) : null, CPI = AC > 0 ? r2(EV / AC) : null;
-    // R8: EAC is the one cost forecast. With actuals: BAC / CPI; before any hours are logged: the bottom-up
-    // estimate (Σ workCost), so an estimate above the budget shows as over budget from day one.
-    const EAC = CPI ? r2(BAC / (EV / AC)) : r2(total > 0 ? total : BAC);
-    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, estimate: r2(total) };
+    // R10 §2: SPI and CPI are blank (null) until work has started (some task done or with logged progress, so EV > 0)
+    // AND actual cost > 0. EAC = BAC / CPI, blank when CPI is blank. pctDone is the share of the budgeted work done:
+    // EV = BAC × pctDone exactly, and the "% done" tile shows round(pctDone × 100).
+    const started = EV > 0;
+    const SPI = PV > 0 && started && AC > 0 ? r2(EV / PV) : null, CPI = started && AC > 0 ? r2(EV / AC) : null;
+    const EAC = CPI ? r2(BAC / (EV / AC)) : null;
+    const pctDone = BAC > 0 ? EV / BAC : 0;
+    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, estimate: r2(total), pctDone, pct: Math.round(pctDone * 100), started };
   }
 
   // R6 capacity leveling. Load: each open item's effort (effortDays, default 1) is spread evenly over the business
@@ -2643,6 +2855,7 @@
     missing: { key: 'notyet', label: 'Not available yet', tone: 'red' },
     pending: { key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' },
     problem: { key: 'problem', label: 'Has a problem', tone: 'amber' },
+    unchecked: { key: 'unchecked', label: 'Not checked yet', tone: 'amber' },   // R10: never "We have it" / "Connected"
   };
   // R8 Simple has two states only: "We have it" / "Not available yet" (state = the effective state; needsConfirm
   // when only the owner's confirmation is missing). {advanced: true} returns the detailed R7 labels.
@@ -2651,6 +2864,7 @@
     const st = effectiveAvail(docs, dataId);
     if (opts && opts.advanced) return Object.assign({ state: st }, AVAIL_LABELS[st] || AVAIL_LABELS.missing);
     if (st === 'problem') return Object.assign({ state: st, needsConfirm: false }, AVAIL_LABELS.problem);
+    if (st === 'unchecked') return Object.assign({ state: st, needsConfirm: false }, AVAIL_LABELS.unchecked);
     return Object.assign({ state: st, needsConfirm: st === 'pending' }, st === 'live' ? SIMPLE_AVAIL.have : SIMPLE_AVAIL.notyet, st === 'pending' || st === 'example' ? { tone: 'amber' } : {});
   }
   // R8 "Confirm all": information waiting for this person's confirmation (fix done by someone else).
@@ -2771,7 +2985,10 @@
     const total = ids.length;
     const passed = ids.filter(id => out[id] === 'pass').length, failed = ids.filter(id => out[id] === 'fail').length;
     const notRun = total - passed - failed;
-    const needTests = n(c.changedData), haveTests = needTests - n(c.noCases);
+    // R10 §4: a piece of information "has tests" only when it has cases AND every one of its rule fields has a case,
+    // so "1 of 2 have tests" always agrees with "Add tests for 1 new piece of information".
+    const needTests = n(c.changedData);
+    const haveTests = (c.changedData || []).filter(d => !(c.noCases || []).includes(d) && !(c.uncoveredFields || []).some(u => u.dataId === d)).length;
     const toAdd = [...new Set((c.noCases || []).concat((c.uncoveredFields || []).map(x => x.dataId)))];
     const count = passed + ' of ' + nWord(total, 'test') + ' passed';
     const stages = [c.stages.system, c.stages.uat].map(x => Object.assign({}, x));
@@ -2782,7 +2999,7 @@
     else {
       stage = !c.stages.system.done ? 'tryout' : 'business';
       if (fixN) { key = 'fix'; next = 'Fix ' + nWord(fixN, 'problem') + ', then re-run ' + (fixN === 1 ? 'its test' : 'their tests'); }
-      else if (notRun) { key = 'run'; next = 'Run the ' + nWord(notRun, 'test') + " that haven't run"; }
+      else if (notRun) { key = 'run'; next = 'Run the ' + nWord(notRun, 'test') + ' that ' + (notRun === 1 ? "hasn't" : "haven't") + ' run'; }   // R10 §7 grammar
       else if (stage === 'tryout') { key = 'run-build'; next = 'Try out the ' + nWord(n(c.cases), 'test'); }
       else if (stages[1].total - stages[1].passed > 0) { key = 'run'; next = 'Run the business check for ' + nWord(stages[1].total - stages[1].passed, 'test'); }
       else if (n(c.noEvidence)) { key = 'evidence'; next = 'Add evidence to ' + nWord(n(c.noEvidence), 'passed test'); }
@@ -2801,7 +3018,7 @@
     const t = projectTruth(docs, prj, today);
     return t ? t.launchSteps : [];
   }
-  function launchStepsCore(docs, project, today, r, testing) {
+  function launchStepsCore(docs, project, today, r, testing, approvals) {
     const ck = id => (r.checks || []).find(c => c.id === id) || { pass: !!r.released };
     const owner = project.owner || null;
     const lo = project.releaseManager || project.owner || null;
@@ -2825,30 +3042,36 @@
     const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || [], dl.problems || []));
     const dataOwners = uniq(notLive.map(id => dataOwnerOf(docs, get(docs, 'dataElement', id))));
     const nDr = (dr.items || []).length;
-    steps.push({ key: 'information', label: 'Information available', done: live || (!!dl.pass && !!dr.pass), who: dataOwners.length ? dataOwners : (dl.pass && dr.pass ? [] : uniq([owner])),
-      action: dl.pass && dr.pass ? 'Done' : [notLive.length ? nWord(notLive.length, 'piece') + ' of information ' + (notLive.length === 1 ? 'is' : 'are') + ' not available yet: ' + joinList(notLive.map(id => dataName(docs, id)), 3) : '',
+    // R10 §6: before a plan exists nothing past "Plan the work" can read as done ("No plan yet")
+    steps.push({ key: 'information', label: 'Information available', done: live || (planned && !!dl.pass && !!dr.pass), who: dataOwners.length ? dataOwners : (dl.pass && dr.pass ? [] : uniq([owner])),
+      action: !planned && !live ? 'Plan the work first' : dl.pass && dr.pass ? 'Done' : [notLive.length ? nWord(notLive.length, 'piece') + ' of information ' + (notLive.length === 1 ? 'is' : 'are') + ' not available yet: ' + joinList(notLive.map(id => dataName(docs, id)), 3) : '',
         nDr ? nWord(nDr, 'new requirement') + ' found during the work ' + (nDr === 1 ? 'needs' : 'need') + ' a decision' : ''].filter(Boolean).join('; ') });
     // 4. Tests passed
     // R9 §6: the same sentence as projectTruth.testing.next (never "Create the tests").
-    const ts = live ? { done: true, next: 'Done' } : testing;
+    const ts = live ? { done: true, next: 'Done' } : !planned ? { done: false, next: 'Plan the work first' } : testing;
     steps.push({ key: 'tests', label: 'Tests passed', done: !!ts.done, who: ts.done ? [] : uniq([project.testLead || owner]), action: ts.done ? 'Done' : ts.next });
     // 5. Each team approved its part (bu-signoff + two-person)
     const bu = ck('bu-signoff'), tp = ck('two-person');
     const waiting = uniq([].concat(bu.unsigned || [], (bu.stale || []).map(x => x.bu)));
     const needs = bu.needsApprover || bu.noPerson || [];
     const elig = bu.eligible || {};
-    const apprWho = uniq(waiting.flatMap(b => elig[b] || Object.keys(people).filter(id => people[id] && people[id].bu === b && id !== owner && id !== lo)));
+    const readyBu = b => { const a = (approvals || []).find(x => x.bu === b); return !a || a.ready !== false; };
+    const apprWho = uniq(waiting.filter(readyBu).flatMap(b => elig[b] || Object.keys(people).filter(id => people[id] && people[id].bu === b && id !== owner && id !== lo)));
     const apprActs = [];
     (bu.sectionStatus || []).filter(x => x.needsApprover && x.sodBlockedBy).forEach(x => apprActs.push(nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else in ' + x.bu + ' must approve'));
     if (needs.length) apprActs.push('Choose who approves ' + joinList(needs) + "'s part");
-    if ((bu.unsigned || []).length) apprActs.push('Waiting for ' + joinList(bu.unsigned) + ' to approve ' + ((bu.unsigned || []).length === 1 ? 'its' : 'their') + ' part');
+    // R10 §6: nobody is asked to approve before their part's work is done
+    const readyOf = b => { const a = (approvals || []).find(x => x.bu === b); return !a || a.ready !== false; };
+    const unsignedReady = (bu.unsigned || []).filter(readyOf), unsignedWaiting = (bu.unsigned || []).filter(b => !readyOf(b));
+    if (unsignedReady.length) apprActs.push('Waiting for ' + joinList(unsignedReady) + ' to approve ' + (unsignedReady.length === 1 ? 'its' : 'their') + ' part');
+    if (unsignedWaiting.length) apprActs.push(joinList(unsignedWaiting) + (unsignedWaiting.length === 1 ? ' approves its part' : ' approve their parts') + ' once the work on ' + (unsignedWaiting.length === 1 ? 'it is' : 'them is') + ' done');
     if ((bu.stale || []).length) apprActs.push(joinList(bu.stale.map(x => x.bu)) + ' must approve again after changes');
     if (!apprActs.length && !tp.pass) apprActs.push('Two different people need to approve');
-    steps.push({ key: 'approvals', label: 'Each team approved its part', done: live || (!!bu.pass && !!tp.pass), who: (bu.pass && tp.pass) ? [] : (needs.length ? uniq([owner]).concat(apprWho) : apprWho),
-      action: (bu.pass && tp.pass) ? 'Done' : apprActs.map(x => x.replace(/\.$/, '')).join('. ') + '.' });
+    steps.push({ key: 'approvals', label: 'Each team approved its part', done: live || (planned && !!bu.pass && !!tp.pass), who: (bu.pass && tp.pass) ? [] : (needs.length ? uniq([owner]).concat(apprWho) : apprWho),
+      action: !planned && !live ? 'Plan the work first' : (bu.pass && tp.pass) ? 'Done' : apprActs.map(x => x.replace(/\.$/, '')).join('. ') + '.' });
     // 6. Launch-day plan ready (cutover-plan)
     const co = ck('cutover-plan');
-    steps.push({ key: 'launch-plan', label: 'Launch-day plan ready', done: live || !!co.pass, who: co.pass ? [] : uniq([lo]),
+    steps.push({ key: 'launch-plan', label: 'Launch-day plan ready', done: live || (planned && !!co.pass), who: co.pass ? [] : uniq([lo]),
       action: co.pass ? 'Done' : 'Finish the launch-day plan: who undoes it if needed, how, who supports after launch, and the launch-day tasks' });
     // 7. Launch (also needs temporary data access closed)
     const gc = ck('grants-closed');
@@ -3029,7 +3252,7 @@
     const buCk = (r.checks || []).find(x => x.id === 'bu-signoff') || {};
     if (!r.released) testing.perBU = testsPerBU(docs, project, buCk.sections || []);
     const approvals = approvalsOf(docs, project, r);
-    const launch = launchStepsCore(docs, project, today, r, testing);
+    const launch = launchStepsCore(docs, project, today, r, testing, approvals);
     const who = whoOf(docs, project, c, { approvals, testing });
     const sentence = sentenceOf(docs, project, c, who);
     const ev = earnedValue(docs, project.id, today);
@@ -3041,6 +3264,11 @@
     return {
       projectId: project.id, name: project.name || '', today: today || null,
       tasks: { total: c.items.length, done: c.items.length - c.open.length, open: c.open.length },
+      pctDone: ev.pct, behindEffort: c.behindEffort,
+      // R10 §6: no work yet and not live: every screen says "No plan yet" instead of a step count
+      noPlan: !c.items.length && !r.released && project.status !== 'live',
+      launch: launchDate(docs, project),
+      lateText: lateText({ lateCount: c.late.length, pastDueCount: c.pastDue.length, finishAfterDueCount: c.finishAfterDue.length }),
       forecastFinish: c.finish, actualFinish: c.allDone ? c.finish : null, target: c.target, deadline: c.target,
       bufferDays: c.bufferDays, bufferUnit: 'business days',
       late: c.late.slice(), lateCount: c.late.length,
@@ -3130,7 +3358,7 @@
     const st = findStep(docs, w.pid, w.step), ctx = availCtx(docs), work = list(docs, 'workItem');
     (st ? stepData(st) : []).forEach(did => {
       const state = availOf(get(docs, 'dataElement', did), work, docs, ctx);
-      if (state !== 'missing' && state !== 'example') return;
+      if (state !== 'missing' && state !== 'example' && state !== 'unchecked') return;
       const r = work.find(x => x.resolves === did && x.status !== 'done' && x.id !== w.id);
       if (r && !out.some(o => o.id === r.id)) out.push({ id: r.id, title: r.title || 'untitled task', owner: r.owner || null, kind: 'information', dataId: did });
     });
@@ -3146,11 +3374,13 @@
     return d ? d.name || 'some information' : s0;
   }
   // R9 §3 calendar helpers: business-day checks and "Mon Nov 16".
-  function isBusinessDay(d) { return isDate(d) && weekday(toMs(d)) !== 0 && weekday(toMs(d)) !== 6; }
+  function isBusinessDay(d, docs) { if (docs) syncCalendar(docs); return isDate(d) && !offMs(toMs(d)); }
   function toBusinessDay(d) { return isDate(d) ? addBusinessDays(String(d).slice(0, 10), 0) : d; }
   function fmtDayLong(d) { const ms = toMs(d); return isNaN(ms) ? String(d || '') : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekday(ms)] + ' ' + fmtDay(d); }
 
   return {
+    // R10
+    federalHolidays, holidays, isHoliday, holidayName, syncCalendar, changeSummary, changeText, lateText, launchDate, checkLaunchWindow,
     // R9
     personQueue, planFit, planToWork, waitingOn, displayValue, namesFor, dataOwner, defaultDataOwner,
     isBusinessDay, toBusinessDay, fmtDay, fmtDayLong,

@@ -1,7 +1,7 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
 import { E, esc, fmt, fmtTime, link, av, personChip, pname, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName } from './process.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName, UNCHECKED } from './process.js';
 
 const clone = o => JSON.parse(JSON.stringify(o));
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
@@ -126,7 +126,12 @@ export function render(params) {
   const ev = x.liveEvidence || null;
   const evDetail = ev ? (ev.type === 'attested' ? `${ev.ref && /^https?:\/\//i.test(ev.ref) ? ` · <a href="${esc(safeUrl(ev.ref))}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">proof link</a>` : ''}${ev.note ? ' · “' + esc(ev.note) + '”' : ''}` : ev.type === 'check' ? (x.check && x.check.detail ? ' · ' + esc(x.check.detail) : '') : ev.type === 'profile' ? (() => { const pr = store.get('profile', ev.ref); return pr ? ` · sample data check of ${esc(pr.rows)} rows, ${esc(fmtTime(pr.at))}` : ''; })() : '') : '';
   const confirmedBy = x.liveConfirmedBy && !adv ? `Confirmed by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${ev && ev.note ? ' · “' + esc(ev.note) + '”' : ''}` : x.liveConfirmedBy ? `Confirmed connected by ${esc(pname(x.liveConfirmedBy))}${x.liveConfirmedAt ? ' · ' + esc(fmtTime(x.liveConfirmedAt)) : ''}${x.liveSource ? ' · from ' + esc(x.liveSource) : ''} ${evidenceTag(x)}${evDetail}` : '';
-  const confirm = eff === 'live'
+  /* R10 S2: information from a pasted procedure or a template is "Not checked yet" until its owner checks it */
+  const unchecked = !!(info && info.unchecked);
+  const confirm = unchecked ? `<div class="card d-confirm d-confirm-due" data-confirm-card data-unchecked style="margin-top:16px"><h3>${esc(UNCHECKED)}</h3>
+      <p class="s" style="margin:0 0 10px">This came from a pasted procedure or a template, so nobody has checked it yet. ${owner ? 'You own it: check we really have it and where it comes from, then confirm.' : esc(dataOwnerName(x)) + ' (the owner) checks it and confirms.'}</p>
+      <div class="d-ownerrow" style="margin-top:0">${owner ? `<button class="btn primary" data-confirm-live>${adv ? 'Confirm it’s connected…' : 'Confirm we have it'}</button>` : `<span class="d-only">${LOCK} Only ${esc(dataOwnerName(x))} (the owner) can confirm</span>`}</div></div>`
+    : eff === 'live'
     ? ''
     : adv ? `<div class="card d-confirm ${eff === 'pending' ? 'd-confirm-due' : ''}" data-confirm-card style="margin-top:16px"><h3>Confirm it’s connected</h3>
       <p class="s" style="margin:0 0 10px">${eff === 'pending' ? `The fix is done. ${esc(dataOwnerName(x))}, as the owner, confirms where it now comes from before launch counts it.` : `When it is connected, the owner confirms it here. Until then the launch check fails.`} You need proof: a clean sample data check, a passing connection check, or a link and a note (weaker).</p>
@@ -176,7 +181,7 @@ export function render(params) {
         <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${simpleCols}`)
       + (!adv ? '' : `<h3 style="margin-top:14px">Differences from the rules <span class="n">${blockingDrift(drift).length}</span></h3>${noRule.length ? `<div class="s" data-norule="${noRule.length}">${noRule.length} column${noRule.length === 1 ? ' has' : 's have'} no rule yet: ${esc(noRule.map(d => d.field).join(', '))}.</div>` : ''}${blockingDrift(drift).length ? blockingDrift(drift).map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : fields.length ? '<div class="s pass">The sample matches the rules.</div>' : ''}`)
     : '<div class="s">Not checked yet. A check reads a sample of the real data and shows what it looks like, so the rules and tests match reality.</div>'}
-    ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id)}" data-link>Check sample data in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Add a process that uses this to a project to check sample data.</div>'}</div>`;
+    ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id + '?de=' + encodeURIComponent(did))}" data-link>Check sample data in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Add a process that uses this to a project to check sample data.</div>'}</div>`;
 
   const dlist = x.discovered || [], open = dlist.filter(d => !d.resolved).length;
   const disc = `<div class="card"><h3>Found during testing <span class="n">${open} open · ${dlist.length - open} fixed</span></h3>${dlist.length ? dlist.map((d, i) => `<div class="row d-disc ${d.resolved ? 'd-resolved' : ''}"><span aria-hidden="true">${d.resolved ? '✓' : '🔎'}</span><div style="flex:1;min-width:0"><div class="t">${esc(d.text)}</div><div class="s">${d.fromRun ? 'Found in test run ' + esc(d.fromRun) + ' · ' : ''}${esc(fmtTime(d.at))}</div>

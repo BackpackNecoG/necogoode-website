@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PMOFlow security and data handling</title>
+<meta name="description" content="How PMOFlow handles your data: a display layer where your data and keys stay in your tenant, project-scoped time-boxed access, Microsoft Entra ID sign-in, roles, audit export, encryption, Azure hosting, AI handling and the SOC 2 roadmap." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://www.necogoode.com/pmoflow/security" />
+<meta name="theme-color" content="#0A0B0F" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="PMOFlow" />
+<meta property="og:title" content="PMOFlow security and data handling" />
+<meta property="og:description" content="How PMOFlow handles your data: a display layer where your data and keys stay in your tenant, project-scoped time-boxed access, Microsoft Entra ID sign-in, roles, audit export, encryption, Azure hosting, AI handling and the SOC 2 roadmap." />
+<meta property="og:url" content="https://www.necogoode.com/pmoflow/security" />
+<meta property="og:image" content="https://www.necogoode.com/pmoflow/img/what-changed.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/pmoflow/site.css" />
+<script src="/pmoflow/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="/pmoflow/"><span class="mark" aria-hidden="true">P</span><span>PMO<em>Flow</em></span></a>
+    <nav class="site-nav" aria-label="PMOFlow"><a href="/pmoflow/">Product</a><a href="/pmoflow/pricing">Pricing</a><a href="/pmoflow/security" aria-current="page">Security</a><a href="/pmoflow/compare">Compare</a><a href="/concepts/pmoflow/">Live demo</a><a class="btn" href="/pmoflow/demo">Book a demo</a></nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero">
+  <div class="wrap">
+    <p class="kicker">Security and data handling</p>
+    <h1>Your data and keys <em>never leave your tenant.</em></h1>
+    <p class="lede">PMOFlow is a hosted display layer. Your process and project records live in your own Microsoft tenant. This page states what is in place today, how it works in your tenant, and what is still planned.</p>
+    <nav class="toc" aria-label="On this page">
+      <a href="#model">Display-layer model</a><a href="#access">Access to real data</a><a href="#signin">Sign-in</a><a href="#roles">Roles</a>
+      <a href="#audit">Audit</a><a href="#encryption">Encryption</a><a href="#hosting">Hosting</a><a href="#ai">AI</a><a href="#roadmap">Roadmap</a><a href="#risks">Known limits</a>
+    </nav>
+  </div>
+</section>
+
+<section class="block" id="status-key" aria-label="How to read this page">
+  <div class="wrap"><p class="soft"><span class="tag now">In place</span> available today, in the live demo or the product. <span class="tag planned">Planned</span> on the roadmap and not available yet. Everything else describes how PMOFlow is designed to run in your tenant.</p></div>
+</section>
+
+<section class="block" id="model" aria-labelledby="model-h">
+  <div class="wrap">
+    <h2 id="model-h">The display-layer model</h2>
+    <ul class="fact-list">
+      <li><b>Your records stay with you.</b> Process and project records live in your own Azure tenant, behind an API that runs in your subscription under your managed identity. PMOFlow draws the screens.</li>
+      <li><b>The browser never holds tokens for Microsoft Graph, SharePoint or your source systems.</b> The only scope it requests is your own PMOFlow API. SharePoint access uses per-site permissions (Sites.Selected), never tenant-wide.</li>
+      <li><b>Integration keys stay in your Key Vault.</b> Jira, Azure DevOps and GitHub credentials are read only by your managed identity. PMOFlow never stores your tokens.</li>
+      <li><b>Sync instructions are signed and expire.</b> Each one is signed with a per-project rotating secret, carries a one-time value, expires after 5 minutes and is refused if replayed.</li>
+      <li><b>Kill switch.</b> Disabling the PMOFlow enterprise app in Microsoft Entra ID stops everything.</li>
+      <li><b>Logs go to your own Log Analytics or Sentinel</b>, with detection rules that ship with the product.</li>
+      <li><span class="tag now">In place</span> <b>No third-party scripts in the app:</b> no analytics and no tag managers. These product pages load none either.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="access" aria-labelledby="access-h">
+  <div class="wrap">
+    <h2 id="access-h">Access to real data: one project, time-boxed</h2>
+    <ul class="fact-list">
+      <li><span class="tag now">In place</span> <b>Access is granted for testing one project.</b> The owner of the information approves it, it expires, and it closes automatically at launch. The live demo shows this.</li>
+      <li><span class="tag now">In place</span> <b>Sample checks return statistics only</b> (lengths, blanks, characters), never the values. No values are kept.</li>
+      <li><span class="tag now">In place</span> <b>A step-up check at sensitive moments:</b> approvals, go-live and access grants. In your tenant this is Microsoft Entra Conditional Access authentication context. (The demo accepts any 6 digits.)</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="signin" aria-labelledby="signin-h">
+  <div class="wrap">
+    <h2 id="signin-h">Sign-in with Microsoft Entra ID</h2>
+    <ul class="fact-list">
+      <li><b>Single sign-on with Microsoft Entra ID</b> on the Business and Enterprise plans.</li>
+      <li><b>Your Conditional Access rules apply</b>, including compliant devices, and sessions are short: the 24-hour single-page-app refresh-token limit is inherited from your tenant.</li>
+      <li><span class="tag planned">Planned</span> <b>SCIM user provisioning</b> on the Enterprise plan.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="roles" aria-labelledby="roles-h">
+  <div class="wrap">
+    <h2 id="roles-h">Roles and separation of duties</h2>
+    <ul class="fact-list">
+      <li><b>Four roles:</b> Admin, Editor, Approver and Viewer. Approvers and viewers are free seats.</li>
+      <li><span class="tag now">In place</span> <b>Two-person rule.</b> The person who records test results can’t also approve them, and go-live needs separate approvers.</li>
+      <li><span class="tag now">In place</span> <b>Each department approves only its own part</b> of a process change.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="audit" aria-labelledby="audit-h">
+  <div class="wrap">
+    <h2 id="audit-h">Audit</h2>
+    <ul class="fact-list">
+      <li><span class="tag now">In place</span> <b>Every change is recorded in history:</b> who, what and when.</li>
+      <li><b>Audit export</b> as CSV or JSON, with each entry chained to the one before it so the export can be verified as complete and unaltered.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="encryption" aria-labelledby="enc-h">
+  <div class="wrap">
+    <h2 id="enc-h">Encryption</h2>
+    <ul class="fact-list">
+      <li><b>In transit:</b> PMOFlow is served over HTTPS only.</li>
+      <li><b>At rest, in your tenant:</b> your records stay in your own Microsoft 365 and Azure services and inherit their encryption and your key choices.</li>
+      <li><b>At rest, on our side:</b> the hosted layer runs on Azure, where Azure Storage encrypts stored data by default.</li>
+      <li><b>Sync instructions</b> are signed (HMAC) with a per-project rotating secret.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="hosting" aria-labelledby="host-h">
+  <div class="wrap">
+    <h2 id="host-h">Hosting on Azure</h2>
+    <ul class="fact-list">
+      <li><b>The display layer is hosted on Microsoft Azure.</b> If it is down, the screens are down; your data is unaffected.</li>
+      <li><b>No standing access to your Azure.</b> Onboarding is your admin running our template in your subscription.</li>
+      <li><b>How we build it:</b> multi-factor sign-in with hardware keys, protected branches, pinned dependencies and a software bill of materials (SBOM).</li>
+      <li><span class="tag now">In place</span> <b>The live demo</b> holds only fictional data, keeps each visitor’s sandbox for 30 days, and stores visitor IP addresses only as a salted hash.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="ai" aria-labelledby="ai-h">
+  <div class="wrap">
+    <h2 id="ai-h">AI data handling</h2>
+    <ul class="fact-list">
+      <li><span class="tag now">In place</span> <b>AI runs on Azure OpenAI</b> and is given only the facts it needs, such as task names, dates and status, to write a status summary or suggest a plan.</li>
+      <li><span class="tag now">In place</span> <b>Sample data and sample statistics are never sent to the AI.</b></li>
+      <li><span class="tag now">In place</span> <b>The AI is told to use only the facts supplied</b> and never to invent people, dates, numbers or systems. Every AI feature has a rules-based fallback that works with AI turned off, and each result says which one produced it.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="roadmap" aria-labelledby="road-h">
+  <div class="wrap">
+    <h2 id="road-h">Roadmap: <em>planned, not yet done</em></h2>
+    <p class="soft">PMOFlow does not hold any security certification today. These items are planned:</p>
+    <ul class="fact-list amber">
+      <li><span class="tag planned">Planned</span> <b>SOC 2 Type II or Microsoft 365 Certification</b> (independent attestation). Not yet obtained.</li>
+      <li><span class="tag planned">Planned</span> <b>Annual third-party penetration test.</b></li>
+      <li><span class="tag planned">Planned</span> <b>Customer-approved, signed releases</b> with a verifying loader and a public transparency log, for regulated buyers.</li>
+      <li><span class="tag planned">Planned</span> <b>SCIM provisioning</b> on the Enterprise plan.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="risks" aria-labelledby="risk-h">
+  <div class="wrap">
+    <h2 id="risk-h">Known limits, stated plainly</h2>
+    <ul class="fact-list amber">
+      <li>One of your admins could be tricked into approving a malicious release. Signed releases (planned) address this.</li>
+      <li>A bug in our code can only act within the limits of the API in your tenant.</li>
+      <li>Browser sign-in tokens are not yet bound to a device. This is a platform limitation.</li>
+      <li>If our hosting is down, the display layer is down. Your data is unaffected.</li>
+    </ul>
+    <div class="cta-row"><a class="btn" href="/pmoflow/demo" data-cta="book">Book a demo</a><a class="btn ghost" href="/pmoflow/pricing">See pricing</a></div>
+    <p class="small soft" data-u="mt16">Security questionnaire or architecture review? Ask on the demo form and we’ll walk your team through it.</p>
+  </div>
+</section>
+</main>
+<footer class="site-foot">
+  <div class="wrap">
+    <div>PMOFlow is built by <a href="https://www.necogoode.com/">Neco Goode</a>. The live demo uses fictional Northwind data.</div>
+    <nav aria-label="Footer">
+      <a href="/pmoflow/">Product</a><a href="/pmoflow/pricing">Pricing</a><a href="/pmoflow/security">Security</a>
+      <a href="/pmoflow/compare">Compare</a><a href="/concepts/pmoflow/">Live demo</a><a href="/pmoflow/demo">Book a demo</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "pmoflow-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PMOFlow customer-deployed relay: executes signed sync intents against Jira / Azure DevOps and posts Teams / Outlook notifications. Node built-ins only.",
+  "main": "intent/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node ../../tests/pmoflow/relay.test.js" },
+  "dependencies": {}
+}

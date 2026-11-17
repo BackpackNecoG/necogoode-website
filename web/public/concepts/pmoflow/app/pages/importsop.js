@@ -1,11 +1,14 @@
-/* Import SOP (stream R): paste an SOP, draft a process with AI (or the rules parser), edit the draft
-   (steps, nested sub-steps, decisions with Yes/No branches, proposed new data elements), then create the process.
-   Route: /import
-   Data links come only from the server parser's strong matches; anything weaker arrives as a newData proposal. */
+/* Import SOP: paste an SOP (or start from a template), draft a process with AI or the rules reader
+   (api/shared/pmoflow-import.js), edit the draft (steps, nested sub-steps, decisions with Yes/No branches, proposed new
+   information), then create the process. Route: /import (?template=1 opens the template list).
+   R10 S2 demo-data isolation: a draft never links workspace people or information by name. Owners come only from the
+   visitor's text or the visitor's choice; every piece of information is created fresh in this process and starts as
+   "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
+import { loadImport, UNCHECKED } from './process.js';
 
-const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null };
+const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
 const SAMPLE = `# Northwind Traders — Contractor Onboarding SOP (v3)
 Purpose: bring a new independent contractor from signed engagement to first approved invoice.
@@ -44,14 +47,10 @@ const clone = o => JSON.parse(JSON.stringify(o));
    "Compliance analyst") stays as that text (ownerRole). An id is kept only when the procedure itself names that person,
    so the import never assigns a step to someone the text doesn't mention, least of all the current user. */
 function namedInText(p) { const t = strip(ui.text); return !!p && !!t && (` ${t} `).includes(` ${strip(p.name)} `); }
-function matchPerson(v) {
-  if (!v) return '';
-  const ppl = store.state.people;
-  const byId = ppl.find(p => p.id === v);
-  if (byId) return namedInText(byId) ? byId.id : '';
-  const hit = ppl.find(p => strip(p.name) === strip(v));
-  return hit ? hit.id : '';
-}
+/* R10: an imported step is never assigned to a workspace person; the visitor picks people in the draft if they want */
+function matchPerson() { return ''; }
+/* a person id the reader returned: keep the name only when the visitor's own text wrote it (as text, not a link) */
+function nameFromId(v) { const p = store.state.people.find(x => x.id === v); return p && namedInText(p) ? p.name : ''; }
 /* When the server gave a person the text never names, keep what the text does say: the team (their BU) or their role. */
 function roleFromId(v) {
   const p = store.state.people.find(x => x.id === v); if (!p || namedInText(p)) return '';
@@ -60,11 +59,9 @@ function roleFromId(v) {
   if (p.role && t.includes(` ${strip(p.role)} `)) return capRole(p.role);
   return '';
 }
-function matchData(v) {
-  const des = store.list('dataElement');
-  const hit = des.find(d => d.id === v) || des.find(d => strip(d.name) === strip(v));
-  return hit ? hit.id : null;
-}
+/* R10: never link existing workspace information; a name the reader matched becomes a fresh proposal (see normStep) */
+function matchData() { return null; }
+const dataNameOf = v => { const d = store.list('dataElement').find(x => x.id === v); return d ? d.name : typeof v === 'string' && !/^[A-Z]{1,3}\d+$|^de/.test(v) ? v : ''; };
 
 const isGate = n => n && (n.type === 'decision' || n.type === 'parallel' || (Array.isArray(n.branches) && n.branches.length));
 /* Every draft node keeps a stable source id so loop-backs (branch.goto) can point at it. */
@@ -75,7 +72,7 @@ const ROLE_W = 'manager|employee|clerk|coordinator|courier|officer|analyst|lead|
 const ROLE_RE = new RegExp('^(?:the|an?)\\s+((?:[a-z-]+\\s){0,2}?(?:' + ROLE_W + ')s?)\\b', 'i');
 const capRole = r => { const t = String(r || '').trim().replace(/\s+/g, ' '); return t ? t.charAt(0).toUpperCase() + t.slice(1) : ''; };
 export function roleOf(n, title) {
-  const given = n && (n.ownerRole || (n.role && !matchPerson(n.role) ? n.role : '') || roleFromId(n.owner || n.ownerId));
+  const given = n && (n.ownerRole || n.role || nameFromId(n.owner || n.ownerId) || roleFromId(n.owner || n.ownerId));
   if (given) return capRole(given);
   const m = ROLE_RE.exec(String(title || '')); return m ? capRole(m[1]) : '';
 }
@@ -89,19 +86,22 @@ function normStep(n) {
   return {
     type: 'step', title, src: srcId(n),
     owner, ownerRole: owner ? '' : roleOf(n, title),
-    data: [...new Set((n.data || n.dataElements || []).map(matchData).filter(Boolean))],
+    data: [],
     touches: Array.isArray(n.touches) ? n.touches.map(String) : [],
     system: typeof n.system === 'string' ? n.system.trim() : '',
     sla: slaOf(n),
-    subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [...new Set((s.data || []).map(matchData).filter(Boolean))] }).filter(s => s.title),
-    newData: Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')).filter(Boolean) : [],
+    note: typeof n.note === 'string' ? n.note : '',
+    raci: n.raci || undefined,
+    subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [] }).filter(s => s.title),
+    /* information the reader linked by id becomes a fresh proposal by name, on this step */
+    newData: [...new Set((Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')) : []).concat((n.data || n.dataElements || []).map(dataNameOf)).filter(Boolean))],
   };
 }
 /* wait / message / sub-process nodes keep their kind and the fields that describe them */
 function normKind(n, kind) {
   const title = cleanTitle(n.title || n.text || n.name || '');
   if (!title) return null;
-  const x = { type: kind, title, src: srcId(n), owner: matchPerson(n.owner || n.ownerId || n.role), data: [...new Set((n.data || []).map(matchData).filter(Boolean))], touches: Array.isArray(n.touches) ? n.touches.map(String) : [], subs: [], newData: Array.isArray(n.newData) ? n.newData.map(y => String(typeof y === 'string' ? y : y.name || '')).filter(Boolean) : [], system: '' };
+  const x = { type: kind, title, src: srcId(n), owner: '', data: [], touches: Array.isArray(n.touches) ? n.touches.map(String) : [], subs: [], newData: Array.isArray(n.newData) ? n.newData.map(y => String(typeof y === 'string' ? y : y.name || '')).filter(Boolean) : [], system: '' };
   ['wait', 'duration', 'timer', 'direction', 'party', 'calls', 'processId', 'sla'].forEach(k => { if (n[k] != null && n[k] !== '') x[k] = n[k]; });
   if (n.type === 'send' || n.type === 'receive') x.direction = x.direction || n.type;
   return x;
@@ -122,11 +122,12 @@ function normalize(res) {
   const nodes = raw.map(normNode).filter(Boolean);
   resolveGotos(nodes);
   repairDraft(nodes, ui.text);
-  const existing = new Set(store.list('dataElement').map(d => strip(d.name)));
+  /* R10: every proposal is new information in this process (never "already exists" against the workspace) */
   const seen = new Set();
-  let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x)
+  const stepNames = allSteps(nodes, []).flatMap(st => (st.newData || []).map(nm => ({ name: nm, reason: 'Named in your procedure.', step: undefined, _src: st.src })));
+  let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x).concat(stepNames)
     .filter(x => x && String(x.name || '').trim())
-    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: existing.has(strip(x.name)) }))
+    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: false }))
     .filter(x => { const k = strip(x.name); if (seen.has(k)) return false; seen.add(k); return true; });
   const skipped = newData.filter(x => !isDataNoun(x.name)).map(x => x.name);
   newData = newData.filter(x => isDataNoun(x.name)).map(x => Object.assign(x, { create: !x.exists }));
@@ -140,7 +141,8 @@ function normalize(res) {
   const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
   const trigger = (res && (res.trigger || (res.process && res.process.trigger))) || (trigNode && trigNode.title) || '';
   newData.forEach(x => { x.target = targetOf(nodes, x); });
-  return { nodes, newData, notes, source: src, name: res && (res.name || (res.process && res.process.name)), trigger: cleanTitle(trigger) };
+  const teams = [...new Set((Array.isArray(res && res.teams) ? res.teams : []).concat(targets(nodes).flatMap(x => x.touches || [])))];
+  return { nodes, newData, notes, source: res && res.source === 'template' ? 'Template' : src, name: res && (res.name || (res.process && res.process.name)), trigger: cleanTitle(trigger), teams };
 }
 
 /* R6: a data proposal must name a document, record or field, never a person doing something ("Receiving clerk records"). */
@@ -195,7 +197,6 @@ function numberedLines(text) {
 const verbBase = v => { const w = String(v || ''); if (/ies$/i.test(w)) return w.slice(0, -3) + 'y'; if (/(ch|sh|ss|x|z)es$/i.test(w)) return w.slice(0, -2); if (/[^s]s$/i.test(w)) return w.slice(0, -1); return w; };
 const SYSTEM_NOUNS = ['ServiceNow', 'HRIS', 'ERP', 'CRM', 'Workday', 'SAP', 'Oracle', 'NetSuite', 'Concur', 'Salesforce', 'SharePoint', 'DocuSign', 'Jira', 'Coupa', 'Ariba', 'QuickBooks', 'Xero', 'Okta', 'Active Directory', 'Zendesk', 'HubSpot', 'Dynamics'];
 const sysRe = new RegExp('\\b(' + SYSTEM_NOUNS.map(x => x.replace(/\s+/g, '\\s+')).join('|') + ')\\b');
-const reEsc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function fixStep(n) {
   if (!n || n.type !== 'step') return;
   /* "HR Manager (Maya Chen) updates the employee record" -> owner Maya Chen (or the role, with the name in the note) */
@@ -204,16 +205,14 @@ function fixStep(n) {
   if (rn || roleTxt) {
     const role = cleanTitle(rn ? rn[1] : roleTxt[1]), name = cleanTitle(rn ? rn[2] : roleTxt[2]);
     if (rn) n.title = capRole(cleanTitle(verbBase(rn[3]) + ' ' + rn[4]).replace(/[.;]$/, ''));
-    const hit = store.state.people.find(p => strip(p.name) === strip(name));
-    if (hit) { n.owner = hit.id; n.ownerRole = ''; }
-    else { n.owner = ''; n.ownerRole = capRole(role); n.note = `Named in the procedure: ${name}`; }
+    n.owner = ''; n.ownerRole = capRole(role); n.note = `Named in the procedure: ${name}`;
   }
-  /* system nouns become the step's system, never information or a team */
+  /* system nouns become the step's system, never information or a team. R10: the title keeps every word ("Enter the
+     vendor into the ERP and check …"); the system is shown beside it as well */
   const m = sysRe.exec(n.title);
-  if (m) {
-    if (!n.system) n.system = m[1].replace(/\s+/g, ' ');
-    if (n.system === m[1].replace(/\s+/g, ' ')) n.title = capRole(cleanTitle(n.title.replace(new RegExp('\\s+(?:in|into|on|using|via|through|from|to|with)\\s+(?:the\\s+)?' + reEsc(m[1]) + '(?:\\s+(?:system|app|tool))?\\b', 'i'), ' ')));
-  }
+  if (m && !n.system) n.system = m[1].replace(/\s+/g, ' ');
+  /* a trailing "in ServiceNow" moves to the system chip (nothing is lost); mid-sentence it stays */
+  if (m && n.system === m[1].replace(/\s+/g, ' ')) n.title = capRole(cleanTitle(n.title.replace(new RegExp('\\s+(?:in|into|on|using|via|through|from|to|with)\\s+(?:the\\s+)?' + m[1].replace(/\s+/g, '\\s+') + '(?:\\s+(?:system|app|tool))?\\s*[.;]?$', 'i'), '')));
 }
 function repairDraft(nodes, text) {
   if (!Array.isArray(nodes)) return nodes;
@@ -292,6 +291,8 @@ function at(path) {
   return node;
 }
 function countSteps(nodes) { return (nodes || []).reduce((n, x) => n + (x.type === 'step' ? 1 : (x.branches || []).reduce((m, b) => m + countSteps(b.nodes), 0)), 0); }
+/* R10: waits, messages and sub-processes are numbered like steps (the map numbers them the same way) */
+function countNumbered(nodes) { return (nodes || []).reduce((n, x) => n + (x.type === 'step' || KINDS[x.type] ? 1 : (x.branches || []).reduce((m, b) => m + countNumbered(b.nodes), 0)), 0); }
 
 /* R8: one plain line of what the reader pulled out of the text: steps, choices, time limits, waits, systems, who. */
 function foundSummary(d) {
@@ -303,10 +304,34 @@ function foundSummary(d) {
   const choices = all.filter(x => x.type === 'decision').length;
   const systems = [...new Set(all.map(x => x.system).filter(Boolean))];
   const roles = [...new Set(steps.filter(x => !x.owner && x.ownerRole).map(x => x.ownerRole))];
-  const bits = [n(steps.length, 'step', 'steps'), n(choices, 'choice', 'choices'), n(slas, 'time limit', 'time limits'), n(waits, 'wait', 'waits'),
+  const numbered = countNumbered(d.nodes), kinds = numbered - steps.length;
+  const pars = all.filter(x => x.type === 'parallel').length;
+  const kindTxt = !kinds ? '' : kinds === waits ? ` (${waits} ${waits === 1 ? 'is a wait' : 'are waits'})` : ` (${kinds} ${kinds === 1 ? 'is a wait or message' : 'are waits or messages'})`;
+  const bits = [numbered ? n(numbered, 'step', 'steps') + kindTxt : '', n(choices, 'choice', 'choices'), pars ? `${pars} set${pars === 1 ? '' : 's'} of steps done at the same time` : '', n(slas, 'time limit', 'time limits'),
     systems.length ? `${n(systems.length, 'system', 'systems')} (${systems.join(', ')})` : ''].filter(Boolean);
   const last = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0] || 'no steps';
-  return `<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}</div>`;
+  const teams = [...new Set((d.teams || []).concat(all.flatMap(x => x.touches || [])))];
+  return `<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}${teams.length ? ` <span data-found-teams>Teams involved: ${teams.map(esc).join(', ')}.</span>` : ''}</div>`;
+}
+
+/* ---------- R10 S2 §6: start from a template ---------- */
+const TPL_FALLBACK = ['Vendor onboarding', 'Employee onboarding', 'Employee offboarding', 'Invoice approval', 'Purchase request', 'Customer refund'];
+function templatesHTML() {
+  const list = ui.PI ? ui.PI.TEMPLATES : null;
+  return `<details class="is-tpl" data-templates ${ui.tplOpen ? 'open' : ''}><summary>Or start from a template</summary>
+    <p class="hint" style="margin:6px 0 8px">Common processes with the usual steps, roles and information. Change anything before you save.</p>
+    <div class="is-tpls">${list ? list.map(t => `<button type="button" class="is-tplbtn" data-template="${esc(t.id)}"><b>${esc(t.name)}</b><span>${esc(t.desc)}</span></button>`).join('')
+      : TPL_FALLBACK.map(nm => `<span class="is-tplbtn is-tplwait"><b>${esc(nm)}</b><span>Loading…</span></span>`).join('')}</div></details>`;
+}
+async function useTemplate(id) {
+  const PI = ui.PI || await loadImport();
+  const t = PI.templateDraft(id); if (!t) return;
+  const n = normalize(Object.assign({}, t, { source: 'template' }));
+  ui.draft = { nodes: n.nodes, newData: n.newData, name: t.name, trigger: t.trigger, teams: n.teams, desc: t.desc, template: t.name }; ui.openData = null;
+  ui.source = 'Template'; ui.notes = [`Made from the ${t.name.toLowerCase()} template. The owners are roles: type a person or keep the role.`]; ui.text = '';
+  ui.tplOpen = false;
+  store.emit();
+  toast(`Started from the ${t.name.toLowerCase()} template`);
 }
 
 /* ---------- render ---------- */
@@ -358,7 +383,7 @@ function kindBody(s, path) {
 }
 /* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
 /* R9 §9: steps are numbered 1..N in order; choices are not steps and take no number */
-const stepNo = n => { const tops = ui.draft.nodes.filter(x => x.type === 'step'); const k = tops.indexOf(n); return k >= 0 ? k + 1 : 0; };
+const stepNo = n => { const tops = ui.draft.nodes.filter(x => x.type === 'step' || KINDS[x.type]); const k = tops.indexOf(n); return k >= 0 ? k + 1 : 0; };
 function gotoRow(g, b, bpath) {
   const all = targets(ui.draft.nodes).filter(n => n !== g && n.type !== 'end' && !b.nodes.includes(n));
   const t = b.goto && all.find(n => n.src === b.goto);
@@ -393,7 +418,7 @@ function gateBody(g, path) {
 
 export function render() {
   const d = ui.draft;
-  const n = d ? countSteps(d.nodes) : 0;
+  const n = d ? countNumbered(d.nodes) : 0;
   const gates = d ? d.nodes.filter(x => x.type === 'decision').length : 0;
   const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
@@ -417,7 +442,7 @@ export function render() {
     ${loops ? `<div class="hint" data-loops>${loops} path${loops === 1 ? '' : 's'} that jump${loops === 1 ? 's' : ''} to another step (“return to step N”, “skip to step N”). They're drawn as arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">What starts it</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
-      <span class="is-n" ${s.type === 'step' ? '' : 'aria-hidden="true"'}>${s.type === 'step' ? stepNo(s) : KINDS[s.type] ? KINDS[s.type].icon : ''}</span>
+      <span class="is-n" ${s.type === 'step' || KINDS[s.type] ? '' : 'aria-hidden="true"'}>${s.type === 'step' || KINDS[s.type] ? stepNo(s) : ''}</span>
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + stepNo(s)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
@@ -431,7 +456,8 @@ export function render() {
         <div class="field"><textarea class="is-text" data-sop aria-label="Your procedure" placeholder="Paste your procedure here. Numbered steps work best.">${esc(ui.text)}</textarea></div>
         <div class="is-foot"><button class="btn sm" data-sample>Try a sample</button><span class="hint">${ui.text.length.toLocaleString()} characters</span>
           <button class="btn primary" data-draft ${ui.busy ? 'disabled' : ''}>${ui.busy ? 'Reading your steps…' : 'Turn into a process'}</button></div>
-        <div class="hint" style="margin-top:8px">${adv() ? 'The text is sent to the in-tenant AI endpoint and is not stored. Without AI, a rules parser drafts the steps. Data is linked only on a strong name match; anything else is proposed as new data.' : 'Your text is read inside your own organisation’s systems and is not kept.'}</div></div>
+        <div class="hint" style="margin-top:8px">${adv() ? 'The text is sent to the in-tenant AI endpoint and is not stored. Without AI, a rules reader drafts the steps. Nothing is linked to existing people or information: every piece of information is new to this process.' : 'Your text is read inside your own organisation’s systems and is not kept.'}</div>
+        ${templatesHTML()}</div>
       ${draftHtml || `<div class="card is-empty"><div class="empty">Your steps appear here, one card per step, ready for you to check.</div></div>`}
     </div>`;
 }
@@ -464,6 +490,10 @@ function removeAt(path) {
 }
 
 export function bind(root) {
+  if (!ui.PI) loadImport().then(PI => { if (PI && !ui.PI) { ui.PI = PI; store.emit(); } }).catch(e => console.warn('Import module unavailable:', e && e.message));
+  if (/[?&]template=/.test(location.search) && !ui.tplSeen) { ui.tplSeen = true; ui.tplOpen = true; setTimeout(() => { const t = root.querySelector('[data-templates]'); if (t) { t.open = true; t.scrollIntoView({ block: 'center' }); } }, 0); }
+  const tp = root.querySelector('[data-templates]');
+  if (tp) { tp.addEventListener('toggle', () => { ui.tplOpen = tp.open; }); tp.querySelectorAll('[data-template]').forEach(b => b.onclick = () => { readDraft(root); useTemplate(b.dataset.template); }); }
   const ta = root.querySelector('[data-sop]');
   if (ta) ta.oninput = () => { ui.text = ta.value; const h = ta.closest('.card').querySelector('.is-foot .hint'); if (h) h.textContent = ui.text.length.toLocaleString() + ' chars'; };
   const rerender = () => { readDraft(root); store.emit(); };
@@ -475,9 +505,9 @@ export function bind(root) {
     try {
       const res = await store.api('/ai/sop-import', { text: ui.text });
       const n = normalize(res);
-      ui.draft = { nodes: n.nodes, newData: n.newData, name: n.name || '', trigger: n.trigger || '' };
+      ui.draft = { nodes: n.nodes, newData: n.newData, name: n.name || '', trigger: n.trigger || '', teams: n.teams }; ui.openData = null;
       ui.source = n.source; ui.notes = n.notes;
-      toast(`Found ${countSteps(n.nodes)} steps`);
+      toast(`Found ${countNumbered(n.nodes)} steps`);
     } catch (e) { toast('Could not draft: ' + e.message); }
     finally { ui.busy = false; store.emit(); }
   };
@@ -513,14 +543,13 @@ async function createProcess() {
   const nodes = d.nodes.filter(n => String(n.title || '').trim());
   if (!countSteps(nodes) && !nodes.length) { toast('There are no steps yet.'); return; }
 
-  /* New data: block blank and duplicate names (case-insensitive) against the workspace and each other. */
+  /* New information: block blank names and names listed twice. R10: it is new to this process even when other processes
+     in the workspace have information with the same name (nothing is linked by name). */
   const picks = d.newData.filter(x => x.create && !x.exists);
-  const existing = new Map(store.list('dataElement').map(x => [strip(x.name), x.name]));
   const seen = new Set();
   for (const x of picks) {
     const k = strip(x.name);
-    if (!k) { toast('A proposed data element has no name.'); return; }
-    if (existing.has(k)) { toast(`“${x.name.trim()}” already exists as “${existing.get(k)}”. Untick it or rename it.`); return; }
+    if (!k) { toast('A proposed piece of information has no name.'); return; }
     if (seen.has(k)) { toast(`“${x.name.trim()}” is listed twice. Untick one.`); return; }
     seen.add(k);
   }
@@ -530,7 +559,8 @@ async function createProcess() {
   const steps = allSteps(nodes, []);
   const given = cleanTitle(d.name || '');
   const isStepText = t => !t || /^(?:step\s+)?\d+[.):]\s/i.test(t) || steps.some(x => strip(x.title) === strip(t)) || numberedLines(ui.text).some(l => strip(l.body).startsWith(strip(t)));
-  let nameVal = !isStepText(given) ? given : deriveName(ui.text), err = '', descVal = 'From a pasted procedure. ' + steps.length + ' step' + (steps.length === 1 ? '' : 's') + '.', trigVal = d.trigger || '';
+  /* R10: the description carries no step count (a count written into text goes stale after edits) */
+  let nameVal = !isStepText(given) ? given : deriveName(ui.text), err = '', descVal = d.desc || (d.template ? `From the ${d.template.toLowerCase()} template.` : 'From a pasted procedure.'), trigVal = d.trigger || '';
   let r;
   for (;;) {
     const pr = modal({
@@ -559,10 +589,13 @@ async function createProcess() {
       const id = store.newId('D');
       /* R8: the owner is whoever does the step it belongs to (a person, or the role as text), never the importer */
       const st = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))) || {};
-      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { owner: '', ownerRole: st.ownerRole } : { owner: '' };
+      /* R10: the role that does the step is shown as the owner; the person importing is accountable for checking it,
+         so someone can confirm it ("Not checked yet" -> "We have it") */
+      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { owner: store.state.me, ownerRole: st.ownerRole } : { owner: store.state.me };
       /* information the procedure already uses today: "We have it" (R8 §1), described, not blocked */
-      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, { source: 'From a pasted procedure', avail: 'live', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.`, fields: [], samples: [], discovered: [] }),
-        `Created information “${cleanTitle(x.name)}” from a pasted procedure`);
+      /* R10: "Not checked yet" until its owner confirms it (never "Connected" without a source) */
+      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, { source: '', avail: 'unchecked', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.`, fields: [], samples: [], discovered: [] }),
+        `Created information “${cleanTitle(x.name)}” from ${d.template ? 'a template' : 'a pasted procedure'}`);
       made.set(strip(x.name), id);
     }
   } catch (e) { toast('Could not create data: ' + e.message); return; }
@@ -590,6 +623,7 @@ async function createProcess() {
     if (s.system) node.system = s.system;
     if (s.sla) node.sla = s.sla;
     if (s.note) node.note = s.note;
+    if (s.raci) node.raci = s.raci;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
@@ -606,7 +640,7 @@ async function createProcess() {
   const resources = [...new Set(steps.map(s => s.owner).filter(Boolean))];
   try {
     await store.save('process', pid, { id: pid, name, desc: (r.form.desc || '').trim(), owner: store.state.me, resources, version: 1, asis, tobe, released: [] },
-      `Created process “${name}” from a pasted procedure (${steps.length} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);
+      `Created process “${name}” from ${d.template ? 'the ' + d.template.toLowerCase() + ' template' : 'a pasted procedure'} (${countNumbered(nodes)} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);
   } catch (e) { toast('Could not create: ' + e.message); return; }
   ui.draft = null; ui.text = ''; ui.notes = []; ui.source = null; ui.openData = null;
   toast('Saved as how it works today');

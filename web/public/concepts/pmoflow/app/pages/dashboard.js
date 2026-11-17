@@ -16,7 +16,7 @@ export const WIDGETS = {
   workload: { title: 'Workload', desc: 'Effort in the next 14 days against capacity' },
   risks: { title: 'Top risks', desc: 'Open risks by impact × likelihood' },
   blockers: { title: 'Top blockers', desc: 'Missing information with no plan, and who needs to act' },
-  golives: { title: 'Upcoming launches', desc: 'Active projects by deadline, with expected finish and launch checks' },
+  golives: { title: 'Upcoming launches', desc: 'Active projects by launch day (or deadline), with expected finish and launch checks' },
 };
 const DEFAULT = { widgets: ['rag', 'ev', 'golives', 'blockers', 'risks', 'workload', 'burndown'], program: ALL, burnPrj: null };
 
@@ -120,14 +120,17 @@ function blockersW(projects) {
   if (!list.length) return '<div class="empty">Nothing is blocking any project.</div>';
   return list.map(({ p, x }) => `<a class="pmo-dash-row" href="${link(x.href)}" data-link data-dash-blocker="${esc(x.ref || '')}"><span class="pmo-dash-main"><b>${esc(x.action)}</b><span class="hint">${esc(p.name)} · ${esc(whoName(x))}</span></span></a>`).join('');
 }
+/* R10 §3: "Upcoming launches" shows the ONE launch date (projectTruth.launch: the launch window's day, else the deadline),
+   the same date the Launch page shows. */
+const launchOf = p => { const l = truthOf(p).launch || {}; return { date: l.date || p.target || null, source: l.source || 'deadline', problem: l.problem || null }; };
 function goLivesW(projects) {
-  const list = projects.filter(p => p.status !== 'live' && p.target).sort((a, b) => String(a.target).localeCompare(String(b.target))).slice(0, 6);
+  const list = projects.filter(p => p.status !== 'live' && launchOf(p).date).sort((a, b) => String(launchOf(a).date).localeCompare(String(launchOf(b).date))).slice(0, 6);
   if (!list.length) return '<div class="empty">No upcoming launches.</div>';
   return list.map(p => {
-    const s = projectStats(p.id), gi = gateInfo(p, s), t = truthOf(p);
+    const s = projectStats(p.id), gi = gateInfo(p, s), t = truthOf(p), L0 = launchOf(p);
     const fails = t.stepsLeft != null ? t.stepsLeft : null; /* R9: projectTruth.stepsLeft */
-    const d = Number(eng('businessDaysBetween', 0, today(), p.target)) || 0; /* R9 §3: business days */
-    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}"><span class="pmo-dash-date"><b>${esc(fmt(p.target).split(' ')[1] || '')}</b><small>${esc(fmt(p.target).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${d >= 0 ? `in ${d} business day${d === 1 ? '' : 's'}` : `${-d} business day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'expected ' + fmt(t.forecast) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail">${fails} launch step${fails === 1 ? '' : 's'} left</span>` : 'ready to launch'}` : ''}</span></span>${summaryPill(summaryOf(p))}</a>`;
+    const d = Number(eng('businessDaysBetween', 0, today(), L0.date)) || 0; /* R9 §3: business days */
+    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}" data-launch-date="${esc(L0.date)}"><span class="pmo-dash-date"><b>${esc(fmt(L0.date).split(' ')[1] || '')}</b><small>${esc(fmt(L0.date).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${L0.source === 'window' ? 'Launch day' : 'Deadline (no launch day set)'} · ${d >= 0 ? `in ${d} business day${d === 1 ? '' : 's'}` : `${-d} business day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'expected ' + fmt(t.forecast) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail">${fails} launch step${fails === 1 ? '' : 's'} left</span>` : 'ready to launch'}` : ''}${L0.problem ? ` · <span class="fail">${esc(L0.problem)}</span>` : ''}</span></span>${summaryPill(summaryOf(p))}</a>`;
   }).join('');
 }
 const RENDER = { rag: ragW, burndown: burnW, ev: evW, workload: workloadW, risks: risksW, blockers: blockersW, golives: goLivesW };

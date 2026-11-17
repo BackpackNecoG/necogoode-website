@@ -854,3 +854,16 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-wtxt .t a:hover{color:var(--accent)}
 @media (max-width:600px){.pmo-why-tag{display:none}}
 .pmo-blocking.calm{border-left-color:var(--accent)}
+
+/* R10 §7 (S1): "+N more" in Who needs to act opens the remaining rows in place, each linking to its own page */
+.pmo-who-more{margin-top:6px}
+.pmo-who-more>summary{cursor:pointer;color:var(--accent);font-size:13px;font-weight:600;list-style:none;padding:4px 0}
+.pmo-who-more>summary::-webkit-details-marker{display:none}
+.pmo-who-more[open]>summary{margin-bottom:4px}
+/* R10 §6 (S1): the first-plan card lists every task (owner, dates, and the role note when a step has only a role) */
+.pmo-fp{max-height:46vh;overflow:auto;padding-right:4px}
+.pmo-fp-note{font-style:italic}
+/* R10 §7 (S1): the hourglass marks information not available yet; 🔒 only marks a card you can't edit */
+.pmo-wait-ic{vertical-align:-1px;flex:none}
+.pmo-card-lock .sr-only,.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.pmo-board [data-blocker]{white-space:normal;max-width:100%;height:auto;line-height:1.3}

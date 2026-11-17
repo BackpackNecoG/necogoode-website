@@ -554,3 +554,33 @@ a.d-wi:hover .t{color:var(--accent)}
 .modal .field .d-have input[type=checkbox],.d-ichip .d-have input[type=checkbox]{min-height:0!important;height:14px!important;width:24px!important;padding:0;border:0;flex:0 0 24px}
 .modal .field .d-switch input[type=checkbox]{min-height:0!important;height:18px!important;width:30px!important;padding:0;border:0;flex:0 0 30px}
 .d-have,.d-switch span{text-transform:none!important;letter-spacing:0!important}
+
+/* ---------- R10 S2: import rigor, templates, RACI ---------- */
+/* typed nodes keep their step number; the kind's icon sits in the kicker */
+.d-ntki{display:inline-flex;vertical-align:-3px;margin-right:4px;color:var(--ink2)}
+.d-ntki svg{width:13px;height:13px}
+/* import preview (BPMN and Visio) */
+.d-imprev ol{margin:8px 0 6px;padding-left:22px;max-height:220px;overflow:auto;font-size:13px}
+.d-imprev li{margin:3px 0;overflow-wrap:anywhere}
+.d-imprev .chip{font-size:11px;padding:1px 7px}
+/* RACI in the step dialog and on the step page */
+.d-raci{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:4px 0 10px}
+.d-raci summary{cursor:pointer;font-weight:600;font-size:13px;color:var(--ink2)}
+.d-raci[open] summary{margin-bottom:6px}
+.d-raci .frow{gap:10px}
+.d-raci-row{flex-wrap:wrap;row-gap:6px}
+.d-raci-row .lbl{margin-left:4px}
+/* import page: templates */
+.is-tpl{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.is-tpl summary{cursor:pointer;font-weight:650}
+.is-tpls{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.is-tplbtn{display:flex;flex-direction:column;gap:3px;text-align:left;background:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font:inherit;cursor:pointer;min-width:0}
+.is-tplbtn:hover,.is-tplbtn:focus-visible{border-color:var(--accent);background:var(--accent-soft)}
+.is-tplbtn b{font-size:13.5px}
+.is-tplbtn span{font-size:12px;color:var(--ink2);line-height:1.35}
+.is-tplwait{opacity:.6;cursor:default}
+.is-found [data-found-teams]{display:block;margin-top:2px}
+@media (max-width:640px){.is-tpls{grid-template-columns:1fr}.d-raci .frow{flex-direction:column}}
+/* import draft: a closed information picker takes no space; on a phone it opens leftwards so it stays on screen */
+details.is-data:not([open]) > .is-pop{display:none}
+@media (max-width:640px){details.is-data > .is-pop{left:auto;right:0;max-width:calc(100vw - 40px)}.is-pop label{white-space:normal}}

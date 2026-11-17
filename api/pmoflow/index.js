@@ -455,6 +455,8 @@ const ROUTE_MODULES = ['pmoflow-routes-buyer', 'pmoflow-routes-connect', 'pmoflo
   .map(n => { try { return require('../shared/' + n); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; return null; } })
   .filter(m => m && typeof m.handle === 'function');
 
+const ADMIN_ROUTES = ROUTE_MODULES.find(m => typeof m.roleError === 'function') || null;
+
 module.exports = async function (context, req) {
   const send = (status, body) => {
     context.res = { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body };
@@ -532,6 +534,9 @@ module.exports = async function (context, req) {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
         const exists = !!prev;
+        /* R10 S5: workspace roles (Viewer / Approver / admin-only settings) */
+        const rd = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
+        if (rd) return fail(403, rd);
         /* R5 [S]: permissions */
         const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
         if (denied) return fail(403, denied);
@@ -569,6 +574,8 @@ module.exports = async function (context, req) {
       if (method === 'DELETE') {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
+        const rdel = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
+        if (prev && rdel) return fail(403, rdel);
         if (prev && (type === 'process' || type === 'project')) {
           const denied = type === 'process' ? permissionError('process', prev.data, prev.data, actor, st.docs)
             : (actor !== prev.data.owner ? `Only the project manager (${personName(st.docs, prev.data.owner)}) can delete ${describe('project', prev.data, st.docs)}.` : null);

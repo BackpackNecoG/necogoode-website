@@ -262,7 +262,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await bar.scrollIntoViewIfNeeded();
   const dragId = await bar.getAttribute('data-bar');
   const before = await getDoc('workItem', dragId);
-  const geo = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); return { x: r.left + Math.min(20, r.width / 2), y: r.top + r.height / 2, pxDay: b.parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span) }; }, dragId);
+  const geo = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); const h = document.elementFromPoint(r.left + Math.min(20, r.width / 3), r.top + r.height / 2); return { hit: h && (h.className + '|' + (h.dataset.bar || '') + '|' + r.width + '|' + b.className), x: r.left + Math.min(20, r.width / 3), y: r.top + r.height / 2, pxDay: b.parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span) }; }, dragId);
   await page.mouse.move(geo.x, geo.y); await page.mouse.down();
   for (let k = 1; k <= 6; k++) await page.mouse.move(geo.x + geo.pxDay * 3 * k / 6, geo.y);
   check('drag shows a live date tip', /\(\+3d\)/.test(await page.locator('.pmo-dragtip').innerText().catch(() => '')));
@@ -324,6 +324,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('board: one card per work item', await page.locator('.pmo-board .pmo-card').count() === nItems, nItems);
   const card0 = page.locator('.pmo-board .pmo-card').first();
   check('board card: owner avatar, title, step, due/forecast badge', await card0.locator('.av').count() === 1 && await card0.locator('.pmo-card-t').count() === 1 && await card0.locator('.pmo-card-s').count() === 1 && await card0.locator('.badge').count() >= 1 && await card0.locator('.pmo-card-due').count() === 1);
+  /* R10 §7 (bug: cross-wired lock labels): 🔒 only marks a card you can't edit; missing information reads "Waiting on <info>" with its own icon */
+  const lockInfo = await page.evaluate(() => ({ blk: [...document.querySelectorAll('.pmo-board [data-blocker]')].map(c => c.textContent.trim()), locks: [...document.querySelectorAll('.pmo-board [data-card-lock]')].map(c => c.getAttribute('title')) }));
+  check('R10 board: missing-information chips say "Waiting on …" (no 🔒); card locks say who can edit', lockInfo.blk.length > 0 && lockInfo.blk.every(t => /^Waiting on /.test(t) && !t.includes('🔒')) && lockInfo.locks.every(t => /^Only .+ can update this$/.test(t || '')), lockInfo);
   check('board: data-blocker chips and risk badges shown', await page.locator('.pmo-board [data-blocker]').count() > 0 && await page.locator('.pmo-board [data-risk]').count() > 0);
   const blkOk = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; return [...document.querySelectorAll('.pmo-board [data-blocker]')].every(c => ['missing', 'pending'].includes(E.effectiveAvail(store.state.docs, c.dataset.blocker))); }, STORE);
   check('board: blocker chips only for missing/pending data', blkOk);
@@ -821,21 +824,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const pair = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const prj = decodeURIComponent(location.pathname.split('/project/')[1]);
     const items = store.list('workItem', w => w.projectId === prj && w.status !== 'done');
     const conf = new Set(E.scheduleConflicts(store.state.docs, prj).map(c => c.workId));
+    /* R10: the widest qualifying bar, so the grab point never lands on a short bar's resize handle */
+    let best = null;
     for (const w of items) for (const d of (w.deps || [])) { const id = typeof d === 'object' ? d.id : d; const t = typeof d === 'object' ? d.type || 'FS' : 'FS'; const dep = items.find(x => x.id === id);
-      if (dep && t === 'FS' && !conf.has(w.id) && document.querySelector(`.tl button.tbar[data-bar="${w.id}"]`)) return { w: w.id, d: dep.id, ws: w.start, dd: dep.due }; }
-    return null; }, STORE);
+      const el = document.querySelector(`.tl button.tbar[data-bar="${w.id}"]`);
+      if (dep && t === 'FS' && !conf.has(w.id) && el) { const wd = el.getBoundingClientRect().width; if (!best || wd > best.wd) best = { w: w.id, d: dep.id, ws: w.start, dd: dep.due, wd }; } }
+    return best; }, STORE);
   check('R5 conflicts: an FS pair to break exists', !!pair, pair);
   const confBeforeList = await E5('scheduleConflicts', PRJ), confBefore = confBeforeList.length;
   check('R5 conflicts: markers match the engine before a drag', await page.locator('[data-conf-mark]').count() === new Set((await E5('scheduleConflicts', PRJ)).map(c => c.workId)).size);
   if (pair) {
     const dshift = Math.round((new Date(pair.dd + 'T12:00:00') - new Date(pair.ws + 'T12:00:00')) / 86400000) - 3; /* start 3 days before the predecessor finishes */
     const b5 = page.locator(`.tl button.tbar[data-bar="${pair.w}"]`); await b5.scrollIntoViewIfNeeded();
+    /* R10: plans now hold 1-day tasks; a bar too narrow to grab away from its resize edge is first made longer (Shift+→) */
+    for (let k = 0; k < 6 && (await b5.boundingBox()).width < 40; k++) { await b5.focus(); await page.keyboard.press('Shift+ArrowRight'); await settle(); await b5.scrollIntoViewIfNeeded(); }
     const g5 = await page.evaluate(id => { const b = document.querySelector(`[data-bar="${id}"]`); const r = b.getBoundingClientRect(); return { x: r.left + Math.min(20, r.width / 2), y: r.top + r.height / 2, pxDay: b.parentElement.clientWidth / Number(document.querySelector('#pmoTl').dataset.span) }; }, pair.w);
     const steps = Math.max(1, Math.min(-dshift, 30));
     await page.mouse.move(g5.x, g5.y); await page.mouse.down();
     for (let k = 1; k <= 8; k++) await page.mouse.move(g5.x - g5.pxDay * steps * k / 8, g5.y);
     const tip5 = await page.locator('.pmo-dragtip').innerText().catch(() => '');
-    check('R5 drag: live tip warns about the new conflict', /conflicts with/.test(tip5) && await page.locator('.pmo-dragtip.conf').count() === 1, tip5);
+    check('R5 drag: live tip warns about the new conflict', /conflicts with/.test(tip5) && await page.locator('.pmo-dragtip.conf').count() === 1, { tip5, g5, hit: g5.hit });
     await page.mouse.up(); await settle();
     const after5 = await E5('scheduleConflicts', PRJ);
     check('R5 drag: conflict recorded after the drop', /* the dragged item now breaks a dependency (the shift is capped at 30 days, so it may be another of its predecessors) */
@@ -1318,7 +1326,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   await sGo('/', '[data-waiting]');
   check('R7 simple is the default (advanced off)', !(await sp.isChecked('#adv')) && await sp.evaluate(async u => !(await import(u)).store.advanced, STORE));
-  check('R7 nav: Home · Processes · Projects · Launch · Testing · Portfolio (no Dashboard)', (await sp.locator('#nav a').allInnerTexts()).join('|') === 'Home|Processes|Projects|Launch|Testing|Portfolio');
+  check('R7 nav: Home · Processes · Projects · Launch · Testing · Portfolio (no Dashboard)', (await sp.locator('#nav a').allInnerTexts()).filter(x => !/^(Connections|Admin)$/.test(x)).join('|') === 'Home|Processes|Projects|Launch|Testing|Portfolio');   /* R10: the lead adds Connections and Admin (S4/S5) */
   check('R7 home: Waiting-for-you list shown', await sp.locator('[data-waiting] h2').count() === 1);
   check('R7 home: the 3 big cards', (await sp.locator('[data-big3] .pmo-big3-c .t').allInnerTexts()).join('|') === 'Paste a procedure you already have|Check on a project|Map a process from scratch');
   check('R7 home: no jargon visible', !(await jargonOn()), await jargonOn());
