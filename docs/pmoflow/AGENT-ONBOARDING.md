@@ -6,7 +6,7 @@
   3. `CONTRACTS.md`
   4. `CONTRACTS-R2.md`
   5. `CONTRACTS-R3.md`
-  6. `CONTRACTS-R4.md` … `CONTRACTS-R8.md`, then `CONTRACTS-R9.md` (R9 is the current round: ONE TRUTH, ENFORCED — no page counts for itself; Rule #1 still governs). Findings detail: `R9-QUEUE.md`.
+  6. `CONTRACTS-R4.md` … `CONTRACTS-R9.md`, then `CONTRACTS-R10.md` (R10 is the current round: TRUSTWORTHY NUMBERS + BUYER PATH + DEAL FEATURES; streams by job; fixed acceptance bar). Market findings: `market-review/CONSOLIDATED.md`.
 
   Later deltas win over earlier ones.
 - **Shared client code (lead-owned):** `web/public/concepts/pmoflow/app/{store.js, ui.js, main.js, styles.css}`. Read them; don't edit them. If you need a change, put it in your report.

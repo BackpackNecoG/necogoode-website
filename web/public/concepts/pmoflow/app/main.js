@@ -16,8 +16,10 @@ const ROUTES = [
   [/^\/release\/([\w-]+)$/, 'release', m => ({ prj: m[1] })],
   [/^\/testing\/([\w-]+)$/, 'testing', m => ({ prj: m[1] })],
   [/^\/import$/, 'importsop', () => ({})],
+  [/^\/connections$/, 'connections', () => ({})],
+  [/^\/admin(?:\/([\w-]+))?$/, 'admin', m => ({ tab: m[1] || 'people' })],
 ];
-const NAV = { home: 'home', processes: 'process', projects: 'project', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process' };
+const NAV = { home: 'home', processes: 'process', projects: 'project', process: 'process', step: 'process', data: 'process', new: 'process', project: 'project', portfolio: 'portfolio', dashboard: 'dashboard', release: 'release', testing: 'testing', importsop: 'process', connections: 'connections', admin: 'admin' };
 
 const pageCache = {};
 async function loadPage(name) {
@@ -39,7 +41,8 @@ function renderChrome(active) {
   const prj = firstProject(), proc = firstProcess();
   const items = [['home', '/', 'Home'], ['process', '/processes', 'Processes'], ['project', '/projects', 'Projects'],
     ['release', '/release/' + prj, 'Launch'], ['testing', '/testing/' + prj, 'Testing'], ['portfolio', '/portfolio', 'Portfolio']]
-    .concat(store.advanced ? [['dashboard', '/dashboard', 'Dashboard']] : []);
+    .concat(store.advanced ? [['dashboard', '/dashboard', 'Dashboard']] : [])
+    .concat([['connections', '/connections', 'Connections'], ['admin', '/admin', 'Admin']]);
   document.getElementById('nav').innerHTML = items.map(([k, p, l]) => `<a href="${link(p)}" data-link class="${active === k ? 'on' : ''}">${l}</a>`).join('');
   document.getElementById('brand').setAttribute('href', link('/'));
   const sel = document.getElementById('persona');
@@ -64,7 +67,7 @@ async function render() {
   if (seq !== renderSeq) return; /* a newer render started */
   let html;
   try { html = mod.render(params); } catch (e) { console.error(e); html = `<div class="card"><h3>Something went wrong</h3><div class="hint">${esc(e.message)}</div></div>`; }
-  const footer = `<div class="hint" style="text-align:center;margin:28px 0 8px">Concept demo · fictional Northwind data · your changes live in a private sandbox for 30 days · <a href="#" data-reset style="color:var(--accent)">Reset demo data</a></div>`;
+  const footer = `<div class="hint" style="text-align:center;margin:28px 0 8px">Live demo · fictional Northwind data · your changes live in a private sandbox for 30 days · <a href="#" data-reset style="color:var(--accent)">Reset demo data</a> · <a href="/pmoflow/" style="color:var(--accent)">About PMOFlow</a> · <a href="/pmoflow/demo" style="color:var(--accent)">Book a demo</a></div>`;
   app.innerHTML = (store.state.error ? `<div class="banner">${esc(store.state.error)}</div>` : '') + html + footer;
   store.state.error = null;
   try { if (mod.bind) mod.bind(app, params); } catch (e) { console.error(e); }

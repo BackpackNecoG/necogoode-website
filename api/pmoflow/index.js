@@ -451,6 +451,10 @@ async function rollback(wsId, docs, project, actor, body, today) {
   return { status: 200, body: { ok: true, release, project: proj } };
 }
 
+const ROUTE_MODULES = ['pmoflow-routes-buyer', 'pmoflow-routes-connect', 'pmoflow-routes-admin']
+  .map(n => { try { return require('../shared/' + n); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; return null; } })
+  .filter(m => m && typeof m.handle === 'function');
+
 module.exports = async function (context, req) {
   const send = (status, body) => {
     context.res = { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body };
@@ -464,6 +468,13 @@ module.exports = async function (context, req) {
     try { seg = String(path).split('/').filter(Boolean).map(decodeURIComponent); } catch (e) { return fail(400, 'bad path'); }
     const body = parseBody(req);
     if (body === null) return fail(400, 'body must be JSON');
+
+    /* R10: stream-owned route modules (buyer layer, connections, admin). Each exports
+       handle({ method, seg, body, req, store, send, fail, clientIpHash, dayInput, clientToday }) → true when it handled the request.
+       A module that is missing simply isn't loaded, so streams can land independently. */
+    for (const mod of ROUTE_MODULES) {
+      if (await mod.handle({ method, seg, body, req, store, send, fail, clientIpHash, dayInput, clientToday })) return;
+    }
 
     /* POST /workspaces */
     if (seg[0] === 'workspaces' && seg.length === 1) {

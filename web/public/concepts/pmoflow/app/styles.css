@@ -261,3 +261,7 @@
   .top .viewmenu .vm-pop{position:static;width:auto;margin-top:8px}
 }
 @media (max-width:640px){.top.open .topmenu .who>span{flex:1 1 100%}.top.open .topmenu .who select{flex:1 1 100%}.top.open .topmenu .who .viewmenu{flex:1 1 100%}.top.open .topmenu .who .viewmenu summary{display:inline-block;padding:8px 12px;font-size:14px}}
+/* R10: header "Book a demo" link */
+.top .bookdemo{white-space:nowrap;font-size:13px;font-weight:600;color:#fff;background:var(--accent,#5b5bd6);border-radius:8px;padding:6px 10px;text-decoration:none;margin-left:4px}
+@media (max-width:640px){.top .bookdemo{font-size:12px;padding:6px 8px}}
+@media (max-width:380px){.top .bookdemo{display:none}}
