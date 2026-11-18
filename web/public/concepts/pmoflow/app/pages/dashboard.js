@@ -152,7 +152,7 @@ function widgetHTML(id, i, n, projects) {
 }
 
 /* ---------------------------------------------------------------- page */
-export function render() {
+function renderPage() {
   if (!store.advanced) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Dashboard</div><h1>Dashboard</h1>
       <p>The dashboard is one of the advanced tools. For a quick view of every project, open the Portfolio.</p></div></section>
     <div class="card pmo-adv-note" data-dash-simple style="margin-top:16px"><a class="btn primary" href="${link('/portfolio')}" data-link>Open the Portfolio</a><button class="btn" data-adv-on>Show advanced tools</button></div>`;
@@ -188,3 +188,5 @@ export function bind(root) {
   const bp = root.querySelector('[data-dash-burn]');
   if (bp) bp.addEventListener('change', () => update(l => { l.burnPrj = bp.value; }));
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

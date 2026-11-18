@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -427,7 +427,7 @@ function simpleRender(projects) {
     <div class="pmo-stack">${risksHTML(projects)}</div>
     <div class="pmo-adv-note hint">Money, earned value, workload, burndown and spreadsheet export are in the advanced tools. <button class="btn sm" data-adv-on>Show advanced tools</button></div>`;
 }
-export function render() {
+function renderPage() {
   const projects = store.list('project');
   if (isSimple()) return simpleRender(projects);
   const totals = projects.map(p => ({ p, s: projectStats(p.id) }));
@@ -464,8 +464,7 @@ export function bind(root) {
   const pick = r => { setPfRange(r); const sel = root.querySelector('[data-rep-prj]'); const prj = sel ? sel.value : st.repPrj; if (prj && reports[prj] && reports[prj].data) generate(prj); else rerender(); };
   on('[data-rep-preset]', el => pick({ preset: el.dataset.repPreset }));
   bindPeriodPicker(root);
-  on('[data-rep-apply]', () => { const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-end]'); const from = f && f.value, to = (t && t.value) || today();
-    if (!from) { toast('Choose a start date'); return; } pick({ preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from }); });
+  on('[data-rep-apply]', el => { const r = readCustomRange(el); if (r) pick({ preset: 'custom', from: r.from, to: r.to }); });
   if (!pfEvents.loaded) { pfEvents.loaded = true; reportEvents().then(list => { pfEvents.list = list; }); }   /* used from the next render on */
   on('[data-gen-rep]', () => { const sel = root.querySelector('[data-rep-prj]'); generate(sel ? sel.value : st.repPrj); });
   on('[data-copy-rep]', async () => {
@@ -483,3 +482,5 @@ export function bind(root) {
   on('[data-export-pf]', () => { const n = downloadCSV(`portfolio-${today()}.csv`, portfolioCSVRows(store.list('project'))); toast(`Exported ${n} project${n === 1 ? '' : 's'} to CSV`); });
   bindFeed(root, 'risk', e => String(e.ref || '').startsWith('risk:'));
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

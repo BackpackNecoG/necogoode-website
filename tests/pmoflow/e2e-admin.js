@@ -79,6 +79,73 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(/ask (Maya Chen|Tom Alvarez)/.test(await page.textContent('[data-admin-only]')), 'explanation names the Admins');
   await setMe('mc'); await settle(900);
 
+  console.log('Departments (R13 #1)');
+  await open('/admin/departments');
+  const deptNames = async () => page.$$eval('[data-dept]', els => els.map(e => e.dataset.deptName));
+  const seeded = await deptNames();
+  ok(['Accounts Payable', 'Compliance', 'IT', 'PMO', 'Procurement', 'Treasury'].every(n => seeded.includes(n)), 'the six seeded departments are listed: ' + seeded.join(', '));
+  ok(/Rosa/.test(await page.textContent('[data-dept-name="Procurement"] [data-dept-approvers-list]')), 'a seeded department shows its named approver');
+  await page.fill('#adm-dn', 'Credit'); await page.click('[data-dept-add-form] button[type=submit]');
+  ok(await toastSays(/Added Credit/), 'department added');
+  await page.waitForSelector('[data-dept-name="Credit"]', { timeout: 8000 }).catch(() => {});
+  await page.reload(); await page.waitForSelector('[data-dept]'); await settle(800);
+  ok((await deptNames()).includes('Credit'), 'Credit persists after reload');
+  const engDepts = () => page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return window.PMOEngine.departments(store.state.docs).map(d => ({ name: d.name, approvers: d.approvers, people: d.people.map(p => p.id) })); });
+  ok((await engDepts()).some(d => d.name === 'Credit'), 'the engine reads the new department (one list for routing)');
+  /* duplicate name is refused with the engine's sentence */
+  await page.fill('#adm-dn', 'credit'); await page.click('[data-dept-add-form] button[type=submit]');
+  ok(await toastSays(/already exists/), 'a duplicate name is refused');
+  /* rename */
+  await page.click('[data-dept-name="Credit"] [data-dept-rename]');
+  await page.fill('.modal #adm-rn', 'Credit and Collections'); await page.click('.modal [data-act="save"]');
+  ok(await toastSays(/Renamed Credit to Credit and Collections/), 'department renamed');
+  await page.waitForSelector('[data-dept-name="Credit and Collections"]', { timeout: 8000 }).catch(() => {});
+  const cc = '[data-dept-name="Credit and Collections"]';
+  /* assign a person */
+  await page.selectOption(`${cc} [data-dept-assign-form] select`, 'ar');
+  await page.click(`${cc} [data-dept-assign-form] button[type=submit]`);
+  ok(await toastSays(/Ana Ruiz is now in Credit and Collections/), 'person assigned');
+  await page.waitForFunction(sel => /Ana Ruiz/.test((document.querySelector(sel + ' .adm-dppl') || {}).textContent || ''), cc, { timeout: 8000 }).catch(() => {});
+  ok(/Ana Ruiz/.test(await page.textContent(`${cc} .adm-dppl`).catch(() => '')), 'the department lists its person');
+  /* set approvers */
+  await page.click(`${cc} [data-dept-approvers] summary`);
+  await page.check(`${cc} [data-dept-approvers] input[value="ar"]`);
+  await page.click(`${cc} [data-dept-approvers-save]`);
+  ok(await toastSays(/Credit and Collections approvers saved/), 'approvers saved');
+  await page.waitForFunction(sel => /Ana Ruiz/.test((document.querySelector(sel + ' [data-dept-approvers-list]') || {}).textContent || ''), cc, { timeout: 8000 }).catch(() => {});
+  ok(/Approves: Ana Ruiz/.test(await page.textContent(`${cc} .adm-dwho`)), 'the card names the approver');
+  const ccEng = (await engDepts()).find(d => d.name === 'Credit and Collections');
+  ok(ccEng && ccEng.approvers.join() === 'ar' && ccEng.people.includes('ar'), 'engine: approvers and members match the screen');
+  /* remove is blocked while people are in it, and says why */
+  ok(await page.$eval(`${cc} [data-dept-remove]`, b => b.disabled) && /Move the 1 person in Credit and Collections/.test(await page.textContent(`${cc} .adm-dwhy`)), 'remove is blocked while people are in it, with the reason');
+  await shotBoth('departments');
+  /* People tab: the department column shows and moves a person */
+  await open('/admin/people');
+  ok(await page.$eval('[data-assign="ar"] option:checked', o => o.textContent) === 'Credit and Collections', 'People shows the department');
+  await page.selectOption('[data-assign="ar"]', { label: 'Accounts Payable' });
+  ok(await toastSays(/Ana Ruiz is now in Accounts Payable/), 'moved back from the People tab');
+  await settle(900);
+  /* invite with a department */
+  await page.fill('#adm-email', 'sam.wu@northwind.example');
+  await page.selectOption('#adm-irole', 'approver');
+  await page.selectOption('#adm-idept', { label: 'Credit and Collections' });
+  await page.click('[data-invite-form] button[type=submit]');
+  ok(await toastSays(/Invited sam\.wu@northwind\.example/), 'invite with a department saved');
+  await settle(900);
+  ok(/Credit and Collections/.test(await page.textContent('[data-invite-dept]').catch(() => '')), 'the invite shows its department');
+  await page.click('[data-uninvite]'); await toastSays(/Invite removed/); await settle(800);
+  /* now empty: remove it */
+  await open('/admin/departments');
+  await page.click(`${cc} [data-dept-remove]`);
+  await page.click('.modal [data-act="rm"]');
+  ok(await toastSays(/Removed Credit and Collections/), 'empty department removed');
+  await page.waitForFunction(() => !document.querySelector('[data-dept-name="Credit and Collections"]'), null, { timeout: 8000 }).catch(() => {});
+  ok(!(await deptNames()).includes('Credit and Collections'), 'it is gone from the list');
+  /* an Editor can add, not rename */
+  await setMe('lp'); await settle(900);
+  ok(!(await page.$eval('#adm-dn', el => el.disabled)) && await page.$eval('[data-dept-rename]', b => b.disabled) && await page.isVisible('[data-admin-only]'), 'Editor: may add a department; rename is Admin only, explained');
+  await setMe('mc'); await settle(900);
+
   console.log('Calendar');
   await open('/admin/calendar');
   const year = Number((await page.evaluate(async () => (await import('/concepts/pmoflow/app/store.js')).store.state.today)).slice(0, 4));
@@ -109,6 +176,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await page.getAttribute('[data-verify]', 'data-verify') === 'ok', 'chain verified');
   const log = await page.textContent('.adm-log');
   ok(/Changed Priya Shah's role from Editor to Approver/.test(log) && /Added Christmas Eve/.test(log) && /Invited jordan/.test(log), 'history lists the admin changes');
+  ok(/Added the Credit department/.test(log) && /Renamed the Credit department to Credit and Collections/.test(log) && /Removed the Credit and Collections department/.test(log), 'history lists the department changes');
   await page.fill('[data-f="item"]', 'Christmas'); await page.press('[data-f="item"]', 'Enter'); await settle(500);
   const rows = await page.$$eval('.adm-log tbody tr', els => els.map(e => e.textContent));
   ok(rows.length >= 1 && rows.every(t => /Christmas/.test(t)), `item filter narrows to ${rows.length} entr(y/ies)`);
@@ -138,6 +206,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await page.setInputFiles('[data-checkfile]', jsonPath);
   await page.waitForSelector('[data-filecheck]');
   ok(await page.getAttribute('[data-filecheck]', 'data-filecheck') === 'ok', 'saved export checks out');
+  /* R13 (Jordan): the JSON check names the key source, worded exactly as the CSV check below */
+  const jsonKeyNote = await page.textContent('[data-filecheck-key]').catch(() => '');
+  ok(jsonKeyNote === `Signed with the ${j.keySource}.`, 'JSON check states the key source: ' + jsonKeyNote);
   const bad = JSON.parse(JSON.stringify(j)); bad.entries[Math.floor(bad.entries.length / 2)].summary += ' (edited)';
   const badPath = `${SHOTS}/tampered.json`; fs.writeFileSync(badPath, JSON.stringify(bad));
   if (!(await page.isVisible('[data-checkfile]'))) await page.click('.adm-check summary');
@@ -179,6 +250,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   };
   res = await checkCsv(csv, 'export');
   ok(res.state === 'ok' && /signed head matches/.test(res.text) && new RegExp(j.keySource).test(res.text), 'the saved CSV checks out in the app: ' + res.text.slice(0, 120));
+  ok((await page.textContent('[data-filecheck-key]').catch(() => '')) === jsonKeyNote, 'CSV and JSON checks word the key source the same way');
   await page.screenshot({ path: `${SHOTS}/history-csvcheck-1366.png` });
   res = await checkCsv(csv.replace(/Christmas Eve/, 'Christmas Day'), 'csv-edited');
   ok(res.state === 'broken' && /Chain broken at entry/.test(res.text), 'an edited CSV is caught: ' + res.text.slice(0, 90));

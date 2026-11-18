@@ -143,23 +143,31 @@ async function api(method, path, body) {
   ok(/^1 changed issue since the last sync\.$/.test(await page.locator('[data-cx-log] .cx-le', { hasText: 'Read changes' }).first().locator('.cx-lx').textContent()), 'pull reads exactly "1 changed issue since the last sync"');
   ok(!(await page.$('[data-cx-early="W11"]')), 'no flag: W11 depends on nothing');
   await shot('05-flowed-back');
-  /* R11 §9 (Jordan's VOM-10 case): a task whose predecessors are still open is marked Done in Jira */
+  /* R11 §9 (Jordan's VOM-10 case) + R13 #5 (expert-pmo.md VOM-8): a task whose predecessors are still open is marked Done in
+     Jira. It is held in review for its owner, so the forecast and expected cost don't move */
   const waiting = after.docs.workItem.find(d => d.data.projectId === 'vendor-modernization' && d.data.status !== 'done' && d.data.kind !== 'defect' && !d.data.resolves &&
     (d.data.deps || []).some(id => { const p = after.docs.workItem.find(x => x.id === id); return p && p.data.status !== 'done'; }));
   if (!waiting) ok(false, 'the seed has a task waiting on open work');
   else {
     const wkey = await page.locator('[data-cx-item]', { hasText: waiting.data.title }).first().getAttribute('data-cx-item');
+    const byHand = JSON.parse(JSON.stringify(after.docs)); byHand.workItem.find(d => d.id === waiting.id).data.status = 'review';
     await page.selectOption(`[data-cx-simstatus="${wkey}"]`, 'Done');
-    await page.waitForSelector(`[data-cx-early="${waiting.id}"]`, { timeout: 20000 }).catch(() => {});
-    ok(/Finished before the work it depends on \(.+ still open\)/.test(await page.textContent(`[data-cx-early="${waiting.id}"]`).catch(() => '')), `${wkey} Done with open predecessors: flagged on the task`);
-    ok(/finished before the work it depends on \(flagged\)/.test(await page.textContent('[data-cx-result]')), 'the result sentence reports the flag');
-    ok(await page.locator('[data-cx-log] .cx-le', { hasText: 'Check order' }).count() >= 1, 'sync log row "Check order · Finished early"');
+    await page.waitForSelector(`[data-cx-held="${waiting.id}"]`, { timeout: 20000 }).catch(() => {});
+    const note = await page.textContent(`[data-cx-held="${waiting.id}"]`).catch(() => '');
+    ok(/Finished before the work it depends on \(.+ still open\)/.test(note), `${wkey} Done with open predecessors: held, and the task says why`);
+    const ownerName = (after.docs.person.find(d => d.id === waiting.data.owner) || { data: {} }).data.name;
+    ok(ownerName && (await page.textContent(`[data-cx-hold-owner="${waiting.id}"]`).catch(() => '')).includes(ownerName), `flagged for its owner (${ownerName})`);
+    ok(/Done held for review in PMOFlow \(1 finished before the work it depends on\)/.test(await page.textContent('[data-cx-result]')), 'the result sentence reports the hold');
+    ok(await page.locator('[data-cx-log] .cx-le', { hasText: 'Done held' }).filter({ hasText: ownerName || '#' }).count() >= 1, 'sync log row "Done held" names the owner');
     const st2 = await api('GET', `ws/${ws}/state`);
-    ok(st2.body.docs.workItem.find(d => d.id === waiting.id).data.status === 'done', 'the Done is accepted, not refused');
-    /* R12: "Finished before the work it depends on" stays flagged after another sync */
+    const hw = st2.body.docs.workItem.find(d => d.id === waiting.id).data;
+    ok(hw.status === 'review' && hw.syncHold && hw.syncHold.kind === 'order' && hw.syncHold.confirmBy === waiting.data.owner, 'held in review with the owner flag on the task');
+    ok(E.projectFinancials(st2.body.docs, 'vendor-modernization', today()).forecastCost === E.projectFinancials(byHand, 'vendor-modernization', today()).forecastCost &&
+      JSON.stringify(E.forecastAll(st2.body.docs, today())) === JSON.stringify(E.forecastAll(byHand, today())), 'forecast and expected cost equal the task put in review by hand');
+    /* still held after another sync */
     await page.click('[data-cx-sync]');
     await page.waitForFunction(() => /already in sync|updated/.test((document.querySelector('[data-cx-result]') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
-    ok(/Finished before the work it depends on/.test(await page.textContent(`[data-cx-early="${waiting.id}"]`).catch(() => '')), 'still flagged after another sync');
+    ok(/Finished before the work it depends on/.test(await page.textContent(`[data-cx-held="${waiting.id}"]`).catch(() => '')), 'still held after another sync');
     await shot('05b-finished-early');
   }
 

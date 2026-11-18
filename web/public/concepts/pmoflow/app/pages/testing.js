@@ -180,7 +180,7 @@ export function render(params) {
       <div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
       <div class="rl-title"><h1>Testing</h1><select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>${!store.advanced && ui.advLocal[prjId] ? '<button class="btn sm rs-link" data-hide-adv>Hide advanced tools</button>' : ''}</div>
       <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch; end-to-end scenarios walk each whole path. Environments: Dev, SIT, UAT and Prod verify. Coverage counts each item's latest result across every run in that environment.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${caseIds.length}</b><span>Data cases</span></div><div class="kpi"><b>${sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Try it out · tests passed', devCov, 'dev')}${covKpi('Business sign-off · tests passed', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
+    <div class="hdr-side"><div class="kpis"><div class="kpi" data-kpi-cases="${esc(tt.cases != null ? tt.cases : caseIds.length)}"><b>${tt.cases != null ? tt.cases : caseIds.length}</b><span>Data cases${tt.cases != null && caseIds.length > tt.cases ? ` · ${caseIds.length - tt.cases} more not counted` : ''}</span></div><div class="kpi" data-kpi-scripts="${esc(tt.scripts != null ? tt.scripts : sc.list.length)}"><b>${tt.scripts != null ? tt.scripts : sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Try it out · tests passed', devCov, 'dev')}${covKpi('Business sign-off · tests passed', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
     ${tc ? `<div class="ts-strip ${tc.pass ? 'pass' : 'fail'}" data-tests-check="${tc.pass ? 'pass' : 'fail'}"><span class="rl-ic ${tc.pass ? 'pass' : 'fail'}">${tc.pass ? '✓' : '✕'}</span>
       <div><b>Go-live check: ${tc.pass ? 'tests passed' : 'tests not passed yet'}</b>. ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}
     ${traceStrip(prj, des)}`;
@@ -202,6 +202,11 @@ export function render(params) {
 /* R6 traceability headline: UAT done/total next to spec-field coverage, from E().testCoverage (local fallback).
    Uncovered fields are listed per data element with a one-press "Generate". */
 function traceOf(prj, des) {
+  /* R13 #2 one ledger: the Business check stage and the coverage of the information this project changes (projectTruth.testing) */
+  const tt = (eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing;
+  const cov = tt && tt.coverage, st = tt && Array.isArray(tt.stages) ? tt.stages.find(x => x && x.key === 'uat') : null;
+  if (cov && st) return { uat: { done: +st.passed || 0, total: +st.total || 0 }, fields: { total: +cov.fieldsTotal || 0, covered: +cov.fieldsCovered || 0,
+    uncovered: (cov.uncoveredFields || []).map(x => ({ dataId: x.dataId || '', field: x.field || '' })) }, engine: true };
   const e = E(); let tc = null;
   if (e && e.testCoverage) { try { tc = e.testCoverage(store.state.docs, prj.id, store.state.today); } catch (err) { tc = null; } }
   const by = latestBy(prj.id, 'uat'); const items = uatItems(prj);
@@ -390,14 +395,21 @@ function coverageCard(prj, des, runs, sc) {
   const dash = '<td><span class="ts-o none">—</span></td>';
   const rows = [];
   let gaps = 0;
+  /* R13 #2 one ledger: a coverage gap is counted only on information this project changes (projectTruth.testing.coverage,
+     the same as the gate and Simple); information it does not change is listed as "not counted" */
+  const tcov = ((eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing || {}).coverage || null;
+  const elOf = id => tcov ? (tcov.elements || []).find(x => x.dataId === id) || null : null;
   des.forEach(d => {
     const ids = casesFor(d.id).map(c => c.id);
     const fc = fieldCoverage(d);
-    const gap = !ids.length || fc.missing.length || fc.customOnly.length;
+    const el = elOf(d.id), nc = !!tcov && !el;
+    const gap = tcov ? !!el && !el.covered : (!ids.length || fc.missing.length || fc.customOnly.length);
     if (gap) gaps++;
     const defs = openDef.filter(w => w.testRef && w.testRef.caseId && ids.includes(w.testRef.caseId)).length;
-    const gapTxt = [fc.missing.length ? `no case: ${fc.missing.join(', ')}` : '', fc.customOnly.length ? `custom only (doesn't count): ${fc.customOnly.join(', ')}` : ''].filter(Boolean).join(' · ');
-    rows.push(`<tr class="${gap ? 'ts-zero' : ''}" data-cov-row="data:${esc(d.id)}"><td><span class="chip">Data</span> <a href="${link(`/testing/${prj.id}?de=${d.id}`)}" data-link>${esc(d.name)}</a>${gapTxt ? `<div class="ts-gap" data-cov-gap>${esc(gapTxt)}</div>` : ''}</td>
+    const uf = el ? (el.uncoveredFields || []) : [], co = uf.filter(f => fc.customOnly.includes(f)), mi = uf.filter(f => !co.includes(f));
+    const gapTxt = nc ? '' : el ? (el.state === 'no-cases' ? 'no tests yet' : [mi.length ? `no case: ${mi.join(', ')}` : '', co.length ? `custom only (doesn't count): ${co.join(', ')}` : ''].filter(Boolean).join(' · '))
+      : [fc.missing.length ? `no case: ${fc.missing.join(', ')}` : '', fc.customOnly.length ? `custom only (doesn't count): ${fc.customOnly.join(', ')}` : ''].filter(Boolean).join(' · ');
+    rows.push(`<tr class="${gap ? 'ts-zero' : nc ? 'ts-nc' : ''}" data-cov-row="data:${esc(d.id)}"${nc ? ' data-not-counted' : ''}><td><span class="chip">Data</span> <a href="${link(`/testing/${prj.id}?de=${d.id}`)}" data-link>${esc(d.name)}</a>${gapTxt ? `<div class="ts-gap" data-cov-gap>${esc(gapTxt)}</div>` : ''}${nc ? '<div class="hint" data-cov-nc>Not counted: this project does not change it</div>' : ''}</td>
       <td>${ids.length ? `${ids.length} case${ids.length === 1 ? '' : 's'}` : '<b>0 cases</b>'}${(d.fields || []).length ? `<div class="hint">${(d.fields || []).length - fc.missing.length - fc.customOnly.length}/${(d.fields || []).length} fields</div>` : ''}</td>${envs.map(env => cell(aggOutcome(last[env], ids))).join('')}<td>${defs ? badge(defs + ' open', 'b-late') : '0'}</td></tr>`);
   });
   const items = uatItems(prj);
@@ -420,7 +432,7 @@ function coverageCard(prj, des, runs, sc) {
   });
   const skipped = envs.reduce((n, env) => n + (last[env] && last[env]._skipped ? last[env]._skipped.size : 0), 0);
   const noEv = new Set(); envs.forEach(env => { if (last[env] && last[env]._noEv) last[env]._noEv.forEach(k => { if (!last[env][k]) noEv.add(k); }); });
-  return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n">${gaps ? `${gaps} uncovered` : 'all covered'}</span></h3>
+  return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n" data-cov-gaps="${tcov ? tcov.gaps : gaps}">${(tcov ? tcov.gaps : gaps) ? `${tcov ? tcov.gaps : gaps} coverage gap${(tcov ? tcov.gaps : gaps) === 1 ? '' : 's'}` : 'all covered'}</span></h3>
     <div class="hint" style="margin-bottom:8px">Rows are the project's data elements, to-be steps and adopted end-to-end scenarios. Red rows have a coverage gap: every spec field needs a case generated from the spec or profile (custom-only fields don't count), and every new or changed step needs a script. Each cell is the latest result per item across every run in that environment.</div>
     ${skipped || noEv.size ? `<div class="ts-warn" data-cov-notes>${skipped ? `<span data-skipped-count="${skipped}">${skipped} skipped (JUnit &lt;skipped/&gt;, counted as not run)</span>` : ''}${skipped && noEv.size ? ' · ' : ''}${noEv.size ? `<span data-noev-count="${noEv.size}">${noEv.size} script or scenario pass${noEv.size === 1 ? '' : 'es'} without evidence (don't count)</span>` : ''}</div>` : ''}
     <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step / scenario</th><th>Cases / scripts</th>${envs.map(env => `<th title="${esc(ENV_TIP[env] || '')}">${esc(envTxt(env))} (latest)</th>`).join('')}<th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;

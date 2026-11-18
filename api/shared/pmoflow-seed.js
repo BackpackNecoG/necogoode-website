@@ -312,7 +312,16 @@ function seed(createdAtISODate) {
   add('calendar', { id: 'workspace', holidays: [] });
   /* R11 §8: Dave Ortiz (and each department head) only approves, so he is an Approver (a free seat). This shows "approvers are free" in the demo:
      the Admin seats line counts him as free, and he can still approve Compliance's part. */
-  add('workspace', { id: 'settings', roles: { do: 'approver', nb: 'approver', sk: 'approver', rv: 'approver', gw: 'approver' }, invites: [], anchors: [] });
+  /* R13 #1: departments are workspace data. The six seeded departments are ordinary, editable entries; each names its
+     approver (its head, an Approver on a free seat). PMO has none: the PM never approves a team's part. */
+  add('workspace', { id: 'settings', roles: { do: 'approver', nb: 'approver', sk: 'approver', rv: 'approver', gw: 'approver' }, invites: [], anchors: [],
+    departments: [
+      { id: 'dept-accounts-payable', name: 'Accounts Payable', approvers: ['nb'] },
+      { id: 'dept-compliance', name: 'Compliance', approvers: ['do'] },
+      { id: 'dept-it', name: 'IT', approvers: ['sk'] },
+      { id: 'dept-pmo', name: 'PMO', approvers: [] },
+      { id: 'dept-procurement', name: 'Procurement', approvers: ['rv'] },
+      { id: 'dept-treasury', name: 'Treasury', approvers: ['gw'] }] });
   dataElements().forEach(d => add('dataElement', d));
   processes().forEach(p => add('process', p));
 

@@ -621,3 +621,12 @@ details.is-data:not([open]) > .is-pop{display:none}
 .is-apr{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
 .is-apr h4{margin:0 0 4px;font-size:13.5px}
 @media (max-width:640px){.d-apr .d-sel{max-width:46vw}}
+/* R13 K2 #14: import disclosures and the /import "Import a Visio or BPMN file" link */
+.is-linkbtn{border:0;background:transparent;color:var(--accent);font:inherit;padding:6px 2px;min-height:40px;text-decoration:underline;cursor:pointer}
+.d-folded{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fffbeb;margin-bottom:8px}
+.d-folded .n{background:#fef3c7;color:#92400e;border-radius:99px;padding:0 7px;font-size:11px;margin-left:4px}
+.d-folded ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:2px}
+.d-folded li{overflow-wrap:anywhere}
+.d-apr-add{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.d-apr-add .btn{min-height:40px}
+.d-apr-add .hint{font-size:12px}

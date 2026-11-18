@@ -249,9 +249,13 @@ test('Azure DevOps: JSON Patch payloads, WIQL pull, dependency relations', () =>
   const k6 = S.keyOf(conn, 'W6'), k7 = S.keyOf(conn, 'W7');
   assert.match(k6, /^\d+$/);
   assert.deepEqual(conn.sim.items[k7].deps, [k6]);
+  S.simEdit(conn.sim, S.keyOf(conn, 'W11'), { status: 'Closed' }, clock());
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W11').status, 'done', 'Closed in Azure DevOps → Done for a plain task');
+  /* R13 #5: W7 waits on W6 (still open), so its Closed is held in review */
   S.simEdit(conn.sim, k7, { status: 'Closed' }, clock());
   sync(docs, conn);
-  assert.equal(wi(docs, 'W7').status, 'done', 'Closed in Azure DevOps → Done for a plain task');
+  assert.equal(wi(docs, 'W7').status, 'review', 'Closed out of order is held');
   /* R12: W6 makes Bank remittance details available, so Closed is held as In review, never Done */
   S.simEdit(conn.sim, k6, { status: 'Closed' }, clock());
   sync(docs, conn);
@@ -331,23 +335,24 @@ test('R11 route: "changed issues since the last sync" excludes PMOFlow’s own w
     const again = await call('POST', `workspaces/${ws}/connections/${c.id}/sync`, { actor: owner });
     assert.equal(again.body.connection.log.find(e => e.op === 'pull').detail, '0 changed issues since the last sync.');
     assert.equal(again.body.sentence, 'Everything was already in sync');
-    /* one person changes one issue: exactly 1 changed issue; it is Done while its predecessors are open, so it is flagged */
+    /* one person changes one issue: exactly 1 changed issue; it is Done while its predecessors are open, so (R13 #5) it is
+       held in review for its owner, not applied */
     const items = again.body.connection.sim.items;
     const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
     const open = id => (docs.workItem.find(d => d.id === id) || {}).data;
-    const key = Object.keys(items).find(k => { const w = open(items[k].pmoId); return w && w.status !== 'done' && (w.deps || []).some(d => open(d) && open(d).status !== 'done'); });
+    const key = Object.keys(items).find(k => { const w = open(items[k].pmoId); return w && w.status !== 'done' && w.kind !== 'defect' && !w.resolves && (w.deps || []).some(d => open(d) && open(d).status !== 'done'); });
     assert.ok(key, 'the seed has a task waiting on open work');
     const sim = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key, status: 'Done', actor: owner });
     assert.equal(sim.status, 200);
     const log = sim.body.connection.log;
     assert.equal(log.find(e => e.op === 'pull').detail, '1 changed issue since the last sync.');
-    const flag = log.find(e => e.op === 'flag');
-    assert.ok(flag && flag.result === 'flagged' && flag.key === key, 'flag row in the sync log');
-    assert.match(flag.detail, /^Finished before the work it depends on \(.+ still open\)\. Accepted/);
-    assert.equal(sim.body.summary.received, 1); assert.equal(sim.body.summary.early, 1);
-    assert.match(sim.body.sentence, /1 task updated from Jira · 1 finished before the work it depends on \(flagged\)/);
+    const flag = log.find(e => e.op === 'held' && e.kind === 'order');
+    assert.ok(flag && flag.result === 'held' && flag.key === key, 'held row in the sync log');
+    assert.match(flag.detail, /Finished before the work it depends on \(.+ still open\)/);
+    assert.equal(sim.body.summary.received, 1); assert.equal(sim.body.summary.held, 1); assert.equal(sim.body.summary.early, 1);
+    assert.match(sim.body.sentence, /1 task updated from Jira · 1 Done held for review in PMOFlow \(1 finished before the work it depends on\)/);
     const after = (await call('GET', `ws/${ws}/state`)).body.docs;
-    assert.equal(after.workItem.find(d => d.id === items[key].pmoId).data.status, 'done', 'accepted, not refused');
+    assert.notEqual(after.workItem.find(d => d.id === items[key].pmoId).data.status, 'done', 'held, not applied');
     const evs = (await call('GET', `ws/${ws}/events`)).body.events;
     assert.ok(evs.some(e => /finished before the work it depends on/i.test(e.summary)), 'recorded in history');
   } finally {
@@ -364,7 +369,7 @@ const strip = (docs) => JSON.parse(JSON.stringify(docs));
 /* every doc, with the one work item's status / doneAt / updatedAt taken out */
 function without(docs, wid) {
   const d = strip(docs);
-  d.workItem.forEach(x => { if (x.id === wid) { delete x.data.status; delete x.data.doneAt; delete x.data.updatedAt; } });
+  d.workItem.forEach(x => { if (x.id === wid) { delete x.data.status; delete x.data.doneAt; delete x.data.updatedAt; delete x.data.syncHold; } });
   delete d.connection;
   return d;
 }
@@ -508,9 +513,124 @@ test('R12 guardrail 4 (route): audit entries name the external identity, never t
     const again = await call('POST', `workspaces/${ws}/connections/${c.id}/sync`, { actor: pm });
     assert.equal(again.status, 200);
     const later = (await call('GET', `ws/${ws}/state`)).body.docs;
-    assert.equal(E.doneBeforeDeps(later, w.id).flag, true, 'still flagged after another sync');
+    const lw = later.workItem.find(d => d.id === w.id).data;
+    assert.ok(lw.status !== 'done' && lw.syncHold && lw.syncHold.kind === 'order', 'still held and flagged after another sync');
     const flagEv = (await call('GET', `ws/${ws}/events`)).body.events.find(e => /finished before the work it depends on/i.test(e.summary));
     assert.ok(flagEv && /^Jira: /.test(flagEv.actor), 'the flag is recorded under the Jira identity');
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});
+
+/* ---------- R13 K4 (CONSOLIDATED-R12 #5, sync side) ----------
+   The PMO expert's repro: an out-of-order Done (VOM-8, predecessor still open) moved EAC $48.8k→$37.0k and pulled the finish
+   date in; the warning was only in the sync log. Held, out-of-order or unverified inbound statuses must not move the
+   forecast or EV, and each held item is flagged for the person who confirms it (the queue entry is K1's personQueue). */
+test('R13 #5: an out-of-order Done (predecessor still open) is held in review, never applied', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  assert.deepEqual(wi(docs, 'W7').deps, ['W6']);
+  assert.notEqual(wi(docs, 'W6').status, 'done');
+  const pre = strip(docs);
+  const byHand = strip(docs); setWi(byHand, 'W7', { status: 'review' });
+  S.simEdit(conn.sim, S.keyOf(conn, 'W7'), { status: 'Done' }, clock(), 'dan.kim@northwind.example');
+  const { res, sent } = sync(docs, conn);
+  assert.equal(wi(docs, 'W7').status, 'review', 'held in review, not Done');
+  assert.equal(wi(docs, 'W7').doneAt, undefined);
+  assert.equal(res.held.length, 1);
+  assert.equal(res.held[0].kind, 'order');
+  assert.match(res.held[0].reason, /Set up the bank details form/);
+  assert.deepEqual(res.held[0].open, ['W6']);
+  assert.equal(cost(docs), cost(byHand), 'expected cost is what the same task in review gives');
+  assert.equal(E.projectTruth(docs, PRJ, DAY).label, E.projectTruth(byHand, PRJ, DAY).label);
+  assert.deepEqual(without(docs, 'W7'), without(pre, 'W7'), 'nothing else changed');
+  assert.ok(!sent.some(i => i.ref.workItemId === 'W7'), 'Jira keeps its own Done');
+  assert.equal(sync(docs, conn).res.held.length, 0, 'not held twice for the same Done');
+  /* predecessor and successor Done in the same pull, predecessor first: the predecessor is plain and applies, so the
+     successor's work is finished in order and applies too */
+  const f = fresh('jira');
+  sync(f.docs, f.conn);
+  setWi(f.docs, 'W6', { resolves: undefined });
+  ['W6', 'W7'].forEach(id => S.simEdit(f.conn.sim, S.keyOf(f.conn, id), { status: 'Done' }, clock()));
+  const r2 = sync(f.docs, f.conn).res;
+  assert.equal(wi(f.docs, 'W6').status, 'done'); assert.equal(wi(f.docs, 'W7').status, 'done');
+  assert.equal(r2.held.length, 0);
+  /* a task with no open predecessors is applied as before (W11) */
+  const g = fresh('jira');
+  sync(g.docs, g.conn);
+  S.simEdit(g.conn.sim, S.keyOf(g.conn, 'W11'), { status: 'Done' }, clock());
+  assert.equal(sync(g.docs, g.conn).res.held.length, 0);
+  assert.equal(wi(g.docs, 'W11').status, 'done');
+});
+
+test('R13 #5: every held item is flagged on the work item for the person who confirms it', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  const now = clock();
+  S.simEdit(conn.sim, S.keyOf(conn, 'W12'), { status: 'Done' }, now, 'jane@contoso.example');
+  S.simEdit(conn.sim, S.keyOf(conn, 'W6'), { status: 'Done' }, clock());
+  S.simEdit(conn.sim, S.keyOf(conn, 'W8'), { status: 'Done' }, clock());
+  const { res } = sync(docs, conn);
+  assert.equal(res.held.length, 3);
+  const h = id => wi(docs, id).syncHold;
+  /* the problem: its owner confirms the retest */
+  assert.equal(h('W12').kind, 'problem'); assert.equal(h('W12').confirmBy, 'lp');
+  assert.equal(h('W12').tool, 'Jira'); assert.equal(h('W12').key, S.keyOf(conn, 'W12')); assert.equal(h('W12').toolStatus, 'Done');
+  assert.equal(h('W12').by, 'jane@contoso.example'); assert.ok(h('W12').at);
+  assert.match(h('W12').reason, /retest/);
+  /* information: the information's owner confirms it */
+  assert.equal(h('W6').kind, 'information'); assert.equal(h('W6').confirmBy, docs.dataElement.find(d => d.id === 'D2').data.owner);
+  assert.equal(h('W6').dataId, 'D2');
+  /* out of order: the task's owner checks the order */
+  assert.equal(h('W8').kind, 'order'); assert.equal(h('W8').confirmBy, 'dk'); assert.deepEqual(h('W8').open, ['W6']);
+  res.held.forEach(x => assert.equal(x.confirmBy, h(x.workItemId).confirmBy, 'the result names the same person'));
+  /* an unowned task is never attributed to the PM: confirmBy is null */
+  const u = fresh('jira');
+  sync(u.docs, u.conn);
+  setWi(u.docs, 'W7', { owner: null });
+  S.simEdit(u.conn.sim, S.keyOf(u.conn, 'W7'), { status: 'Done' }, clock());
+  sync(u.docs, u.conn);
+  assert.equal(wi(u.docs, 'W7').syncHold.confirmBy, null);
+  /* the tool moves it back off Done: the flag clears */
+  S.simEdit(conn.sim, S.keyOf(conn, 'W8'), { status: 'In Progress' }, clock());
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W8').syncHold, undefined, 'no longer held once the tool takes its Done back');
+  assert.equal(wi(docs, 'W8').status, 'prog');
+});
+
+test('R13 #5 (route): held out-of-order Done is logged, named for its owner, and never moves the forecast', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r13-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.7' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const st0 = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const pm = st0.project.find(d => d.id === PRJ).data.owner;
+    const r = await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: pm });
+    const c = r.body.connection, items = c.sim.items;
+    const keyOf = wid => Object.keys(items).find(k => items[k].pmoId === wid);
+    const pre = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const fin = E.forecastAll ? JSON.stringify(E.forecastAll(pre, DAY)) : null;
+    const s = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W8'), status: 'Done', by: 'dan.kim@northwind.example', actor: pm });
+    assert.equal(s.status, 200);
+    const row = s.body.connection.log.find(e => e.op === 'held' && e.workItemId === 'W8');
+    assert.ok(row && row.result === 'held' && row.kind === 'order', 'held row for the out-of-order Done');
+    assert.equal(row.confirmBy, 'dk');
+    assert.match(row.detail, /Set up the bank details form/);
+    assert.match(row.detail, /Dev Kumar/, 'the log names who confirms it');
+    assert.match(s.body.sentence, /1 Done held for review in PMOFlow \(1 finished before the work it depends on\)/);
+    assert.equal(s.body.summary.received, 1);
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const w8 = docs.workItem.find(d => d.id === 'W8').data;
+    assert.equal(w8.status, 'review'); assert.equal(w8.syncHold.confirmBy, 'dk');
+    const byHand = strip(pre); setWi(byHand, 'W8', { status: 'review' });
+    assert.equal(cost(docs), cost(byHand), 'expected cost moves only with the held status');
+    if (fin) assert.equal(JSON.stringify(E.forecastAll(docs, DAY)), JSON.stringify(E.forecastAll(byHand, DAY)), 'forecast equals the task in review by hand');
+    const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+    assert.ok(evs.some(e => e.action === 'sync-held' && /^Jira: /.test(e.actor) && /Dev Kumar/.test(e.summary)), 'history says who confirms it');
   } finally {
     await store.deleteWorkspace(ws).catch(() => {});
     if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;

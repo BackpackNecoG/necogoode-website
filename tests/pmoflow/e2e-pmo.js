@@ -836,17 +836,27 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('[data-settings]'); await modalOpen();
   check('R5 settings modal: PM, release manager, program, budget fields', await page.locator('.overlay select[name="owner"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
   await page.selectOption('.overlay select[name="releaseManager"]', 'lp');
-  await page.fill('.overlay input[name="budget"]', '-5'); await page.click('.overlay [data-act="save"]'); await page.waitForSelector('.overlay .banner');
-  check('R5 settings: negative budget rejected, input kept', (await page.locator('.overlay .banner').innerText()).includes('budget') && await page.inputValue('.overlay select[name="releaseManager"]') === 'lp');
-  await page.fill('.overlay input[name="budget"]', '52000'); await page.fill('.overlay input[name="program"]', 'Finance Operations Modernization');
+  /* R13: once the project has a plan, Settings shows the deadline and budget read-only; they move only through "Change the plan" (sponsor approval) */
+  check('R13 settings: deadline and budget are read-only once planned, with a pointer to Change the plan',
+    await page.locator('.overlay input[name="budget"][readonly]').count() === 1 && await page.locator('.overlay input[name="target"][readonly]').count() === 1 &&
+    (await page.locator('.overlay [data-set-locked]').first().innerText()).includes('Change the plan'));
+  const vmB = await getDoc('project', PRJ);
+  await page.fill('.overlay input[name="program"]', 'Finance Operations Modernization');
   await act('save'); await settle();
   const vm2 = await getDoc('project', PRJ);
-  check('R5 settings: release manager + budget saved', vm2.releaseManager === 'lp' && vm2.budget && vm2.budget.planned === 52000 && vm2.owner === tomId, { rm: vm2.releaseManager, b: vm2.budget });
+  check('R5 settings: release manager + program saved; deadline and budget unchanged', vm2.releaseManager === 'lp' && vm2.program === 'Finance Operations Modernization' && vm2.owner === tomId &&
+    vm2.target === vmB.target && JSON.stringify(vm2.budget || null) === JSON.stringify(vmB.budget || null), { rm: vm2.releaseManager, b: vm2.budget });
   check('R5 header: new release manager shown', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
   await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-  check('R5 history: settings change summarised', /Project settings: .*launch owner Tom Alvarez → Leo Park.*planned budget/.test(await page.locator('[data-history]').innerText()));
+  check('R5 history: settings change summarised', /Project settings: .*launch owner Tom Alvarez → Leo Park/.test(await page.locator('[data-history]').innerText()));
   await sleep(600); await page.reload(); await page.waitForSelector('[data-role-rm]');
-  check('R5 reload: settings persisted', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park') && (await page.locator('[data-hfin]').innerText()).includes('$52,000'));
+  check('R5 reload: settings persisted', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
+  /* R13 server: a direct save that moves the deadline is refused (409) on a planned project */
+  const srv409 = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const j = store.get('project', id);
+    const r = await fetch(`/api/pmoflow/ws/${store.state.ws}/doc/project/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: Object.assign({}, j, { target: '2027-09-30' }), actor: store.state.me }) });
+    return r.status; }, [STORE, PRJ]);
+  check('R13 server: moving the deadline outside Change the plan is refused (409)', srv409 === 409, srv409);
+  for (let i = errors.length - 1; i >= 0; i--) if (/status of 409/.test(errors[i])) errors.splice(i, 1); /* R13: the browser logs the intentional 409 response */
   /* the server enforces "only the PM edits the plan": a non-PM change to linked processes is refused with 403 */
   await asPersona('^Maya Chen');
   const srv403 = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const j = store.get('project', id);
@@ -855,12 +865,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* and the UI handles a refusal: toast, server truth restored, no unhandled error */
   await asPersona('Project Manager');
   await page.route('**/doc/project/**', r => r.request().method() === 'PUT' ? r.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Only the project manager can change the plan.' }) }) : r.continue());
-  await page.click('[data-settings]'); await modalOpen(); await page.fill('.overlay input[name="budget"]', '61000'); await act('save');
+  const progBefore = (await getDoc('project', PRJ)).program;
+  await page.click('[data-settings]'); await modalOpen(); await page.fill('.overlay input[name="program"]', 'Refused program name'); await act('save');
   await page.waitForSelector('.toast:has-text("Not saved")', { timeout: 8000 }).catch(() => {});
   const t403 = await page.locator('.toast').innerText().catch(() => '');
   await page.unroute('**/doc/project/**'); await settle();
   check('R5 403: UI says the change was not saved', /Not saved: Only the project manager/.test(t403), t403);
-  check('R5 403: server truth restored', (await getDoc('project', PRJ)).budget.planned === 52000);
+  check('R5 403: server truth restored', (await getDoc('project', PRJ)).program === progBefore);
   for (let i = errors.length - 1; i >= 0; i--) if (/status of 403/.test(errors[i])) errors.splice(i, 1); /* the browser logs the intentional 403 response */
 
   console.log('R5 planning conflicts + auto-schedule');
@@ -1364,7 +1375,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const accN = await page.evaluate(async ([u, id]) => (await import(u)).store.list('workItem', w => w.projectId === id).length, [STORE, dpId]);
   const accDraft = !!(await getDoc('project', dpId)).planDraft;
   check('R11 Accept anyway adds the tasks and clears the draft', accN === dpN && !accDraft, { accN, dpN, accDraft });
-  await page.evaluate(async ([u, id, t]) => { const { store } = await import(u); const j = store.get('project', id); await store.save('project', id, Object.assign({}, j, { target: t }), 'E2E: restore the deadline'); }, [STORE, dpId, dpj.target]);
+  /* R13: with a plan in place the deadline no longer moves by a direct save (409, "Use Change the plan"); this test project keeps its tight deadline */
+  const restore = await page.evaluate(async ([u, id, t]) => { const { store } = await import(u); const j = store.get('project', id); try { await store.save('project', id, Object.assign({}, j, { target: t }), 'E2E: restore the deadline'); return 'saved'; } catch (e) { return String(e.message || e); } }, [STORE, dpId, dpj.target]);
+  check('R13: restoring the deadline by a direct save is refused once the plan exists', /Change the plan/.test(restore), restore);
+  for (let i = errors.length - 1; i >= 0; i--) if (/status of 409/.test(errors[i])) errors.splice(i, 1); /* R13: the browser logs the intentional 409 response */
 
   console.log('R11 G3 timeline: retire label + adaptive axis');
   const retire = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === id && x.retires)[0]; if (!w) return null; const p = store.get('process', w.pid);
@@ -1780,6 +1794,108 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const nl = await sp.evaluate(async u => (await import(u.replace('store.js', 'pages/project.js'))).notLiveText({ n: 3, of: 5, by: { unchecked: 2, missing: 1 } }), STORE);
     check('R12 information line: "not checked yet" in its own words', /1 not available yet, 2 not checked yet/.test(nl), nl);
     check('R12 Simple portfolio report: "Custom…" chip too', await sp.locator('[data-pf-rep] [data-rep-custom-chip]').count() === 1);
+  }
+  /* ================= R13 (K3): blank owner default, inverted range message, phone polish ================= */
+  console.log('R13 K3: owner default, date range, phone polish');
+  {
+    await sp.setViewportSize({ width: 390, height: 844 }); await sSettle();
+    /* #11: a From date after the To date shows a message, and the range is not silently swapped */
+    await sGo(`/project/${PRJ7}`, '[data-report]');
+    if (!(await sp.locator('[data-prj-rep]').count())) { await sp.click('[data-report]'); await sp.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await sSettle(); }
+    if (!(await sp.locator('[data-prj-rep] [data-rep-from]').isVisible())) { await sp.click('[data-prj-rep] [data-rep-custom-chip]'); await sp.waitForTimeout(150); }
+    const t13 = await sp.evaluate(async u => (await import(u)).store.state.today, STORE);
+    const early13 = await sp.evaluate(([d]) => window.PMOEngine.addBusinessDays(d, -10), [t13]);
+    const late13 = await sp.evaluate(([d]) => window.PMOEngine.addBusinessDays(d, -3), [t13]);
+    const win0 = (await sp.innerText('[data-prj-rep] [data-rep-window]')).trim();
+    await sp.fill('[data-prj-rep] [data-rep-from]', late13); await sp.fill('[data-prj-rep] [data-rep-end]', early13);
+    await sp.click('[data-prj-rep] [data-rep-apply]'); await sp.waitForTimeout(600);
+    const err13 = await sp.locator('[data-prj-rep] [data-rep-range-err]').innerText().catch(() => '');
+    check('R13 #11 inverted range: a message says From is after To', /after/i.test(err13) && /From/.test(err13), err13);
+    check('R13 #11 inverted range: the report period is unchanged (no silent swap)', (await sp.innerText('[data-prj-rep] [data-rep-window]')).trim() === win0, { win0, now: await sp.innerText('[data-prj-rep] [data-rep-window]') });
+    await sp.locator('[data-prj-rep] [data-rep-picker]').screenshot({ path: `${SHOTS}/s-30-r13-range-error-390.png` });
+    /* fixing the dates clears the message and uses them */
+    await sp.fill('[data-prj-rep] [data-rep-from]', early13); await sp.fill('[data-prj-rep] [data-rep-end]', late13);
+    await sp.click('[data-prj-rep] [data-rep-apply]'); await sp.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await sSettle();
+    check('R13 #11 a valid range clears the message', !(await sp.locator('[data-prj-rep] [data-rep-range-err]').isVisible().catch(() => false)));
+    await sGo('/portfolio', '[data-pf-rep]');
+    if (!(await sp.locator('[data-pf-rep] [data-rep-from]').isVisible())) { await sp.click('[data-pf-rep] [data-rep-custom-chip]'); await sp.waitForTimeout(150); }
+    await sp.fill('[data-pf-rep] [data-rep-from]', late13); await sp.fill('[data-pf-rep] [data-rep-end]', early13);
+    await sp.click('[data-pf-rep] [data-rep-apply]'); await sp.waitForTimeout(600);
+    check('R13 #11 portfolio: the same message for an inverted range', /after/i.test(await sp.locator('[data-pf-rep] [data-rep-range-err]').innerText().catch(() => '')));
+
+    /* #4: the task Edit dialog keeps an unowned task unowned (blank owner, never the PM or the first person) */
+    const pm13 = await sp.evaluate(async ([u, prj]) => (await import(u)).store.get('project', prj).owner, [STORE, PRJ7]);
+    await sAs('Project Manager');
+    const wid13 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === prj && x.status !== 'done')[0];
+      const next = Object.assign({}, w, { owner: null, ownerRole: 'Buyer' }); await store.save('workItem', w.id, next, 'E2E R13: unowned task'); return w.id; }, [STORE, PRJ7]);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await sSettle();
+    await sGo(`/project/${PRJ7}?mode=work`, `tr[data-wid="${wid13}"]`);
+    await sp.click(`tr[data-wid="${wid13}"] [data-edit-work]`); await sp.waitForSelector('.overlay .modal select[name="owner"]');
+    const ownSel = await sp.evaluate(() => { const s = document.querySelector('.overlay select[name="owner"]'); return { v: s.value, t: s.options[s.selectedIndex].text }; });
+    check('R13 #4 Edit dialog: an unowned task opens with a blank owner ("Needs an owner")', ownSel.v === '' && /^Needs an owner: Buyer$/.test(ownSel.t), ownSel);
+    await sp.locator('.overlay .modal').screenshot({ path: `${SHOTS}/s-31-r13-edit-owner-390.png` });
+    await sp.fill('.overlay input[name="title"]', 'E2E R13 unowned task kept unowned');
+    await sAct('save'); await sSettle();
+    const after13 = await sDoc('workItem', wid13);
+    check('R13 #4 saving the dialog does not assign the PM', !after13.owner && after13.owner !== pm13 && after13.ownerRole === 'Buyer', after13);
+    await sp.click('[data-add-work]'); await sp.waitForSelector('.overlay .modal select[name="owner"]');
+    check('R13 #4 a new task’s owner defaults to blank too', await sp.inputValue('.overlay select[name="owner"]') === '');
+    await sp.click('.overlay [data-act="cancel"]').catch(() => {}); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 8000 }).catch(() => {});
+
+    /* K4 hand-off: an inbound "Done" held in review shows the sync's reason and who confirms (or "Needs an owner") */
+    const held13 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const ws = store.list('workItem', x => x.projectId === prj && x.status !== 'done');
+      const a = ws[1], b = ws[2];
+      await store.save('workItem', a.id, Object.assign({}, a, { status: 'prog', syncHold: { kind: 'order', reason: 'Jira says Done, but the work it depends on is still open.', confirmBy: 'lp', tool: 'Jira', key: 'VOM-8' } }), 'E2E R13: held in review');
+      await store.save('workItem', b.id, Object.assign({}, b, { status: 'prog', syncHold: { kind: 'order', reason: 'Jira says Done before its checks ran.', confirmBy: null, tool: 'Jira', key: 'VOM-9' } }), 'E2E R13: held, no owner');
+      return [a.id, b.id]; }, [STORE, PRJ7]);
+    await sGo(`/project/${PRJ7}?mode=work`, `tr[data-wid="${held13[0]}"]`);
+    const h1 = await sp.locator(`[data-sync-hold="${held13[0]}"]`).innerText().catch(() => '');
+    const h2 = await sp.locator(`[data-sync-hold="${held13[1]}"]`).innerText().catch(() => '');
+    check('R13 held inbound Done: the task shows the sync reason and who confirms', /Held in review \(Jira VOM-8\)/.test(h1) && /depends on is still open/.test(h1) && /Leo Park confirms/.test(h1), h1);
+    check('R13 held inbound Done with nobody to confirm: "Needs an owner"', /Needs an owner to confirm/.test(h2), h2);
+    await sp.locator(`tr[data-wid="${held13[0]}"]`).screenshot({ path: `${SHOTS}/s-33-r13-held-390.png` });
+
+    /* #12 Home "Waiting for you": the held Jira item reaches the person who confirms it; a re-approval reaches its approver */
+    await sAs('Leo Park'); await sGo('/', '[data-waiting]');
+    const hq = await sp.locator(`[data-wkind="syncHold"][data-wid="${held13[0]}"]`).innerText().catch(() => '');
+    check('R13 #12 Home: Leo sees the held Jira item, with why it is held', /Confirm/.test(hq) && /Jira/.test(hq) && /depends on is still open/.test(hq), hq);
+    check('R13 #12 Home: the list is exactly personQueue', await sp.evaluate(async u => { const { store } = await import(u); return window.PMOEngine.personQueue(store.state.docs, store.state.me, store.state.today).length; }, STORE) === await sp.locator('[data-waiting] [data-wq]').count());
+    await sAs('Rosa Vega'); await sGo('/', '[data-waiting]');
+    const rq = await sp.locator('[data-wkind="approval"][data-reapproval]').first().innerText().catch(() => '');
+    check('R13 #12 Home: Rosa sees "approve again" with the reason', /again/.test(rq) && (await sp.locator('[data-wkind="approval"][data-reapproval] [data-wreason]').count()) >= 1, rq);
+    await sShot('34-r13-home-reapproval-390', true);
+    await sAs('Project Manager');
+
+    /* #15 phone polish on the PMO pages (Simple and Advanced): secondary text >= 11px, controls >= 40px tall, no truncated labels */
+    const audit = () => sp.evaluate(() => {
+      const vis = el => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !el.closest('[hidden],svg,.pmo-tl,.tl,#pmoTl'); };
+      const small = [], taps = [], trunc = [];
+      document.querySelectorAll('#app *').forEach(el => {
+        if (!vis(el)) return;
+        const own = [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
+        const s = getComputedStyle(el);
+        if (own && parseFloat(s.fontSize) < 10.95) small.push(s.fontSize + ' ' + el.tagName + '.' + el.className + ' “' + el.textContent.trim().slice(0, 24) + '”');
+        if (own && s.textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1) trunc.push(el.tagName + '.' + el.className + ' “' + el.textContent.trim().slice(0, 30) + '”');
+      });
+      document.querySelectorAll('#app button, #app select, #app input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=range]), #app a.btn, #app summary, #app [role=button], #app a.chip').forEach(el => {
+        if (!vis(el)) return; const h = el.getBoundingClientRect().height; if (h < 39.5) taps.push(Math.round(h) + 'px ' + el.tagName + '.' + el.className + ' “' + (el.textContent || el.value || '').trim().slice(0, 20) + '”');
+      });
+      return { small: [...new Set(small)], taps: [...new Set(taps)], trunc: [...new Set(trunc)] };
+    });
+    for (const adv of [false, true]) {
+      await sp.evaluate(async ([u, on]) => (await import(u)).store.setAdvanced(on), [STORE, adv]); await sSettle();
+      for (const [path, sel] of [['/', '[data-waiting]'], ['/projects', '[data-plist]'], [`/project/${PRJ7}`, '.hdr'], [`/project/${PRJ7}?mode=work`, '.hdr'], ['/portfolio', '.hdr'], ['/dashboard', '#app .card'], [`/project/${PRJ7}/changes`, '[data-chg-log]']]) {
+        await sGo(path, sel);
+        const a = await audit();
+        const tag = `${adv ? 'Advanced' : 'Simple'} ${path}`;
+        check(`R13 #15 phone @390 ${tag}: secondary text is at least 11px`, a.small.length === 0, a.small.slice(0, 6));
+        check(`R13 #15 phone @390 ${tag}: tap targets are at least 40px`, a.taps.length === 0, a.taps.slice(0, 6));
+        check(`R13 #15 phone @390 ${tag}: no truncated labels`, a.trunc.length === 0, a.trunc.slice(0, 4));
+        check(`R13 #15 phone @390 ${tag}: no horizontal overflow`, await sNoOverflow());
+        await sShot(`32-r13-phone-${adv ? 'adv' : 'simple'}${path.replace(/[^a-z0-9]+/gi, '-')}`, true);
+      }
+    }
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
   }
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();

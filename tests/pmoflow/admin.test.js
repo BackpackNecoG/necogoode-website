@@ -533,3 +533,70 @@ test('R12 sandbox: the burst message names the real wait, and Retry-After agrees
     assert.equal(ok2.status, 201); created.push([ok2.body.id, hashOf(ip)]);
   } finally { Date.now = realNow; }
 });
+
+/* R13 K4 (Jordan, R12 mismatch 8): "CSV verify mentions the development key; JSON verify doesn't". Both formats state the
+   key source the same way, from what the server checked the signature with, not from a label the file carries. */
+test('R13 audit: JSON and CSV verify messages show the key source the same way', async () => {
+  const { ws, j, csv } = await auditWs();
+  const vj = await vJson(ws, j.entries, j.head);
+  const vc = await vCsv(ws, csv);
+  assert.equal(vj.ok, true, vj.summary); assert.equal(vc.ok, true, vc.summary);
+  assert.match(vj.keyNote, /^Signed with the (development|production) key\.$/, 'JSON verify states the key source');
+  assert.equal(vc.keyNote, vj.keyNote, 'CSV verify states it the same way');
+  assert.equal(vj.keyNote, `Signed with the ${admin.keyLabel()}.`);
+  /* a CSV whose footer claims another key source does not change what the check says */
+  const relabelled = csv.replace(/,(development|production) key\r\n$/, ',production key\r\n');
+  assert.equal((await vCsv(ws, relabelled)).keyNote, vj.keyNote);
+  /* a broken file makes no claim about its key */
+  const bad = j.entries.map(e => Object.assign({}, e)); bad[0].summary += ' (changed)';
+  assert.equal((await vJson(ws, bad, j.head)).keyNote, '');
+  assert.equal((await vCsv(ws, 'name,amount\r\nx,1\r\n')).keyNote || '', '');
+});
+
+/* R13 K4 #1 (Karen, BPM expert): departments are workspace data. Admin keeps them through every settings write, shows them in
+   GET admin, and invites name a department. Writes go through K1's POST /ws/:ws/departments. */
+test('R13 departments: admin writes keep settings.departments; GET admin lists them', async () => {
+  const ws = await newWs();
+  const add = await call('POST', `ws/${ws}/departments`, { op: { kind: 'add', name: 'Credit', approvers: ['ar'] }, actor: 'ta' });
+  assert.equal(add.status, 200, JSON.stringify(add.body));
+  const names = r => r.body.departments.map(d => d.name);
+  let g = await call('GET', `workspaces/${ws}/admin`);
+  assert.ok(Array.isArray(g.body.departments), 'GET admin carries the department list');
+  assert.ok(names(g).includes('Credit') && names(g).includes('Treasury'));
+  const credit = g.body.departments.find(d => d.name === 'Credit');
+  assert.deepEqual(credit.approvers, ['ar']); assert.deepEqual(credit.approverNames, ['Ana Ruiz']);
+  /* a role change, an invite, an export checkpoint: none of them wipe the departments */
+  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' })).status, 200);
+  assert.equal((await call('POST', `workspaces/${ws}/admin/invites`, { email: 'kim@northwind.example', role: 'viewer', actor: 'ta' })).status, 200);
+  await call('POST', `workspaces/${ws}/admin/audit/anchor`, { actor: 'ta' });
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const set = st.workspace.find(d => d.id === 'settings').data;
+  assert.ok(set.departments.some(d => d.name === 'Credit'), 'departments survive admin writes');
+  assert.equal(set.roles.ps, 'approver');
+  g = await call('GET', `workspaces/${ws}/admin`);
+  assert.ok(names(g).includes('Credit'));
+  /* each person row says which department they are in */
+  assert.equal(g.body.people.find(p => p.id === 'lp').department, 'Treasury');
+});
+
+test('R13 departments: an invite names a department (optional), checked against the list', async () => {
+  const ws = await newWs();
+  await call('POST', `ws/${ws}/departments`, { op: { kind: 'add', name: 'Credit' }, actor: 'ta' });
+  const g = await call('GET', `workspaces/${ws}/admin`);
+  const credit = g.body.departments.find(d => d.name === 'Credit');
+  let r = await call('POST', `workspaces/${ws}/admin/invites`, { email: 'sam.wu@northwind.example', role: 'approver', departmentId: credit.id, actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const inv = r.body.settings.invites.find(i => i.email === 'sam.wu@northwind.example');
+  assert.equal(inv.departmentId, credit.id); assert.equal(inv.department, 'Credit');
+  r = await call('POST', `workspaces/${ws}/admin/invites`, { email: 'x@northwind.example', role: 'viewer', departmentId: 'dept-nope', actor: 'ta' });
+  assert.equal(r.status, 400); assert.match(r.body.error, /department/i);
+  r = await call('POST', `workspaces/${ws}/admin/invites`, { email: 'y@northwind.example', role: 'viewer', actor: 'ta' });
+  assert.equal(r.status, 200, 'no department is fine');
+  assert.equal(r.body.settings.invites.find(i => i.email === 'y@northwind.example').departmentId, null);
+  const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+  assert.ok(evs.some(e => /Invited sam\.wu@northwind\.example as Approver in Credit/.test(e.summary)));
+  /* renaming the department shows the new name on the invite */
+  await call('POST', `ws/${ws}/departments`, { op: { kind: 'rename', id: credit.id, name: 'Credit and Collections' }, actor: 'ta' });
+  const g2 = await call('GET', `workspaces/${ws}/admin`);
+  assert.equal(g2.body.settings.invites.find(i => i.email === 'sam.wu@northwind.example').department, 'Credit and Collections');
+});

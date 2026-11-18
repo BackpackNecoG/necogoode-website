@@ -441,7 +441,15 @@ export function taskRowHTML(w, j, fc, compact) {
 /* R11 G1 §6/§9 per-task flags from the engine: "Finished before the work it depends on" (E().doneBeforeDeps, e.g. a Jira
    "Done" while its predecessors are open) and "Done with no hours logged" (projectTruth.evFlags done-no-hours items). */
 export function taskFlagsHTML(w, j) {
-  if (!w || w.status !== 'done') return '';
+  if (!w) return '';
+  /* R13 (K4): an inbound Jira/ADO "Done" held in review (out of order, problem or information): the sync's own reason,
+     and who confirms it (or "Needs an owner"). It is not done, so the done-only flags below don't apply. */
+  const h = w.syncHold;
+  if (h && h.reason) {
+    const who = h.confirmBy && store.person(h.confirmBy) ? `${pname(h.confirmBy)} confirms` : 'Needs an owner to confirm';
+    return `<div class="pmo-tflags"><span class="pmo-evflag pmo-held" data-sync-hold="${esc(w.id)}" title="${esc(h.reason)}">⚠ Held in review${h.tool ? ` (${esc(h.tool)}${h.key ? ' ' + esc(h.key) : ''})` : ''}: ${esc(h.reason)} <b data-sync-hold-who>${esc(who)}</b></span></div>`;
+  }
+  if (w.status !== 'done') return '';
   const out = [];
   if ((w.deps || []).length) { const r = eng('doneBeforeDeps', null, docs(), w.id); if (r && r.flag) out.push(`<span class="pmo-evflag" data-done-early="${esc(w.id)}" title="${esc(r.text)}">⚠ Finished before the work it depends on</span>`); }
   const fl = j ? ((truthOf(j).raw || {}).evFlags || []).find(f => f && f.key === 'done-no-hours') : null;
@@ -1770,8 +1778,20 @@ export function periodPickerHTML(range, opts) {
   /* R12 #12: Simple gets the range too, behind a small "Custom…" chip (open while a custom range is in use) */
   const simple = isSimple(), isCustom = range.preset === 'custom';
   const chip = simple ? `<button type="button" class="pmo-chipbtn ${isCustom ? 'on' : ''}" data-rep-custom-chip aria-expanded="${isCustom}" aria-pressed="${isCustom}">Custom…</button>` : '';
-  const custom = `<span class="pmo-rep-custom" data-rep-custom ${simple && !isCustom ? 'hidden' : ''}><label>From <input type="date" data-rep-from value="${esc(isCustom ? range.from || '' : '')}" max="${esc(today())}"></label><label>To <input type="date" data-rep-end value="${esc(isCustom ? range.to || '' : '')}" max="${esc(today())}"></label><button type="button" class="btn sm ${isCustom ? 'primary' : ''}" data-rep-apply>Use these dates</button></span>`;
+  const custom = `<span class="pmo-rep-custom" data-rep-custom ${simple && !isCustom ? 'hidden' : ''}><label>From <input type="date" data-rep-from value="${esc(isCustom ? range.from || '' : '')}" max="${esc(today())}"></label><label>To <input type="date" data-rep-end value="${esc(isCustom ? range.to || '' : '')}" max="${esc(today())}"></label><button type="button" class="btn sm ${isCustom ? 'primary' : ''}" data-rep-apply>Use these dates</button><span class="pmo-rep-rangeerr" data-rep-range-err role="alert" hidden></span></span>`;
   return `<div class="pmo-rep-picker" data-rep-picker role="group" aria-label="Report period">${chips}${chip}${custom}</div>`;
+}
+/* R13 #11: the custom From/To range of the picker holding `el` → {from, to}, or null after showing why (a missing start,
+   or a From date after the To date: never silently swapped). Used by the project and portfolio pages. */
+export function readCustomRange(el) {
+  const box = (el && el.closest && el.closest('[data-rep-picker]')) || document;
+  const f = box.querySelector('[data-rep-from]'), t = box.querySelector('[data-rep-end]'), err = box.querySelector('[data-rep-range-err]');
+  const from = f && f.value, to = (t && t.value) || today();
+  const say = msg => { if (err) { err.textContent = msg; err.hidden = !msg; } if (msg) { const bad = f; if (bad) { bad.setAttribute('aria-invalid', 'true'); try { bad.focus(); } catch (e) { /* gone */ } } } else if (f) f.removeAttribute('aria-invalid'); };
+  if (!from) { say('Choose a From date.'); return null; }
+  if (from > to) { say(`The From date (${fmt(from)}) is after the To date (${fmt(to)}). Pick a From date on or before ${fmt(to)}.`); return null; }
+  say('');
+  return { from, to };
 }
 /* R12: the "Custom…" chip shows or hides the From/To range (used by the project and portfolio pages) */
 export function bindPeriodPicker(root) {
@@ -1855,7 +1875,9 @@ async function rememberReport(j, d) {
   if (log.some(x => x && x.date === today())) return;
   const t = truthOf(cur);
   const fl = (Array.isArray(cur.forecastLog) ? cur.forecastLog : []).filter(x => x && x.date !== today());
-  const next = Object.assign({}, cur, { lastReportAt: today(), reportLog: log.concat([{ date: today(), preset: d.window ? d.window.preset : null }]).slice(-30),
+  /* R13: keep the exact time too, so "since last report" can compare to the minute */
+  const at = new Date().toISOString();
+  const next = Object.assign({}, cur, { lastReportAt: today(), lastReportAtTime: at, reportLog: log.concat([{ date: today(), at, preset: d.window ? d.window.preset : null }]).slice(-30),
     forecastLog: t.forecast ? fl.concat([{ date: today(), finish: t.forecast }]).slice(-60) : fl });
   try { await store.save('project', cur.id, next, `Generated a status report (${d.window ? d.window.short : fmt(today())})`); } catch (e) { /* the report still shows */ }
 }
@@ -1904,7 +1926,7 @@ function bindWhyGlobal() {
 }
 
 /* ---------------------------------------------------------------- render */
-export function render(params) {
+function renderPage(params) {
   const prj = params.prj;
   if (bulk && bulk.projectId === prj) return `<section class="card pmo-bulk" role="status" aria-live="polite" data-plan-adding="${bulk.total}"><h3>Adding the plan</h3><p class="s">Saving ${plural(bulk.total, 'task')} (${bulk.done} done). The project opens again as soon as they are all saved.</p></section>`;
   const j = store.get('project', prj);
@@ -2087,7 +2109,9 @@ async function editWork(j, w, err) {
   const prev = isNew ? null : (store.get('workItem', w.id) || w);
   /* default dates on business days (R8: no weekend due dates, defects included) */
   const s0 = isWeekend(today()) ? addBiz(today(), 1) : today();
-  w = Object.assign({ title: '', owner: store.state.me, status: 'idle', kind: 'build', start: s0, due: addBiz(s0, 4), deps: [], effortDays: 1 }, w || {});
+  /* R13 #4: the owner defaults to blank ("Needs an owner"), never to the person editing or the PM */
+  w = Object.assign({ title: '', owner: null, status: 'idle', kind: 'build', start: s0, due: addBiz(s0, 4), deps: [], effortDays: 1 }, w || {});
+  const ownerKnown = !!(w.owner && store.person(w.owner));
   if (!w.pid && (j.processes || []).length) { const p = store.get('process', j.processes[0]); const s0 = p && flatSteps(p.tobe)[0]; if (s0) { w.pid = p.id; w.step = s0.id; } }
   const blocked = new Set(w.id ? [w.id, ...(eng('dependents', [], docs(), w.id) || [])] : []); /* cycle guard */
   const others = projectItems(j.id).filter(x => !blocked.has(x.id));
@@ -2101,7 +2125,7 @@ async function editWork(j, w, err) {
   const stepOpts = stepOptions(j, w.pid, w.step);
   const body = `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
     <div class="field"><label>Title</label><input name="title" value="${esc(w.title)}" maxlength="140" placeholder="e.g. Integrate screening API" /></div>
-    <div class="frow"><div class="field"><label>Owner</label><select name="owner">${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === w.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
+    <div class="frow"><div class="field"><label>Owner</label><select name="owner" data-wi-owner><option value="" ${ownerKnown ? '' : 'selected'}>${esc(w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner')}</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === w.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select name="kind">${Object.entries(KIND_LBL).map(([k, l]) => `<option value="${k}" ${w.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
     <div class="field"><label>Step it delivers</label>${stepOpts ? `<select name="step">${stepOpts}</select>` : '<div class="hint">Link a process first. Tasks attach to a step of the future process.</div>'}</div>
     <div class="frow"><div class="field"><label>Start</label><input type="date" name="start" value="${esc(w.start || '')}" /></div><div class="field"><label>Due</label><input type="date" name="due" value="${esc(w.due || '')}" /></div></div>
@@ -2132,7 +2156,7 @@ async function editWork(j, w, err) {
     return type === 'FS' && !lag ? id : { id, type, lag };
   });
   const stPick = statusesOf(j).find(x => x.id === f.status) || statusOf(w, j);
-  const next = Object.assign({}, w, { title: (f.title || '').trim(), owner: f.owner, kind: f.kind, start: f.start, due: f.due, status: stPick.maps, statusId: stPick.id, deps, pid: pid || w.pid, step: step || w.step, projectId: j.id, effortDays: eff });
+  const next = Object.assign({}, w, { title: (f.title || '').trim(), owner: f.owner || null, kind: f.kind, start: f.start, due: f.due, status: stPick.maps, statusId: stPick.id, deps, pid: pid || w.pid, step: step || w.step, projectId: j.id, effortDays: eff });
   const cfErr = readCustomFields(j, f, next);
   if (cfErr) return editWork(j, next, cfErr);
   if (badLag) return editWork(j, next, 'Lag must be between -30 and 60 days.');
@@ -2154,7 +2178,7 @@ async function editWork(j, w, err) {
   if (prev.title !== next.title) ch.push(`renamed from “${prev.title}”`);
   if (prev.status !== next.status || statusOf(prev, j).id !== statusOf(next, j).id) ch.push(`status ${statusName(prev, j)} → ${statusName(next, j)}`);
   fieldsOf(j).forEach(fd => { if (fieldVal(prev, fd) !== fieldVal(next, fd)) ch.push(`${fd.label} ${fieldVal(prev, fd) || '—'} → ${fieldVal(next, fd) || '—'}`); });
-  if (prev.owner !== next.owner) ch.push(`owner ${pname(prev.owner)} → ${pname(next.owner)}`);
+  if ((prev.owner || null) !== (next.owner || null)) ch.push(`owner ${ownerText(prev)} → ${ownerText(next)}`);
   if (prev.start !== next.start) ch.push(`start ${fmt(prev.start)} → ${fmt(next.start)}`);
   if (prev.due !== next.due) ch.push(`due ${fmt(prev.due)} → ${fmt(next.due)}`);
   if (effortOf(prev) !== next.effortDays) ch.push(`effort ${fmtEffort(effortOf(prev))} → ${fmtEffort(next.effortDays)}`);
@@ -2585,20 +2609,27 @@ export async function newProject(prefill, err) {
 /* R5 project settings: the PM edits name, target, roles, program and budget. The server rejects role changes from anyone else. */
 async function editSettings(j, err, prefill) {
   if (!isPM(j)) { toast(pmOnly(j, 'change project settings')); return; }
-  const v = Object.assign({ name: j.name, desc: j.desc || '', target: j.target, owner: j.owner, releaseManager: j.releaseManager && j.releaseManager !== j.owner ? j.releaseManager : '', program: j.program || '', budget: j.budget && j.budget.planned != null ? j.budget.planned : '' }, prefill || {});
+  const v = Object.assign({ name: j.name, desc: j.desc || '', target: j.target, owner: j.owner, releaseManager: j.releaseManager && j.releaseManager !== j.owner ? j.releaseManager : '', sponsor: j.sponsor || '', program: j.program || '', budget: j.budget && j.budget.planned != null ? j.budget.planned : '' }, prefill || {});
+  /* R13 #3: the sponsor approves plan changes past the deadline or budget; unset, the project's default approver does */
+  const dflt = window.PMOChange ? window.PMOChange.sponsorOf(docs(), Object.assign({}, j, { sponsor: null })) : null;
   const fin = financials(j);
+  /* R13: once there is a plan, the deadline and budget only move through "Change the plan" (sponsor approval) */
+  const locked = projectItems(j.id).length > 0;
+  const lockHint = '<div class="hint" data-set-locked>To move this once there is a plan, use <b>Change the plan</b>, so the sponsor can approve it.</div>';
+  const pmoHtml = locked ? pmoFields(v).replace('id="pf-budget" type="number"', 'id="pf-budget" type="number" readonly aria-readonly="true"').replace('placeholder="e.g. 60000" /></div>', 'placeholder="e.g. 60000" />' + lockHint + '</div>') : pmoFields(v);
   const body = `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
     <div class="field"><label for="ps-name">Name</label><input id="ps-name" name="name" maxlength="100" value="${esc(v.name)}" /></div>
     <div class="field"><label for="ps-desc">Description</label><textarea id="ps-desc" name="desc" maxlength="600">${esc(v.desc)}</textarea></div>
-    <div class="field"><label for="ps-target">Deadline</label><input id="ps-target" type="date" name="target" value="${esc(v.target || '')}" /></div>
+    <div class="field"><label for="ps-target">Deadline</label><input id="ps-target" type="date" name="target" value="${esc(v.target || '')}" ${locked ? 'readonly aria-readonly="true"' : ''} />${locked ? lockHint : ''}</div>
     ${roleFields(v, store.state.me)}
-    ${pmoFields(v)}
+    <div class="field"><label for="ps-sponsor">Sponsor</label><select id="ps-sponsor" name="sponsor" data-set-sponsor><option value="" ${v.sponsor ? '' : 'selected'}>Not set${dflt ? ': ' + esc(pname(dflt)) + ' approves (owns a linked process)' : ''}</option>${peopleOpts(v.sponsor, store.state.me)}</select><div class="hint">Approves plan changes that move the deadline, push the finish past it, or change the budget. Nobody approves their own change.</div></div>
+    ${pmoHtml}
     <div class="hint" data-set-fin>Expected cost ${esc(money(fin.forecast))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
   const r = await modal({ title: 'Project settings', body, actions: [{ id: 'save', label: 'Save settings', primary: true }] });
   if (r.action !== 'save') return;
   const f = r.form;
   const cur = store.get('project', j.id) || j;
-  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: f.owner || cur.owner, releaseManager: f.releaseManager || '', program: (f.program || '').trim(), budget: f.budget };
+  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: f.owner || cur.owner, releaseManager: f.releaseManager || '', sponsor: f.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
   if (!vals.name) return editSettings(cur, 'Give the project a name.', vals);
   if (!vals.target) return editSettings(cur, 'Set a deadline.', vals);
   const bud = budgetOf(vals.budget);
@@ -2607,7 +2638,9 @@ async function editSettings(j, err, prefill) {
   const rm = vals.releaseManager || vals.owner;
   const next = Object.assign({}, cur, { name: vals.name, desc: vals.desc, target: vals.target, owner: vals.owner, releaseManager: rm });
   if (vals.program) next.program = vals.program; else delete next.program;
+  if (vals.sponsor) next.sponsor = vals.sponsor; else delete next.sponsor;
   if (bud != null) next.budget = Object.assign({}, cur.budget || {}, { planned: bud }); else delete next.budget;
+  if (locked) { next.target = cur.target; if (cur.budget) next.budget = cur.budget; else delete next.budget; }
   next.resources = [...(cur.resources || [])]; [rm, vals.owner].forEach(x => { if (!next.resources.includes(x)) next.resources.unshift(x); });
   const ch = [];
   if (cur.name !== next.name) ch.push(`renamed from “${cur.name}”`);
@@ -2616,6 +2649,7 @@ async function editSettings(j, err, prefill) {
   if (cur.owner !== next.owner) ch.push(`project manager ${pname(cur.owner)} → ${pname(next.owner)}`);
   if (relMgr(cur) !== rm) ch.push(`launch owner ${pname(relMgr(cur))} → ${pname(rm)}`);
   if ((cur.program || '') !== (next.program || '')) ch.push(next.program ? `program “${next.program}”` : 'removed from its program');
+  if ((cur.sponsor || '') !== (next.sponsor || '')) ch.push(next.sponsor ? `sponsor ${cur.sponsor ? pname(cur.sponsor) + ' → ' : ''}${pname(next.sponsor)}` : 'sponsor cleared');
   const pb = cur.budget && cur.budget.planned != null ? cur.budget.planned : null;
   if (pb !== bud) ch.push(bud != null ? `planned budget ${pb != null ? money(pb) + ' → ' : ''}${money(bud)}` : 'planned budget cleared');
   if (!ch.length) { toast('No changes'); return; }
@@ -2883,11 +2917,9 @@ export function bind(root, params) {
   /* R10.1: the report's period */
   on('[data-rep-preset]', el => openReport(cur(), { preset: el.dataset.repPreset }));
   bindPeriodPicker(root);
-  on('[data-rep-apply]', () => {
-    const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-end]');
-    const from = f && f.value, to = (t && t.value) || today();
-    if (!from) { toast('Choose a start date'); return; }
-    openReport(cur(), { preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from });
+  on('[data-rep-apply]', el => {
+    const r = readCustomRange(el);
+    if (r) openReport(cur(), { preset: 'custom', from: r.from, to: r.to });
   });
   /* the mailto link must open the mail client, not be swallowed by the router */
   root.querySelectorAll('[data-rep-mail]').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
@@ -2904,3 +2936,5 @@ export function bind(root, params) {
   else if (actP.open) loadActivity(actP);
   else { bindComments(actP); actP.addEventListener('toggle', () => { if (actP.open && !actP.dataset.loaded) { actP.dataset.loaded = '1'; bindHistory(actP); bindFeed(actP, 'prj-work', e => { const [t, id] = String(e.ref || '').split(':'); return t === 'workItem' && (ids.has(id) || String(e.summary || '').includes(j.name)); }); } }); }
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

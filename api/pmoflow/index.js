@@ -173,6 +173,12 @@ function approversError(prev, next, docs) {
   return null;
 }
 
+/* the project whose changed information a data case belongs to (the first linked one), for the assignment rule */
+function projectOfCase(docs, dataId) {
+  const eng = engine(); if (!eng || !dataId) return null;
+  const p = (docs.project || []).find(d => d.data && d.data.status !== 'live' && (eng.changedInformation(docs, d.id) || []).some(x => x.dataId === dataId));
+  return p ? p.id : null;
+}
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
 
 /* R5 [S] permission rules for PUT. Returns an error message or null. Server promotions bypass this (they write via the store). */
@@ -258,7 +264,13 @@ function approvalError(prev, next, actor, docs) {
   }
   if (next.decision !== 'approved') return null;
   const bar = eng.approvalBar(docs, next.projectId, next.bu, actor);
-  return bar ? bar.text : null;
+  if (bar) return bar.text;
+  /* R13 #3: ONE approval-readiness rule for Simple and Advanced: a part is approved only when it is ready */
+  if (typeof eng.buReady === 'function' && next.bu && !next.kind) {
+    const br = eng.buReady(docs, next.projectId, next.bu);
+    if (br && br.needed && !br.ready) return br.sentence;
+  }
+  return null;
 }
 /* R11 §3 the person's local wall time for the launch guard ("YYYY-MM-DDTHH:MM"), within a day of their today */
 function localNowOf(body, today) {
@@ -412,7 +424,10 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
       ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
       { type: 'notify', target: team, status: 'simulated-ok', detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
-    exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')),
+    /* R13 #11: a launch on a two-person override is an exception too (outside the window or with steps still open) */
+    exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')).concat(body && body._override ? [{ ref: 'release:' + relId,
+      summary: `Launched with a two-person override (${(body._override.signoffs || []).map(x => x.name).filter(Boolean).join(' and ') || 'two people'}): ${(body._override.guard || []).join('; ') || 'outside the launch window'}`,
+      by: pn(actor), at }] : []),
     checks: JSON.parse(JSON.stringify(gate.checks)),
     snapshot,
   };
@@ -531,8 +546,10 @@ const ROUTE_MODULES = ['pmoflow-routes-buyer', 'pmoflow-routes-connect', 'pmoflo
 const ADMIN_ROUTES = ROUTE_MODULES.find(m => typeof m.roleError === 'function') || null;
 
 module.exports = async function (context, req) {
-  const send = (status, body) => {
-    context.res = { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body };
+  const send = (status, body, headers) => {
+    /* R13: route modules may add response headers (e.g. Set-Cookie for the returning-visitor sandbox, Retry-After) */
+    const extra = headers && typeof headers === 'object' ? headers : {};
+    context.res = { status, headers: Object.assign({ 'content-type': 'application/json', 'cache-control': 'no-store' }, extra), body };
   };
   const fail = (status, error, reasons) => send(status, reasons ? { error, reasons } : { error });
   try {
@@ -594,6 +611,50 @@ module.exports = async function (context, req) {
       return send(200, { events: await store.listEvents(ws, { ref, limit }) });
     }
 
+    /* R13 #1 POST /ws/:ws/departments {op, actor}: departments are workspace data (settings.departments). Admins and
+       Editors add one (the approver panel's "Add a department"); rename, remove, approvers and assign are Admin only.
+       The engine's departmentEdit decides; this writes the settings doc (every other field kept) plus the person,
+       process and project patches it returns, and appends one audit event. */
+    if (action === 'departments' && seg.length === 3) {
+      if (method !== 'POST') return fail(405, 'method not allowed');
+      const eng = engine();
+      const op = isPlainObject(body.op) ? body.op : null;
+      if (!op || typeof op.kind !== 'string') return fail(400, 'op is required');
+      const actor = actorOf(body);
+      const st = await store.getState(ws);
+      const role = ADMIN_ROUTES && typeof ADMIN_ROUTES.roleOf === 'function' ? ADMIN_ROUTES.roleOf(st.docs, actor) : null;
+      const nm = personName(st.docs, actor);
+      if (op.kind === 'add' ? !(role === 'admin' || role === 'editor') : role !== 'admin') {
+        const admins = ADMIN_ROUTES && typeof ADMIN_ROUTES.effectiveRoles === 'function' ? ADMIN_ROUTES.effectiveRoles(st.docs).filter(p => p.role === 'admin').map(p => p.name) : [];
+        return fail(403, op.kind === 'add' ? `${nm} can't add a department: only an Admin or an Editor can.` : `Only an Admin can change departments${admins.length ? ` (Admins: ${admins.join(', ')})` : ''}.`);
+      }
+      const r = eng.departmentEdit(st.docs, op);
+      if (!r.ok) return fail(400, r.error);
+      const prevDepts = eng.departments(st.docs);
+      const setDoc = ((st.docs.workspace || []).find(d => d.id === 'settings') || {}).data || {};
+      await store.putDoc(wsId, 'workspace', 'settings', Object.assign({}, setDoc, { id: 'settings', departments: r.departments }));
+      const patch = async (type, list) => {
+        for (const x of list) {
+          const cur = ((st.docs[type] || []).find(d => d.id === x.id) || {}).data;
+          if (!cur) continue;
+          const data = Object.assign({}, cur, x, { id: x.id });
+          if (type === 'person' && data.bu == null) delete data.bu;
+          await store.putDoc(wsId, type, x.id, data);
+        }
+      };
+      await patch('person', r.people); await patch('process', r.processes); await patch('project', r.projects);
+      const was = prevDepts.find(d => d.id === op.id), now = r.departments.find(d => d.id === op.id);
+      const added = op.kind === 'add' ? r.departments.find(d => !prevDepts.some(p => p.id === d.id)) : null;
+      const who = op.personId ? personName(st.docs, op.personId) : '';
+      const summary = op.kind === 'add' ? `Added the ${added ? added.name : 'new'} department`
+        : op.kind === 'rename' ? `Renamed the ${was ? was.name : ''} department to ${now ? now.name : ''}`
+        : op.kind === 'remove' ? `Removed the ${was ? was.name : ''} department`
+        : op.kind === 'approvers' ? `Set who approves for ${now ? now.name : ''}: ${(now ? now.approvers : []).map(id => personName(st.docs, id)).join(', ') || 'its members'}`
+        : `${now ? `Moved ${who} to ${now.name}` : `Took ${who} out of their department`}`;
+      await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings', summary });
+      return send(200, { ok: true, departments: r.departments });
+    }
+
     /* PUT|DELETE /ws/:ws/doc/:type/:id */
     if (action === 'doc' && seg.length === 5) {
       const [, , , type, id] = seg;
@@ -607,6 +668,14 @@ module.exports = async function (context, req) {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
         const exists = !!prev;
+        /* R13: once a project has a plan, its deadline and planned budget move only through "Change the plan"
+           (the change routes write directly, with sponsor approval); a plain doc save may not move them. */
+        if (type === 'project' && prev && prev.data) {
+          const hasPlan = (st.docs.workItem || []).some(w => w.data && w.data.projectId === id);
+          const pb = d => (d && d.budget && d.budget.planned != null) ? Number(d.budget.planned) : null;
+          if (hasPlan && ((prev.data.target || null) !== (data.target || null) || pb(prev.data) !== pb(data)))
+            return fail(409, 'Use “Change the plan” to move the deadline or budget, so the sponsor can approve it.');
+        }
         /* R10 S5: workspace roles (Viewer / Approver / admin-only settings) */
         const rd = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
         if (rd) return fail(403, rd);
@@ -616,6 +685,26 @@ module.exports = async function (context, req) {
         if (type === 'project') {
           const bad = approversError(prev && prev.data, data, st.docs);
           if (bad) return fail(400, bad);
+        }
+        /* R13 #3: only the PM or the test's own department assigns a test; the assigner is stamped (they can't pass it) */
+        if (type === 'testCase' && (prev ? prev.data.tester || null : null) !== (data.tester || null)) {
+          const eng = engine();
+          if (data.tester) {
+            const bad = eng && typeof eng.canAssignTest === 'function' ? eng.canAssignTest(st.docs, data.projectId || projectOfCase(st.docs, data.dataId), id, actor) : null;
+            if (bad && (data.projectId || projectOfCase(st.docs, data.dataId))) return fail(403, bad.text);
+            data.assignedBy = actor;
+          } else delete data.assignedBy;
+        }
+        if (type === 'project' && prev && Array.isArray(data.uatScripts)) {
+          const eng = engine(); const was = {}; (Array.isArray(prev.data.uatScripts) ? prev.data.uatScripts : []).forEach(x => { if (x && x.id) was[x.id] = x; });
+          for (const sc of data.uatScripts) {
+            if (!sc || !sc.id || ((was[sc.id] || {}).tester || null) === (sc.tester || null)) continue;
+            if (sc.tester) {
+              const bad = eng && typeof eng.canAssignTest === 'function' ? eng.canAssignTest(st.docs, prev.data, sc.id, actor) : null;
+              if (bad) return fail(403, bad.text);
+              sc.assignedBy = actor;
+            } else delete sc.assignedBy;
+          }
         }
         /* R11 §2: separation of duties */
         if (type === 'testRun') {
@@ -711,6 +800,13 @@ module.exports = async function (context, req) {
         /* a count only (non-empty values repeating an earlier value), never the values: specDrift flags it against a
            field whose spec is unique (e.g. "Required, unique per vendor") */
         if (typeof c.duplicates === 'number' && isFinite(c.duplicates)) o.duplicates = Math.max(0, Math.floor(c.duplicates));
+        /* R13 #7: the fraud and quality checks reach the page and the test generator (counts, row numbers and the engine's
+           own sentence only; never a value): a bank account shared across records, near-duplicate names, extra spaces */
+        const cnt = v => (typeof v === 'number' && isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+        const rowsOf = r => (Array.isArray(r) ? r.slice(0, 20).map(g => (Array.isArray(g) ? g.slice(0, 20).map(cnt) : [])) : []);
+        if (c.sharedAccount && typeof c.sharedAccount === 'object') o.sharedAccount = { accounts: cnt(c.sharedAccount.accounts), records: cnt(c.sharedAccount.records), rows: rowsOf(c.sharedAccount.rows), text: String(c.sharedAccount.text || '').slice(0, 200) };
+        if (c.nearDuplicates && typeof c.nearDuplicates === 'object') o.nearDuplicates = { groups: cnt(c.nearDuplicates.groups), records: cnt(c.nearDuplicates.records), rows: rowsOf(c.nearDuplicates.rows), text: String(c.nearDuplicates.text || '').slice(0, 200) };
+        if (c.whitespace && typeof c.whitespace === 'object') o.whitespace = { count: cnt(c.whitespace.count), firstRow: cnt(c.whitespace.firstRow) };
         return o;
       });
       const id = 'profile-' + dataId;

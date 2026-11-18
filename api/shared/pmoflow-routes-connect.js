@@ -144,14 +144,16 @@ async function runSync(ctx, conn, st, opts) {
         await store.putDoc(wsId, 'workItem', u.workItemId, u.data);
         const list = st.docs.workItem; const i = list.findIndex(d => d.id === u.workItemId);
         if (i >= 0) list[i] = { id: u.workItemId, data: u.data };
+        if (!u.changes.length) continue;      /* R13: only the hold flag changed (the item was already in review) */
         const what = u.changes.map(c => `${S.FIELD_LABELS[c.field].toLowerCase()} ${fieldText(project, c.field, c.from, docs, conn)} → ${fieldText(project, c.field, c.to, docs, conn)}${c.held ? ` (${S.TOOLS[conn.tool].name} said Done)` : ''}`).join('; ');
         const ext = extActor(conn, u.by);
         await store.appendEvent(wsId, { actor: ext, action: 'sync', ref: 'workItem:' + u.workItemId,
           summary: `From ${S.TOOLS[conn.tool].name} ${u.key}: work item "${u.data.title}" ${what}`.slice(0, 300) });
         entry({ dir: 'in', op: 'apply', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'ok', by: ext, detail: 'Updated in PMOFlow: ' + what });
         sum.received++;
-        /* R11 §9: a "Done" from the tool is accepted, but flagged when work it depends on is still open */
-        const early = u.changes.some(c => c.field === 'status') ? doneBeforeDeps(st.docs, u.workItemId) : null;
+        /* R11 §9 / R13 #5: a Done whose predecessors are still open is held in review by PMOSync.applyInbound (kind 'order',
+           below). This stays as a safety net for a Done that was applied while the engine still sees open predecessors. */
+        const early = u.changes.some(c => c.field === 'status' && !c.held) ? doneBeforeDeps(st.docs, u.workItemId) : null;
         if (early && early.flag) {
           const detail = `${early.text}. Accepted as ${S.TOOLS[conn.tool].name} reported it; check the order.`;
           entry({ dir: 'in', op: 'flag', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'flagged', flag: 'finished-before-dependencies', open: early.open.map(w => w.id), by: ext, detail });
@@ -164,10 +166,15 @@ async function runSync(ctx, conn, st, opts) {
       for (const h of applied.held) {
         const ext = extActor(conn, h.by);
         const wt = ((st.docs.workItem || []).find(d => d.id === h.workItemId) || {}).data || {};
-        entry({ dir: 'in', op: 'held', key: h.key, workItemId: h.workItemId, title: wt.title || '', result: 'held', kind: h.kind, dataId: h.dataId, by: ext, detail: h.reason });
+        /* R13 #5: name the person who confirms it in PMOFlow (never the PM by default; unowned says so) */
+        const who = h.confirmBy && (st.docs.person || []).some(d => d.id === h.confirmBy) ? `Waiting for ${personName(st.docs, h.confirmBy)} to confirm it.` : 'Nobody owns it yet: it needs an owner to confirm it.';
+        const detail = `${h.reason} ${who}`;
+        entry({ dir: 'in', op: 'held', key: h.key, workItemId: h.workItemId, title: wt.title || '', result: 'held', kind: h.kind, dataId: h.dataId,
+          open: h.open || undefined, confirmBy: h.confirmBy || null, by: ext, detail });
         await store.appendEvent(wsId, { actor: ext, action: 'sync-held', ref: 'workItem:' + h.workItemId,
-          summary: `From ${S.TOOLS[conn.tool].name} ${h.key}: "${wt.title || h.workItemId}" Done not applied. ${h.reason}`.slice(0, 300) });
+          summary: `From ${S.TOOLS[conn.tool].name} ${h.key}: "${wt.title || h.workItemId}" Done not applied. ${detail}`.slice(0, 300) });
         sum.held++;
+        if (h.kind === 'order') sum.early++;
       }
       for (const c of applied.conflicts) {
         entry({ dir: 'in', op: 'conflict', key: c.key, workItemId: c.workItemId, result: 'conflict',
@@ -205,8 +212,9 @@ function syncSentence(conn, sum) {
   if (sum.linked) parts.push(`${sum.linked} dependency link${sum.linked === 1 ? '' : 's'} set in ${tool}`);
   if (sum.sent && !(sum.created || sum.updated || sum.linked)) parts.push(`${sum.sent} change${sum.sent === 1 ? '' : 's'} sent to ${tool}`);
   if (sum.received) parts.push(`${sum.received} task${sum.received === 1 ? '' : 's'} updated from ${tool}`);
-  if (sum.held) parts.push(`${sum.held} Done held for review in PMOFlow`);
-  if (sum.early) parts.push(`${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on (flagged)`);
+  /* R13 #5: an out-of-order Done is one of the held ones; say how many of them finished early */
+  if (sum.held) parts.push(`${sum.held} Done held for review in PMOFlow${sum.early ? ` (${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on)` : ''}`);
+  else if (sum.early) parts.push(`${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on (flagged)`);
   if (sum.conflicts) parts.push(`${sum.conflicts} conflict${sum.conflicts === 1 ? '' : 's'} settled (later change wins)`);
   if (sum.ignored) parts.push(`${sum.ignored} PMOFlow-owned date${sum.ignored === 1 ? '' : 's'} put back`);
   if (sum.refused) parts.push(`${sum.refused} refused by the relay`);

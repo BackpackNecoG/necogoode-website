@@ -392,7 +392,10 @@ export function render(params) {
   /* R11 §3: the count is the FAIL/WARN rows below; "Ready to launch" only when the launch button is enabled */
   const sLeft = failing + warns;
   const g0 = launchGuard(prj);
-  const gateTitle = live ? 'Launched' : rd.pass && !g0.ok ? g0.text : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready to launch: ${sLeft} check${sLeft === 1 ? '' : 's'} not passed`;
+  /* R13 #2: Simple and Advanced (desktop and phone) show ONE phrase and ONE number: projectTruth.stepsLeft ("6 steps left").
+     The checks below are the detail behind those steps; they carry no competing headline count. */
+  const stepsLeftA = stepsLeftOf(prj, null, truthOf(prj));
+  const gateTitle = live ? 'Launched' : rd.pass && !g0.ok ? g0.text : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready to launch: ${stepsLeftA || sLeft} step${(stepsLeftA || sLeft) === 1 ? '' : 's'} left`;
   const gateSub = live ? `Live since ${fmt(lastGo && lastGo.at)}. Temporary data access closed at launch.`
     : rd.unavailable ? 'Readiness engine is still loading.'
     : rd.pass ? (warns ? `Everything required is done. ${warns} warning to review.` : 'Everything required is done. The launch owner can launch.')
@@ -422,7 +425,7 @@ export function render(params) {
     return `<details class="rl-check ${st}" data-check="${esc(c.id)}" ${open ? 'open' : ''}>
       <summary title="${esc(tipOf(c) || c.label)}"><span class="rl-ic ${st}">${ICON[st]}</span>
         <span class="rl-ct1" data-plain>${esc(plainOf(c))}</span>
-        <span class="rl-st ${st}">${stTxt}${items.length && st !== 'pass' ? ` · ${items.length}` : ''}</span>
+        <span class="rl-st ${st}" data-check-count="${esc(c.count != null ? c.count : items.length)}">${stTxt}${(c.count != null ? c.count : items.length) && st !== 'pass' ? ` · ${c.count != null ? c.count : items.length}` : ''}</span>
         <span class="rl-more" aria-hidden="true"><span class="sh">Show detail</span><span class="hd">Hide detail</span></span></summary>
       <div class="rl-items"><div class="rl-detail" data-detail>${esc(c.detail || '')}${tipOf(c) ? `<div class="hint">${esc(tipOf(c))}</div>` : ''}</div>${items.map(it => { const v = itemView(it, c.id, prjId, c);
         if (v.state) return `<div class="rl-item rl-data ${esc(v.state)}" data-avail="${esc(v.state)}"><span class="rl-dstate ${esc(v.state)}" aria-hidden="true"></span><a href="${link(v.href)}" data-link>${esc(v.text)}</a><small>${esc(v.extra)}</small>${v.cta ? `<a class="rl-go" href="${link(v.href)}" data-link data-confirm-link>${esc(v.cta)}</a>` : ''}</div>`;
@@ -435,7 +438,7 @@ export function render(params) {
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>The launch was refused by the server.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || JSON.stringify(r)))}</li>`).join('')}</ul></div>` : ''}
     ${failedRel ? failBanner(prj, failedRel) : ''}
     ${live && releases[0] && isFailedRb(releases[0]) ? rbFailBanner(prj, releases[0]) : ''}
-    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts>${esc(countsText(cnt))}</span></h3>${checks}</div>`}
+    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts data-steps-left="${esc(stepsLeftA)}">${live || rd.pass ? esc(countsText(cnt)) : `${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left`}</span></h3>${checks}</div>`}
     ${cutoverCard(prj)}
     ${signoffCard(prj, rd)}
     ${grantsCard(prj)}
@@ -606,16 +609,19 @@ function runbookTable(prj, opts) {
   if (!tasks.length) return '<div class="hint" data-runbook-empty>No launch-day steps yet. Add the steps, in order, that people follow on launch day.</div>';
   const done = tasks.filter(t => t.done).length;
   const late = opts.readonly ? [] : tasks.filter(overdue);
+  const ldcSteps = prj.status === 'live' ? null : ((eng('launchDayCard', prj.id, store.state.today) || {}).steps || null);
   return `<div class="rl-rb-h"><b>${opts.checklist ? 'Launch-day checklist' : 'Launch-day steps'}</b><span class="hint" data-runbook-progress>${done}/${tasks.length} done · ${tasks.filter(t => t.gonogo).length} ${GNG()}</span></div>
     <div class="rl-rbar"><i style="width:${Math.round(100 * done / tasks.length)}%"></i></div>
     ${late.length ? `<div class="rl-overdue-w" data-runbook-overdue="${late.length}"><span class="rl-ic warn">!</span> ${late.length} launch-day step${late.length === 1 ? ' is' : 's are'} overdue: ${late.map(t => `${esc(t.task)} (${t.owner ? esc(pname(t.owner)) : 'no owner'})`).join(' · ')}</div>` : ''}
     <ol class="rl-runbook ${opts.checklist ? 'check' : ''}" data-runbook>${tasks.map((t, i) => {
       const tick = canTick(prj, t) && !opts.readonly;
       const od = !opts.readonly && overdue(t);
+      const pb = ldcSteps && ldcSteps.find(x => x.taskId === t.id && x.problem);
       return `<li class="${t.done ? 'done' : ''} ${t.gonogo ? 'gng' : ''} ${od ? 'od' : ''}" data-rbtask="${esc(t.id)}" ${od ? 'data-overdue' : ''}><span class="rl-rbn">${i + 1}</span>
         <label class="rl-rbchk"><input type="checkbox" data-rb-done="${esc(t.id)}" ${t.done ? 'checked' : ''} ${tick ? '' : 'disabled'} aria-label="Done: ${esc(t.task)}"></label>
         <div class="rl-rbt"><div><b data-user-text>${esc(t.task)}</b>${t.gonogo ? ` <span class="rl-gng">${GNG()}</span>` : ''}${od ? ' <span class="badge b-late">Overdue</span>' : ''}</div>
           <small><span class="rl-rbown" data-rb-owner="${esc(t.owner || '')}">${t.owner ? `${av(t.owner)} ${esc(pname(t.owner))}` : '<b class="rl-noown">No owner</b>'}</span> · ${esc(fmtPlanned(startOf(t)))}${t.durationMins ? ` · ${esc(fmtDur(t.durationMins))}` : ''}${t.done && t.doneBy ? ` · ${t.gonogo ? 'confirmed' : 'done'} by ${esc(pname(t.doneBy))} ${esc(fmtTime(t.doneAt))}` : ''}</small>
+          ${pb ? `<small class="rl-co-pb" data-step-problem="${esc(pb.problem)}">${esc(pb.text)}</small>` : ''}
           ${t.gonogo && !t.done && !opts.readonly ? `<small class="rl-gngwho" data-gng-who>${t.owner ? `Only ${esc(pname(t.owner))} can confirm this final check.` : 'Needs an owner before launch.'}</small>` : ''}</div></li>`;
     }).join('')}</ol>`;
 }
@@ -624,10 +630,13 @@ function cutoverCard(prj) {
   const canEdit = store.state.me === prj.owner;
   const live = prj.status === 'live';
   const need = cutoverNeeds(prj.cutover);
+  /* R13 #13: the card reads the gate (E().launchDayCard): a step on a day off or outside the window is never "Ready" */
+  const ldc = !live ? eng('launchDayCard', prj.id, store.state.today) : null;
+  const notReady = need.length || (ldc && !ldc.ready);
   const row = (label, html, key) => `<div class="rl-co-r" data-co="${key}"><span class="lbl">${esc(label)}</span><div>${html || '<span class="hint">Not set</span>'}</div></div>`;
-  return `<div class="card" id="cutover"><h3>Launch-day plan<span class="n">${need.length ? 'incomplete' : 'complete'}</span></h3>
-    <div class="rl-co-st ${need.length ? 'fail' : 'pass'}"><span class="rl-ic ${need.length ? 'fail' : 'pass'}">${need.length ? ICON.fail : ICON.pass}</span>
-      <span>${need.length ? `Needed before launch: add ${esc(need.join(', '))}.` : 'Ready: the launch-day steps are in order, and someone owns the undo plan and support after launch.'}</span></div>
+  return `<div class="card" id="cutover" data-launch-day-card="${notReady ? 'not-ready' : 'ready'}"><h3>Launch-day plan<span class="n">${need.length ? 'incomplete' : notReady ? 'not ready' : 'complete'}</span></h3>
+    <div class="rl-co-st ${notReady ? 'fail' : 'pass'}"><span class="rl-ic ${notReady ? 'fail' : 'pass'}">${notReady ? ICON.fail : ICON.pass}</span>
+      <span>${need.length ? `Needed before launch: add ${esc(need.join(', '))}.` : notReady ? esc(ldc.text) : 'Ready: the launch-day steps are in order, and someone owns the undo plan and support after launch.'}</span></div>
     ${!prj.cutover ? '<div class="empty rl-co-empty">No launch-day plan yet. List the launch-day steps in order, name who undoes the launch if needed, write the undo plan and name who handles support after launch.</div>' : `
       ${runbookTable(prj, { checklist: live })}
       <div class="rl-co">
@@ -1005,9 +1014,10 @@ function buView(prj, buRaw, rd) {
   const changes = stale.length ? `<ul class="rl-bv-ch">${stale.map(v => `<li data-bu-change>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)} <small>${esc(v.extra)}</small></li>`).join('')}</ul>`
     : a && a.decision === 'approved' ? `<div class="hint" data-bu-nochange>Nothing in this part changed since ${esc(pname(a.approver))} approved on ${esc(fmtTime(a.at))}.</div>`
     : `<div class="hint" data-bu-nochange>${esc(s.bu)} has not approved yet, so everything above is new to review: ${s.steps.filter(x => ((diffs[x.pid] || { nodes: {} }).nodes[x.step.id] || 'same') !== 'same').length} new or changed step${s.steps.length === 1 ? '' : 's'}.</div>`;
-  const why = live ? '' : signoffWhy(prj, s.bu, open);
   const rdy = live || signed ? { ready: true, waiting: [] } : buReadyOf(prj, s.bu);
-  const early = !live && !rdy.ready ? `<div class="rl-early" data-early-warning role="note"><b>Not ready for approval yet: waiting on ${esc(joinAnd(rdy.waiting))}.</b> You can approve early, but this part may need approving again when that changes.</div>` : '';
+  /* R13 #3: ONE approval-readiness rule (the server's): Advanced never approves a part that Simple calls not ready */
+  const why = live ? '' : signoffWhy(prj, s.bu, open) || (!rdy.ready ? `<span class="hint" data-why="notready">${esc(s.bu)} approves once this is done.</span>` : '');
+  const early = !live && !rdy.ready ? `<div class="rl-early" data-early-warning data-not-ready role="note"><b>Not ready for approval yet: waiting on ${esc(joinAnd(rdy.waiting))}.</b> The approval opens when that is done; ${esc(s.bu)}’s approver is told then.</div>` : '';
   const form = live ? `<div class="hint">The project is live; approvals are closed.</div>`
     : `<div class="rl-bv-form" data-bu-form><div class="field"><label for="rl-attest" title="Attestation note">What you checked <span class="rl-req">required</span></label>
         <textarea id="rl-attest" data-attest placeholder="e.g. “I reviewed the ${esc(s.bu)} steps, the proof for their information, and the business test results.”" ${why ? 'disabled' : ''}>${esc(ui.attest[prj.id + '|' + s.bu] != null ? ui.attest[prj.id + '|' + s.bu] : why ? '' : noteFactsOf(prj, s.bu, s))}</textarea></div>
@@ -1022,6 +1032,7 @@ function buView(prj, buRaw, rd) {
       <div class="card"><h3>Steps<span class="n">${s.steps.length}</span></h3><ol class="rl-bv-steps">${steps}</ol></div>
       <div class="card"><h3>Information and proof<span class="n">${des.length}</span></h3>${data ? `<ul class="rl-bv-data">${data}</ul>` : '<div class="empty">These steps use no information.</div>'}</div>
       <div class="card"><h3>Test results<span class="n">latest per item</span></h3>${tests ? `<div class="tbl-wrap"><table class="rl-gt rl-bv-tests"><thead><tr><th>Item</th><th>Size</th><th>Latest result</th></tr></thead><tbody>${tests}</tbody></table></div>` : '<div class="empty">No tests cover these steps or their data yet.</div>'}
+        ${passedByHtml(perBuOf(prj, s.bu))}
         <div class="rl-item-foot"><a class="rl-go" href="${link('/testing/' + prj.id)}" data-link>Open testing ›</a></div></div>
     </div><aside class="side">
       <div class="card rl-bv-sign"><h3>Approve the ${esc(s.bu)} part</h3>
@@ -1106,8 +1117,18 @@ function perBuOf(prj, bu, t) {
   /* R11 §1: the engine's own line, coverage gaps included ("0 of 12 checks done: …"), and what needs no tests */
   const txt = (x, tot, pas) => x && x.text ? String(x.text) : tot ? `${pas} of ${tot} test${tot === 1 ? '' : 's'} passed` : '';
   return v ? { total: +v.total || 0, passed: +v.passed || 0, failed: +v.failed || 0, notRun: +v.notRun || 0, gapCount: +v.gapCount || 0, checks: +v.checks || +v.total || 0,
-      text: txt(v, +v.total || 0, +v.passed || 0), notChangedText: v.notChangedText || '' }
-    : { total: 0, passed: 0, failed: 0, notRun: 0, gapCount: 0, checks: 0, text: '', notChangedText: '' };
+      text: txt(v, +v.total || 0, +v.passed || 0), notChangedText: v.notChangedText || '', tests: Array.isArray(v.tests) ? v.tests : [], passedByText: v.passedByText || '', otherDeptPasses: +v.otherDeptPasses || 0 }
+    : { total: 0, passed: 0, failed: 0, notRun: 0, gapCount: 0, checks: 0, text: '', notChangedText: '', tests: [], passedByText: '', otherDeptPasses: 0 };
+}
+/* R13 #2: who passed each test in this part (projectTruth.testing.perBU[bu].tests), a pass from another department flagged */
+const TEST_STATE_WORD = { failed: 'failed', fix: 'waiting for a fix', blocked: 'blocked', notRun: 'not passed yet' };
+function passedByHtml(pb) {
+  if (!pb || !pb.tests || !pb.tests.length) return '';
+  const rows = pb.tests.map(x => `<li data-test-passer="${esc(x.id)}" data-passed-by="${esc(x.passedBy || '')}"${x.otherDept ? ' data-other-dept class="rs-other"' : ''}><span class="rs-tl">${esc(x.label)}</span> <small>${x.passedBy
+    ? `passed by ${esc(x.passedByName)}${x.otherDept ? ` (${esc(x.passedByDept || 'no department')}, another department)` : ''}${x.passedAt ? ' · ' + esc(fmt(x.passedAt)) : ''}`
+    : esc(TEST_STATE_WORD[x.status] || 'not passed yet')}</small></li>`).join('');
+  return `<div class="rs-passers${pb.otherDeptPasses ? ' warn' : ''}" data-passed-by-text data-other-dept-passes="${pb.otherDeptPasses}">${esc(pb.passedByText || 'No test in this part has passed yet.')}</div>
+    <details class="rs-passer-list" data-passer-list><summary>Who passed each test (${pb.tests.length})</summary><ul>${rows}</ul></details>`;
 }
 /* "Not ready to launch: N steps left" = projectTruth.stepsLeft (the checklist's undone count). */
 function stepsLeftOf(prj, steps, t) {
@@ -1396,7 +1417,7 @@ function simpleRender(prj, rd, params) {
       ${canRollback(prj) ? `<button class="btn danger" data-rollback>Undo the launch</button>` : `<div class="hint" data-why="rm">If something goes badly wrong, ${esc(pname(rm))} (launch owner) can undo the launch.</div>`}
       ${releases[0] && isFailedRb(releases[0]) ? `<div class="rs-fail" data-rollback-failed><b>The undo did not go through.</b> Nothing was restored; the launch is still live.</div>` : ''}</div>` : ''}
     ${parts.length && !live ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && (canChoose(prj) && parts.some(p => p.state === 'nobody' || p.state === 'blocked'))) : ''}
-    ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
+    ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length || ckFail('cutover-plan') ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
     ${sec('access', 'Temporary data access', grantsOpen ? `${grantsOpen} open` : 'None open', grantsCard(prj), !live && ckFail('grants-closed'))}
     ${live ? sec('support', 'Support after launch', hc.length ? `${hc.length} open problem${hc.length === 1 ? '' : 's'}` : 'No open problems', hypercareCard(prj, lastGo), hc.some(x => +x.severity === 1)) : ''}
     ${sec('audit', 'History', 'Every launch event, oldest first', '<div data-rl-history><div class="hint">Loading history…</div></div>', false)}
@@ -1433,7 +1454,8 @@ function evidenceLine(prj, s) {
   /* the note most passes share (a bulk pass shows its one note), else the first note */
   const topK = Object.entries(byNote).filter(([k]) => !/\|$/.test(k)).sort((a, b) => b[1] - a[1])[0];
   const note = (topK ? topK[0].slice(topK[0].indexOf('|') + 1) : '').replace(/\bUAT folder\b/g, 'Business check scripts').replace(/\bdev run\b/g, 'test run').replace(/\bUAT\b/g, 'business check');
-  const together = Object.entries(byNote).some(([k, n]) => n >= 3 && !/\|$/.test(k));
+  /* R13 #2: how many of the CURRENT passes share one run and one note (tests re-recorded one by one no longer count) */
+  const together = Object.entries(byNote).filter(([k, n]) => n >= 3 && !/\|$/.test(k)).reduce((m, [, n]) => Math.max(m, n), 0);
   const parts = [];
   if (pass.length) parts.push(`${pass.length} ${kind}${pass.length === 1 ? '' : 's'} passed by ${firstName(who)} on ${fmt(last)}${note ? `: “${note.length > 70 ? note.slice(0, 70) + '…' : note}”` : ''}`);
   if (fail.length) parts.push(`${fail.length} failed: “${String(fail[0].note || 'no note').slice(0, 60)}”`);
@@ -1494,8 +1516,9 @@ function simpleBuView(prj, buRaw, rd) {
       ${doneMsg}
       <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li>No steps.</li>'}</ul>${teamsSystems(s)}</div>
       <div class="card rs-card"><h3>Information your part uses</h3>${info ? `<ul class="rs-list rs-info">${info}</ul>` : '<div class="hint">Your part uses no information.</div>'}</div>
-      <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.checks}" data-part-gaps="${pb.gapCount}"` : ''}>${esc(ev.text)}${ev.together ? ' <span class="rs-together" data-passed-together title="Many tests were marked passed at once with one shared note">marked at once with one note</span>' : ''}</div>
+      <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.checks}" data-part-gaps="${pb.gapCount}"` : ''}>${esc(ev.text)}${ev.together ? ` <span class="rs-together" data-passed-together="${esc(ev.together)}" title="Several tests were marked passed at once with one shared note">${esc(ev.together)} marked at once with one note</span>` : ''}</div>
         ${pb && pb.notChangedText ? `<div class="hint rs-notchanged" data-not-changed>${esc(pb.notChangedText)}</div>` : ''}
+        ${passedByHtml(pb)}
         <a class="rl-go" href="${link('/testing/' + prj.id)}" data-link>See the tests ›</a></div>
       ${actHtml ? `<div class="card rs-card rs-sign">${actHtml}</div>` : ''}
       ${back}
@@ -1803,7 +1826,7 @@ async function goLive(prj, retry, override) {
       <div><span class="lbl">Processes updated if the pipeline succeeds</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
       <div><span class="lbl">Approved by</span>${approvers.map(id => `<div>${av(id)} ${esc(pname(id))}</div>`).join('')}</div>
       <div><span class="lbl">Temporary data access</span><div>${openGrants} open access${openGrants === 1 ? '' : 'es'} will close if the pipeline succeeds</div></div>
-      <div><span class="lbl">Approved again after changes</span><div>${excs.length ? `${excs.length} change${excs.length === 1 ? '' : 's'} made after an approval, then approved again` : 'None'}</div></div>
+      <div><span class="lbl">Approved again after changes</span><div data-reapprovals>${esc((truthOf(prj) || {}).reapprovalsText || 'None')}</div></div>
       <div><span class="lbl">What happens</span><div>Run the delivery pipeline, then update the processes, publish the new procedure, close temporary data access and tell everyone involved</div></div></div>
       <div class="rl-gl-rb" data-golive-runbook>${tasks.length ? `<div class="rl-rb-h"><b>Launch-day steps</b><span class="hint">${gngOf(prj).length - gOpen.length}/${gngOf(prj).length} ${GNG()} confirmed</span></div>
         <div class="tbl-wrap"><table class="rl-gltbl"><thead><tr><th>#</th><th>Step</th><th>Who</th><th>Status</th></tr></thead><tbody>${rbRows}</tbody></table></div>` : '<div class="hint">No launch-day steps.</div>'}

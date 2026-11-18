@@ -328,9 +328,16 @@
        - a problem fix (kind 'defect'): Done would close the problem; in PMOFlow it closes after its retest passes;
        - a task that makes information available (resolves): Done would count as the information being available; in
          PMOFlow its owner confirms it.
+     R13 (CONSOLIDATED-R12 #5): a Done on a task whose predecessors are still open (out of order) is held the same way.
      Held means: the work item moves to In review (when the project has that status; otherwise it keeps its status), the
      reason is in res.held, and the tool keeps its own Done (nothing is pushed back). Approvals, tests, test runs, defect
-     fields and information records are never written here: the only document this returns is the work item. */
+     fields and information records are never written here: the only document this returns is the work item.
+     R13 HOLD FLAG (read by the engine's personQueue and the screens): while held, the work item carries
+       syncHold: {kind: 'problem'|'information'|'order', reason, confirmBy: personId|null, tool, key, toolStatus, by, at,
+                  dataId? (information), open? (order: the predecessor work item ids)}
+     confirmBy is who confirms it in PMOFlow: the problem's owner, the information's owner, or the task's owner; null when
+     nobody owns it (never the project manager by default). It is meaningful only while status is not done; it is removed
+     when the tool's status for the item moves on (a later inbound status change that is applied). */
   function doneLike(project, id) {
     if (id === 'done') return true;
     var s = ((project && project.statuses) || []).find(function (x) { return x && x.id === id; });
@@ -342,13 +349,32 @@
     var rv = sts.find(function (x) { return x && x.maps === 'prog' && x.id !== 'prog'; });
     return rv ? rv.id : (w.status && !doneLike(project, w.status) ? w.status : 'prog');
   }
-  /* why a Done from the tool cannot be applied to this work item, or null */
-  function guardOf(w, docs, toolName) {
-    if (w.kind === 'defect') return { kind: 'problem', reason: toolName + ' says Done. A problem closes in PMOFlow only after its retest passes, so it waits in review.' };
+  /* why a Done from the tool cannot be applied to this work item, or null. confirmBy: the person who confirms it in PMOFlow
+     (never a fallback to the project manager: an unowned item has confirmBy null).
+     R13 #5: a Done while work it depends on is still open ('order') is held the same way, so an out-of-order status never
+     moves the forecast or earned value. statusOf(id) gives a work item's status as of this sync pass. */
+  function depIdsOf(w) {
+    return (Array.isArray(w && w.deps) ? w.deps : []).map(function (d) { return typeof d === 'string' ? d : d && d.id ? String(d.id) : null; }).filter(Boolean);
+  }
+  function guardOf(w, docs, toolName, statusOf) {
+    if (w.kind === 'defect') return { kind: 'problem', confirmBy: w.owner || null, reason: toolName + ' says Done. A problem closes in PMOFlow only after its retest passes, so it waits in review.' };
     if (w.resolves) {
       var d = list(docs, 'dataElement').find(function (x) { return x.id === w.resolves; });
       var nm = d && d.name ? '“' + d.name + '”' : 'The information';
-      return { kind: 'information', dataId: w.resolves, reason: toolName + ' says Done. ' + nm + ' counts as available only when its owner confirms it in PMOFlow, so the task waits in review.' };
+      return { kind: 'information', dataId: w.resolves, confirmBy: (d && d.owner) || null, reason: toolName + ' says Done. ' + nm + ' counts as available only when its owner confirms it in PMOFlow, so the task waits in review.' };
+    }
+    var all = list(docs, 'workItem'), projects = list(docs, 'project');
+    var open = depIdsOf(w).map(function (id) { return all.find(function (x) { return x.id === id; }); }).filter(function (p) {
+      if (!p) return false;
+      var pp = projects.find(function (x) { return x.id === p.projectId; }) || null;
+      return !doneLike(pp, statusOf ? statusOf(p) : p.status);
+    });
+    if (open.length) {
+      var names = open.slice(0, 3).map(function (p) { return '“' + (p.title || 'untitled task') + '”'; });
+      var more = open.length > 3 ? ' and ' + (open.length - 3) + ' more' : '';
+      var listTxt = names.length > 1 ? names.slice(0, -1).join(', ') + (more ? ', ' + names[names.length - 1] + more : ' and ' + names[names.length - 1]) : names[0] + more;
+      return { kind: 'order', open: open.map(function (p) { return p.id; }), confirmBy: w.owner || null,
+        reason: toolName + ' says Done. Finished before the work it depends on (' + listTxt + ' ' + (open.length === 1 ? 'is' : 'are') + ' still open), so it waits in review until its owner confirms it in PMOFlow.' };
     }
     return null;
   }
@@ -361,6 +387,8 @@
     var items = projectItems(docs, conn.projectId), fields = inFields(conn);
     var project = list(docs, 'project').find(function (p) { return p.id === conn.projectId; }) || null;
     var byWid = {};
+    /* a work item's status as of this pass (an item already updated earlier in this pull counts with its new status) */
+    var statusNow = function (x) { return byWid[x.id] ? byWid[x.id].data.status : x.status; };
     (changes || []).slice().sort(function (a, b) { return str(a.updatedAt).localeCompare(str(b.updatedAt)); }).forEach(function (ch) {
       var wid = workItemOfKey(conn, ch.key);
       if (!wid) { res.skipped.push({ key: ch.key, reason: 'Not linked to a PMOFlow task. PMOFlow plans the work, so add the task in PMOFlow first.' }); return; }
@@ -406,12 +434,18 @@
         base[f] = tv;
         if (!apply) return;
         if (f === 'status' && doneLike(project, tv)) {
-          var g = guardOf(w, docs, toolName);
+          var g = guardOf(w, docs, toolName, statusNow);
           if (g) {
             var hs = heldStatus(project, w);
             base[f] = hs;                       /* the tool keeps its Done; PMOFlow's review is not pushed back as a change */
             if (eq(b, hs) && eq(pv, hs)) return;  /* already held for this Done */
-            res.held.push({ key: ch.key, workItemId: wid, field: f, kind: g.kind, dataId: g.dataId || null, from: pv, to: hs, tool: str(ch.status), by: entry.by, reason: g.reason });
+            res.held.push({ key: ch.key, workItemId: wid, field: f, kind: g.kind, dataId: g.dataId || null, open: g.open || null, confirmBy: g.confirmBy,
+              from: pv, to: hs, tool: str(ch.status), by: entry.by, reason: g.reason });
+            /* R13 #5: the flag rides on the work item, for the person who confirms it (K1's personQueue reads it) */
+            w.syncHold = { kind: g.kind, reason: g.reason, confirmBy: g.confirmBy, tool: toolName, key: ch.key, toolStatus: str(ch.status), by: entry.by || null, at: now };
+            if (g.dataId) w.syncHold.dataId = g.dataId;
+            if (g.open) w.syncHold.open = g.open.slice();
+            entry.touched = true;
             if (eq(pv, hs)) return;
             entry.changes.push({ field: f, from: pv, to: hs, held: true });
             setField(w, f, hs, docs, conn, today);
@@ -419,6 +453,7 @@
             return;
           }
         }
+        if (f === 'status' && w.syncHold) { delete w.syncHold; entry.touched = true; }   /* the tool's status moved on: no longer held */
         entry.changes.push({ field: f, from: pv, to: tv });
         setField(w, f, tv, docs, conn, today);
         rec = pmoRecord(w, docs, conn);
@@ -426,7 +461,7 @@
     });
     Object.keys(byWid).forEach(function (wid) {
       var e = byWid[wid];
-      if (e.changes.length) { e.data.updatedAt = now; res.updates.push(e); }
+      if (e.changes.length || e.touched) { e.data.updatedAt = now; delete e.touched; res.updates.push(e); }
     });
     return res;
   }

@@ -773,10 +773,19 @@
       reasons.unshift(launchFlag);
       if (rag === 'green') rag = 'amber';
     }
-    let label2 = effortOnly ? 'Behind on effort' : RAG_LABEL[rag], labelAdv2 = effortOnly ? 'Behind on effort' : RAG_LABEL_ADVANCED[rag];
+    // R13 #4: open tasks nobody owns are never the PM's; they are a reason, and a project whose open work is mostly
+    // unowned is never "On track"
+    const ppl = personMap(docs);
+    const unowned = open.filter(w => !(w.owner && ppl[w.owner])).map(w => w.id);
+    let ownersOnly = false;
+    if (unowned.length && rag !== 'grey') {
+      reasons.push(nWord(unowned.length, 'task') + ' need' + (unowned.length === 1 ? 's' : '') + ' an owner');
+      if (rag === 'green' && unowned.length * 2 > open.length) { rag = 'amber'; ownersOnly = true; }
+    }
+    let label2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : RAG_LABEL[rag], labelAdv2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : RAG_LABEL_ADVANCED[rag];
     if (launchFlag && (label2 === RAG_LABEL.amber || label2 === 'Behind on effort') && !late.length) { label2 = 'Launch day is a day off'; labelAdv2 = label2; }
     return { project, items, open, allDone, finish, target, bufferDays, late, pastDue, finishAfterDue, runningLate: finishAfterDue, blockers, rag,
-      label: label2, labelAdvanced: labelAdv2, reasons, fc, ev, behindEffort, today: today || null, launchFlag };
+      label: label2, labelAdvanced: labelAdv2, reasons, fc, ev, behindEffort, today: today || null, launchFlag, unowned };
   }
   // R10 §3 the ONE launch date: the launch window's day when set, else the deadline. Every screen (Launch page,
   // dashboard "Upcoming launches", project header) shows this. {date, source: 'window'|'deadline'|null, problem}
@@ -939,10 +948,94 @@
     if (step.owner && people[step.owner]) return { owner: step.owner, role: null, text: people[step.owner].name || 'someone' };
     return { owner: null, role: null, text: 'Needs an owner' };
   }
-  function sectionHelpers(people) {
+  // R13 #1 departments are workspace data: docs.workspace 'settings'.departments = [{id, name, approvers: [personId]}].
+  // Membership is person.bu (the department's name). Without a configured list (older sandboxes, fixtures) the list is
+  // derived from person.bu (configured: false) and the R12 built-in names still route.
+  function deptSettings(docs) {
+    const ws = list(docs, 'workspace').find(x => x && x.id === 'settings');
+    return ws && Array.isArray(ws.departments) ? ws.departments.filter(d => d && String(d.name || '').trim()) : null;
+  }
+  function deptSlug(name) { return 'dept-' + String(name || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, ''); }
+  function departments(docs) {
+    const people = personMap(docs), conf = deptSettings(docs);
+    const out = conf ? conf.map(d => ({ id: String(d.id || deptSlug(d.name)), name: String(d.name).trim(), approvers: (Array.isArray(d.approvers) ? d.approvers : []).filter(id => people[id]), configured: true })) : [];
+    Object.keys(people).forEach(id => { const b = people[id] && String(people[id].bu || '').trim();
+      if (b && !out.some(d => teamKey(d.name) === teamKey(b))) out.push({ id: deptSlug(b), name: b, approvers: [], configured: false }); });
+    return out.sort((a, b) => a.name.localeCompare(b.name)).map(d => Object.assign(d, { approverNames: d.approvers.map(id => people[id].name || 'someone'),
+      people: Object.keys(people).filter(id => people[id] && teamKey(people[id].bu) === teamKey(d.name)).map(id => ({ id, name: people[id].name || '' })) }));
+  }
+  // R13 #1 the one pure department editor (the server route and Admin save what it returns; only changed docs are listed).
+  // op: {kind:'add', name, approvers?} | {kind:'rename', id, name} | {kind:'remove', id} | {kind:'approvers', id, approvers}
+  //   | {kind:'assign', personId, id|null}
+  // → {ok, error, departments: [{id, name, approvers}], people: [{id, bu}], processes: [{id, teamDepartments}], projects: [{id, approvers}]}
+  function departmentEdit(docs, op) {
+    op = op || {};
+    const people = personMap(docs);
+    const cur = departments(docs).map(d => ({ id: d.id, name: d.name, approvers: d.approvers.slice() }));
+    const out = { ok: true, error: null, departments: cur, people: [], processes: [], projects: [] };
+    const fail = error => ({ ok: false, error, departments: null, people: [], processes: [], projects: [] });
+    const clean = n => String(n == null ? '' : n).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+    const dept = cur.find(d => d.id === op.id) || null;
+    const nameError = (name, exceptId) => {
+      if (!name) return 'Name a department.';
+      if (name.length > 60) return 'Keep the department name under 60 characters.';
+      const dup = cur.find(d => d.id !== exceptId && sameTeam(d.name, name));
+      return dup ? 'A department called ' + dup.name + ' already exists.' : null;
+    };
+    const approversOf = a => Array.isArray(a) ? [...new Set(a.map(String))] : [];
+    const badApprovers = a => a.some(id => !people[id]);
+    const members = d => Object.keys(people).filter(id => people[id] && teamKey(people[id].bu) === teamKey(d.name));
+    // rewrite every reference to a department name (process routing values, project approver keys)
+    const rewrite = (from, to) => {
+      list(docs, 'process').forEach(p => {
+        const m = mapOf(p), ks = Object.keys(m).filter(k => m[k] != null && teamKey(m[k]) === teamKey(from));
+        if (!ks.length) return;
+        const td = Object.assign({}, m); ks.forEach(k => { td[k] = to; });
+        out.processes.push({ id: p.id, teamDepartments: td });
+      });
+      list(docs, 'project').forEach(p => {
+        const a = p.approvers && typeof p.approvers === 'object' ? p.approvers : null;
+        const ks = a ? Object.keys(a).filter(k => teamKey(k) === teamKey(from)) : [];
+        if (!ks.length) return;
+        const na = {}; Object.keys(a).forEach(k => { if (!ks.includes(k)) na[k] = a[k]; else if (to) na[to] = a[k]; });
+        out.projects.push({ id: p.id, approvers: na });
+      });
+    };
+    if (op.kind === 'add') {
+      const name = clean(op.name), err = nameError(name, null); if (err) return fail(err);
+      const ap = approversOf(op.approvers); if (badApprovers(ap)) return fail('Choose approvers from the people in this workspace.');
+      let id = deptSlug(name), i = 2; while (cur.some(d => d.id === id)) id = deptSlug(name) + '-' + i++;
+      cur.push({ id, name, approvers: ap });
+    } else if (op.kind === 'rename') {
+      if (!dept) return fail('That department no longer exists.');
+      const name = clean(op.name), err = nameError(name, dept.id); if (err) return fail(err);
+      if (name === dept.name) return out;
+      members(dept).forEach(id => out.people.push({ id, bu: name }));
+      rewrite(dept.name, name);
+      dept.name = name;
+    } else if (op.kind === 'remove') {
+      if (!dept) return fail('That department no longer exists.');
+      const m = members(dept);
+      if (m.length) return fail('Move the ' + nWord(m.length, 'person', 'people') + ' in ' + dept.name + ' to another department first.');
+      rewrite(dept.name, null);
+      out.departments = cur.filter(d => d !== dept);
+    } else if (op.kind === 'approvers') {
+      if (!dept) return fail('That department no longer exists.');
+      const ap = approversOf(op.approvers); if (badApprovers(ap)) return fail('Choose approvers from the people in this workspace.');
+      dept.approvers = ap;
+    } else if (op.kind === 'assign') {
+      if (!people[op.personId]) return fail('That person is not in this workspace.');
+      if (op.id != null && !dept) return fail('That department no longer exists.');
+      out.people.push({ id: op.personId, bu: dept ? dept.name : null });
+    } else return fail('Unknown department change.');
+    out.departments = out.departments.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }
+  function sectionHelpers(people, docs) {
     const buOf = pid => people[pid] && people[pid].bu || null;
     const peopleBus = [...new Set(Object.keys(people).map(k => people[k] && people[k].bu).filter(Boolean))];
-    const allBus = [...new Set(peopleBus.concat(KNOWN_BUS))];
+    const conf = docs ? deptSettings(docs) : null;
+    const allBus = [...new Set(peopleBus.concat(conf ? conf.map(d => String(d.name).trim()) : KNOWN_BUS))];
     const deptNamed = t => allBus.find(b => sameTeam(b, t)) || null;
     // teams of a step (names as found)
     const stepTeamsOf = (st, proc) => {
@@ -974,12 +1067,12 @@
     const stepUnrouted = (st, proc) => stepTeamsOf(st, proc).filter(t => !deptOf(t, proc));
     return { buOf, peopleBus, allBus, stepBus, stepTeamsOf, deptOf, stepUnrouted };
   }
-  function stepTeams(docs, proc, step) { return sectionHelpers(personMap(docs)).stepTeamsOf(step, procOf(docs, proc)); }
-  function departmentFor(docs, proc, team) { return sectionHelpers(personMap(docs)).deptOf(team, procOf(docs, proc)); }
+  function stepTeams(docs, proc, step) { return sectionHelpers(personMap(docs), docs).stepTeamsOf(step, procOf(docs, proc)); }
+  function departmentFor(docs, proc, team) { return sectionHelpers(personMap(docs), docs).deptOf(team, procOf(docs, proc)); }
   function stepDoer(docs, step) { return stepDoerIn(personMap(docs), step); }
   // Seed the mapping at import: every team found on the map; a team that IS a department gets it; others null.
   function seedTeamDepartments(docs, nodes) {
-    const h = sectionHelpers(personMap(docs)), out = {};
+    const h = sectionHelpers(personMap(docs), docs), out = {};
     const touchTeam = t => TEAM_WORDS.some(w => sameTeam(w, t)) || h.allBus.some(b => sameTeam(b, t));
     allNodes(versionNodes(nodes)).forEach(n => {
       if (!n || isGateway(n) || n.type === 'end') return;
@@ -989,7 +1082,7 @@
     return out;
   }
   function teamRouting(docs, proc) {
-    const p = procOf(docs, proc), people = personMap(docs), h = sectionHelpers(people);
+    const p = procOf(docs, proc), people = personMap(docs), h = sectionHelpers(people, docs);
     if (!p) return { teams: [], unmapped: [], departments: [], text: '' };
     const map = mapOf(p), teams = [];
     const addTeam = (t, st) => {
@@ -1004,10 +1097,11 @@
       x.text = x.department ? (teamKey(x.team) === teamKey(x.department) ? x.department : x.team + ' → ' + x.department) : 'Choose who approves for ' + x.team;
     });
     const unmapped = teams.filter(x => !x.department).map(x => x.team);
-    const departments = h.peopleBus.slice().sort().map(name => ({ name, people: Object.keys(people).filter(id => people[id].bu === name).map(id => ({ id, name: people[id].name || '' })) }));
+    // R13 #1: the one department list (workspace data), each { id, name, approvers, approverNames, people, configured }
+    const depts = departments(docs);
     const text = !teams.length ? 'No teams yet' : unmapped.length ? nWord(teams.length, 'team') + ' · ' + unmapped.length + ' need' + (unmapped.length === 1 ? 's' : '') + ' an approving department'
       : 'All ' + nWord(teams.length, 'team') + ' have an approving department';
-    return { teams, unmapped, departments, text };
+    return { teams, unmapped, departments: depts, text };
   }
   // R7: a runbook task belongs to the section of its owner's BU (or task.bu when set).
   function taskBu(people, t) { return (t && t.bu) || (t && people[t.owner] && people[t.owner].bu) || null; }
@@ -1024,7 +1118,7 @@
   }
   function sectionParts(docs, project, bu) {
     const people = personMap(docs);
-    const { stepBus } = sectionHelpers(people);
+    const { stepBus } = sectionHelpers(people, docs);
     const stepsOut = [];
     linkedProcesses(docs, project).forEach(p => allNodes(p.tobe).forEach(n => {
       if (!n || isGateway(n) || n.type === 'end') return;
@@ -1085,7 +1179,7 @@
   // R8 approval sections: teams owning a new/changed Future step (or a trigger that changed), plus teams that own
   // launch-day tasks. Unchanged teams need no approval.
   function sectionBus(docs, project, people) {
-    const { stepBus } = sectionHelpers(people);
+    const { stepBus } = sectionHelpers(people, docs);
     const set = new Set();
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
@@ -1100,6 +1194,8 @@
         } else changed = diff.nodes[n.id] === 'new' || diff.nodes[n.id] === 'changed';
         if (changed) stepBus(n, p).forEach(b => set.add(b));
       });
+      // R13 #10: removing a Today step (a control) needs the team that owned it to approve
+      (diff.removed || []).filter(a => a && isStep(a)).forEach(a => stepBus(a, p).forEach(b => set.add(b)));
     });
     // Launch-day tasks run by the PM or launch owner themselves (no explicit task.bu) add no section: they cannot approve it.
     const lead = [project.owner, project.releaseManager].filter(Boolean);
@@ -1111,7 +1207,7 @@
   }
   // R12 #1: changed steps whose team has no approving department yet: [{pid, process, team, steps, text}].
   function unroutedTeams(docs, project) {
-    const h = sectionHelpers(personMap(docs)), out = [];
+    const h = sectionHelpers(personMap(docs), docs), out = [];
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
       allNodes(p.tobe).forEach(n => {
@@ -1164,7 +1260,8 @@
   //    project does not change needs no tests (listed in notChanged, never counted as a gap).
   const FIX_DONE = ['fixed', 'verified', 'closed'];
   function rawDefectState(w) { return String((w && w.defectStatus) || '').trim().toLowerCase().replace(/[\s_]+/g, '-'); }
-  function problemFixDone(w) { return !!w && (w.status === 'done' || (w.status === 'review' && !rawDefectState(w)) || FIX_DONE.includes(rawDefectState(w))); }
+  // R13 #5: a fix held from an inbound sync (syncHold) is not done until someone confirms it
+  function problemFixDone(w) { return !!w && (w.status === 'done' || (!isHeld(w) && ((w.status === 'review' && !rawDefectState(w)) || FIX_DONE.includes(rawDefectState(w))))); }
   // {testId: defect workItem id} for open problems whose fix is not done yet
   function heldTests(docs, projectId) {
     const m = {};
@@ -1312,7 +1409,7 @@
     const workIdx = byId(work);
     const wt = id => (workIdx[id] && workIdx[id].title) || 'a deleted work item';
     const checks = [];
-    const { buOf, peopleBus, stepBus } = sectionHelpers(people);
+    const { buOf, peopleBus, stepBus } = sectionHelpers(people, docs);
     const stepBuIdx = {};
     const procIdx = byId(procs);
     steps.forEach(x => { stepBuIdx[x.pid + '/' + x.s.id] = stepBus(x.s, procIdx[x.pid]); });
@@ -1449,8 +1546,9 @@
     });
     const allTests = tf.ids;
     const stages = { system: Object.assign({}, tf.stages.system), uat: Object.assign({}, tf.stages.uat) };
+    // R13 #2 the gate's one number is the testing ledger's: tests not passed (total − passed)
     checks.push({ id: 'tests-passed', label: 'Tests passed', pass: tp, detail: tDetail.join(' '),
-      total: allTests.length, passed: tf.passed.length, stages, changedData, cases: cases.map(c => c.id),
+      total: allTests.length, passed: tf.passed.length, count: allTests.length - tf.passed.length, stages, changedData, cases: cases.map(c => c.id),
       items: [...new Set([...failing, ...held, ...blocked, ...unrun, ...defects, ...noCases])], failing: [...failing], held, blocked: [...blocked], unrun, defects, noCases,
       uncoveredFields, scriptGaps, skipped: skippedIds, noEvidence: [...noEvidence], byEnv: envSummary, scripts: scripts.map(x => x.id), coverage: tf.coverage });
 
@@ -1492,8 +1590,11 @@
     };
     const overrides = project.approvers && typeof project.approvers === 'object' ? project.approvers : {};
     const eligible = {}, sodBlocked = {}, barred = {};
+    // R13 #1: a department's named approvers when it has any, otherwise its members
+    const deptList = departments(docs);
     bus.forEach(bu => {
-      const e = Object.keys(people).filter(id => people[id] && people[id].bu === bu && !excluded.includes(id));
+      const dd = deptList.find(d => teamKey(d.name) === teamKey(bu));
+      const e = (dd && dd.approvers.length ? dd.approvers.slice() : Object.keys(people).filter(id => people[id] && people[id].bu === bu)).filter(id => !excluded.includes(id));
       const o = overrides[bu];
       if (o && people[o] && !excluded.includes(o) && !e.includes(o)) e.push(o);
       const ok = e.filter(id => !barOf(bu, id));
@@ -1808,6 +1909,9 @@
   // Values of 1–2 chars are fully masked. If the result would equal the raw value, mask fully;
   // if that still equals it (e.g. "999"), replace with '*'.
   function maskValue(v) {
+    // R13 #7: letters never leak: each run of letters becomes a fixed 4-letter shape by case (Xxxx / XXXX / xxxx), so no
+    // first or last letter and no word length shows; digits keep their count (formats like 99-9999999 matter)
+    if (RE_L.test(String(v))) return String(v).replace(/[\p{L}]+/gu, w => /^\p{Lu}+$/u.test(w) && w.length > 1 ? 'XXXX' : /^\p{Lu}/u.test(w) ? (w.length === 1 ? 'X' : 'Xxxx') : 'xxxx').replace(/[0-9]/g, '9');
     const cs = chars(v);
     const full = cs.map(maskChar).join('');
     // R8: every digit is hidden (no first/last digit shown); a first/last letter or symbol may stay.
@@ -2661,16 +2765,23 @@
       // its role), plus the teams it touches.
       // R12 #1: the approving departments of the changed steps (process.teamDepartments), plus any team not mapped yet
       // by its own name. Never the process owner's department by default.
-      const hs = sectionHelpers(personMap(docs)), teams = [];
+      const hs = sectionHelpers(personMap(docs), docs), teams = [];
       linkedProcesses(docs, project).forEach(p => { const df = diffProcess(p); flatSteps(p.tobe).forEach(st => {
         if (df.nodes[st.id] !== 'new' && df.nodes[st.id] !== 'changed') return;
         // a generic actor ("Employee") is no team, but the people in it are still told
         const tt = hs.stepTeamsOf(st, p), gen = String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
         (tt.length ? tt.map(t => hs.deptOf(t, p) || t) : gen && isGenericActor(gen) ? [gen] : [])
           .forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); });
-      }); });
+      });
+      // R13 #10: the teams whose Today steps are removed are told too
+      df.removed.filter(a => a && isStep(a)).forEach(a => hs.stepTeamsOf(a, p).map(t => hs.deptOf(t, p) || t)
+        .forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); }));
+      });
+      // R13 #10: a "tell-removed" task (from deleting a step) already tells its teams; the plan's tell task skips them
+      const toldAlready = own.filter(w => w.tag === 'tell-removed').flatMap(w => Array.isArray(w.teams) ? w.teams : []);
+      for (let i = teams.length - 1; i >= 0; i--) if (toldAlready.some(x => sameTeam(x, teams[i]))) teams.splice(i, 1);
       // telling the teams happens early (1 day, can start now); training follows the changed steps' work
-      if (!own.some(w => w.tag === 'tell')) push({ pid: null, step: null, title: 'Tell affected teams about the change', kind: 'other', tag: 'tell', owner: pm, deps: [], effortDays: 1,
+      if (!own.some(w => w.tag === 'tell') && !(toldAlready.length && !teams.length)) push({ pid: null, step: null, title: 'Tell affected teams about the change', kind: 'other', tag: 'tell', owner: pm, deps: [], effortDays: 1,
         note: 'Teams: ' + (joinList(teams, 8) || 'everyone the change touches') + '.', teams: teams.slice() });
       if (!own.some(w => w.tag === 'train')) push({ pid: null, step: null, title: 'Train the people who do the changed steps', kind: 'other', tag: 'train', owner: pm, deps: ends,
         note: 'Who: ' + (joinList(people.concat(roles.map(r => r + ' (role)')), 8) || 'the people on the changed steps') + '.' });
@@ -2979,14 +3090,28 @@
     if (!w) return 0;
     const p = personMap(docs)[w.owner];
     const rate = p && p.dayRate != null && isFinite(+p.dayRate) ? +p.dayRate : DEFAULT_DAY_RATE;
-    return Math.round(effortOf(w) * rate * 100) / 100;
+    // R13 #6: a task may carry a fixed cost (a licence, a fee): w.cost, money
+    const fixed = w.cost != null && w.cost !== '' && isFinite(+w.cost) && +w.cost > 0 ? +w.cost : 0;
+    return Math.round((effortOf(w) * rate + fixed) * 100) / 100;
   }
   // R8: actualCost = logged hours × rate (earnedValue AC); forecastCost = EAC (the one cost forecast);
   // estimate = Σ workCost (bottom-up planned cost); planned = the budget.
   function projectFinancials(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
     const planned = project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) ? +project.budget.planned : null;
-    return costOf(project, planned, earnedValue(docs, projectId, today));
+    const cost = costOf(project, planned, earnedValue(docs, projectId, today));
+    return moneyKnown(docs, project, planned) ? cost : Object.assign(cost, { estimate: null, forecastCost: null, remainingCost: null, variance: null, overBudget: false });
+  }
+  // R12 #7 / R13 #6: money shows only with a budget (current or saved), hours logged, or a day rate (or fixed cost) for
+  // EVERY open task's work. Tasks nobody owns, priced at a default rate, never produce an "expected cost".
+  function moneyKnown(docs, project, planned) {
+    if (!project) return false;
+    if (planned != null || baselineBudget(project) != null) return true;
+    const pm_ = personMap(docs), items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    if (!items.length) return false;
+    if (items.some(w => Array.isArray(w.time) && w.time.some(t => t && +t.hours > 0))) return true;
+    const priced = w => (w.cost != null && +w.cost > 0) || !!(w.owner && pm_[w.owner] && pm_[w.owner].dayRate != null && isFinite(+pm_[w.owner].dayRate));
+    return items.filter(w => w.status !== 'done').every(priced) && items.some(priced);
   }
   // R10 §2: the cost forecast is EAC once CPI exists; before that it is the bottom-up estimate (forecastBasis says which).
   function costOf(project, planned, ev) {
@@ -3004,10 +3129,16 @@
   //  SPI = EV/PV, CPI = EV/AC (null when the divisor is 0); EAC = BAC/CPI, or BAC when CPI is null.
   function progressOf(w) {
     if (w.status === 'done') return 1;
-    if (w.progress != null && w.progress !== '' && isFinite(+w.progress)) return Math.min(1, Math.max(0, +w.progress));
-    if (w.pct != null && w.pct !== '' && isFinite(+w.pct)) return Math.min(1, Math.max(0, +w.pct / 100));
-    return 0;
+    let p = 0;
+    if (w.progress != null && w.progress !== '' && isFinite(+w.progress)) p = Math.min(1, Math.max(0, +w.progress));
+    else if (w.pct != null && w.pct !== '' && isFinite(+w.pct)) p = Math.min(1, Math.max(0, +w.pct / 100));
+    // R13 #5: a held inbound status (syncHold: out of order, unverified, open problem) earns nothing new: the progress
+    // saved with the hold (syncHold.progress) when there is one, else a "finished" 100% from the tool counts as 0
+    if (isHeld(w)) { const h = w.syncHold; return h.progress != null && isFinite(+h.progress) ? Math.min(1, Math.max(0, +h.progress)) : p >= 1 ? 0 : p; }
+    return p;
   }
+  // R13 #5 an inbound status PMOFlow holds until someone confirms it (K4 sync sets workItem.syncHold)
+  function isHeld(w) { return !!(w && w.status !== 'done' && w.syncHold && typeof w.syncHold === 'object'); }
   function scheduledFraction(w, today) {
     if (!isDate(today) || !isDate(w.due)) return 0;
     if (w.due <= today) return 1;
@@ -3031,12 +3162,23 @@
     // a budget change moves the expected cost and variance, never SPI/CPI by itself. No baseline budget: the current one.
     const bl = baselineBudget(project);
     const planned = bl != null ? bl : current, bacSource = bl != null ? 'baseline' : current != null ? 'current' : 'estimate';
-    const BAC = planned != null ? planned : total;
+    // R13 #6 the saved plan (latest baseline a person saved, never a plan change's automatic before/after record):
+    // planned value runs on its dates, so a slip never raises SPI; work added since (scope) is valued at its own cost
+    // on top of the budget, so added cost raises BAC and the expected cost
+    const plan = ((project && project.baselines) || []).filter(b => b && !b.auto && b.items && typeof b.items === 'object')
+      .sort((a, b) => String(a.at || '').localeCompare(String(b.at || ''))).pop() || null;
+    const inPlan = w => !!(plan && plan.items[w.id]);
+    const baseTotal = plan ? items.reduce((a, w, i) => a + (inPlan(w) ? costs[i] : 0), 0) : total;
+    const extra = total - baseTotal;
+    const BAC0 = planned != null ? planned : baseTotal;
+    const BAC = BAC0 + (plan ? extra : 0);
+    const scaleOf = w => !plan || inPlan(w) ? (baseTotal > 0 ? BAC0 / baseTotal : 0) : 1;
+    const pvDates = w => { const b = inPlan(w) ? plan.items[w.id] : null; return b && isDate(b.due) ? Object.assign({}, w, { start: isDate(b.start) ? b.start : w.start, due: b.due }) : w; };
     const scale = total > 0 ? BAC / total : 0;
     let PV = 0, EV = 0, AC = 0;
     items.forEach((w, i) => {
-      const v = costs[i] * scale;
-      PV += v * scheduledFraction(w, today);
+      const v = costs[i] * scaleOf(w);
+      PV += v * scheduledFraction(pvDates(w), today);
       EV += v * progressOf(w);
       (Array.isArray(w.time) ? w.time : []).forEach(t => {
         const h = t && isFinite(+t.hours) ? +t.hours : 0;
@@ -3057,7 +3199,7 @@
     const eacMethod = CPI ? 'cpi' : 'bottom-up';
     // R12 #9: with money spent and nothing earned (CPI 0), the expected cost is what is spent plus the budgeted value
     // of the work still to do (AC + BAC − EV), so it is never under budget while CPI reads 0.
-    const EAC = !items.length ? null : r2(Math.max(AC, CPI ? BAC / (EV / AC) : spentNothing ? AC + remainingEst * scale : Math.max(total, AC + remainingEst)));
+    const EAC = !items.length ? null : r2(Math.max(AC, CPI ? BAC / (EV / AC) : spentNothing ? AC + items.reduce((a, w, i) => a + (w.status === 'done' ? 0 : costs[i] * (1 - progressOf(w)) * scaleOf(w)), 0) : Math.max(total, AC + remainingEst)));
     const pctDone = BAC > 0 ? EV / BAC : 0;
     const doneNoHours = items.filter(w => w.status === 'done' && !(Array.isArray(w.time) ? w.time : []).some(t => t && isFinite(+t.hours) && +t.hours > 0)).map(w => w.id);
     const flags = [];
@@ -3214,8 +3356,11 @@
     const passed = (m, ids) => ids.filter(id => m[id] && m[id].outcome === 'pass').length;
     const uatIds = cases.map(c => c.id).concat(scripts.map(s => s.id));
     const system = { done: passed(sys, cases.map(c => c.id)), total: cases.length, label: 'Try it out' };
+    // R13 #2 one ledger: the business-check count is the testing truth's (a pass held by an open problem never counts)
+    const tf = project ? testFacts(docs, project) : null;
+    if (tf) { system.done = tf.stages.system.passed; system.total = tf.stages.system.total; }
     return { fieldsTotal, fieldsCovered: fieldsTotal - uncoveredFields.length, uncoveredFields,
-      uat: { done: passed(uat, uatIds), total: uatIds.length, label: 'Business sign-off' }, system, dev: system };
+      uat: { done: tf ? tf.stages.uat.passed : passed(uat, uatIds), total: tf ? tf.stages.uat.total : uatIds.length, label: 'Business sign-off' }, system, dev: system };
   }
 
   // R6 defect lifecycle: new → triaged → in-progress → fixed → verified → closed.
@@ -3318,7 +3463,7 @@
   // R9 §1 the one ranked "who needs to act" list. Ranks: unplanned blockers, past due, late items delaying others,
   // other late items, information being made available / open problems, approvals ready, tests to run.
   // [{person, name, what, why, href, ref, rank, action}] (action = what, kept for R8 callers).
-  const WHO_RANK = { plan: 5, blocker: 10, 'past-due': 20, deadline: 25, delaying: 30, late: 40, info: 45, problem: 47, approval: 50, test: 60 };
+  const WHO_RANK = { plan: 5, owner: 8, blocker: 10, 'past-due': 20, deadline: 25, delaying: 30, late: 40, info: 45, hold: 46, problem: 47, approval: 50, test: 60 };
   function q(t) { return '“' + (t || 'untitled task') + '”'; }
   function problemTitle(w) { return capFirst(String((w && w.title) || 'untitled problem').replace(/^\s*fix\s*:\s*/i, '')); }
   function taskHref(project, w) { return '/project/' + (w.projectId || (project && project.id) || '') + '?task=' + encodeURIComponent(w.id); }
@@ -3366,12 +3511,25 @@
       if (a.blockedBy) add(project.owner, a.blockedBy.fix, 'approval', '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu), 'approval:' + a.bu);
       else if (a.approver) add(a.approver, 'Approve ' + a.bu + "'s part", 'approval', '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu), 'approval:' + a.bu);
     });
+    // R13 #4: open tasks with no owner are one row with nobody's name on it (never the PM's)
+    if ((c.unowned || []).length) {
+      const n = c.unowned.length;
+      add(null, 'Choose owners for ' + nWord(n, 'task'), 'owner', '/project/' + project.id + '?owner=none', 'owners:' + project.id);
+      const row = out[out.length - 1]; if (row && row.ref === 'owners:' + project.id) { row.name = 'Needs an owner'; row.needsOwner = true; row.items = c.unowned.slice(); }
+    }
+    // R13 #5/#12: an inbound status held for confirmation goes to syncHold.confirmBy; with nobody, "Needs an owner"
+    (c.items || c.open).filter(isHeld).forEach(w => {
+      const h = w.syncHold, tool = h.tool || 'the connected tool';
+      add(h.confirmBy || null, 'Confirm ' + q(w.title) + ' finished in ' + tool, 'hold', taskHref(project, w), 'hold:' + w.id);
+      const row = out[out.length - 1];
+      if (row && row.ref === 'hold:' + w.id) { row.workId = w.id; row.reason = h.reason || null; if (!h.confirmBy) { row.name = 'Needs an owner'; row.needsOwner = true; } }
+    });
     const t = extra.testing;
     if (t && t.stage && t.stage !== 'done' && t.next) add(project.testLead || project.owner, t.next, 'test', '/testing/' + project.id, 'testing:' + project.id);
     // R12 #6: an unowned task is never shown under a person: "Needs an owner: <role>"
     const allIdx = byId(c.items || c.open);
     out.forEach(x => { const id = x.workId || (/^work:/.test(x.ref || '') ? x.ref.slice(5) : null); const w = id && allIdx[id];
-      if (!x.person && w) { x.name = ownerText(docs, w); x.needsOwner = true; x.role = String(w.ownerRole || '').trim() || null; } });
+      if (!x.person && w && x.why !== 'hold' && x.why !== 'owner') { x.name = ownerText(docs, w); x.needsOwner = true; x.role = String(w.ownerRole || '').trim() || null; } });
     return out.sort((x, y) => x.rank - y.rank);
   }
   // R12 #4 who can pass a test. The departments whose part covers the test (its data case's information or its
@@ -3392,6 +3550,9 @@
     const scr = tc ? null : (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, project.id)).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []).find(x => x && x.id === testId);
     const label = tc ? dataName(docs, tc.dataId) + (tc.field ? ': ' + tc.field : '') : scr ? (scr.title || 'business check script') : 'this test';
     const who = testAssignee(docs, project, testId);
+    // R13 #3: whoever assigned a test can't pass it (self-assign then pass is two duties in one person)
+    const by = (tc || scr || {}).assignedBy || null;
+    if (who && by && by === personId) return { rule: 'assigner', text: nameOf(docs, personId) + ' assigned the test “' + label + '”, so someone else must pass it.' };
     if (who) return who === personId ? null : { rule: 'assignee', text: 'The test “' + label + '” is assigned to ' + nameOf(docs, who) + ', so only they can pass it.' };
     const depts = testDepartments(docs, project, testId);
     if (!depts.length) return null;
@@ -3399,6 +3560,21 @@
     if (p && depts.includes(p.bu)) return null;
     const orList = depts.length === 1 ? depts[0] : depts.slice(0, -1).join(', ') + ' or ' + depts[depts.length - 1];
     return { rule: 'department', departments: depts, text: 'Only someone in ' + orList + ' (or the person it is assigned to) can pass the test “' + label + '”.' };
+  }
+  // R13 #3 who may assign a test: the project manager, or someone in a department whose part the test covers.
+  // null when allowed, else {rule: 'department', departments, text}. A test no department owns may be assigned by anyone.
+  function canAssignTest(docs, prj, testId, actor) {
+    const project = projOf(docs, prj); if (!project || !actor) return { rule: 'unknown', text: 'Sign in to assign tests.' };
+    if (actor === project.owner) return null;
+    const depts = testDepartments(docs, project, testId);
+    if (!depts.length) return null;
+    const p = personMap(docs)[actor];
+    if (p && depts.some(d => sameTeam(d, p.bu))) return null;
+    const tc = get(docs, 'testCase', testId);
+    const scr = tc ? null : projectScripts(docs, project).find(x => x && x.id === testId);
+    const label = tc ? dataName(docs, tc.dataId) + (tc.field ? ': ' + tc.field : '') : scr ? (scr.title || 'business check script') : 'this test';
+    const orList = depts.length === 1 ? depts[0] : depts.slice(0, -1).join(', ') + ' or ' + depts[depts.length - 1];
+    return { rule: 'department', departments: depts, text: 'Only someone in ' + orList + ' or the project manager can assign the test “' + label + '”.' };
   }
   function launchChecksOf(r) {
     const cks = (r && r.checks) || [];
@@ -3498,7 +3674,8 @@
     const statusById = Object.assign({}, tf.status);
     const phases = {};
     ['system', 'uat'].forEach(k => { phases[k] = {}; Object.keys(tf.phase[k]).forEach(id => { phases[k][id] = tf.phase[k][id].outcome; }); });
-    return { done, passed, total, failed, failedOnly, waitingForFix, blocked, notRun, needTests, haveTests, count, stage, next, sentence, stages,
+    // R13 #2: the ledger's parts (total = cases + scripts), so no screen counts cases on information the project doesn't change
+    return { done, passed, total, cases: tf.caseIds.length, scripts: tf.scriptIds.length, failed, failedOnly, waitingForFix, blocked, notRun, needTests, haveTests, count, stage, next, sentence, stages,
       changedInformation: n(c.changedData), problems: n(c.defects), nextAction: { key, label: next },
       coverage: { denominator: cov.denominator, needTests, haveTests, gaps: cov.gaps, notCovered: cov.notCovered.slice(), elements: cov.elements.map(e => Object.assign({}, e)),
         fieldsTotal: cov.fieldsTotal, fieldsCovered: cov.fieldsCovered, uncoveredFields: cov.uncoveredFields.slice(), scriptGaps: cov.scriptGaps.slice(), notChanged: cov.notChanged.slice(),
@@ -3554,8 +3731,10 @@
       action: !planned ? 'Add the work or accept a suggested plan' : !pv.pass ? 'Fix ' + nWord(noOwner || 1, 'problem') + ' in the process map' + (noOwner ? ' (for example, a step with nobody doing it)' : '') : 'Done' });
     // 2. Finish the work
     const open = items.filter(w => w.status !== 'done');
-    steps.push({ key: 'work', label: 'Finish the work', done: live || (planned && open.length === 0), who: uniq(open.map(w => w.owner)).slice(0, 5),
-      action: !planned ? 'Plan the work first' : open.length ? nWord(open.length, 'task') + ' still open' : 'Done' });
+    // R13 #4: only real owners are named; unowned tasks are counted, never given to the PM
+    const noOwner_ = open.filter(w => !(w.owner && people[w.owner])).length;
+    steps.push({ key: 'work', label: 'Finish the work', done: live || (planned && open.length === 0), who: uniq(open.map(w => w.owner).filter(id => people[id])).slice(0, 5),
+      action: !planned ? 'Plan the work first' : open.length ? nWord(open.length, 'task') + ' still open' + (noOwner_ ? ' (' + noOwner_ + ' need' + (noOwner_ === 1 ? 's' : '') + ' an owner)' : '') : 'Done' });
     // 3. Information connected (data-live + discovered requirements)
     const dl = ck('data-live'), dr = ck('discovered-resolved');
     const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || [], dl.problems || []));
@@ -3635,7 +3814,7 @@
   // information (only information the project changes) and the UAT scripts of its steps, and its launch-day tasks.
   function sectionScope(docs, project, bu) {
     const people = personMap(docs);
-    const { stepBus } = sectionHelpers(people);
+    const { stepBus } = sectionHelpers(people, docs);
     const steps = [], stepKeys = new Set();
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
@@ -3726,8 +3905,23 @@
       const pt = partTests(docs, project, bu, null, tf);
       const c = o => pt.ids.filter(id => pt.status[id] === o).length;
       const failed = c('failed') + c('fix');
+      // R13 #2: who passed each test (the business check's latest pass), so the approver sees it; a pass by someone
+      // outside this department is flagged
+      const people = personMap(docs);
+      const tests = pt.ids.map(id => {
+        const tc = tf.cases.find(x => x.id === id), scr = tc ? null : tf.scripts.find(x => x.id === id);
+        const u = tf.phase.uat[id], st = pt.status[id];
+        const by = st === 'passed' && u ? u.by || null : null, dept = by && people[by] ? people[by].bu || null : null;
+        return { id, kind: tc ? 'case' : 'script', label: tc ? dataName(docs, tc.dataId) + (tc.field ? ': ' + tc.field : '') : (scr && scr.title) || 'business check script',
+          status: st, passedBy: by, passedByName: by ? nameOf(docs, by) : null, passedByDept: dept, otherDept: !!(by && !sameTeam(dept, bu)), passedAt: by ? u.at || null : null };
+      });
+      const groups = [];
+      tests.filter(x => x.passedBy).forEach(x => { let g = groups.find(y => y.by === x.passedBy); if (!g) groups.push(g = { by: x.passedBy, n: 0, other: x.otherDept, dept: x.passedByDept }); g.n++; });
+      groups.sort((a, b) => (a.other ? 1 : 0) - (b.other ? 1 : 0) || b.n - a.n);
+      const passedByText = groups.map(g => 'Passed by ' + nameOf(docs, g.by) + ' (' + (g.dept || 'no department') + (g.other ? ', another department' : '') + '): ' + nWord(g.n, 'test') + '.').join(' ');
       res[bu] = { total: pt.ids.length, passed: pt.passed, failed, blocked: c('blocked'), notRun: pt.ids.length - pt.passed - failed,
-        gaps: pt.gaps.map(g => Object.assign({}, g)), gapCount: pt.gaps.length, checks: pt.checks, text: pt.text, notChanged: pt.notChanged.map(x => x.name), notChangedText: pt.notChangedText };
+        gaps: pt.gaps.map(g => Object.assign({}, g)), gapCount: pt.gaps.length, checks: pt.checks, text: pt.text, notChanged: pt.notChanged.map(x => x.name), notChangedText: pt.notChangedText,
+        tests, passedByText, otherDeptPasses: tests.filter(x => x.otherDept).length };
     });
     return res;
   }
@@ -3806,8 +4000,13 @@
     const cost = costOf(project, planned, ev);
     // R12 #7: money shows only with a budget, or a day rate for someone doing this project's work, or hours logged.
     // Unowned (role) tasks priced at the default rate never produce an "expected cost" on their own.
-    const pm_ = personMap(docs), rated = id => !!(id && pm_[id] && pm_[id].dayRate != null && isFinite(+pm_[id].dayRate));
-    const hasRates = planned != null || c.items.some(w => rated(w.owner) || (Array.isArray(w.time) && w.time.some(t => t && +t.hours > 0)));
+    const hasRates = moneyKnown(docs, project, planned);
+    // R13 #11 one count of re-approvals: the teams whose latest approval follows an earlier one
+    const apprAll = list(docs, 'approval').filter(a => a.projectId === project.id && a.bu && !a.kind && a.decision === 'approved');
+    const reapprovals = [...new Set(apprAll.map(a => a.bu))].sort().map(bu => { const xs = apprAll.filter(a => a.bu === bu).sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+      return xs.length > 1 ? { bu, times: xs.length - 1, approver: xs[xs.length - 1].approver || null, at: xs[xs.length - 1].at || null } : null; }).filter(Boolean);
+    // R13 #6: with no budget, no rates and no hours there is no expected cost at all (never $800/day guesses)
+    if (!hasRates) { cost.estimate = null; cost.forecastCost = null; cost.remainingCost = null; cost.variance = null; cost.overBudget = false; }
     // R9 §5 Advanced-only note: the label stays driven by §1.
     const advancedNote = ev.SPI != null && ev.SPI < 0.95 && c.rag === 'green' ? 'Behind plan on effort (SPI ' + ev.SPI.toFixed(2) + ')' : null;
     return {
@@ -3825,9 +4024,9 @@
       pastDue: c.pastDue.slice(), pastDueCount: c.pastDue.length, finishAfterDue: c.finishAfterDue.slice(), finishAfterDueCount: c.finishAfterDue.length,
       runningLate: c.finishAfterDue.slice(), runningLateCount: c.finishAfterDue.length,   // deprecated (R8): use finishAfterDue
       blockers: c.blockers, unplannedBlockers: c.blockers.filter(b => !b.planned).length,
-      rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, who, reasons: c.reasons.slice(),
+      rag: c.rag, unowned: (c.unowned || []).slice(), label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, who, reasons: c.reasons.slice(),
       status: { rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, reasons: c.reasons.slice(), who },
-      launchSteps: launch, stepsLeft: launch.filter(s => !s.done).length, testing, approvals,
+      launchSteps: launch, stepsLeft: launch.filter(s => !s.done).length, testing, approvals, reapprovals, reapprovalsText: reapprovals.length ? joinList(reapprovals.map(x => x.bu)) + ' approved again after changes' : 'None',
       // R12 #7 the launch gate in ONE phrase and ONE number: checks (never "launch steps left" next to "checks")
       launchChecks: launchChecksOf(r),
       cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget, show: hasRates,
@@ -3873,9 +4072,18 @@
           rank: wx ? wx.rank : r.late ? WHO_RANK.late : kind === 'problem' ? WHO_RANK.problem : 70,
           what: wx ? wx.what : (kind === 'problem' ? 'Fix the problem: ' : 'Finish ') + q(w.title) });
       });
-      t.approvals.filter(a => a.needed && a.ready && !a.approved && !a.blockedBy && a.approver === person).forEach(a =>
-        add({ kind: 'approval', projectId: project.id, id: a.bu, title: 'Approve ' + a.bu + "'s part", due: null, late: false, href: '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu),
-          oneTap: null, why: 'approval', rank: WHO_RANK.approval, what: 'Approve ' + a.bu + "'s part" }));
+      // R13 #12: a re-approval (stale) reaches its approver even before the part's work is done
+      t.approvals.filter(a => a.needed && (a.ready || a.stale) && !a.approved && !a.blockedBy && a.approver === person).forEach(a => {
+        const tt = 'Approve ' + a.bu + "'s part" + (a.stale ? ' again' : '');
+        add({ kind: 'approval', projectId: project.id, id: a.bu, title: tt, due: null, late: false, href: '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu),
+          oneTap: null, why: 'approval', rank: WHO_RANK.approval, what: tt, reapproval: !!a.stale, reason: a.stale ? a.sentence : null });
+      });
+      // R13 #5/#12: inbound statuses held for this person's confirmation (only while the task is not done)
+      list(docs, 'workItem').filter(w => w.projectId === project.id && isHeld(w) && w.syncHold.confirmBy === person).forEach(w => {
+        const tt = 'Confirm ' + q(w.title) + ' finished in ' + (w.syncHold.tool || 'the connected tool');
+        add({ kind: 'syncHold', projectId: project.id, id: w.id, title: tt, due: w.due || null, late: false, href: taskHref(project, w), oneTap: null, why: 'hold', rank: WHO_RANK.hold, what: tt,
+          reason: w.syncHold.reason || null, tool: w.syncHold.tool || null, key: w.syncHold.key || null });
+      });
       const outc = latestAnyStage(docs, project.id);
       list(docs, 'testCase').filter(c => c.assignee === person && outc[c.id] !== 'pass' && changedInformation(docs, project).some(x => x.dataId === c.dataId)).forEach(c =>
         add({ kind: 'test', projectId: project.id, id: c.id, title: 'Run the test for ' + dataName(docs, c.dataId) + (c.field ? ' · ' + c.field : ''), due: null, late: false,
@@ -3967,6 +4175,12 @@
     const all = log.concat([dayOfValue(project.lastReportAt)]).filter(d => d && d <= today).sort();
     return all.length ? all[all.length - 1] : null;
   }
+  // R13 #11 the exact time of the last report (reportLog[].at or lastReportAt with a time), at or before today
+  function lastReportStamp(project, today) {
+    const ts = (Array.isArray(project.reportLog) ? project.reportLog : []).map(r => r && r.at).concat([project.lastReportAt])
+      .filter(v => typeof v === 'string' && /T\d{2}:\d{2}/.test(v) && dayOfValue(v) && dayOfValue(v) <= today).sort();
+    return ts.length ? ts[ts.length - 1] : null;
+  }
   // {preset, from, to, label, short, noun, partial, note, weekEnd}
   function periodWindow(docs, prj, range, today) {
     const project = projOf(docs, prj);
@@ -3982,9 +4196,13 @@
       weekEnd = e;
       return { from: f, to: e < td ? e : td, label: label0 + fmtDayLong(f) + ' – ' + fmtDayLong(e) };
     };
+    let since = null, dayFrom = null;
     if (preset === 'since-last-report') {
       const last = project ? lastReportDay(project, td) : null;
-      if (last) { from = firstBizFrom(addDays(last, 1)); if (from > td) from = td; note = 'Since the last report on ' + fmtDayLong(last) + '.'; }
+      const stamp = project ? lastReportStamp(project, td) : null;
+      // R13 #11: with an exact time, timestamped facts count only after it; day-only facts start the next business day
+      if (stamp && dayOfValue(stamp) === last) { since = stamp; from = last; dayFrom = firstBizFrom(addDays(last, 1)); note = 'Since the last report on ' + fmtDayLong(last) + ' at ' + stamp.slice(11, 16) + ' UTC.'; }
+      else if (last) { from = firstBizFrom(addDays(last, 1)); if (from > td) from = td; note = 'Since the last report on ' + fmtDayLong(last) + '.'; }
       else { preset = 'this-week'; note = 'No earlier report yet, so this shows this week.'; }
     }
     if (preset === 'this-week') { const w = week(td, 'Week of '); from = w.from; to = w.to; label = w.label; }
@@ -4005,17 +4223,23 @@
     if (!label) label = from === to ? fmtDayLong(from) : fmtDayLong(from) + ' – ' + fmtDayLong(to);
     const partial = !!(weekEnd && to < weekEnd);
     const short = /^Week of /.test(label) ? 'week of ' + fmtDay(from) : from === to ? fmtDay(from) : fmtDay(from) + ' – ' + fmtDay(to);
-    return { preset, presetLabel: PERIOD_LABEL[preset], from, to, label, short, noun: PERIOD_NOUN[preset], partial, weekEnd, clamped, note,
+    return { preset, presetLabel: PERIOD_LABEL[preset], from, to, label, short, noun: PERIOD_NOUN[preset], partial, weekEnd, clamped, note, since, dayFrom,
       days: businessDaysBetween(addDays(from, -1), to) };
   }
   // The same docs as they stood at the end of day `to`: tasks created later are left out, tasks finished later
   // are open again (in progress when they had started by then), and hours logged later are dropped.
   function docsAsOf(docs, projectId, to, facts) {
+    // R13 #11: plan changes applied after `to` are undone (their saved "before" start, due and owner), latest first,
+    // so a past range never shows today's plan
+    const undo = {};
+    list(docs, 'planChange').filter(c => c && c.projectId === projectId && c.status === 'applied' && dayOfValue(c.appliedAt) && dayOfValue(c.appliedAt) > to && c.snapshots && c.snapshots.before)
+      .sort((a, b) => String(b.appliedAt).localeCompare(String(a.appliedAt)))
+      .forEach(c => Object.keys(c.snapshots.before).forEach(id => { const b = c.snapshots.before[id]; if (b && typeof b === 'object') undo[id] = Object.assign({}, undo[id], b); }));
     const items = (docs.workItem || []).map(e => {
       const w = e && (e.data || e); if (!w || w.projectId !== projectId) return e;
       const f = facts(w);
       if (f.created && f.created > to) return null;
-      const d = Object.assign({}, w);
+      const d = Object.assign({}, w, undo[w.id] ? Object.fromEntries(['start', 'due', 'owner'].filter(k => undo[w.id][k] !== undefined).map(k => [k, undo[w.id][k]])) : {});
       if (d.status === 'done' && f.done && f.done > to) { d.status = f.started && f.started <= to ? 'prog' : 'idle'; delete d.doneAt; }
       if (Array.isArray(d.time)) d.time = d.time.filter(t => !(t && dayOfValue(t.date) && dayOfValue(t.date) > to));
       return { id: e.id, data: d };
@@ -4033,7 +4257,9 @@
     opts = opts || {};
     const win = periodWindow(docs, project, range, today);
     const { from, to } = win;
-    const within = d => !!d && d >= from && d <= to;
+    // R13 #11: day-only facts from dayFrom; facts with a time after the last report's exact time
+    const within = d => !!d && d >= (win.dayFrom || from) && d <= to;
+    const withinTs = v => { const d = dayOfValue(v); if (!d) return false; if (win.since && /T\d{2}:\d{2}/.test(String(v))) return String(v) > win.since && d <= to; return within(d); };
     const t = projectTruth(docs, project, today);
     const people = personMap(docs);
     const pn = id => (id && people[id] && people[id].name) || (id ? 'someone' : 'Nobody');
@@ -4109,19 +4335,57 @@
     });
     const behindText = lateText({ lateCount: core.late.length, pastDueCount: core.pastDue.length, finishAfterDueCount: core.finishAfterDue.length });
     // tests, approvals, risks, spend
-    const testsRun = { passed: 0, failed: 0, runs: 0 };
-    runs.forEach(r => { if (!within(dayOfValue(r.at))) return; testsRun.runs++;
-      (r.results || []).forEach(x => { if (x && x.outcome === 'pass') testsRun.passed++; else if (x && x.outcome === 'fail') testsRun.failed++; }); });
-    const approvalsGiven = list(docs, 'approval').filter(a => a.projectId === project.id && a.bu && !a.kind && a.decision === 'approved')
-      .map(a => ({ id: a.id, bu: a.bu || null, approver: a.approver || null, approverName: pn(a.approver), date: dayOfValue(a.date) || dayOfValue(a.at) }))
-      .filter(a => within(a.date)).sort(byDate);
+    // R13 #2 one testing ledger: each test's LATEST result in the window, per stage (Try it out / Business check), never
+    // the sum of runs. A pass on a test held by a still-open problem counts as failed (as on Testing). When the window
+    // ends today the line adds the stage's current count (projectTruth.testing); a past window never shows today's.
+    const latestIn = { system: {}, uat: {} };
+    let runCount = 0;
+    runs.slice().sort((a, b) => String(a.at || '').localeCompare(String(b.at || ''))).forEach(r => {
+      if (!withinTs(r.at)) return; runCount++;
+      const ph = stageOfEnv(r.env); if (!ph) return;
+      (r.results || []).forEach(x => { const k = x && (x.caseId || x.scriptId);
+        if (k && ['pass', 'fail', 'blocked'].includes(x.outcome)) latestIn[ph][k] = x.outcome; });
+    });
+    const heldNow = nowOpen ? heldTests(docs, project.id) : {};
+    const stageRun = {};
+    ['system', 'uat'].forEach(ph => {
+      const o = { tests: 0, passed: 0, failed: 0, blocked: 0 };
+      Object.keys(latestIn[ph]).forEach(k => { o.tests++; const v = latestIn[ph][k] === 'pass' && heldNow[k] ? 'fail' : latestIn[ph][k];
+        if (v === 'pass') o.passed++; else if (v === 'fail') o.failed++; else o.blocked++; });
+      stageRun[ph] = o;
+    });
+    const ledger = nowOpen && t.testing && Array.isArray(t.testing.stages) && t.testing.stages.length === 2
+      ? { system: t.testing.stages[0], uat: t.testing.stages[1], count: t.testing.count } : null;
+    const stageLine = (ph, label) => {
+      const o = stageRun[ph]; if (!o.tests) return null;
+      const bits = [nWord(o.passed, 'test') + ' passed', o.failed ? o.failed + ' failed' : '', o.blocked ? o.blocked + ' blocked' : ''].filter(Boolean);
+      if (!o.passed) bits[0] = nWord(o.tests, 'test') + ': 0 passed';
+      const now = ledger ? ' (now ' + ledger[ph].passed + ' of ' + ledger[ph].total + ' passed)' : '';
+      return label + ': ' + bits.join(', ') + now + '.';
+    };
+    const lines = [stageLine('uat', 'Business check'), stageLine('system', 'Try it out')].filter(Boolean);
+    // the first stage line says "N tests"; later ones just "N passed" (same unit, fewer words)
+    if (lines.length > 1) lines[1] = lines[1].replace(/(\d+) tests? passed/, '$1 passed');
+    const testsRun = { runs: runCount, tests: stageRun.system.tests + stageRun.uat.tests, passed: stageRun.system.passed + stageRun.uat.passed,
+      failed: stageRun.system.failed + stageRun.uat.failed, blocked: stageRun.system.blocked + stageRun.uat.blocked, stages: stageRun, ledger,
+      text: runCount ? lines.join(' ') + (lines.length ? ' ' : '') + 'Latest result of each test, from ' + nWord(runCount, 'test run') + '.' : null };
+    // R13 #11: each approval says whether it repeats an earlier one ("again") and whether it has gone stale since
+    // (the part changed after it, or a later approval replaced it)
+    const allAppr = list(docs, 'approval').filter(a => a.projectId === project.id && a.bu && !a.kind && a.decision === 'approved').sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+    const staleBus = new Set((t.approvals || []).filter(a => a.stale).map(a => a.bu));
+    const approvalsGiven = allAppr.filter(a => withinTs(a.at || a.date)).map(a => {
+      const same = allAppr.filter(x => x.bu === a.bu), i = same.indexOf(a);
+      const again = i > 0, replaced = i < same.length - 1, stale = replaced || staleBus.has(a.bu);
+      return { id: a.id, bu: a.bu || null, approver: a.approver || null, approverName: pn(a.approver), date: dayOfValue(a.date) || dayOfValue(a.at), at: a.at || null, again, stale,
+        text: a.bu + '’s part approved' + (again ? ' again' : '') + ' by ' + pn(a.approver) + (stale ? (replaced ? '; replaced by a later approval' : '; changed since, so it must be approved again') : '') };
+    }).sort(byDate);
     const risksOpened = [], risksClosed = [];
     list(docs, 'risk').filter(r => r.projectId === project.id).forEach(r => {
-      const o = dayOfValue(r.openedAt) || dayOfValue(r.createdAt) || created['risk:' + r.id] || null;
-      const c = r.status === 'closed' ? dayOfValue(r.closedAt) : null;
+      const oRaw = r.openedAt || r.createdAt || created['risk:' + r.id] || null, o = dayOfValue(oRaw);
+      const cRaw = r.status === 'closed' ? r.closedAt : null, c = dayOfValue(cRaw);
       const base = { id: r.id, title: r.title || 'Untitled risk', impact: r.impact || null, owner: r.owner || null, ownerName: pn(r.owner) };
-      if (within(o)) risksOpened.push(Object.assign({}, base, { date: o }));
-      if (within(c)) risksClosed.push(Object.assign({}, base, { date: c }));
+      if (withinTs(oRaw)) risksOpened.push(Object.assign({}, base, { date: o }));
+      if (withinTs(cRaw)) risksClosed.push(Object.assign({}, base, { date: c }));
     });
     let spend = 0;
     items.forEach(w => (Array.isArray(w.time) ? w.time : []).forEach(x => {
@@ -4155,10 +4419,12 @@
     // plan changes proposed or applied in the window (doc type planChange; read defensively)
     const planChanges = [];
     list(docs, 'planChange').filter(c => c && c.projectId === project.id).forEach(c => {
-      const ap = c.status === 'applied' ? dayOfValue(c.appliedAt) : null, pr = dayOfValue(c.at);
-      // R12 #7: a change applied this evening carries tomorrow's UTC date; a window that ends today still includes it
-      const nowish = d => within(d) || (!!d && isDate(today) && to === String(today).slice(0, 10) && d > to && d <= addDays(to, 1));
-      const ev = nowish(ap) ? 'applied' : nowish(pr) ? 'proposed' : null;
+      const apRaw = c.status === 'applied' ? c.appliedAt : null, ap = dayOfValue(apRaw), pr = dayOfValue(c.at);
+      // R12 #7: a change applied this evening carries tomorrow's UTC date; a window that ends today still includes it.
+      // R13 #11: after the last report's exact time only
+      const nowish = v => { const d = dayOfValue(v); if (!d) return false; if (win.since && /T\d{2}:\d{2}/.test(String(v)) && String(v) <= win.since) return false;
+        return withinTs(v) || (isDate(today) && to === String(today).slice(0, 10) && d > to && d <= addDays(to, 1)); };
+      const ev = nowish(apRaw) ? 'applied' : nowish(c.at) ? 'proposed' : null;
       if (!ev) return;
       const im = c.impact && typeof c.impact === 'object' ? c.impact : {};
       const de = im.deadlineEffect;
@@ -4357,6 +4623,19 @@
     });
     return { ok: !problems.length, problems, text: problems.length ? capFirst(nWord(problems.length, 'launch-day step')) + ' ' + (problems.length === 1 ? 'needs' : 'need') + ' a new time: ' + problems.map(x => x.text).join('; ') + '.' : 'Every launch-day step is on a business day inside the launch window.' };
   }
+  // R13 #13 the launch-day card reads the gate: "Ready" only when the cutover-plan check passes; every step carries
+  // its own problem (day off, outside the window) from launchPlanCheck. {ready, label, text, steps: [{taskId, task, done, problem, text}]}
+  function launchDayCard(docs, prj, today) {
+    const project = projOf(docs, prj);
+    if (!project) return { ready: false, label: 'Not ready', text: 'This project could not be found.', steps: [] };
+    const r = readiness(docs, project.id, today);
+    const ck = (r.checks || []).find(c => c.id === 'cutover-plan') || { pass: !!r.released };
+    const lp = launchPlanCheckCore(project);
+    const tasks = (project.cutover && Array.isArray(project.cutover.tasks) ? project.cutover.tasks.filter(Boolean) : []);
+    const steps = tasks.map(t => { const pb = lp.problems.find(x => x.taskId === (t.id || '')); return { taskId: t.id || '', task: t.task || t.title || '', done: !!t.done, problem: pb ? pb.why : null, text: pb ? pb.text : '' }; });
+    const ready = !!ck.pass;
+    return { ready, label: ready ? 'Ready' : 'Not ready', text: ready ? 'Every launch-day step is set.' : ck.detail || lp.text, steps };
+  }
   function launchPlanCheck(docs, prj) { const project = projOf(docs, prj); syncCalendar(docs); return project ? launchPlanCheckCore(project) : { ok: false, problems: [], text: 'This project could not be found.' }; }
   function fmtClock(hm) { const m = /^(\d{1,2}):(\d{2})$/.exec(hm || ''); if (!m) return ''; const h = +m[1]; return (h % 12 || 12) + ':' + m[2] + ' ' + (h < 12 ? 'AM' : 'PM'); }
   function launchGuard(docs, prj, now) {
@@ -4452,6 +4731,9 @@
   }
 
   return {
+    // R13 (K1)
+    departments, departmentEdit,
+    isHeld, canAssignTest, launchDayCard,
     // R12 (H1)
     stepTeams, departmentFor, stepDoer, ownerText, withPlan, grantApproverOf, testDepartments, canPassTest, launchPlanCheck, overrideRoleLabel, seedTeamDepartments, teamRouting, unroutedTeams,
     // R11 (G1)

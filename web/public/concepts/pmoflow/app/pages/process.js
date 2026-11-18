@@ -39,16 +39,46 @@ export function approversHTML(rt, opts) {
   const gaps = rt.teams.filter(r => !r.department).length;
   const row = r => `<div class="row d-apr ${r.department ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}">
       <div style="min-width:0"><div class="t">${esc(r.team)}</div>${r.department ? '' : `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`}</div>
-      <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select>`
+      <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}<option value="${ADD_DEPT}">+ Add a department…</option></select>`
         : r.department ? `<span data-apr-shown>${esc(r.department)}</span>` : '<span class="hint">Not chosen</span>'}</div></div>`;
   return `<div class="${opts.inline ? 'is-apr' : 'card'}" data-approvers="${rt.teams.length}" data-apr-gaps="${gaps}">${opts.inline ? '<h4>Who approves each team’s part</h4>' : `<h3>Who approves each team’s part${gaps ? ` <span class="n d-apr-n">${gaps} to choose</span>` : ''}</h3>`}
     <div class="hint" style="margin:-2px 0 8px">Before launch, the department you pick signs off that team’s steps. Nothing is picked for you${opts.inline ? '; you can change it later on the process' : ''}.</div>
-    ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${rt.text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(rt.text)}</div>` : ''}</div>`;
+    ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${rt.text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(rt.text)}</div>` : ''}
+    ${opts.editable ? `<div class="d-apr-add"><button type="button" class="btn sm" data-apr-adddept>+ Add a department</button><span class="hint">Missing one, such as Credit or Sales? Add it here.</span></div>` : ''}</div>`;
+}
+/* R13 #1: "Add a department" in the approver panel. Departments are workspace data (K1's engine API): the add goes
+   through POST /ws/:ws/departments, then the workspace is reloaded so every pick list has it. Returns the new
+   department's name, or null when the visitor cancels. A team's own name is offered first ("Credit" for Credit). */
+export const ADD_DEPT = '__add_department__';
+export async function addDepartmentFlow(team, err) {
+  const known = (eng('departments', [docs()], []) || []).map(d => d.name);
+  const suggest = team && !known.some(n => n.toLowerCase() === String(team).toLowerCase()) ? team : '';
+  const r = await modal({
+    title: 'Add a department',
+    body: `${err ? `<div class="banner" style="margin:0 0 8px" data-dept-err>${esc(err.msg)}</div>` : ''}<div class="field"><label for="d-dept-name">Department name</label><input id="d-dept-name" name="name" data-dept-name value="${esc(err ? err.value : suggest)}" placeholder="e.g. Credit" autocomplete="off" maxlength="60" /></div>
+      <div class="hint">It is added for the whole workspace. Its people approve its part of a project; an Admin can name its approvers and add people to it.${team ? ` Once added, it approves <b>${esc(team)}</b>’s part here.` : ''}</div>`,
+    actions: [{ id: 'add', label: 'Add department', primary: true }],
+  });
+  if (r.action !== 'add') return null;
+  const name = String(r.form.name || '').trim();
+  const again = msg => addDepartmentFlow(team, { msg, value: name });
+  /* the same plain sentences the server uses, checked here first so a typo never costs a round trip */
+  if (!name) return again('Name a department.');
+  const dup = known.find(n => n.toLowerCase() === name.toLowerCase());
+  if (dup) return again(`A department called ${dup} already exists.`);
+  let res;
+  try { res = await store.api('/departments', { op: { kind: 'add', name } }); }
+  catch (e) { return again((e && e.message) || 'Could not add the department.'); }
+  if (res && res.ok === false) return again(res.error || 'Could not add the department.');
+  await store.load();
+  const made = ((res && res.departments) || eng('departments', [docs()], []) || []).find(d => String(d.name).toLowerCase() === name.toLowerCase());
+  toast(`Added the ${made ? made.name : name} department`);
+  return made ? made.name : name;
 }
 /* {team: department|null} with the visitor's choices read back from the selects */
 export function readApproverSelects(root, map) {
   const out = Object.assign({}, map || {});
-  root.querySelectorAll('[data-apr-sel]').forEach(el => { const k = Object.keys(out).find(x => x.toLowerCase() === el.dataset.aprSel.toLowerCase()) || el.dataset.aprSel; out[k] = el.value || null; });
+  root.querySelectorAll('[data-apr-sel]').forEach(el => { const k = Object.keys(out).find(x => x.toLowerCase() === el.dataset.aprSel.toLowerCase()) || el.dataset.aprSel; out[k] = el.value && el.value !== ADD_DEPT ? el.value : null; });
   return out;
 }
 /* RACI (R10 S2 §5): Responsible is the step's owner; Accountable / Consulted / Informed are optional people or roles */
@@ -490,14 +520,25 @@ const rName = k => k.startsWith('p:') ? pname(k.slice(2)) : k.slice(2);
 const respKeyOf = s => s.owner && store.person(s.owner) && !s.ownerRole ? 'p:' + s.owner : s.ownerRole ? 'r:' + s.ownerRole : s.owner ? 'p:' + s.owner : '';
 /* the map the matrix shows and edits: Future once it exists, else Today */
 export const raciVer = p => (flat(p && p.tobe).length ? 'tobe' : 'asis');
+/* R13 #8: one actor however the map writes it: "Controller (Sam Wu)", "Controller" and "Sam Wu" are one column and one
+   lane when the map ties the name to the role (the import module's actorAliases) */
+export function actorCanonOf(nodes) {
+  const PI = typeof window !== 'undefined' && window.PMOImport;
+  const al = PI && PI.actorAliases ? PI.actorAliases(nodes || []) : null;
+  return v => (al && al.size ? PI.actorKey(v, al) : String(v || '').trim());
+}
+const keyIn = canon => v => { const k = rKey(v); return k.startsWith('r:') ? 'r:' + canon(k.slice(2)) : k; };
 export function raciMatrix(nodes, extra) {
-  const steps = flat(nodes).filter(s => s.type !== 'wait');
+  /* R13 #8: every numbered step is a row, waits included (the BPM expert's 10 steps were 9 rows) */
+  const steps = flat(nodes);
+  const key = keyIn(actorCanonOf(nodes));
   const cols = [];
   const addCol = k => { if (k && k.length > 2 && !cols.includes(k)) cols.push(k); };
   const rows = steps.map(s => {
     const r = raciNorm(s), cells = {};
     const put = (k, L) => { if (!k || k.length <= 2) return; addCol(k); const c = cells[k] || (cells[k] = []); if (!c.includes(L)) c.push(L); };
-    put(respKeyOf(s), 'R'); if (r.a) put(rKey(r.a), 'A'); r.c.forEach(x => put(rKey(x), 'C')); r.i.forEach(x => put(rKey(x), 'I'));
+    const resp = respKeyOf(s);
+    put(resp.startsWith('r:') ? key(resp.slice(2)) : resp, 'R'); if (r.a) put(key(r.a), 'A'); r.c.forEach(x => put(key(x), 'C')); r.i.forEach(x => put(key(x), 'I'));
     return { s, cells };
   });
   (extra || []).forEach(addCol);
@@ -527,9 +568,9 @@ function raciHTML(p, editable) {
     <tbody>${m.rows.map((r, i) => `<tr data-raci-row="${esc(r.s.id)}"><th scope="row"><span class="d-raci-n">${i + 1}</span>${esc(r.s.title)}</th>${m.cols.map(k => cell(r, k)).join('')}</tr>`).join('')}</tbody></table></div>${editable ? peopleList() : ''}</div>`;
 }
 /* set column k's letter on step sid ('' clears A/C/I for that column) */
-function raciSet(node, k, L) {
+function raciSet(node, k, L, nodes) {
   const r = raciNorm(node), v = k.startsWith('p:') ? rVal(k) : rVal(k);
-  const same = x => rKey(x) === k;
+  const key = keyIn(actorCanonOf(nodes)), same = x => key(x) === k;
   const out = { a: same(r.a) ? '' : r.a, c: r.c.filter(x => !same(x)), i: r.i.filter(x => !same(x)) };
   if (L === 'A') out.a = v; else if (L === 'C') out.c.push(v); else if (L === 'I') out.i.push(v);
   if (out.a || out.c.length || out.i.length) node.raci = out; else delete node.raci;
@@ -554,7 +595,7 @@ function bindRaci(root, pid) {
     const p = clone(cur()); const ver = raciVer(p);
     const node = flat(p[ver]).find(n => n.id === sel.dataset.raciCell); if (!node) return;
     const k = sel.dataset.raciCol, L = sel.value;
-    raciSet(node, k, L);
+    raciSet(node, k, L, p[ver]);
     const word = { A: 'Accountable', C: 'Consulted', I: 'Informed' }[L];
     await saveProc(p, `RACI on '${node.title}': ${rName(k)} ${word ? '→ ' + word : 'removed'}`);
   });
@@ -567,7 +608,8 @@ function lanesHTML(nodes, ctx) {
   const steps = rows.filter(r => r.s).map(r => r.s);
   if (!steps.length) return '<div class="empty">No steps yet. Tap “Edit steps” to add them.</div>';
   /* one lane per person, or per role for steps done by a role */
-  const laneKey = s => s.ownerRole ? 'role:' + s.ownerRole : (s.owner || '');
+  const canon = actorCanonOf(nodes);
+  const laneKey = s => s.ownerRole ? 'role:' + canon(s.ownerRole) : (s.owner || '');
   const owners = [...new Set(steps.map(laneKey))];
   /* R6: message nodes talk to an "External parties" lane on the right */
   const ext = steps.some(s => s.type === 'message');
@@ -866,6 +908,8 @@ export function parseBpmn(text, people, me) {
      escalation path after it (a task, then an end) is folded into the timer, so a round trip keeps it and adds no step.
      Other boundary events (error, message, signal) are reported as dropped. */
   const timerOn = {};
+  /* R13 #14 (BPM expert): a task folded into a time limit is disclosed ("Escalate to CFO" is the escalation on its step) */
+  const folded = [];
   const bFlows = kids.filter(el => el.localName === 'sequenceFlow').map(el => ({ from: el.getAttribute('sourceRef'), to: el.getAttribute('targetRef') }));
   bounds.forEach(b => {
     const att = b.getAttribute('attachedToRef'), isTimer = [...b.children].some(c => c.localName === 'timerEventDefinition');
@@ -882,7 +926,7 @@ export function parseBpmn(text, people, me) {
       if (nn.tag === 'endEvent') break;
       const o = outs[cur] || []; if (o.length !== 1) break; cur = o[0].to;
     }
-    chain.forEach(c => { emitted[c] = null; });
+    chain.forEach(c => { emitted[c] = null; if (TASKS.has(nodes[c].tag)) folded.push({ name: nodes[c].name || c, type: 'task', into: nodes[att].name || '' }); });
     const bd = te && te.getAttribute('businessDays');
     timerOn[att] = { after: (te && te.getAttribute('after')) || durationText(iso) || (b.getAttribute('name') || '').replace(/^not done in\s+/i, ''), iso, businessDays: bd != null && bd !== '' ? +bd : null, action: action || 'Escalate', to };
   });
@@ -989,7 +1033,7 @@ export function parseBpmn(text, people, me) {
   const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
   /* only data a node still references after the walk is created */
   const usedIds = new Set(allNodes(list).flatMap(n => [...(n.data || []), ...(n.subs || []).flatMap(s => s.data || [])]));
-  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
+  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, folded, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
 }
 /* create the data elements an import references by name but this workspace does not have yet */
 export async function createImportedData(list, fileName) {
@@ -1134,7 +1178,7 @@ export function render(params) {
         <span class="d-cmpsum" data-cmp-sum>${same ? 'Pick two different versions' : `${n.new} new · ${n.changed} changed · ${n.removed} removed`}</span></div>
       ${(view.B.nodes || []).length ? `<div class="flow">${flowHTML(view.B.nodes, ctx, 'root')}${same ? '' : removedHTML(diff, n.removed, view.A.label)}</div>` : '<div class="empty">This version has no map.</div>'}`;
   }
-  else if (mode === 'lanes') canvas = lanesHTML(tobe, ctx);
+  else if (mode === 'lanes') canvas = lanesHTML(flat(tobe).length ? tobe : (p.asis || []), ctx); /* R13: a process with only a Today map shows Today's lanes */
   else if (mode === 'impact') canvas = impactHTML(p);
   else if (mode === 'raci') canvas = raciHTML(p, editor && !rel);
   else if (mode === 'asis') canvas = flat(asis).length || asis.length ? `<div class="flow">${flowHTML(asis, ctx, 'root')}</div>${editor && !flat(asis).length ? '<div class="d-firsthint" role="note">No steps yet. Tap “✎ Edit steps” to add them.</div>' : ''}` : '<div class="empty">No Today map yet.</div>';
@@ -1170,7 +1214,10 @@ export function render(params) {
   /* R9 §13: "Teams involved" lists teams only; a system named as a team moves to "Systems touched" */
   const systems = {}; vsteps.forEach(s => { if (s.system) systems[s.system] = (systems[s.system] || 0) + 1; });
   const isSys = t => isSystemName(t) || Object.keys(systems).some(x => x.toLowerCase() === String(t).toLowerCase());
-  const touches = {}; [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => { if (isSys(t)) systems[t] = (systems[t] || 0) + 1; else touches[t] = (touches[t] || 0) + 1; }));
+  [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => { if (isSys(t)) systems[t] = (systems[t] || 0) + 1; }));
+  /* R13 #9: "Teams involved" is the engine's team list, the same one the approver panel shows (teams only: never a
+     system, a document or a generic actor), most steps first */
+  const teamsInv = (routingRows(p).teams || []).slice().sort((a, b) => b.steps.length - a.steps.length);
   const linked = projectsFor(pid);
   const drafts = (p.drafts || []).slice().reverse();
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
@@ -1182,7 +1229,7 @@ export function render(params) {
   const sideHTML = `${blockCard}
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
-    ${Object.keys(touches).length || adv ? `<div class="card" data-touches><h3>Teams involved</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}" title="${c} step${c === 1 ? '' : 's'}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
+    ${teamsInv.length || adv ? `<div class="card" data-touches="${teamsInv.length}"><h3>Teams involved</h3><div class="chips">${teamsInv.map(x => `<span class="chip touch" data-touch="${esc(x.team)}" title="${x.steps.length} step${x.steps.length === 1 ? '' : 's'}">${esc(x.team)}${x.steps.length ? ` · ${x.steps.length} step${x.steps.length === 1 ? '' : 's'}` : ''}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
     ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor })}
     ${Object.keys(systems).length ? `<div class="card" data-systems><h3>Systems touched</h3><div class="chips">${Object.entries(systems).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip d-syschip" data-system="${esc(t)}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('')}</div></div>` : ''}
     ${versionsCard}
@@ -1210,6 +1257,15 @@ async function saveProc(p, summary, opts) {
   opts = opts || {};
   const prev = store.get('process', p.id);
   if (prev && !canEditProc(prev)) { toast(deniedMsg(prev)); return false; }
+  /* R13 #9: a team someone types into "Teams involved" is a team: it joins the approver panel ("Choose who approves for
+     Kickoff Desk") so "Teams involved" and the panel stay one list. Systems never count as teams. */
+  const tagsOf = x => new Set(allNodes((x && x.asis) || []).concat(allNodes((x && x.tobe) || [])).flatMap(n => (n && n.touches) || []).map(t => String(t || '').trim()).filter(Boolean));
+  const was = tagsOf(prev), typed = [...tagsOf(p)].filter(t => !was.has(t) && !isSystemName(t));
+  if (typed.length) {
+    const known = (routingRows(p).teams || []).map(x => x.team.toLowerCase());
+    const add = typed.filter(t => !known.includes(t.toLowerCase()));
+    if (add.length) { p.teamDepartments = Object.assign({}, p.teamDepartments || {}); add.forEach(t => { if (!Object.keys(p.teamDepartments).some(k => k.toLowerCase() === t.toLowerCase())) p.teamDepartments[t] = eng('departmentFor', [docs(), p, t], null) || null; }); }
+  }
   try {
     await store.save('process', p.id, p, summary);
     if (prev && !opts.noUndo) { const st = undoStack[p.id] || (undoStack[p.id] = []); st.push({ doc: clone(prev), summary }); if (st.length > 20) st.shift(); store.emit(); }
@@ -1539,51 +1595,73 @@ export function importCounts(nodes) {
 const countBits = c => [`<span data-imp-steps="${c.steps}"><b>${c.steps}</b> step${c.steps === 1 ? '' : 's'}</span>`, `<span data-imp-choices="${c.choices}"><b>${c.choices}</b> choice${c.choices === 1 ? '' : 's'}</span>`,
   c.together ? `<span data-imp-together="${c.together}"><b>${c.together}</b> ${c.together === 1 ? 'set of steps that runs' : 'sets of steps that run'} at the same time</span>` : ''].filter(Boolean).join('');
 /* R10 S2: one preview for a new process from a BPMN or Visio file: what was found, who does it (lanes are roles), what is new */
-async function importPreview(r, fileName, kind) {
+async function importPreview(r, fileName, kind, name) {
   const c = importCounts(r.nodes);
   const steps = flat(r.nodes);
   const res = await modal({
     title: `Import ${kind === 'vsdx' ? 'a Visio diagram' : 'a diagram file'}`,
     body: `<p style="margin:0">We read <b>${esc(fileName)}</b>. Check what we found, then import it as a new process. You can change anything afterwards.</p>
+      <div class="field"><label for="d-imp-name">Process name</label><input id="d-imp-name" name="pname" data-imp-name value="${esc(name)}" autocomplete="off" /></div>
       <div class="d-impsum" data-impsum data-imp-kind="${esc(kind)}">${countBits(c)}</div>
       <div class="d-imprev" data-imp-preview><ol>${steps.slice(0, 12).map(n => `<li><b>${esc(n.title)}</b>${n.ownerRole ? ` <span class="chip is-role">${esc(n.ownerRole)}</span>` : n.owner ? ` <span class="chip">${esc(pname(n.owner))}</span>` : ' <span class="hint">nobody yet</span>'}${(n.data || []).length ? ` <span class="hint">· ${n.data.length} information</span>` : ''}</li>`).join('')}${steps.length > 12 ? `<li class="hint">and ${steps.length - 12} more</li>` : ''}</ol></div>
       ${c.roles.length ? `<div class="hint" data-imp-roles>Who does them (from the lanes): ${esc(c.roles.join(', '))}. These are roles; pick a person for each step whenever you like.</div>` : ''}
       ${r.newData.length ? `<div class="hint" data-imp-newdata="${r.newData.length}">New information in this process: ${esc(r.newData.map(d => d.name).join(', '))}. It starts as “${UNCHECKED}”.</div>` : ''}
-      ${droppedHTML(r.dropped)}`,
+      ${foldedHTML(r.folded)}${droppedHTML(r.dropped)}`,
     actions: [{ id: 'import', label: 'Import as a new process', primary: true }],
   });
-  return res.action === 'import';
+  return res.action === 'import' ? { name: String(res.form.pname || '').trim() || name } : null;
 }
 async function readDiagram(file) {
   if (/\.vsdx$/i.test(file.name)) {
     const PI = await loadImport();
     const v = await PI.parseVsdx(await file.arrayBuffer(), { name: '' });
     const r = parseBpmn(v.bpmn, store.state.people, store.state.me);
-    r.name = v.name || file.name.replace(/\.vsdx$/i, '');
+    r.name = v.name || '';
     /* R12: a shape the Visio reader already listed is not listed again by the diagram reader */
     const seenDrop = new Set();
     r.dropped = (v.dropped || []).concat(r.dropped || []).filter(d => { const k = String(d.name || '').trim().toLowerCase(); if (seenDrop.has(k)) return false; seenDrop.add(k); return true; });
-    r.kind = 'vsdx'; r.desc = `Imported from the Visio file ${file.name}.`;
+    r.kind = 'vsdx'; r.desc = `Imported from the Visio file ${file.name}.`; r.pageName = v.name || '';
     return r;
   }
   const r = parseBpmn(await file.text(), store.state.people, store.state.me); r.kind = 'bpmn'; return r;
 }
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const droppedHTML = list => `<div class="d-dropped" data-dropped="${list.length}"><b>Dropped elements <span class="n">${list.length}</span></b>${list.length ? `<ul>${list.slice(0, 25).map(d => `<li><b>${esc(d.name)}</b> <span class="hint">${esc(d.type)}: ${esc(d.reason)}</span></li>`).join('')}${list.length > 25 ? `<li class="hint">and ${list.length - 25} more</li>` : ''}</ul>` : '<div class="hint">None: every element in the file maps to PMOFlow.</div>'}</div>`;
+/* R13 #14: what the file holds that is not a step of its own because it became part of one (a task after a time limit) */
+const foldedHTML = list => (list || []).length ? `<div class="d-folded" data-folded="${list.length}"><b>Kept as part of a step <span class="n">${list.length}</span></b><ul>${list.slice(0, 12).map(f => `<li><b>${esc(f.name)}</b> <span class="hint">${esc(f.type)}: kept as the time limit's action on “${esc(f.into)}”, not a step of its own</span></li>`).join('')}</ul></div>` : '';
+/* R13 #14: the /new dialog's "Import…" keeps the name typed there for a file whose page has no name */
+let typedImportName = '';
 /* bindImport(root): the process index and /new create a new process from the file.
    bindImport(root, pid): on a process page the file becomes a new version of that process's to-be. */
+const importFail = (vis, msg) => modal({ title: vis ? 'Could not import the Visio file' : 'Could not import BPMN', body: `<p style="margin:0" data-import-error>${esc(msg)}</p><p class="hint">${vis ? 'PMOFlow reads Visio flowcharts (.vsdx): process, decision and start/end shapes, connectors, swimlanes, and data or document shapes connected to a step.' : 'PMOFlow reads BPMN 2.0 XML: start and end events, tasks, exclusive and parallel gateways, sequence flows, lanes and data objects.'}</p>`, actions: [] });
 export function bindImport(root, pid) {
-  root.querySelectorAll('[data-bpmn-file]').forEach(inp => inp.onchange = async () => {
-    const file = inp.files && inp.files[0]; inp.value = ''; if (!file) return;
-    if (file.size > 2 * 1024 * 1024) { toast('That file is over 2 MB. Export a single process.'); return; }
+  /* R13 #14 (Jordan): every import button reads the file the same way, and anything that goes wrong is shown, never
+     swallowed. A file is checked for its type and size first, then read; the preview names the process. */
+  root.querySelectorAll('[data-bpmn-file]').forEach(inp => { inp.dataset.importPid = pid || ''; inp.onchange = () => onImportFile(inp); });
+  root.querySelectorAll('[data-pick-import]').forEach(b => b.onclick = () => { const f = root.querySelector('[data-bpmn-file]'); if (f) f.click(); });
+}
+async function onImportFile(inp) {
+  const file = inp.files && inp.files[0]; inp.value = ''; if (!file) return;
+  const pid = inp.dataset.importPid || null;
+  const vis = /\.vsdx$/i.test(file.name);
+  try { await importFile(file, pid, vis); }
+  catch (e) { console.warn('Import failed:', e); await importFail(vis, (e && e.message) || 'Something went wrong while reading the file.'); }
+}
+async function importFile(file, pid, vis) {
+    if (file.size > 2 * 1024 * 1024) { await importFail(vis, 'That file is over 2 MB. Export a single process (one page) and try again.'); return; }
+    if (!/\.(vsdx|bpmn|xml)$/i.test(file.name)) { await importFail(vis, `“${file.name}” is not a Visio (.vsdx) or BPMN (.bpmn, .xml) file.`); return; }
+    toast(`Reading ${file.name}…`);
     let r;
-    const vis = /\.vsdx$/i.test(file.name);
     try { r = await readDiagram(file); }
-    catch (e) { await modal({ title: vis ? 'Could not import the Visio file' : 'Could not import BPMN', body: `<p style="margin:0">${esc(e.message)}</p><p class="hint">${vis ? 'PMOFlow reads Visio flowcharts (.vsdx): process, decision and start/end shapes, connectors, swimlanes, and data or document shapes connected to a step.' : 'PMOFlow reads BPMN 2.0 XML: start and end events, tasks, exclusive and parallel gateways, sequence flows, lanes and data objects.'}</p>`, actions: [] }); return; }
-    if (!r.steps) { toast(vis ? 'No process shapes found in that Visio file' : 'No tasks found in that BPMN file'); return; }
+    catch (e) { await importFail(vis, e.message); return; }
+    if (!r.steps) { await importFail(vis, vis ? 'No process shapes were found in that Visio file.' : 'No tasks were found in that BPMN file.'); return; }
     if (pid) { await importVersion(pid, r, file.name); return; }
-    if (!(await importPreview(r, file.name, r.kind))) return;
-    const name = r.name || file.name.replace(/\.(bpmn|xml|vsdx)$/i, '') || 'Imported process';
+    /* the Visio page name, else the name typed in "Map a process", else the file name */
+    const guess = r.name || typedImportName || file.name.replace(/\.(bpmn|xml|vsdx)$/i, '') || 'Imported process';
+    const ok = await importPreview(r, file.name, r.kind, guess);
+    if (!ok) return;
+    typedImportName = '';
+    const name = ok.name || guess;
     const id = store.newId('proc');
     allNodes(r.nodes).forEach(n => delete n.pmoId); /* a new process: the ids in the file belong to some other map */
     const asis = r.nodes, tobe = forkNodes(asis);
@@ -1597,8 +1675,7 @@ export function bindImport(root, pid) {
       await store.save('process', id, p, `Imported process '${name}' from ${r.kind === 'vsdx' ? 'Visio' : 'BPMN'} (${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''})`);
       toast(`Imported '${name}': ${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''}${r.dropped.length ? `, ${r.dropped.length} dropped` : ''}${r.newData.length ? `, ${plural(r.newData.length, 'new piece')} of information` : ''}`);
       go(`/process/${id}?mode=edit`);
-    } catch (e) { toast('Could not import: ' + e.message); }
-  });
+    } catch (e) { await importFail(vis, 'Could not import: ' + e.message); }
 }
 
 /* R5: merge an imported map into this process's to-be. R8 §8: nodes are matched by the PMOFlow id the file carries
@@ -1656,7 +1733,7 @@ async function importVersion(pid, r, fileName) {
       <div class="d-impsum" data-impsum><span><b>${m.kept.length}</b> matched</span><span data-imp-renamed="${m.renamed.length}"><b>${m.renamed.length}</b> renamed</span><span><b>${m.added.length}</b> new</span><span><b>${m.removed.length}</b> no longer in the map</span>${(() => { const c = importCounts(r.nodes); return `<span data-imp-choices="${c.choices}"><b>${c.choices}</b> choice${c.choices === 1 ? '' : 's'}</span>${c.together ? `<span data-imp-together="${c.together}"><b>${c.together}</b> run${c.together === 1 ? 's' : ''} at the same time</span>` : ''}`; })()}</div>
       ${m.renamed.length ? `<ul class="d-renamed" data-renamed-list>${m.renamed.slice(0, 12).map(x => { const wn = store.list('workItem', w => w.pid === pid && w.step === x.id).length; return `<li data-renamed="${esc(x.id)}">Renamed: “${esc(x.from)}” → “<b>${esc(x.to)}</b>”${wn ? ` <span class="hint">keeps ${plural(wn, 'work item')}</span>` : ''}</li>`; }).join('')}${m.renamed.length > 12 ? `<li class="hint">and ${m.renamed.length - 12} more</li>` : ''}</ul>` : ''}
       ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
-      ${droppedHTML(r.dropped)}
+      ${foldedHTML(r.folded)}${droppedHTML(r.dropped)}
       ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (you own it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
       ${(r.roles || []).length ? `<div class="hint" data-imp-roles>Lanes become roles: ${esc(r.roles.join(', '))}</div>` : ''}
       ${room ? `<label class="d-check"><input type="checkbox" name="snap" value="yes" checked /> Save the current version as “Before import of ${esc(fileName)}” first</label>` : `<div class="hint">You have ${MAX_DRAFTS} saved versions, so the current one is not saved first. “Undo last change” still restores it in this session.</div>`}`,
@@ -1713,13 +1790,13 @@ async function openNew() {
       <div class="field"><label>One-line description</label><textarea name="desc" rows="2" placeholder="What this process does and where it ends"></textarea></div>
       <div class="field"><label>Owner</label><select name="owner">${personOpts(store.state.me)}</select></div></div></details>
       <div class="hint">Next you add the steps as they happen today. Press Enter after each one.</div>`,
-    actions: (isAdv() ? [{ id: 'import', label: 'Import BPMN…' }] : []).concat([{ id: 'create', label: 'Create and add steps', primary: true }]),
+    actions: (isAdv() ? [{ id: 'import', label: 'Import Visio or BPMN…' }] : []).concat([{ id: 'create', label: 'Create and add steps', primary: true }]),
   });
   /* Enter in the name creates the process */
   const nm = document.querySelector('.overlay #d-np-name');
   if (nm) nm.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const b = nm.closest('.modal').querySelector('[data-act="create"]'); if (b) b.click(); } });
   const r = await pr;
-  if (r.action === 'import') { newOpen = false; newImport = true; const f = document.querySelector('[data-bpmn-file]'); if (f) f.click(); return; }
+  if (r.action === 'import') { newOpen = false; newImport = true; typedImportName = (r.form.name || '').trim(); const f = document.querySelector('[data-bpmn-file]'); if (f) f.click(); return; }
   if (r.action !== 'create') { newOpen = false; go('/'); return; }
   const name = (r.form.name || '').trim() || 'Untitled process';
   const id = store.newId('proc');
@@ -1781,12 +1858,12 @@ export function drawLoops(root) {
 if (typeof window !== 'undefined') window.addEventListener('resize', () => { cancelAnimationFrame(loopRaf); loopRaf = requestAnimationFrame(() => { if (loopCanvas && loopCanvas.isConnected) drawLoops(loopCanvas.parentNode); }); });
 
 /* R5: deleting a step that has work: move the work to another step, or delete it too */
-async function deleteWorkDialog(p, ver, n, kind, goneIds, work) {
+async function deleteWorkDialog(p, ver, n, kind, goneIds, work, ownTxt) {
   const targets = flat(p[ver]).filter(s => !goneIds.has(s.id));
   const prjs = [...new Set(work.map(w => (store.get('project', w.projectId) || {}).name).filter(Boolean))];
   const r = await modal({
     title: `Delete ${kind} with work?`,
-    body: `<div class="banner d-err" role="alert" style="margin:0"><b>'${esc(n.title)}' has ${plural(work.length, 'work item')}</b>${prjs.length ? ` in ${esc(prjs.join(', '))}` : ''}. Choose what happens to ${work.length === 1 ? 'it' : 'them'}.</div>
+    body: `<div class="banner d-err" role="alert" style="margin:0"><b>'${esc(n.title)}' has ${plural(work.length, 'work item')}</b>${prjs.length ? ` in ${esc(prjs.join(', '))}` : ''}. Choose what happens to ${work.length === 1 ? 'it' : 'them'}.</div>${ownTxt ? `<p class="hint" data-del-owners>${esc(ownTxt.trim())}</p>` : ''}
       <ul class="d-worklist">${work.map(w => `<li data-delwork="${esc(w.id)}">${av(w.owner)} ${esc(w.title)} <span class="hint">${esc(STATUS_LBL[w.status] || w.status)} · due ${esc(fmt(w.due))}</span></li>`).join('')}</ul>
       ${targets.length ? `<div class="field"><label>Move work to step…</label><select name="to">${targets.map(s => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join('')}</select></div>` : '<div class="hint">There is no other step to move the work to.</div>'}`,
     actions: [...(targets.length ? [{ id: 'move', label: 'Move work and delete step', primary: true }] : []), { id: 'deletework', label: 'Delete work too', danger: true }],
@@ -1834,13 +1911,31 @@ export function bind(root, params) {
   drawLoops(root);
   bindRaci(root, pid);
   /* R12 #1: choose the department that approves each team's part (saved on the process) */
-  root.querySelectorAll('[data-apr-sel]').forEach(sel => sel.onchange = async () => {
+  const saveRoute = async (team, dep) => {
     const p = clone(cur());
     const base = {}; routingRows(p).teams.forEach(t => { base[t.team] = t.department || null; });
     p.teamDepartments = readApproverSelects(root, Object.assign(base, p.teamDepartments || {}));
-    const team = sel.dataset.aprSel, dep = sel.value || null;
+    if (team) { const k = Object.keys(p.teamDepartments).find(x => x.toLowerCase() === team.toLowerCase()) || team; p.teamDepartments[k] = dep; }
     await saveProc(p, dep ? `${dep} approves ${team}'s part` : `Cleared who approves ${team}'s part`);
+  };
+  root.querySelectorAll('[data-apr-sel]').forEach(sel => sel.onchange = async () => {
+    const team = sel.dataset.aprSel;
+    if (sel.value === ADD_DEPT) {
+      const prev = (sel.closest('[data-apr-dept]') || {}).dataset ? sel.closest('[data-apr-dept]').dataset.aprDept : '';
+      sel.value = prev || '';
+      const name = await addDepartmentFlow(team);
+      if (name) await saveRoute(team, name); else store.emit();
+      return;
+    }
+    await saveRoute(team, sel.value || null);
   });
+  const addB = root.querySelector('[data-apr-adddept]');
+  if (addB) addB.onclick = async () => {
+    /* the first team still without a department gets the new one */
+    const gap = (routingRows(cur()).teams || []).find(t => !t.department);
+    const name = await addDepartmentFlow(gap ? gap.team : '');
+    if (name && gap) await saveRoute(gap.team, name); else store.emit();
+  };
   const vs = root.querySelector('[data-version]');
   if (vs) vs.onchange = () => go(vs.value ? `/process/${pid}?mode=asis&rel=${encodeURIComponent(vs.value)}` : `/process/${pid}?mode=asis`);
   const vc = root.querySelector('[data-version-current]'); if (vc) vc.onclick = () => go(`/process/${pid}?mode=asis`);
@@ -2036,8 +2131,12 @@ export function bind(root, params) {
       const goneIds = new Set(allNodes([n]).map(x => x.id));
       const work = store.list('workItem', w => w.pid === pid && goneIds.has(w.step));
       let plan = null;
-      if (work.length) { plan = await deleteWorkDialog(p, ver, n, kind, goneIds, work); if (!plan) return; }
-      else if (!await confirmBox(`Delete ${kind}?`, `Delete '${n.title}' from the ${VER[ver]} map${inner ? ` and the ${inner} step${inner === 1 ? '' : 's'} inside its branches` : ''}?`, 'Delete')) return;
+      /* R13 #10 (Karen): removing a Future step a team owns (a control such as AP's bank-letter double-check) is a
+         change to that team's part: say so before deleting, then tell the team in every open project */
+      const owners = ver === 'tobe' ? removedStepTeams(p, n) : [];
+      const ownTxt = owners.length ? ` ${joinNames(owners)} ${owners.length === 1 ? 'owns' : 'own'} this step: removing it changes ${owners.length === 1 ? 'its' : 'their'} part, so ${joinNames(owners)} ${owners.length === 1 ? 'approves' : 'approve'} the change before launch and ${owners.length === 1 ? 'is' : 'are'} told.` : '';
+      if (work.length) { plan = await deleteWorkDialog(p, ver, n, kind, goneIds, work, ownTxt); if (!plan) return; }
+      else if (!await confirmBox(`Delete ${kind}?`, `Delete '${n.title}' from the ${VER[ver]} map${inner ? ` and the ${inner} step${inner === 1 ? '' : 's'} inside its branches` : ''}?${ownTxt}`, 'Delete')) return;
       const p2 = clone(cur()); const l2 = findLoc(p2[ver] || [], id); if (!l2) return;
       if (plan) {
         try {
@@ -2055,7 +2154,31 @@ export function bind(root, params) {
       l2.list.splice(l2.index, 1);
       /* loop-backs that pointed at the deleted node(s) now continue instead */
       allNodes(p2[ver]).forEach(x => isGw(x) && (x.branches || []).forEach(br => { if (br.goto && gone.has(br.goto)) delete br.goto; }));
-      await saveProc(p2, `Deleted ${kind} '${n.title}' from ${VER[ver]}`);
+      if (await saveProc(p2, `Deleted ${kind} '${n.title}' from ${VER[ver]}${owners.length ? ` (a step ${joinNames(owners)} ${owners.length === 1 ? 'owns' : 'own'})` : ''}`) && owners.length) await tellTeams(p2, n, owners);
     }
   });
+}
+/* R13 #10: the approving departments of the steps a delete removes (the engine's routing: process.teamDepartments, else a
+   department of the team's name); a team with no department yet is named as written */
+function removedStepTeams(p, n) {
+  const out = [];
+  flat([n]).forEach(st => (eng('stepTeams', [docs(), p, st], []) || []).forEach(t => {
+    const d = eng('departmentFor', [docs(), p, t], null) || t;
+    if (d && !out.some(x => x.toLowerCase() === String(d).toLowerCase())) out.push(d);
+  }));
+  return out;
+}
+const joinNames = l => l.length < 2 ? (l[0] || '') : l.slice(0, -1).join(', ') + ' and ' + l[l.length - 1];
+/* one "Tell <team>" task per open project that uses this process, done by the person who removed the step */
+async function tellTeams(p, n, teams) {
+  const prjs = projectsFor(p.id).filter(j => j.status !== 'live');
+  for (const j of prjs) {
+    const id = store.newId('w');
+    const title = `Tell ${joinNames(teams)}: “${n.title}” is removed from ${p.name}`;
+    try {
+      await store.save('workItem', id, { id, projectId: j.id, pid: p.id, step: null, title, owner: store.state.me, status: 'idle', start: today(), due: today(), deps: [], kind: 'other', tag: 'tell-removed', teams: teams.slice(), effortDays: 1,
+        note: `Removed step: “${n.title}”. ${joinNames(teams)} ${teams.length === 1 ? 'approves' : 'approve'} this change before launch.`, updatedAt: new Date().toISOString() }, `Added '${title}' to ${j.name}`);
+    } catch (e) { toast('Could not add the task to tell the team: ' + e.message); return; }
+  }
+  if (prjs.length) toast(`${joinNames(teams)} will be told: a task was added to ${prjs.length === 1 ? prjs[0].name : prjs.length + ' projects'}`);
 }

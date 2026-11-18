@@ -22,8 +22,8 @@ export function waitingFor() { const list = personQueue(); return { list, total:
 
 /* §7: an approval opens that team's part page */
 const hrefOf = x => x.kind === 'approval' && x.projectId && x.id ? `/release/${encodeURIComponent(x.projectId)}?bu=${encodeURIComponent(x.id)}` : (x.href || '/');
-const KIND_IC = { work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', information: WAIT_IC, action: '›' };
-const KIND_CLS = { work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', information: 'notready', action: 'mention' };
+const KIND_IC = { work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', syncHold: '?', planChange: '✓', information: WAIT_IC, action: '›' };
+const KIND_CLS = { work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', syncHold: 'confirm', planChange: 'approve', information: 'notready', action: 'mention' };
 function waitHTML() {
   const { list } = waitingFor();
   const pn = id => (store.get('project', id) || {}).name || '';
@@ -39,9 +39,11 @@ function waitHTML() {
       ? `<button class="btn primary pmo-big" data-wdone="${esc(x.id)}" aria-label="${esc((x.oneTap.label || 'Mark done') + ': ' + (x.title || ''))}">✓ ${esc(x.oneTap.label || 'Mark done')}</button>`
       : one === 'confirm' && x.id
       ? `<a class="btn primary pmo-big" data-confirm-data="${esc(x.id)}" href="${link('/data/' + encodeURIComponent(x.id) + '?confirm=1')}" data-link>${esc(x.oneTap.label || 'Confirm')}</a>`
-      : `<a class="btn primary pmo-big" href="${link(hrefOf(x))}" data-link data-wopen="${i}">${kind === 'approval' ? 'Open the approval' : kind === 'test' ? 'Run it' : 'Open'}</a>`;
-    return `<li class="pmo-wrow" data-wkind="${esc(kind)}" data-wq="${i}"><span class="pmo-wic pmo-wic-${cls}" aria-hidden="true">${KIND_IC[kind] || '›'}</span>
-      <div class="pmo-wtxt"><div class="t"><a href="${link(hrefOf(x))}" data-link ${x.id ? `data-task-link="${esc(x.id)}"` : ''}>${title}</a></div>${sub ? `<div class="s">${sub}</div>` : ''}</div><div class="pmo-wact">${act}</div></li>`;
+      : `<a class="btn primary pmo-big" href="${link(hrefOf(x))}" data-link data-wopen="${i}">${kind === 'approval' ? (x.reapproval ? 'Approve again' : 'Open the approval') : kind === 'syncHold' ? 'Check and confirm' : kind === 'test' ? 'Run it' : 'Open'}</a>`;
+    /* R13 #12: a re-approval says why it reopened; a held Jira/ADO item says why it is held (both from the engine) */
+    const why = x.reason ? `<div class="s pmo-wreason" data-wreason>${esc(x.reason)}</div>` : '';
+    return `<li class="pmo-wrow" data-wkind="${esc(kind)}" data-wq="${i}"${x.id ? ` data-wid="${esc(x.id)}"` : ''}${x.reapproval ? ' data-reapproval' : ''}><span class="pmo-wic pmo-wic-${cls}" aria-hidden="true">${KIND_IC[kind] || '›'}</span>
+      <div class="pmo-wtxt"><div class="t"><a href="${link(hrefOf(x))}" data-link ${x.id ? `data-task-link="${esc(x.id)}"` : ''}>${title}</a></div>${sub ? `<div class="s">${sub}</div>` : ''}${why}</div><div class="pmo-wact">${act}</div></li>`;
   });
   return `<section class="card pmo-wait" data-waiting aria-labelledby="pmo-wait-h"><h2 id="pmo-wait-h">Waiting for you ${list.length ? `<span class="pmo-wn" data-wait-count>${list.length}</span>` : ''}</h2>
     ${rows.length ? `<ul class="pmo-wlist">${rows.join('')}</ul>` : '<div class="pmo-wnone" data-waiting-none>✓ Nothing is waiting for you. You’re all caught up.</div>'}</section>`;
@@ -81,7 +83,7 @@ function processTile(p) {
     <div class="pmo-tile-f">${av(p.owner)}<span class="hint">${esc(pname(p.owner))}</span></div></a>`;
 }
 
-export function render() {
+function renderPage() {
   const me = store.person(store.state.me) || { name: 'there' };
   const procs = store.list('process'), projects = store.list('project').slice().sort((a, b) => (a.status === 'live') - (b.status === 'live'));
   return `<section class="pmo-greet"><h1 data-greeting>Hi ${esc(me.name.split(' ')[0])}.</h1><p>Here’s what needs you, and what you can do next.</p></section>
@@ -102,3 +104,5 @@ export function bind(root) {
   });
   on('[data-big="check"]', () => go('/projects'));
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

@@ -13,6 +13,7 @@ const C = () => window.PMOChange;
 const E = () => window.PMOEngine;
 const money = n => (n == null || !isFinite(n) ? '—' : (n < 0 ? '−' : '') + '$' + Math.round(Math.abs(n)).toLocaleString('en-US'));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+const joinAnd = a => (a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]);
 const STATUS_CLS = { proposed: 'b-soon', approved: 'b-prog', applied: 'b-done', rejected: 'b-late' };
 const openIds = new Set();   /* expanded log entries survive re-renders */
 
@@ -103,7 +104,8 @@ function entryHTML(c, open, here) {
   /* R12 #13: an entry linked from another project (applied knock-on), or another project's change still waiting */
   const from = c.linkedFrom ? c.linkedFrom : (here && c.projectId !== here ? { projectId: c.projectId, changeId: c.id, projectName: (projectOf(c.projectId) || {}).name || 'another project' } : null);
   const fromChip = from ? `<a class="chip chg-from" href="${link(prjHref(from.projectId, from.changeId))}" data-link data-chg-from="${esc(from.projectId)}">${c.linkedFrom ? 'Knock-on from' : 'Proposed on'} ${esc(from.projectName)}</a>` : '';
-  const canDecide = c.status === 'proposed' && C().pendingApprovers(c).some(a => a.person === me);
+  /* R13 #3: the requester never decides their own change */
+  const canDecide = c.status === 'proposed' && c.requestedBy !== me && C().pendingApprovers(c).some(a => a.person === me);
   const wait = c.status === 'proposed' ? C().waitingText(c, store.state.docs) : '';
   const tol = c.tolerance ? (c.tolerance.within ? '<span class="chip chg-ok">Within tolerance</span>' : `<span class="chip chg-over" title="${esc(c.tolerance.reasons.join(' '))}">Needed approval</span>`) : '';
   return `<details class="chg-entry" data-chg="${esc(c.id)}" ${open || openIds.has(c.id) ? 'open' : ''}>
@@ -131,7 +133,7 @@ export function renderChangesSection(projectId, opts) {
   if (!j) return '';
   const all = C().changesOf(store.state.docs, projectId);
   const me = store.state.me;
-  const mine = all.filter(c => c.status === 'proposed' && C().pendingApprovers(c).some(a => a.person === me));
+  const mine = all.filter(c => c.status === 'proposed' && c.requestedBy !== me && C().pendingApprovers(c).some(a => a.person === me));
   const focus = opts.focus || null;
   return `<section class="chg-section" data-changes-section="${esc(projectId)}">
     <div data-chg-drift="${esc(projectId)}"></div>
@@ -248,7 +250,8 @@ export async function openChangeWizard(projectId, preset) {
   const mb = ov.querySelector('.mb'), mf = ov.querySelector('.mf'), steps = ov.querySelector('.chg-steps');
   const val = n => { const el = mb.querySelector(`[name="${n}"]`); return el ? el.value : ''; };
 
-  const people = sel => store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('');
+  /* R13 #4: an unowned task shows a blank choice, never the first person in the list */
+  const people = (sel, blank) => (blank ? `<option value="" ${sel ? '' : 'selected'}>${esc(blank)}</option>` : '') + store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('');
   const stepOpts = sel => (j.processes || []).map(pid => store.get('process', pid)).filter(Boolean).map(p => `<optgroup label="${esc(p.name)}">${E().flatSteps(p.tobe).map(s => `<option value="${esc(p.id + '::' + s.id)}" ${sel === p.id + '::' + s.id ? 'selected' : ''}>${esc(s.title)}</option>`).join('')}</optgroup>`).join('');
 
   function collect() {
@@ -272,7 +275,7 @@ export async function openChangeWizard(projectId, preset) {
   function editsOf() {
     const ed = [];
     if (S.kinds.has('dates')) Object.entries(S.dates).forEach(([id, d]) => { if (!d.on) return; ed.push({ op: 'set', type: 'workItem', id, field: 'start', to: d.start }, { op: 'set', type: 'workItem', id, field: 'due', to: d.due }); });
-    if (S.kinds.has('owner')) Object.entries(S.owners).forEach(([id, o]) => ed.push({ op: 'set', type: 'workItem', id, field: 'owner', to: o }));
+    if (S.kinds.has('owner')) Object.entries(S.owners).forEach(([id, o]) => { if (o) ed.push({ op: 'set', type: 'workItem', id, field: 'owner', to: o }); });
     if (S.kinds.has('work')) {
       S.removes.forEach(id => ed.push({ op: 'remove', type: 'workItem', id }));
       S.adds.forEach(a => { const [pid, step] = String(a.step || '').split('::'); ed.push({ op: 'add', type: 'workItem', id: a.id, data: { title: a.title, owner: a.owner, pid: pid || null, step: step || null, start: a.start, due: a.due, effortDays: a.effortDays } }); });
@@ -296,7 +299,7 @@ export async function openChangeWizard(projectId, preset) {
       <div class="chg-shift"><label>Shift the ticked tasks by <input type="number" name="shift" value="5" min="-60" max="120" step="1" aria-label="Business days to shift" /> business days</label><button class="btn sm" data-shift>Shift</button></div>
       ${open.map(w => { const d = S.dates[w.id] || { start: w.start, due: w.due }; return `<div class="chg-trow ${d.on ? 'on' : ''}"><label class="chg-pick"><input type="checkbox" name="dt_on" value="${esc(w.id)}" ${d.on ? 'checked' : ''}/> ${taskLine(w)}</label>
         <span class="chg-dates"><label>Start <input type="date" name="st_${esc(w.id)}" value="${esc(d.start || '')}" /></label><label>Due <input type="date" name="du_${esc(w.id)}" value="${esc(d.due || '')}" /></label></span></div>`; }).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
-    if (S.kinds.has('owner')) parts.push(`<section class="chg-ed" data-ed="owner"><h4>Change owner</h4>${open.map(w => `<div class="chg-trow"><span class="chg-pick">${taskLine(w)}</span><select name="ow_${esc(w.id)}" aria-label="Owner of ${esc(w.title)}">${people(S.owners[w.id] || w.owner)}</select></div>`).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
+    if (S.kinds.has('owner')) parts.push(`<section class="chg-ed" data-ed="owner"><h4>Change owner</h4>${open.map(w => `<div class="chg-trow"><span class="chg-pick">${taskLine(w)}</span><select name="ow_${esc(w.id)}" aria-label="Owner of ${esc(w.title)}">${people(S.owners[w.id] || w.owner, w.owner ? '' : (w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner'))}</select></div>`).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
     if (S.kinds.has('work')) parts.push(`<section class="chg-ed" data-ed="work"><h4>Add or remove work</h4>
       ${S.adds.map((a, i) => `<div class="chg-add" data-add="${i}"><div class="field"><label>New task</label><input name="ad_title_${i}" maxlength="140" value="${esc(a.title || '')}" placeholder="What needs doing" /></div>
         <div class="frow"><div class="field"><label>Owner</label><select name="ad_owner_${i}">${people(a.owner || store.state.me)}</select></div><div class="field"><label>Step it delivers</label><select name="ad_step_${i}"><option value="">— none —</option>${stepOpts(a.step)}</select></div></div>
@@ -311,10 +314,12 @@ export async function openChangeWizard(projectId, preset) {
   }
   function step2() {
     const im = S.im, need = S.need;
-    const who = need.approvers.map(a => `${pname(a.person)} (${roleOf(a)})${a.person === store.state.me ? ' — that’s you' : ''}`);
+    /* R13 #3: one name per person (with every role they decide in); the requester is never among them */
+    const who = need.approvers.map(a => `${pname(a.person)} (${roleOf(a)})`);
     return `<p class="chg-sentence" data-chg-preview-sentence>${esc(im.sentence)}</p>
       ${need.within ? '<div class="chg-verdict ok" data-chg-verdict="within">Within tolerance: it applies as soon as you confirm.</div>'
-        : `<div class="chg-verdict over" data-chg-verdict="approval"><b>Needs approval from ${esc(who.join(' and '))}.</b><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}
+        : need.blocked ? `<div class="chg-verdict over" data-chg-verdict="blocked" role="alert"><b>${esc(need.blocked)}</b><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`
+        : `<div class="chg-verdict over" data-chg-verdict="approval"><b>Needs approval from ${esc(joinAnd(who))}.</b> <span class="hint">You asked for it, so you don’t approve it yourself.</span><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}
       <h4>What changes</h4>${editsListHTML(S.built)}
       ${impactDetailsHTML(im)}`;
   }
@@ -323,7 +328,7 @@ export async function openChangeWizard(projectId, preset) {
     const err = S.errors.length ? `<div class="banner" style="margin:0" role="alert" data-chg-errors>${S.errors.map(esc).join('<br>')}</div>` : '';
     mb.innerHTML = err + (S.step === 0 ? step0() : S.step === 1 ? step1() : step2());
     const needs = S.need && !S.need.within;
-    mf.innerHTML = `<button class="btn" data-w="cancel">Cancel</button>${S.step ? '<button class="btn" data-w="back">Back</button>' : ''}${S.step < 2 ? `<button class="btn primary" data-w="next">${S.step === 1 ? 'See the impact' : 'Next'}</button>` : `<button class="btn primary" data-w="submit" ${S.busy ? 'disabled' : ''}>${needs ? 'Send for approval' : 'Apply change'}</button>`}`;
+    mf.innerHTML = `<button class="btn" data-w="cancel">Cancel</button>${S.step ? '<button class="btn" data-w="back">Back</button>' : ''}${S.step < 2 ? `<button class="btn primary" data-w="next">${S.step === 1 ? 'See the impact' : 'Next'}</button>` : `<button class="btn primary" data-w="submit" ${S.busy || (needs && S.need.blocked) ? 'disabled' : ''}>${needs ? 'Send for approval' : 'Apply change'}</button>`}`;
     const f = mb.querySelector('input:not([type=checkbox]),select,textarea'); if (f && S.step < 2) f.focus();
     mb.querySelectorAll('[name="dt_on"]').forEach(cb => cb.addEventListener('change', () => cb.closest('.chg-trow').classList.toggle('on', cb.checked)));
     const sh = mb.querySelector('[data-shift]');
@@ -341,21 +346,16 @@ export async function openChangeWizard(projectId, preset) {
     const after = C().applyToDocs(store.state.docs, change, new Date().toISOString());
     S.built = change;
     S.im = C().impact(store.state.docs, after, projectId, store.state.today, { change, engine: E() });
-    S.need = C().needsApproval(change, S.im, store.state.docs);
+    S.need = C().needsApproval(change, S.im, store.state.docs, { requester: store.state.me });
     return true;
   }
   async function submit() {
-    /* R12 #4: when you are one of the approvers, your own approval counts only with the extra sign-in check */
-    let su = null;
-    if (S.need && !S.need.within && S.need.approvers.some(a => a.person === store.state.me)) {
-      if (await stepUp('approve your own plan change')) su = { method: 'simulated-mfa', at: new Date().toISOString() };
-      else toast('Sent without your approval: approve it from the log after the extra sign-in check.');
-    }
+    /* R13 #3: the requester never approves their own change, so there is no self-approval here */
+    if (S.need && !S.need.within && S.need.blocked) return;
     S.busy = true; draw();
     try {
       const body = { change: { projectId, title: S.built.title, reason: S.reason, category: S.category || null, source: preset.source || 'manual', edits: S.built.edits.filter(e => !e.auto).map(e => {
         const o = { op: e.op, type: e.type, id: e.id }; if (e.op === 'set') { o.field = e.field; o.to = e.to; } if (e.op === 'add') { o.data = e.data; if (e.fromProcess) o.fromProcess = true; } return o; }), ackSteps: preset.ackSteps } };
-      if (su) body.stepUp = su;
       const r = await api('POST', '', body);
       close();
       await refresh();
@@ -387,7 +387,7 @@ export async function openChangeWizard(projectId, preset) {
 }
 
 /* ---------------------------------------------------------------- standalone page: /project/:prj/changes */
-export function render(params) {
+function renderPage(params) {
   const prj = params.prj;
   const j = projectOf(prj);
   if (!j) return `<div class="card"><h3>Project not found</h3><a href="${link('/projects')}" data-link style="color:var(--accent)">All projects</a></div>`;
@@ -407,3 +407,5 @@ export function bind(root, params) {
   if (focus && focus !== scrolledTo) requestAnimationFrame(() => { const el = root.querySelector(`[data-chg="${CSS.escape(focus)}"]`); if (el) { scrolledTo = focus; openIds.add(focus); el.scrollIntoView({ block: 'start' }); } });
   if (params.q && params.q.open === '1') { history.replaceState({}, '', link(`/project/${encodeURIComponent(params.prj)}/changes`)); openChangeWizard(params.prj, params.q.task ? { taskId: params.q.task } : null); }
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

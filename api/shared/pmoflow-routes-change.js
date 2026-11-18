@@ -206,21 +206,18 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const at = new Date().toISOString();
     const after = C.applyToDocs(docs, change, at);
     const im = C.impact(docs, after, change.projectId, today, { change, engine: E });
-    const need = C.needsApproval(change, im, docs);
+    /* R13 #3: the requester is never an approver; when nobody else can approve, the change cannot be sent */
+    const need = C.needsApproval(change, im, docs, { requester: actor });
+    if (!need.within && need.blocked) { fail(409, need.blocked); return true; }
     const id = newId('chg');
-    /* the requester's own approval counts only with the extra sign-in check (R12 #4); without it, it stays open */
-    const su = stepUpOf(body, at);
-    const approvers = need.approvers.map(a => (a.person === actor && su
-      ? Object.assign({}, a, { decision: 'approved', at, note: 'Requested it', stepUp: true, stepUpAt: su.at }) : Object.assign({}, a, { decision: null, at: null })));
+    const approvers = need.approvers.map(a => Object.assign({}, a, { decision: null, at: null }));
     const doc = Object.assign({ id }, change, {
       status: 'proposed', requestedBy: actor, requestedAt: at, impact: im, tolerance: { within: need.within, reasons: need.reasons }, approvers,
     });
-    const allApproved = approvers.length > 0 && approvers.every(a => a.decision === 'approved');
-    if ((need.within || allApproved) && body.apply !== false) {
-      if (allApproved) Object.assign(doc, { status: 'approved', decidedBy: actor, decidedAt: at });
+    if (need.within && body.apply !== false) {
       const r = await applyChange(store, wsId, docs, doc, actor, today);
       if (r.status === 200) await store.appendEvent(wsId, { actor, at: new Date(Date.parse(at) - 1).toISOString(), action: 'propose', ref: 'planChange:' + id,
-        summary: `Proposed plan change “${doc.title}”: ${doc.reason}` + (need.within ? ' (within tolerance, applied at once)' : ' (approved by the requester)') });
+        summary: `Proposed plan change “${doc.title}”: ${doc.reason} (within tolerance, applied at once)` });
       send(r.status, r.body);
       return true;
     }
@@ -252,6 +249,12 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const mine = pending.filter(a => a.person === actor);
     if (!mine.length) {
       fail(403, pending.length ? `Only ${pending.map(a => `${pname(docs, a.person)} (${C.roleText(a, docs)})`).join(' and ')} can decide this change.` : 'Nobody needs to decide this change.');
+      return true;
+    }
+    /* R13 #3: the requester never decides their own change (also for changes stored before R13 listed them) */
+    if (actor === change.requestedBy) {
+      const others = pending.filter(a => a.person !== actor);
+      fail(403, `You asked for this change, so someone else decides it${others.length ? `: ${others.map(a => `${pname(docs, a.person)} (${C.roleText(a, docs)})`).join(' and ')}` : ''}.`);
       return true;
     }
     const note = String(body.note || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200);
@@ -298,7 +301,7 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     if (change.status === 'proposed') {
       /* only while it is still within tolerance on today's plan */
       const im = C.impact(docs, C.applyToDocs(docs, change, new Date().toISOString()), change.projectId, today, { change, engine: E });
-      const need = C.needsApproval(change, im, docs);
+      const need = C.needsApproval(change, im, docs, { requester: change.requestedBy });
       if (!need.within) { fail(409, `This change needs approval first: ${need.reasons.join(' ')} ${C.waitingText(change, docs)}.`.trim(), need.reasons); return true; }
       next.tolerance = { within: true, reasons: [] };
     }

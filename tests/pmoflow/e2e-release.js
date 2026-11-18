@@ -205,7 +205,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(!(await page.$(`[data-wkind="approval"] a[data-wopen][href*="${AR}"]`)), 'home: no "Approve my part" before the part is ready');
     await setAdv(true);
     await open('/release/' + AR + '?bu=Compliance');
-    ok(await page.$('[data-early-warning]') && await page.$('[data-bu-decide=approved]'), 'Advanced: approving early is possible, with a warning that it may need redoing');
+    /* R13 #3: ONE approval-readiness rule in both views (the server refuses an early approval too) */
+    ok(await page.$('[data-early-warning][data-not-ready]') && !(await page.$('[data-bu-decide=approved]')) && await page.$('[data-locked]') && await page.$('[data-why="notready"]'), 'R13 #3 Advanced: the same rule as Simple: "Not ready for approval yet" and no enabled Approve button');
     await setAdv(false);
     /* the team's own member (Priya) does the work and records the tests; Dave stays clear of both */
     await setMe('ps');
@@ -811,6 +812,8 @@ The process starts when an employee asks to buy something.
     ok(await page.$('[data-bu="Compliance"] [data-via-tag]') && /teams involved: Compliance/.test(await txt('[data-bu="Compliance"]')), 'Compliance section includes a step owned by Procurement via its touches tag');
     const hasHr = await st(`return store.state.people.some(p => p.bu === 'HR');`);
     await setMe('mc');
+    /* R13 #1: departments are workspace data; HR is not one of the seeded six, so it is added first (no people, no approvers) */
+    if (!hasHr) ok(await st(`await store.api('/departments', { op: { kind: 'add', name: 'HR' } }); await store.load(); return store.list('workspace').find(w => w.id === 'settings').departments.some(d => d.name === 'HR');`), 'R13 #1: HR added as a department (workspace data)');
     await st(`const p = store.get('process', 'vendor-onboarding'); const tobe = p.tobe.map(n => n.type === 'trigger' ? Object.assign({}, n, { touches: (n.touches || []).concat(['HR']) }) : n); await store.save('process', p.id, Object.assign({}, p, { tobe }), 'Trigger now touches HR (e2e)');`);
     await settle(800);
     ok(await page.$('[data-bu="HR"] [data-via-trigger]'), 'HR section comes from the trigger’s touches');
@@ -864,6 +867,12 @@ The process starts when an employee asks to buy something.
     /* traceability headline: UAT done/total next to spec-field coverage */
     const tcov = await st(`return window.PMOEngine.testCoverage(store.state.docs, a);`, VM);
     ok(await page.getAttribute('[data-trace-uat]', 'data-trace-uat') === `${tcov.uat.done}/${tcov.uat.total}` && +(await page.getAttribute('[data-trace-fields]', 'data-trace-fields')) === tcov.uncoveredFields.length, `traceability header matches E().testCoverage: UAT ${tcov.uat.done}/${tcov.uat.total}, ${tcov.uncoveredFields.length} uncovered`);
+    /* R13 #2 one ledger: the trace strip, the matrix and the KPIs equal projectTruth.testing (the gate and Simple read it too) */
+    const led = await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).testing;`, VM);
+    ok(await page.getAttribute('[data-trace-uat]', 'data-trace-uat') === `${led.stages[1].passed}/${led.stages[1].total}` && +(await page.getAttribute('[data-trace-fields]', 'data-trace-fields')) === led.coverage.uncoveredFields.length
+      && +(await page.getAttribute('[data-cov-gaps]', 'data-cov-gaps')) === led.coverage.gaps
+      && +(await page.getAttribute('[data-kpi-cases]', 'data-kpi-cases')) + +(await page.getAttribute('[data-kpi-scripts]', 'data-kpi-scripts')) === led.total,
+      `R13 #2: trace strip ${led.stages[1].passed}/${led.stages[1].total}, ${led.coverage.uncoveredFields.length} fields, matrix ${led.coverage.gaps} gaps, cases + scripts = ${led.total} (the ledger)`);
     ok(await page.$('[data-trace-uat]') && await page.$('[data-trace-fields]'), 'traceability header: UAT done/total next to spec-field coverage: ' + (await txt('[data-trace]')).slice(0, 90));
     /* profile view: no "?" row counts and no duplicate humanized pattern rows */
     await page.click('.ts-list [data-de="D2"]'); await settle(400);

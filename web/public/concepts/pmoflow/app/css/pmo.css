@@ -913,3 +913,20 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-rep-custom[hidden]{display:none}
 .kpi > .hint{display:block;margin-top:2px;line-height:1.3}
 .pmo-noowner{color:#92400e;font-weight:600}
+
+/* R13 #15 phone polish on the PMO pages (home, projects, project, portfolio, dashboard, plan changes), scoped by the
+   page marker so other streams' pages are untouched: secondary text at least 11px, tap targets at least 40px tall,
+   and labels wrap instead of being cut off with "…". Timeline bars (a chart, scrolled sideways) are left as they are. */
+@media (max-width:640px){
+  #app:has(> .pmo-k3) :is(button, .btn, .pmo-chipbtn, .pmo-capbtn, .pmo-sel, select, input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=range]), [role=button]):not(.tbar):not(.pmo-big){min-height:40px}
+  #app:has(> .pmo-k3) :is(.btn, .pmo-chipbtn, .pmo-capbtn):not(.pmo-big){display:inline-flex;align-items:center;justify-content:center;gap:4px}
+  #app:has(> .pmo-k3) a.chip{min-height:40px;display:inline-flex;align-items:center}
+  #app:has(> .pmo-k3) .pmo-why{width:40px;height:40px;font-size:14px;vertical-align:middle}
+  #app:has(> .pmo-k3) summary{min-height:40px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px}
+  #app:has(> .pmo-k3) .pmo-activity>summary{align-items:flex-start;justify-content:center}
+  #app:has(> .pmo-k3) :is(.av, .chip.diff-new, .chip.diff-changed, .pmo-mx-lbl, .pmo-next, .pmo-ftag, .pmo-deptype, .pmo-ext, .pmo-crit-tag, .pmo-scen-tag, .pmo-wl-who .badge, .pmo-tl-badges .badge, .pmo-card-c .chip, .pmo-ev small, .pmo-dash-num small, .pmo-dash-date small, .pmo-hev .lbl, .pmo-scen-cmp .lbl, .pmo-sg-f label, .thead td){font-size:11px}
+  #app:has(> .pmo-k3) small{font-size:max(11px, .85em)}
+  #app:has(> .pmo-k3) :is(.pmo-attn-row .t, .pmo-attn-row .s, .pmo-deps .dep, .pmo-wl-who span, .pmo-rlinks .chip, .pmo-card-s, .pmo-card-c .chip, .rag .pmo-rag-why, .pmo-rep-to .chip, .pmo-dash-main b, .pmo-dash-row .rag, .pmo-sg-deps summary){white-space:normal;overflow:visible;text-overflow:clip;max-width:100%;overflow-wrap:anywhere}
+}
+.pmo-rep-rangeerr{display:block;flex:1 1 100%;color:var(--late);font-size:12.5px;font-weight:600;margin-top:4px}
+.pmo-rep-rangeerr[hidden]{display:none}

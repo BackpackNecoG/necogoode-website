@@ -545,6 +545,174 @@ test('R12 Visio: Start/End are not steps, connectors listed once, a "?" shape is
   fs.writeFileSync('/tmp/pmo-design/r12-eligibility.vsdx', vsdxR12());
 });
 
+/* ---------- R13 K2: the R12 reviewers' procedures (market-review/r12 karen.md, expert-bpm.md) ---------- */
+/* Karen (R12): 9 lines, one of them unnumbered ("if spend over $25k Karen approves too" was a note on step 7); a compound
+   line ("Vendor sends…; Treasury calls…" lost Treasury); "Check OFAC/sanctions list" became information */
+const KAREN13 = `Vendor Setup
+1. Buyer gets the vendor request from the requester.
+2. Purchasing mgr sends the vendor our packet.
+3. Vendor sends W-9; Treasury calls to verify bank letter.
+4. Check OFAC/sanctions list.
+5. Credit dept runs a D&B check on the vendor.
+6. Operations confirms the ship-to address.
+7. Purchasing mgr approves the vendor.
+if spend over $25k Karen approves too
+8. AP double-checks the bank letter and sets up the vendor master in the ERP.`;
+/* BPM expert (R12): "Controller (Sam Wu)" and "Sam Wu signs off" are one actor; "signs off"/"approves" are A; consulted
+   and informed phrases are C and I; requested limit, payment history and risk score are information; a Wait step */
+const CREDIT13 = `Credit Limit Request
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit request with the requested limit in Salesforce.
+2. The Credit Analyst reviews the customer's payment history and risk score.
+3. The Credit Analyst writes a recommendation with input from the Sales Manager, and notifies the Account Manager.
+4. If the requested limit is under $50k, approve it.
+5. The Credit Manager approves or rejects the request.
+6. Wait 1 business day for the customer to accept the new terms.
+7. Limits above $250,000 also need sign-off from the Controller (Sam Wu).
+8. AR updates the credit limit in NetSuite. Sam Wu signs off.
+9. Sam Wu files the approval letter in SharePoint.`;
+
+test('R13 #9 Karen: the unnumbered "if … approves too" line is a choice and an approval, and is counted', () => {
+  const r = I.parseSop(KAREN13);
+  assert.equal(r.lines.length, 9, 'all 9 lines are accounted for: ' + r.lines.map(l => l.text).join(' | '));
+  assert.ok(everyLineKept(r));
+  assert.equal(r.linesText, '9 lines → 10 steps, 1 choice');
+  const d = tops(r).find(n => n.type === 'decision');
+  assert.equal(d.title, 'Spend over $25k?');
+  const ap = d.branches[0].nodes[0];
+  assert.deepEqual([ap.title, ap.ownerRole, ap.approval], ['Also approve', 'Karen', true]);
+  const seven = tops(r).find(n => n.title === 'Approve the vendor');
+  assert.ok(!/karen|25k/i.test(seven.note || ''), 'never a note on step 7: ' + seven.note);
+  /* it sits after step 7 and before step 8 */
+  const t = tops(r); assert.equal(t[t.indexOf(seven) + 1], d);
+  const ln = r.lines.find(l => /karen approves too/i.test(l.text));
+  assert.deepEqual([ln.num, ln.as, ln.nodes[0]], [null, 'step', d.id]);
+});
+
+test('R13 #9 Karen: a compound line is split into owned steps; Treasury is kept', () => {
+  const r = I.parseSop(KAREN13);
+  const ln = r.lines.find(l => l.num === 3);
+  assert.equal(ln.nodes.length, 2);
+  const [a, b] = ln.nodes.map(id => walk(r.nodes).find(n => n.id === id));
+  assert.deepEqual([a.title, a.ownerRole], ['Send W-9', 'Vendor']);
+  assert.deepEqual([b.title, b.ownerRole], ['Call to verify bank letter', 'Treasury']);
+  assert.deepEqual(b.touches, ['Treasury']);
+  assert.ok(!a.touches.includes('Treasury'), 'the vendor\'s step does not carry Treasury');
+  assert.ok(b.newData.some(x => x.name === 'Bank letter'));
+  assert.ok(r.teams.includes('Treasury'));
+  /* a sign-off after a semicolon is not a second step (it is the Accountable person) */
+  const s = I.parseSop('1. Finance approves the contract; the Controller (Sam Wu) signs off.');
+  assert.equal(steps(s).length, 1);
+});
+
+test('R13 #9 Karen: "Check OFAC/sanctions list" is a step, never information', () => {
+  const r = I.parseSop(KAREN13);
+  const c = steps(r).find(s => /ofac/i.test(s.title));
+  assert.equal(c.title, 'Check OFAC/sanctions list');
+  assert.ok(!r.newData.some(x => /^check\b/i.test(x.name)), 'no information named "Check…": ' + r.newData.map(x => x.name).join(', '));
+  assert.ok(r.newData.some(x => x.name === 'OFAC/sanctions list'), r.newData.map(x => x.name).join(', '));
+  /* as a second sentence on a line, or an unnumbered line between steps, it is a step too */
+  const r2 = I.parseSop(`1. Compliance reviews the vendor file. Check OFAC/sanctions list.
+2. AP sets up the vendor.`);
+  assert.deepEqual(steps(r2).map(s => s.title), ['Review the vendor file', 'Check OFAC/sanctions list', 'Set up the vendor']);
+  assert.equal(r2.linesText, '2 lines → 3 steps');
+  const r3 = I.parseSop(`1. Compliance reviews the vendor file.
+Screen the vendor against the sanctions list.
+2. AP sets up the vendor.`);
+  assert.deepEqual(steps(r3).map(s => s.title), ['Review the vendor file', 'Screen the vendor against the sanctions list', 'Set up the vendor']);
+  assert.equal(r3.lines.length, 3);
+  /* plain prose between steps is still a note */
+  const r4 = I.parseSop(`1. Compliance reviews the vendor file.
+This usually takes a day.
+2. AP sets up the vendor.`);
+  assert.equal(steps(r4).length, 2);
+  assert.match(steps(r4)[0].note, /usually takes a day/);
+});
+
+test('R13 #9 data: requested limit, payment history and risk score are information', () => {
+  const names = I.parseSop(CREDIT13).newData.map(x => x.name);
+  for (const n of ['Requested limit', 'Payment history', 'Risk score']) assert.ok(names.some(x => x.toLowerCase().endsWith(n.toLowerCase())), n + ' in ' + names.join(', '));
+  assert.ok(!names.some(x => /^limits?$/i.test(x)), 'never a bare "Limits"');
+});
+
+test('R13 #8 identity: "Controller (Sam Wu)" and "Sam Wu" are one actor; signs off / approves are A; C and I from phrases', () => {
+  const r = I.parseSop(CREDIT13);
+  const t = tops(r);
+  const by = re => steps(r).find(s => re.test(s.title));
+  /* line 9: Sam Wu's own step is the Controller's */
+  const files = by(/^File the approval letter/);
+  assert.deepEqual([files.ownerRole, files.note], ['Controller', 'Named in the procedure: Sam Wu']);
+  /* line 8: "Sam Wu signs off" is the Controller (Sam Wu) */
+  const upd = by(/^Update the credit limit/);
+  assert.deepEqual(upd.raci, { a: 'Controller (Sam Wu)' });
+  const ctl = by(/sign-off/i);
+  assert.deepEqual([ctl.ownerRole, ctl.raci], ['Controller', { a: 'Controller (Sam Wu)' }]);
+  /* one actor key for all three ways of writing it */
+  const al = I.actorAliases(r.nodes);
+  assert.equal(I.actorKey('Sam Wu', al), I.actorKey('Controller (Sam Wu)', al));
+  assert.equal(I.actorKey('Controller', al), I.actorKey('Controller (Sam Wu)', al));
+  assert.notEqual(I.actorKey('Credit Manager', al), I.actorKey('Controller', al));
+  /* "approves" is Accountable for the approver */
+  const apr = by(/^Approve or reject the request/);
+  assert.deepEqual([apr.ownerRole, apr.raci], ['Credit Manager', { a: 'Credit Manager' }]);
+  /* consulted and informed */
+  const rec = by(/^Write a recommendation/);
+  assert.deepEqual(rec.raci, { c: ['Sales Manager'], i: ['Account Manager'] });
+  assert.equal(rec.title, 'Write a recommendation');
+  /* a wait is a numbered step of its own kind (the matrix lists it) */
+  assert.ok(t.some(n => n.type === 'wait'));
+  assert.ok(I.raciRowsOf(r.nodes).some(n => n.type === 'wait'), 'the RACI rows include the Wait step');
+  assert.equal(I.raciRowsOf(r.nodes).length, I.countNodes(r.nodes).steps + I.countNodes(r.nodes).waits);
+});
+
+/* Jordan (R12): a Visio file saved by Visio itself: a background page listed first, the real page in page2.xml found
+   through pages.xml.rels, single-quoted attributes, "Role: task" shape text, Start/End shapes, and ZIP entries written
+   with data descriptors. Failed from /import and the Processes button; the name came through blank. */
+function zipDD(files) {
+  const locals = [], central = []; let off = 0;
+  Object.entries(files).forEach(([name, text]) => {
+    const raw = Buffer.from(text, 'utf8'), data = zlib.deflateRawSync(raw), nm = Buffer.from(name, 'utf8'), crc = CRC(raw);
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(8, 6); lh.writeUInt16LE(8, 8); lh.writeUInt16LE(nm.length, 26);
+    const dd = Buffer.alloc(16); dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(crc, 4); dd.writeUInt32LE(data.length, 8); dd.writeUInt32LE(raw.length, 12);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(8, 8); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(nm.length, 28); ch.writeUInt32LE(off, 42);
+    locals.push(lh, nm, data, dd); central.push(ch, nm); off += 30 + nm.length + data.length + 16;
+  });
+  const cd = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+function vsdxJordan() {
+  const NS = 'http://schemas.microsoft.com/office/visio/2012/main', R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const sh = (id, master, text, y) => `<Shape ID='${id}' Type='Shape' Master='${master}'><Cell N='PinX' V='4'/><Cell N='PinY' V='${y}'/><Cell N='Width' V='2'/><Cell N='Height' V='0.75'/><Text><cp IX='0'/>${text}</Text></Shape>`;
+  const con = id => `<Shape ID='${id}' Type='Shape' Master='9'><Cell N='BeginX' V='0'/><Cell N='EndX' V='1'/></Shape>`;
+  const shapes = [sh(1, 2, 'Start', 10), sh(2, 1, 'Member services rep: Log the life-event request', 9), sh(3, 1, 'Benefits Analyst: Check eligibility', 8),
+    sh(4, 3, 'Eligible?', 7), sh(5, 1, 'Benefits Analyst: Update the election', 6), sh(6, 1, 'Member services rep: Ask for missing documents', 6), sh(7, 2, 'End', 5),
+    con(20), con(21), con(22), con(23), con(24), con(25), con(26)].join('');
+  const c = (con, from, to) => `<Connect FromSheet='${con}' FromCell='BeginX' FromPart='9' ToSheet='${from}' ToCell='PinX' ToPart='3'/><Connect FromSheet='${con}' FromCell='EndX' FromPart='12' ToSheet='${to}' ToCell='PinX' ToPart='3'/>`;
+  const connects = [c(20, 1, 2), c(21, 2, 3), c(22, 3, 4), c(23, 4, 5), c(24, 4, 6), c(25, 5, 7), c(26, 6, 3)].join('');
+  return zipDD({
+    '[Content_Types].xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>`,
+    'visio/document.xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><VisioDocument xmlns='${NS}'/>`,
+    'visio/masters/masters.xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><Masters xmlns='${NS}' xmlns:r='${R}'><Master ID='1' NameU='Process' Name='Process'><Rel r:id='rId1'/></Master><Master ID='2' NameU='Start/End' Name='Start/End'><Rel r:id='rId2'/></Master><Master ID='3' NameU='Decision' Name='Decision'><Rel r:id='rId3'/></Master><Master ID='9' NameU='Dynamic connector' Name='Dynamic connector'><Rel r:id='rId4'/></Master></Masters>`,
+    'visio/pages/pages.xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><Pages xmlns='${NS}' xmlns:r='${R}' xml:space='preserve'><Page ID='4' NameU='Background-1' Name='Background-1' Background='1'><PageSheet LineStyle='0'><Cell N='PageWidth' V='8.5'/></PageSheet><Rel r:id='rId1'/></Page><Page ID='0' NameU='Benefits enrollment change' IsCustomNameU='1' Name='Benefits enrollment change' IsCustomName='1' BackPage='4'><PageSheet LineStyle='0'><Cell N='PageWidth' V='8.5'/></PageSheet><Rel r:id='rId2'/></Page></Pages>`,
+    'visio/pages/_rels/pages.xml.rels': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/></Relationships>`,
+    'visio/pages/page1.xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><PageContents xmlns='${NS}' xml:space='preserve'><Shapes><Shape ID='1' Type='Shape' NameU='Title'><Text>Northwind Benefits</Text></Shape></Shapes></PageContents>`,
+    'visio/pages/page2.xml': `<?xml version='1.0' encoding='utf-8' standalone='yes'?><PageContents xmlns='${NS}' xml:space='preserve'><Shapes>${shapes}</Shapes><Connects>${connects}</Connects></PageContents>`,
+  });
+}
+test('R13 #14 Jordan\'s Visio: the real page (not the background), its name, "Role: task" owners, data-descriptor ZIP', async () => {
+  const v = await I.parseVsdx(vsdxJordan());
+  assert.equal(v.name, 'Benefits enrollment change');
+  assert.deepEqual([v.steps, v.decisions], [4, 1]);
+  const x = I.parseXml(v.bpmn); const proc = I._all(x, 'process')[0];
+  assert.equal(proc.attrs.name, 'Benefits enrollment change');
+  assert.deepEqual(I._all(proc, 'userTask').map(e => e.attrs.name).sort(), ['Ask for missing documents', 'Check eligibility', 'Log the life-event request', 'Update the election']);
+  assert.deepEqual(I._all(proc, 'lane').map(e => e.attrs.name).sort(), ['Benefits Analyst', 'Member services rep']);
+  assert.ok(!v.dropped.some(d => /Northwind Benefits/.test(d.name)), 'the background page is not read');
+  fs.mkdirSync('/tmp/pmo-design', { recursive: true });
+  fs.writeFileSync('/tmp/pmo-design/r13-jordan-benefits.vsdx', vsdxJordan());
+});
+
 test('the web copy is byte-identical', () => {
   const a = fs.readFileSync(path.join(__dirname, '../../api/shared/pmoflow-import.js'));
   const b = fs.readFileSync(path.join(__dirname, '../../web/public/concepts/pmoflow/app/import.js'));

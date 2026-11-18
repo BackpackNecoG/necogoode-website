@@ -214,13 +214,13 @@
   }
 
   /* ---------------------------------------------------------------- information (data elements) */
-  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?|masters?)$/i;
+  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?|masters?|limits?|history|histories|scores?|ratings?)$/i;
   /* R12 (Karen): document abbreviations a procedure uses as names */
   const DOC_ABBR = { COI: 'Certificate of insurance', NDA: 'NDA', MSA: 'MSA', SOW: 'Statement of work', BAA: 'BAA', 'W9': 'W-9' };
   const NOUNISH = /^(request|review|purchase|change|check|schedule|order|payment|expense|update|access|record|screening|approval|contact|delivery|return|transfer|release|exit|welcome|termination|refund|offer|onboarding|tax|credit|time|start|end|due|ship|bill)$/i;
   const OF_HEADS = /^(certificate|record|proof|copy|statement|letter|bill|notice|evidence|confirmation)s?$/i;
   const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded|their|its|his|her|our|your|returned|known|listed|usual|main|registered|existing|official|verified|primary|preferred|same|other)$/i;
-  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?|masters?)$/i;
+  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?|masters?|limits?|history|histories|scores?|ratings?)$/i;
   const INFO_NOUNS = [
     { re: /\bamounts?\b/i, name: 'Amount' },
     { re: /\bcost cent(re|er)s?\b/i, name: m => 'Cost cent' + m[1].toLowerCase() },
@@ -249,7 +249,7 @@
         if ((isBase(xl) || verbBase(xl)) && !NOUNISH.test(xl)) break;
         if ((ROLE_NOUNS.has(xl) || ROLE_NOUNS.has(xl.replace(/s$/, ''))) && !/^(vendor|vendors|supplier|suppliers|employee|employees|contractor|contractors|customer|customers|client|clients|tax|bank|benefits|payroll|exit)$/i.test(xl) && !/^[A-Z]{2,}$/.test(x)) break;
         if (/^\d/.test(x) || /[^A-Za-z0-9&/'-]/.test(x)) break;
-        mods.unshift(/^[A-Z]{2,5}s?$/.test(x) ? x : xl);
+        mods.unshift(x.split('/').map(p => /^[A-Z]{2,5}s?$/.test(p) ? p : p.toLowerCase()).join('/'));
       }
       const head = /^ids?$/i.test(w) ? 'ID' : w.toLowerCase();
       if (OF_HEADS.test(w) && next && /^of$/i.test(next)) {
@@ -403,6 +403,13 @@
   /* qualifier clauses that stay in the note ("…, usually by email, sometimes fax") */
   const QUALIFIER = /^(usually|sometimes|often|typically|normally|generally|mostly|occasionally|e\.g\.|for example|such as|including|which|who|where|so that|because|as needed|if needed|when needed|as required|either|via|by (?:email|e-mail|phone|fax|post|mail|courier|hand)|or by|and usually|but)\b/i;
 
+  /* R13 #9: an imperative check or approval ("Check OFAC/sanctions list", "Screen the vendor…") is a step wherever it is
+     written: a sentence after the line's step, or an unnumbered line between numbered steps */
+  const CONTROL_LINE = /^(?:then\s+)?(?:check|screen|verify|validate|confirm|review|approve|reconcile|inspect|audit|double-check|cross-check)\s+\S/i;
+  /* an unnumbered line between numbered steps that is a step: a check, or a condition with its own action
+     ("if spend over $25k Karen approves too") */
+  const actionLine = b => CONTROL_LINE.test(b) || /^(?:if|unless|should)\s+\S/i.test(b) && /[a-z]/i.test(b.replace(/^\S+\s+/, ''));
+
   /* Names of the processes the parser recognises as a title, e.g. "Northwind Traders — Vendor Onboarding SOP (v3)" -> "Vendor onboarding" */
   function deriveName(text) {
     const ls = String(text || '').split(/\r?\n/).map(x => x.replace(/^#+\s*/, '').trim()).filter(Boolean);
@@ -499,7 +506,9 @@
       addTeams(n.touches);
       /* information named by the action (never by the actor), plus any the line's condition reads ("the amount") */
       const extra = opts.dataText ? String(opts.dataText).replace(clause, ' ') : '';
-      [...new Set(infoPhrases(withoutSystems(action)).concat(extra ? infoPhrases(withoutSystems(extra)) : []))].forEach(nm => propose(nm, line, n));
+      /* R13 #9: the step's own verb is never part of an information name ("Check OFAC/sanctions list") */
+      const objText = action.replace(/^(\S+)\s+/, (m, w) => (isBase(w) && NOUNISH.test(w) ? '' : m));
+      [...new Set(infoPhrases(withoutSystems(objText)).concat(extra ? infoPhrases(withoutSystems(extra)) : []))].forEach(nm => propose(nm, line, n));
       return n;
     };
     const addNote = (n, extra) => {
@@ -515,6 +524,15 @@
       const full = squash(body);
       /* split into sentences; "; otherwise", "; if not" and ", otherwise" start a clause too */
       const sentences = full.split(/(?<=[.!?])\s+(?=[A-Z("“])|;\s*(?=(?:otherwise|else|if|unless)\b)|,\s*(?=(?:otherwise|if not)\b)/i).map(s => s.trim()).filter(s => s.length >= 2);
+      /* R13 #9: "Vendor sends W-9; Treasury calls to verify bank letter": a sentence whose semicolon-separated parts each
+         name who acts is that many steps (a sign-off after the semicolon is the Accountable person, not a step) */
+      const compound = new Set(), splitAt = [];
+      sentences.forEach(sen => {
+        const parts = sen.split(/;\s+/).map(x => x.trim()).filter(x => x.length >= 2);
+        const acts = parts.length >= 2 && parts.every(x => splitActor(x).actor && !/^(?:if|unless|when|otherwise|else)\b/i.test(x)) && !parts.slice(1).some(x => /\b(?:signs?\s+off|gives?\s+(?:the\s+)?(?:final\s+)?(?:sign-?off|approval)|is\s+accountable)\b/i.test(x));
+        if (acts) parts.forEach(x => { compound.add(x); splitAt.push(x); }); else splitAt.push(sen);
+      });
+      sentences.splice(0, sentences.length, ...splitAt);
       let main = null, dec = null, lastDec = null;
       const notes = [];
       timerHosts = [];
@@ -598,8 +616,14 @@
           for (; k < parts.length; k++) { if (QUALIFIER.test(parts[k].trim())) break; keep.push(parts[k]); }
           const titleText = k < parts.length ? keep.join(', ') : sen;
           if (k < parts.length) notes.push(stripEnd(parts.slice(k).join(', ').replace(/^[\s,(]+|[\s,)]+$/g, '')));
-          main = makeStep(titleText.replace(GOTO_STRIP, ''), full, { dataText: sen });
+          main = makeStep(titleText.replace(GOTO_STRIP, ''), compound.has(sen) ? sen : full, { dataText: sen });
           out.push(main);
+          return;
+        }
+        /* R13 #9: a part of a compound sentence, or a check of its own ("Check OFAC/sanctions list."), is a step */
+        if (compound.has(sen) || CONTROL_LINE.test(sen)) {
+          const st = makeStep(sen, sen, { dataText: sen });
+          out.push(st);
           return;
         }
         /* any other sentence on the line is part of the same step: kept in its note, its information on the step */
@@ -647,6 +671,8 @@
         /* R11: an unnumbered "Otherwise, …" / "If not, …" line belongs to the step above it (its choice's other path) */
         if (last && /^(?:otherwise|else|if\s+not)\b/i.test(body)) { last.body += ' ' + body; prevBlank = false; continue; }
         if (wasFirst) { prevBlank = false; continue; }
+        /* R13 #9: an unnumbered check or condition between numbered steps is a line of its own (and is counted) */
+        if (last && hasNum && actionLine(body)) { items.push({ num: null, body, subs: [], indent, text: t }); prevBlank = false; continue; }
         /* prose between steps is kept as a note on the step above (nothing is dropped); prose before the list is intro */
         if (last && !/^(?:[A-Z][\w ]{0,30}):\s*$/.test(t)) (last.extra = last.extra || []).push(body);
         prevBlank = false;
@@ -764,6 +790,29 @@
     walk(nodes, n => (n.branches || []).forEach(b => { if (b.gotoNum != null) { if (lineFirst[b.gotoNum]) b.goto = lineFirst[b.gotoNum]; delete b.gotoNum; } }));
     /* R11: a rejected request stops unless the procedure says where it goes */
     walk(nodes, endRejectPath);
+    /* R13 #8: one actor however it is written. "Controller (Sam Wu)", "the Controller" and "Sam Wu" are the same person
+       when the procedure ties the name to the role once; their steps share the role and their RACI the "Role (Name)" */
+    const al = actorAliases(nodes);
+    const full = v => { const k = al.get(squash(v).toLowerCase()); return k || v; };
+    walk(nodes, n => {
+      if (n.type !== 'step') return;
+      const pr = n.ownerRole && /^(.+) \((.+)\)$/.exec(full(n.ownerRole));
+      if (pr && n.ownerRole.toLowerCase() === pr[2].toLowerCase()) {
+        n.ownerRole = pr[1];
+        if (!/Named in the procedure/.test(n.note || '')) n.note = n.note ? `Named in the procedure: ${pr[2]} · ${n.note}` : `Named in the procedure: ${pr[2]}`;
+        n.touches = [...new Set((n.touches || []).concat(teamOfRole(n.ownerRole)))]; addTeams(n.touches);
+      }
+      if (n.raci) {
+        if (n.raci.a) n.raci.a = full(n.raci.a);
+        ['c', 'i'].forEach(k => { if (n.raci[k]) n.raci[k] = [...new Set(n.raci[k].map(full))]; });
+      }
+      /* "X approves" / "X signs off": the approver is Accountable for the step (A), as well as doing it (R) */
+      if (n.ownerRole && !(n.raci && n.raci.a) && /^(?:also\s+)?(?:approve|co-approve|sign\s+off|sign-off|authori[sz]e|countersign)\b/i.test(n.title || '')) {
+        const nm = /Named in the procedure: ([^·]+?)(?:\s*·|$)/.exec(n.note || '');
+        (n.raci || (n.raci = {})).a = full(nm ? `${n.ownerRole} (${nm[1].trim()})` : n.ownerRole);
+      }
+    });
+    /* the notes after a sign-off sentence ("Sam Wu signs off") stay; the Accountable is the merged name */
     nodes.unshift({ id: 'k', type: 'trigger', title: trigger, touches: [] });
     const c = countNodes(nodes);
     const roles = []; walk(nodes, n => { if (n.type === 'step' && n.ownerRole && !roles.includes(n.ownerRole)) roles.push(n.ownerRole); });
@@ -773,6 +822,39 @@
       nobody.length ? `${plural(nobody.length, 'step')} ${nobody.length === 1 ? 'does' : 'do'} not say who does ${nobody.length === 1 ? 'it' : 'them'}.` : '',
       'Check each step before saving.'].filter(Boolean).join(' ');
     return { nodes, newData, notes, trigger, teams: teamsAll, name: deriveName(text), lines: lineMap, linesText: linesText(lineMap.length, c) };
+  }
+  /* R13 #8: who is who. Every "Role (Name)" the map writes (a step's role with its named person, or a RACI entry) makes the
+     role, the name and the pair one actor. actorAliases(nodes) -> Map(lower-case spelling -> "Role (Name)"); a role
+     written with two different names is left alone (it is two people). actorKey(v, aliases) -> the one spelling. */
+  function actorAliases(nodes) {
+    const pairs = [];
+    const add = (role, name) => { role = squash(role); name = squash(name); if (role && name && role.toLowerCase() !== name.toLowerCase()) pairs.push([role, name]); };
+    const walkA = ns => (ns || []).forEach(n => {
+      if (!n) return;
+      const nm = /Named in the procedure: ([^·]+?)(?:\s*·|$)/.exec(n.note || '');
+      if (n.ownerRole && nm) add(n.ownerRole, nm[1]);
+      const r = n.raci || {};
+      [].concat(r.a || [], r.c || [], r.i || []).forEach(v => { const m = /^(.*?)\s*\(([A-Z][^)]{1,40})\)$/.exec(squash(v)); if (m) add(m[1], m[2]); });
+      (n.branches || []).forEach(b => walkA(b.nodes));
+    });
+    walkA(nodes);
+    const out = new Map(), byRole = {}, byName = {};
+    pairs.forEach(([r, n]) => { (byRole[r.toLowerCase()] = byRole[r.toLowerCase()] || new Set()).add(n.toLowerCase()); (byName[n.toLowerCase()] = byName[n.toLowerCase()] || new Set()).add(r.toLowerCase()); });
+    pairs.forEach(([r, n]) => {
+      const fullName = `${r} (${n})`;
+      out.set(fullName.toLowerCase(), fullName);
+      if (byName[n.toLowerCase()].size === 1) out.set(n.toLowerCase(), fullName);
+      if (byRole[r.toLowerCase()].size === 1) out.set(r.toLowerCase(), fullName);
+    });
+    return out;
+  }
+  function actorKey(v, aliases) { const x = squash(v); return (aliases && aliases.get(x.toLowerCase())) || x; }
+  /* the rows a RACI matrix lists: every numbered step, waits, messages and sub-processes included, in map order */
+  function raciRowsOf(nodes) {
+    const out = [];
+    const w = ns => (ns || []).forEach(n => { if (!n) return; if (n.type === 'step' || n.type === 'wait' || n.type === 'message' || n.type === 'subprocess') out.push(n); (n.branches || []).forEach(b => w(b.nodes)); });
+    w(nodes);
+    return out;
   }
   /* "9 lines → 9 steps", "12 lines → 11 steps, 2 choices": the one sentence every screen shows for what the reader made */
   function linesText(lines, c) {
@@ -906,7 +988,30 @@
   async function parseVsdx(bytes, opts) {
     opts = opts || {};
     const files = await unzip(bytes);
-    const pageName = Object.keys(files).filter(n => /^visio\/pages\/page\d*\.xml$/i.test(n)).sort((a, b) => (parseInt(a.replace(/\D+/g, ''), 10) || 0) - (parseInt(b.replace(/\D+/g, ''), 10) || 0))[0];
+    /* R13 #14 (Jordan): the page to read is the first foreground page pages.xml lists, found through its relationship
+       (pages/_rels/pages.xml.rels); a background page (title block, border) is never the process. Without the index,
+       the lowest-numbered page file. */
+    const pageFiles = Object.keys(files).filter(n => /^visio\/pages\/page\d*\.xml$/i.test(n)).sort((a, b) => (parseInt(a.replace(/\D+/g, ''), 10) || 0) - (parseInt(b.replace(/\D+/g, ''), 10) || 0));
+    let pageName = '', pageTitle = '';
+    const px = files['visio/pages/pages.xml'], prx = files['visio/pages/_rels/pages.xml.rels'];
+    if (px) {
+      const rels = {};
+      if (prx) all(parseXml(utf8(prx)), 'Relationship').forEach(r => { rels[r.attrs.Id] = 'visio/pages/' + String(r.attrs.Target || '').replace(/^\.?\//, '').replace(/^.*\/pages\//, ''); });
+      const pages = all(parseXml(utf8(px)), 'Page');
+      const fg = pages.filter(pg => !/^(1|true)$/i.test(pg.attrs.Background || ''));
+      for (const pg of (fg.length ? fg : pages)) {
+        const rel = kid(pg, 'Rel'), rid = rel && (rel.attrs['r:id'] || Object.keys(rel.attrs).filter(k => /(^|:)id$/i.test(k)).map(k => rel.attrs[k])[0]);
+        const f = rid && rels[rid] && files[rels[rid]] ? rels[rid] : (!prx ? pageFiles[pages.indexOf(pg)] : '');
+        if (!f || !files[f]) continue;
+        pageName = f;
+        /* R11 G2 §9: the process takes the diagram PAGE's name ("Vendor onboarding"), not the file's; a default page name
+           ("Page-1") falls back to the document title */
+        const nm = squash(pg.attrs.Name || pg.attrs.NameU || '');
+        if (nm && !/^(page|seite|página|pagina)[-\s]?\d*$/i.test(nm)) pageTitle = nm;
+        break;
+      }
+    }
+    if (!pageName) pageName = pageFiles[0];
     if (!pageName) throw new Error('No diagram page was found in this Visio file.');
     const masters = {};
     const mx = files['visio/masters/masters.xml'];
@@ -918,11 +1023,14 @@
     const shapesEl = kid(page, 'Shapes');
     const visit = (sh, parent) => {
       const idv = sh.attrs.ID; const master = masters[sh.attrs.Master] || (parent && parent.master) || sh.attrs.NameU || sh.attrs.Name || '';
-      const text = squash(textOf(kid(sh, 'Text')));
+      let text = squash(textOf(kid(sh, 'Text'))), role = '';
+      /* R13 #14 (Jordan): "Benefits Analyst: Check eligibility" names who does the step */
+      const rt = /^([A-Za-z][\w&/' -]{1,40}?):\s+(\S.*)$/.exec(text);
+      if (rt && (roleWords(rt[1].trim().split(/\s+/)) || isTeam(rt[1].trim()))) { role = canonRole(rt[1].trim()); text = rt[2]; }
       /* R12: a 1-D shape (it has a begin and an end point) is a connector whatever its master is called */
       const oneD = kids(sh, 'Cell').some(c => c.attrs.N === 'BeginX') && kids(sh, 'Cell').some(c => c.attrs.N === 'EndX');
       const kind = oneD ? 'connector' : refineKind(shapeKind(master, text), text);
-      const s = { id: idv, master, text, kind, x: cell(sh, 'PinX'), y: cell(sh, 'PinY'), w: cell(sh, 'Width'), h: cell(sh, 'Height') };
+      const s = { id: idv, master, text, role, kind, x: cell(sh, 'PinX'), y: cell(sh, 'PinY'), w: cell(sh, 'Width'), h: cell(sh, 'Height') };
       shapes[idv] = s;
       kids(kid(sh, 'Shapes'), 'Shape').forEach(c => { if (kind === 'lane' || kind === 'ignore') visit(c, null); });
     };
@@ -964,11 +1072,6 @@
     /* a terminator with no way in is the start; with no way out the end */
     flowShapes.forEach(s => { if (s.kind === 'terminator') s.kind = !(ins[s.id] || []).length ? 'start' : !(outs[s.id] || []).length ? 'end' : 'process'; });
     flowShapes.filter(s => s.kind !== 'start' && s.kind !== 'end' && !(ins[s.id] || []).length && !(outs[s.id] || []).length).forEach(s => dropped.push({ name: s.text || 'Shape ' + s.id, type: s.kind, reason: 'not connected to the flow' }));
-    /* R11 G2 §9: the process takes the diagram PAGE's name ("Vendor onboarding"), not the file's; a default page name
-       ("Page-1") falls back to the document title */
-    let pageTitle = '';
-    const px = files['visio/pages/pages.xml'];
-    if (px) { const pg = all(parseXml(utf8(px)), 'Page')[0]; const nm = pg ? squash(pg.attrs.Name || pg.attrs.NameU || '') : ''; if (nm && !/^(page|seite|página|pagina)[-\s]?\d*$/i.test(nm)) pageTitle = nm; }
     /* R12: a shape left out is listed once */
     const seenDrop = new Set();
     for (let i = 0; i < dropped.length; i++) { const k = dropped[i].type + '|' + dropped[i].name + '|' + dropped[i].reason; if (seenDrop.has(k)) dropped.splice(i--, 1); else seenDrop.add(k); }
@@ -992,7 +1095,7 @@
     v.flowShapes.filter(s => !seen.has(s.id)).sort((a, b) => b.y - a.y || a.x - b.x).forEach(s => order.push(s));
     order.forEach(s => {
       const t = tag(s); if (t === 'startEvent') hasStart = true;
-      const lane = s.kind === 'start' || s.kind === 'end' ? '' : v.laneOf(s);
+      const lane = s.kind === 'start' || s.kind === 'end' ? '' : (s.role || v.laneOf(s));
       if (lane) (laneRefs[lane] = laneRefs[lane] || []).push(id(s));
       let inner = '';
       if (t === 'intermediateCatchEvent') { const d = durationInfo(s.text); inner = `\n      <bpmn:timerEventDefinition id="${id(s)}_timer">${d ? `<bpmn:timeDuration>${d.iso}</bpmn:timeDuration>` : ''}</bpmn:timerEventDefinition>\n    `; }
@@ -1117,5 +1220,5 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
   }
 
   return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn,
-    RACI_ROLES, raciOf, raciEmpty, raciText, raciIn, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
+    RACI_ROLES, raciOf, raciEmpty, raciText, raciIn, actorAliases, actorKey, raciRowsOf, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
 });

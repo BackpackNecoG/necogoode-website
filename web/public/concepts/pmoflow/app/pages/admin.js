@@ -1,12 +1,14 @@
-/* PMOFlow R10 stream S5: workspace admin. Route: /admin and /admin/<tab> (people | history | calendar | security).
+/* PMOFlow R10 stream S5: workspace admin. Route: /admin and /admin/<tab> (people | departments | history | calendar | security).
+   R13 K4 #1: Departments tab (create, rename, remove, set approvers, assign people) over K1's POST /ws/:ws/departments and
+   E.departments(docs); invites name a department; People shows and (Admin) changes each person's department.
    People and roles, invites, a hash-chained change history with CSV/JSON export, the holiday calendar the engine reads,
    and plain-language security settings. Server side: api/shared/pmoflow-routes-admin.js (/api/pmoflow/workspaces/:ws/admin...).
    Also exports authPrincipal / signInURL / signOutURL so the lead can show "Sign in with Microsoft" in the header menu. */
 import { store } from '../store.js';
-import { esc, link, av, fmtTime, toast, E } from '../ui.js';
+import { esc, link, av, fmtTime, toast, E, modal } from '../ui.js';
 import { refPath } from '../main.js';
 
-const TABS = [['people', 'People'], ['history', 'History'], ['calendar', 'Calendar'], ['security', 'Security']];
+const TABS = [['people', 'People'], ['departments', 'Departments'], ['history', 'History'], ['calendar', 'Calendar'], ['security', 'Security']];
 const ROLE_INFO = {
   admin: { label: 'Admin', paid: true, what: 'Manages people, roles, the holiday calendar and settings. Also edits.' },
   editor: { label: 'Editor', paid: true, what: 'Maps processes, plans projects, records tests and runs launches.' },
@@ -74,6 +76,20 @@ async function refresh(tab) {
 const people = () => (S.view && S.view.people) || [];
 const roleOf = id => (people().find(p => p.id === id) || {}).role || null;
 const isAdmin = () => roleOf(store.state.me) === 'admin';
+/* R13 #1: the one department list (E.departments via GET admin); Editors may add one, everything else is Admin only */
+const depts = () => (S.view && S.view.departments) || [];
+const canAddDept = () => ['admin', 'editor'].includes(roleOf(store.state.me));
+async function deptOp(op) {
+  /* the engine's pure editor decides first, so a refused change shows its sentence without a failed request */
+  const eng = E();
+  if (eng && typeof eng.departmentEdit === 'function') { const pre = eng.departmentEdit(store.state.docs, op); if (pre && !pre.ok) throw new Error(pre.error); }
+  const r = await fetch(`/api/pmoflow/ws/${encodeURIComponent(store.state.ws)}/departments`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ op, actor: store.state.me }) });
+  let j = null; try { j = await r.json(); } catch (e) { j = null; }
+  if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+  S.viewStale = true;
+  return j;
+}
 const adminNames = () => people().filter(p => p.role === 'admin').map(p => p.name);
 const pname = id => (store.person(id) || {}).name || id || 'Someone';
 const D = s => new Date(String(s).slice(0, 10) + 'T12:00:00');
@@ -113,25 +129,67 @@ function peopleHTML() {
   const admin = isAdmin();
   const rows = people().map(p => {
     const sel = `<select data-role="${esc(p.id)}" aria-label="Role for ${esc(p.name)}" ${admin ? '' : 'disabled'}>${Object.entries(ROLE_INFO).map(([k, r]) => `<option value="${k}" ${p.role === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>`;
+    const dsel = `<select data-assign="${esc(p.id)}" aria-label="Department for ${esc(p.name)}" ${admin ? '' : 'disabled'}><option value="">No department</option>${depts().map(d => `<option value="${esc(d.id)}" ${d.name === p.department ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>`;
     return `<tr data-person-row="${esc(p.id)}"><td><span class="adm-pp">${av(p.id)}<span><b>${esc(p.name)}</b><span class="hint adm-title">${esc(p.title || '')}</span></span></span></td>
-      <td>${sel}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
+      <td>${sel}</td><td>${dsel}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
   }).join('');
   const inv = (S.view.settings.invites || []);
   return `${seatsHTML()}
     <div class="card"><h3>People and roles <span class="n">${people().length}</span></h3>
       ${adminOnlyNote('change roles or invite people')}
-      <div class="tbl-wrap"><table class="adm-table"><thead><tr><th>Person</th><th>Role</th><th>Seat</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="tbl-wrap"><table class="adm-table"><thead><tr><th>Person</th><th>Role</th><th>Department</th><th>Seat</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="adm-legend">${Object.values(ROLE_INFO).map(r => `<div><b>${r.label}</b> <span class="hint">${esc(r.what)}</span></div>`).join('')}</div>
     </div>
     <div class="card" data-invites><h3>Invite someone <span class="n">${inv.length} pending</span></h3>
       <form class="adm-invite" data-invite-form>
         <div class="field"><label for="adm-email">Work email</label><input id="adm-email" name="email" type="email" autocomplete="off" placeholder="name@northwind.example" required ${admin ? '' : 'disabled'} /></div>
         <div class="field"><label for="adm-irole">Role</label><select id="adm-irole" name="role" ${admin ? '' : 'disabled'}>${Object.entries(ROLE_INFO).map(([k, r]) => `<option value="${k}" ${k === 'editor' ? 'selected' : ''}>${r.label}${r.paid ? '' : ' (free)'}</option>`).join('')}</select></div>
+        <div class="field"><label for="adm-idept">Department</label><select id="adm-idept" name="departmentId" ${admin ? '' : 'disabled'}><option value="">None yet</option>${depts().map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}</select></div>
         <button class="btn primary" type="submit" ${admin ? '' : 'disabled'}>Invite</button>
       </form>
       <div class="hint">The invite is saved here. No email is sent from the demo.</div>
-      ${inv.length ? `<div class="adm-list">${inv.map(i => `<div class="row" data-invite="${esc(i.id)}"><div><div class="t">${esc(i.email)}</div><div class="s">${esc((ROLE_INFO[i.role] || {}).label || i.role)} · invited by ${esc(pname(i.by))} · ${esc(fmtTime(i.at))}</div></div><div class="r"><button class="btn sm danger" data-uninvite="${esc(i.id)}" ${admin ? '' : 'disabled'}>Remove</button></div></div>`).join('')}</div>` : ''}
+      ${inv.length ? `<div class="adm-list">${inv.map(i => `<div class="row" data-invite="${esc(i.id)}"><div><div class="t">${esc(i.email)}</div><div class="s">${esc((ROLE_INFO[i.role] || {}).label || i.role)}${i.department ? ` · <span data-invite-dept>${esc(i.department)}</span>` : ''} · invited by ${esc(pname(i.by))} · ${esc(fmtTime(i.at))}</div></div><div class="r"><button class="btn sm danger" data-uninvite="${esc(i.id)}" ${admin ? '' : 'disabled'}>Remove</button></div></div>`).join('')}</div>` : ''}
     </div>`;
+}
+
+/* ------------------------------------------------------------ departments (R13 #1) */
+function deptCard(d) {
+  const admin = isAdmin();
+  const n = d.people.length;
+  const names = d.approverNames || [];
+  const who = names.length ? `Approves: <b data-dept-approvers-list>${esc(names.join(', '))}</b>`
+    : `<span data-dept-approvers-list>No named approver: anyone in ${esc(d.name)} can approve its part.</span>`;
+  const removeWhy = n ? `Move the ${plural(n, 'person').replace(/persons$/, 'people')} in ${d.name} to another department first.` : '';
+  const ppl = people().slice().sort((a, b) => a.name.localeCompare(b.name));
+  return `<div class="card adm-dept" data-dept="${esc(d.id)}" data-dept-name="${esc(d.name)}">
+      <div class="adm-dhead"><h3>${esc(d.name)} <span class="n">${plural(n, 'person').replace(/persons$/, 'people')}</span></h3>
+        <div class="adm-dacts"><button class="btn sm" data-dept-rename="${esc(d.id)}" ${admin ? '' : 'disabled'}>Rename</button>
+        <button class="btn sm danger" data-dept-remove="${esc(d.id)}" ${admin && !n ? '' : 'disabled'} ${removeWhy ? `title="${esc(removeWhy)}"` : ''}>Remove</button></div></div>
+      <div class="adm-dwho">${who}</div>
+      ${n ? `<div class="adm-dppl">${d.people.map(p => `<span class="adm-chip">${av(p.id)}${esc(p.name)}</span>`).join('')}</div>` : `<div class="hint">Nobody is in ${esc(d.name)} yet. Assign people on the People tab or below.</div>`}
+      ${n && admin ? `<div class="hint adm-dwhy">${esc(removeWhy)}</div>` : ''}
+      <details class="adm-dedit" data-dept-approvers="${esc(d.id)}"><summary>Choose who approves for ${esc(d.name)}</summary>
+        <div class="hint">Leave everyone unticked to let anyone in the department approve. The project manager and anyone who works on or tests a part never approve it.</div>
+        <div class="adm-dpick">${ppl.map(p => `<label class="adm-pick"><input type="checkbox" value="${esc(p.id)}" ${d.approvers.includes(p.id) ? 'checked' : ''} ${admin ? '' : 'disabled'} /><span>${esc(p.name)}${p.department && p.department !== d.name ? ` <small class="hint">${esc(p.department)}</small>` : ''}</span></label>`).join('')}</div>
+        <button class="btn sm primary" data-dept-approvers-save="${esc(d.id)}" ${admin ? '' : 'disabled'}>Save approvers</button></details>
+      <form class="adm-dassign" data-dept-assign-form="${esc(d.id)}">
+        <select name="personId" aria-label="Add a person to ${esc(d.name)}" ${admin ? '' : 'disabled'}><option value="">Add a person to ${esc(d.name)}…</option>${ppl.filter(p => p.department !== d.name).map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.department ? ` (now ${esc(p.department)})` : ''}</option>`).join('')}</select>
+        <button class="btn sm" type="submit" ${admin ? '' : 'disabled'}>Add</button></form>
+    </div>`;
+}
+function departmentsHTML() {
+  const list = depts();
+  const note = isAdmin() ? '' : canAddDept()
+    ? `<div class="note adm-note" data-admin-only>You’re viewing as ${esc(pname(store.state.me))} (Editor). You can add a department; only an Admin can rename, remove, choose approvers or move people${adminNames().length ? `: ask ${esc(adminNames().join(' or '))}` : ''}.</div>`
+    : adminOnlyNote('change departments');
+  return `<div class="card" data-dept-add-card><h3>Departments <span class="n" data-dept-count>${list.length}</span></h3>
+      <p class="hint adm-dintro">Your own list of departments, for example Purchasing, Credit, Sales or Operations. Each one approves its part of a process change. The approver panel and invites use this list.</p>
+      ${note}
+      <form class="adm-dform" data-dept-add-form>
+        <div class="field"><label for="adm-dn">New department</label><input id="adm-dn" name="name" maxlength="60" placeholder="e.g. Credit" autocomplete="off" ${canAddDept() ? '' : 'disabled'} /></div>
+        <button class="btn primary" type="submit" ${canAddDept() ? '' : 'disabled'}>Add department</button>
+      </form></div>
+    ${list.length ? list.map(deptCard).join('') : '<div class="card"><div class="empty">No departments yet. Add your first one above.</div></div>'}`;
 }
 
 /* ------------------------------------------------------------ history (audit log) */
@@ -178,7 +236,7 @@ function historyHTML() {
       <div class="hint" data-keysource="${esc(S.audit.keySource || '')}">Signed with the ${esc(S.audit.keySource || 'development key')}${S.audit.keySource === 'production key' ? '.' : ' (this copy runs without the production key; the live service signs with its production key).'}</div>
       <details class="adm-check" ${fc ? 'open' : ''}><summary>Check a saved export (CSV or JSON)</summary>
         <div class="adm-checkrow"><input type="file" accept="text/csv,.csv,application/json,.json" data-checkfile aria-label="Saved CSV or JSON export" />
-        ${fc ? `<span class="${fc.ok ? 'pass' : 'fail'}" data-filecheck="${fc.ok ? 'ok' : 'broken'}">${fc.ok ? '✓ ' : '✕ '}${esc(fc.summary)}${fc.ok && fc.fileKeySource ? ` Signed with the ${esc(fc.fileKeySource)}.` : ''}</span>` : ''}</div>
+        ${fc ? `<span class="${fc.ok ? 'pass' : 'fail'}" data-filecheck="${fc.ok ? 'ok' : 'broken'}">${fc.ok ? '✓ ' : '✕ '}${esc(fc.summary)}${fc.ok && fc.keyNote ? ` <span data-filecheck-key>${esc(fc.keyNote)}</span>` : ''}</span>` : ''}</div>
         <div class="hint">Only an unfiltered export can be checked on its own: a filtered one leaves gaps in the chain.</div></details>
     </div>`;
 }
@@ -255,9 +313,9 @@ export function render(params) {
   let body;
   if (S.err && !S.view) body = `<div class="card"><div class="empty">Couldn’t load admin settings (${esc(S.err)}). <button class="btn sm" data-retry>Try again</button></div></div>`;
   else if (!S.view || S.ws !== store.state.ws) body = '<div class="card"><div class="empty">Loading…</div></div>';
-  else body = tab === 'people' ? peopleHTML() : tab === 'history' ? historyHTML() : tab === 'calendar' ? calendarHTML() : securityHTML();
+  else body = tab === 'people' ? peopleHTML() : tab === 'departments' ? departmentsHTML() : tab === 'history' ? historyHTML() : tab === 'calendar' ? calendarHTML() : securityHTML();
   return `<div class="hdr adm-hdr"><div><div class="crumbs">Workspace</div><h1>Admin</h1>
-      <p>People and roles, the record of every change, the holiday calendar, and security settings.</p></div>
+      <p>People and roles, departments, the record of every change, the holiday calendar, and security settings.</p></div>
       <div class="hdr-side">${S.auth === undefined ? '' : signInHTML()}</div></div>
     <nav class="tabs adm-tabs" aria-label="Admin sections">${TABS.map(([k, l]) => `<a href="${link('/admin/' + k)}" data-link class="${k === tab ? 'on' : ''}" ${k === tab ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
     <div class="adm-body" data-tab="${tab}">${body}</div>`;
@@ -282,9 +340,47 @@ export function bind(root, params) {
   on('[data-invite-form]', 'submit', (el, e) => {
     e.preventDefault();
     const email = el.querySelector('[name=email]').value.trim(), role = el.querySelector('[name=role]').value;
-    act(async () => { S.view = await api('POST', '/invites', { email, role }); }, `Invited ${email}`);
+    const departmentId = (el.querySelector('[name=departmentId]') || {}).value || null;
+    act(async () => { S.view = await api('POST', '/invites', { email, role, departmentId }); }, `Invited ${email}`);
   });
   on('[data-uninvite]', 'click', el => act(async () => { S.view = await api('DELETE', '/invites/' + encodeURIComponent(el.dataset.uninvite), {}); }, 'Invite removed'));
+
+  /* departments (R13 #1) */
+  const dname = id => (depts().find(d => d.id === id) || {}).name || 'the department';
+  on('[data-assign]', 'change', el => act(() => deptOp({ kind: 'assign', personId: el.dataset.assign, id: el.value || null }),
+    el.value ? `${pname(el.dataset.assign)} is now in ${dname(el.value)}` : `${pname(el.dataset.assign)} has no department`));
+  on('[data-dept-add-form]', 'submit', (el, e) => {
+    e.preventDefault();
+    const name = el.querySelector('[name=name]').value.trim();
+    if (!name) { toast('Name a department.'); return; }
+    act(() => deptOp({ kind: 'add', name }), `Added ${name}`);
+  });
+  on('[data-dept-rename]', 'click', async el => {
+    const id = el.dataset.deptRename, cur = dname(id);
+    const r = await modal({ title: `Rename ${cur}`, body: `<div class="field"><label for="adm-rn">Department name</label><input id="adm-rn" name="name" maxlength="60" value="${esc(cur)}" /></div>
+      <div class="hint">People, approvers and process routing move with it.</div>`, actions: [{ id: 'save', label: 'Rename', primary: true }] });
+    if (r.action !== 'save') return;
+    const name = String((r.form && r.form.name) || '').trim();
+    if (!name) { toast('Name a department.'); return; }
+    act(() => deptOp({ kind: 'rename', id, name }), `Renamed ${cur} to ${name}`);
+  });
+  on('[data-dept-remove]', 'click', async el => {
+    const id = el.dataset.deptRemove, cur = dname(id);
+    const r = await modal({ title: `Remove ${cur}?`, body: `<p>Processes that route a team to ${esc(cur)} will ask you to choose who approves for that team instead.</p>`, actions: [{ id: 'rm', label: 'Remove', danger: true }] });
+    if (r.action !== 'rm') return;
+    act(() => deptOp({ kind: 'remove', id }), `Removed ${cur}`);
+  });
+  on('[data-dept-approvers-save]', 'click', el => {
+    const id = el.dataset.deptApproversSave;
+    const ids = [...root.querySelectorAll(`[data-dept-approvers="${CSS.escape(id)}"] input[type=checkbox]:checked`)].map(x => x.value);
+    act(() => deptOp({ kind: 'approvers', id, approvers: ids }), ids.length ? `${dname(id)} approvers saved` : `Anyone in ${dname(id)} can approve`);
+  });
+  on('[data-dept-assign-form]', 'submit', (el, e) => {
+    e.preventDefault();
+    const id = el.dataset.deptAssignForm, personId = el.querySelector('[name=personId]').value;
+    if (!personId) { toast('Choose a person.'); return; }
+    act(() => deptOp({ kind: 'assign', personId, id }), `${pname(personId)} is now in ${dname(id)}`);
+  });
 
   /* calendar */
   on('[data-holiday-form]', 'submit', (el, e) => {

@@ -531,8 +531,6 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
   await call('PUT', `ws/${ws}/doc/workItem/A1`, { actor: 'dk', data: Object.assign({}, find(st, 'workItem', 'A1').data, { resolves: 'D7', owner: 'ps', updatedAt: '2020-01-01T00:00:00.000Z' }) });
   const a4 = find(st, 'workItem', 'A4').data;
   await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today }) });
-  const at = new Date(Date.now() + 1000).toISOString();
-  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   st = await state(ws);
   if (isR4Engine()) {
     assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'pending', 'a finished fix awaits the owner');
@@ -548,6 +546,11 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
   await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: Object.assign({}, find(st, 'dataElement', 'D7').data, { liveConfirmedBy: 'dk', liveConfirmedAt: new Date().toISOString(), liveSource: 'HR directory nightly sync', liveEvidence: { type: 'check', ref: 'check', at: ck.body.at, by: 'dk' } }) });
   st = await state(ws);
   assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'live');
+  /* R13 #3: Compliance approves once its part is ready (its information is now live) */
+  const at = new Date(Date.now() + 1000).toISOString();
+  const ap9 = await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  assert.equal(ap9.status, 200, JSON.stringify(ap9.body));
+  st = await state(ws);
   const gate = engine.readiness(st.docs, 'access-review-automation', st.today);
   assert.equal(gate.pass, true, JSON.stringify(gate.checks.filter(c => !c.pass)));
   const r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta' });
@@ -582,7 +585,8 @@ test('R3/R6 status report: RAG agrees with the headline; risk reconciliation', a
   const finish = r.body.facts.stats.finish;
   /* R8: "At risk" only when the forecast misses the deadline */
   const before = new Date(Date.parse(finish + 'T12:00:00Z') - 2 * 86400000).toISOString().slice(0, 10);
-  await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, proj, { target: before }) });
+  /* R13: a planned project's deadline moves only through an approved plan change, so write it the way an applied change does */
+  await store.putDoc(ws, 'project', 'access-review-automation', Object.assign({}, proj, { target: before }));
   r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'access-review-automation' });
   assert.equal(r.body.rag, 'red');
   assert.match(r.body.headline, /^(At risk|Will miss the deadline): /);
@@ -1526,7 +1530,8 @@ test('R8 dates: the client today dates the sandbox, state, releases, approvals a
   assert.equal((await call('GET', `ws/${ws}/state`, null, { today: shiftDay(server, -9) })).body.today, server, 'a far-off date is ignored');
   /* approvals carry the approver's date; the ISO timestamp is untouched */
   const at = new Date().toISOString();
-  r = await call('PUT', `ws/${ws}/doc/approval/AP7`, { actor: 'do', today: yday, data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  /* R13 #3: a part is approved only when it is ready (Compliance still has an open task here; IT is ready) */
+  r = await call('PUT', `ws/${ws}/doc/approval/AP7`, { actor: 'sk', today: yday, data: { projectId: 'access-review-automation', bu: 'IT', approver: 'sk', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   assert.equal(r.status, 200);
   assert.equal(r.body.doc.data.date, yday);
   assert.equal(r.body.doc.data.at, at);
@@ -1748,7 +1753,8 @@ test('R10.1 status report: {preset} or {from, to}; "Overall" + "This period"; pl
   const sec = Object.fromEntries(b.sections.map(s => [s.key, s]));
   assert.deepEqual([sec.completed.items, sec.completed.empty], [[], 'Nothing completed this week']);
   assert.equal(sec.behind.items[0], '5 late (1 past due, 4 will finish after their due date)');
-  assert.deepEqual(sec.tests.items, ['14 passed, 1 failed (2 test runs)']);
+  /* R13 #2: each test's latest result per stage, with the stage's current count (one ledger) */
+  assert.deepEqual(sec.tests.items, ['Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.']);
   assert.ok(b.sections.every(s => s.items.length || s.empty || ['spend', 'schedule'].includes(s.key)), 'never an empty heading');
   assert.equal(b.overall.needsPurpose, false);
   assert.match(b.overall.budget, /^Higher budget need expected/);
@@ -1890,6 +1896,8 @@ test('R11 §2/§3 launch overrides need the PM and a sponsor, both with step-up;
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual(r.body.release.override.signoffs.map(x => [x.role, x.by]), [['pm', 'ta'], ['sponsor', 'do']]);
   assert.ok(!r.body.release.approvers.includes('ta'), 'override sign-offs are never team approvals');
+  /* R13 #11: an override launch is an exception in the launch history */
+  assert.ok(r.body.release.exceptions.some(x => /^release:/.test(x.ref) && /two-person override \(Tom Alvarez and Dave Ortiz\)/.test(x.summary)), JSON.stringify(r.body.release.exceptions));
 });
 
 /* ================= R12 (H1) ================= */
@@ -1911,4 +1919,105 @@ test('R12 #4 who can pass a business check: the assignee or the owning departmen
   // one pass needs no step-up
   r = await run('RY5', 'ps', [{ caseId: 'TC13', outcome: 'pass', evidence: 'ok' }]);
   assert.equal(r.status, 200, JSON.stringify(r.body));
+});
+
+/* ================================ R13 (K1) ================================ */
+test('R13 #1 POST /ws/:ws/departments: editors add, Admins rename/assign/remove; the settings doc keeps roles', async () => {
+  const ws = await newWs();
+  const st0 = await state(ws);
+  const settings0 = find(st0, 'workspace', 'settings').data;
+  assert.equal(settings0.departments.length, 6);
+  /* an Editor (Ana) may add a department from the approver panel */
+  let r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'add', name: 'Credit', approvers: ['gw'] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.departments.some(d => d.name === 'Credit' && d.approvers[0] === 'gw'));
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'add', name: 'credit' } });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, 'A department called Credit already exists.');
+  /* an Approver (Dave) may not add; an Editor may not rename */
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'do', op: { kind: 'add', name: 'Sales' } });
+  assert.equal(r.status, 403);
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'rename', id: 'dept-credit', name: 'Credit Control' } });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /Only an Admin/);
+  /* an Admin (Tom) renames, assigns and removes; person.bu follows; roles survive */
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'assign', personId: 'lp', id: 'dept-credit' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'rename', id: 'dept-credit', name: 'Credit Control' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  let st = await state(ws);
+  assert.equal(find(st, 'person', 'lp').data.bu, 'Credit Control');
+  assert.equal(find(st, 'person', 'lp').data.name, 'Leo Park');
+  assert.deepEqual(find(st, 'workspace', 'settings').data.roles, settings0.roles);
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'remove', id: 'dept-credit' } });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, 'Move the 1 person in Credit Control to another department first.');
+  await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'assign', personId: 'lp', id: 'dept-treasury' } });
+  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'remove', id: 'dept-credit' } });
+  assert.equal(r.status, 200);
+  st = await state(ws);
+  assert.ok(!find(st, 'workspace', 'settings').data.departments.some(d => d.id === 'dept-credit'));
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: 20 })).body.events.map(e => e.summary);
+  assert.ok(ev.some(s => s === 'Added the Credit department'), ev.join(' | '));
+  assert.ok(ev.some(s => s === 'Renamed the Credit department to Credit Control'));
+  /* the generic doc API still refuses settings writes */
+  r = await call('PUT', `ws/${ws}/doc/workspace/settings`, { actor: 'ta', data: { departments: [] } });
+  assert.equal(r.status, 403);
+});
+
+test('R13 #3 server: test assignment across departments is refused; the assigner can\'t pass; approval needs a ready part in every view', async () => {
+  const ws = await newWs();
+  const st0 = await state(ws);
+  const truth = engine.projectTruth(st0.docs, 'vendor-modernization', st0.today);
+  const tid = truth.testing.perBU.Compliance.tests.map(x => x.id).find(id => find(st0, 'testCase', id));
+  const tc = find(st0, 'testCase', tid).data;
+  let r = await call('PUT', `ws/${ws}/doc/testCase/${tid}`, { actor: 'ar', data: Object.assign({}, tc, { tester: 'ar' }) });
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  assert.match(r.body.error, /Only someone in Compliance or the project manager can assign/);
+  r = await call('PUT', `ws/${ws}/doc/testCase/${tid}`, { actor: 'ps', data: Object.assign({}, tc, { tester: 'ps' }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.doc.data.assignedBy, 'ps');
+  r = await call('PUT', `ws/${ws}/doc/testRun/tr-self-${rnd()}`, { actor: 'ps', data: { projectId: 'vendor-modernization', env: 'uat', by: 'ps', at: new Date().toISOString(), results: [{ caseId: tid, outcome: 'pass' }] } });
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  assert.match(r.body.error, /assigned the test .*so someone else must pass it/);
+  /* one approval-readiness rule: Nina can't approve Accounts Payable's part while its tests are not passed (Advanced allowed it) */
+  const ap = engine.buReady(st0.docs, 'vendor-modernization', 'Accounts Payable');
+  assert.equal(ap.ready, false);
+  r = await call('PUT', `ws/${ws}/doc/approval/apr-early-${rnd()}`, { actor: 'nb', data: { projectId: 'vendor-modernization', bu: 'Accounts Payable', approver: 'nb', decision: 'approved', stepUp: true, at: new Date().toISOString(), attestation: 'Looked at it' } });
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  assert.match(r.body.error, /^Not ready for your approval yet: waiting on/);
+});
+
+test('R13 #7 profile: shared bank accounts and near-duplicate names reach the stored profile and the generator (no values)', async () => {
+  const ws = await newWs();
+  const csv = ['legal_name,tax_id,account_number', 'Acme Supply Inc,12-3456789,000123456789', 'ACME Supply Inc.,12-3456789,000123456789', 'Fabrikam Metals,45-1112223,000987654321', 'Fabrikam Metal Works,45-1112224,000555666777'].join('\n');
+  const r = await call('POST', `ws/${ws}/profile/D2`, { actor: 'lp', csv });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const col = n => r.body.columns.find(c => c.name === n);
+  assert.deepEqual([col('account_number').sharedAccount.accounts, col('account_number').sharedAccount.records], [1, 2]);
+  assert.ok(col('legal_name').nearDuplicates && col('legal_name').nearDuplicates.groups >= 1, JSON.stringify(col('legal_name')));
+  assert.ok(!JSON.stringify(r.body).includes('000123456789') && !/Acme|Fabrikam/.test(JSON.stringify(r.body)), 'no values stored');
+  const de = { id: 'DV', name: 'Vendors', fields: [{ name: 'Account number', type: 'digits', minLen: 4, maxLen: 17 }] };
+  const tests = engine.generateTests(de, r.body.columns.map(c => Object.assign({}, c, { name: c.name === 'account_number' ? 'Account number' : c.name })), { all: true });
+  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same account number as another record/.test(t.note)), 'a uniqueness test from the stored profile');
+});
+
+/* R13 (K3 finding): once a project has a plan, Settings may not move the deadline or budget around sponsor approval */
+test('R13: deadline/budget on a planned project move only through Change the plan', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = (st.docs.project || []).find(p => (st.docs.workItem || []).some(w => w.data.projectId === p.id));
+  assert.ok(prj, 'a seeded project with work');
+  const base = prj.data;
+  const moved = await call('PUT', `ws/${ws}/doc/project/${prj.id}`, { data: Object.assign({}, base, { target: '2027-06-30' }), actor: base.owner });
+  assert.equal(moved.status, 409);
+  assert.match(moved.body.error, /Change the plan/);
+  const bud = await call('PUT', `ws/${ws}/doc/project/${prj.id}`, { data: Object.assign({}, base, { budget: Object.assign({}, base.budget || {}, { planned: 999999 }) }), actor: base.owner });
+  assert.equal(bud.status, 409);
+  const renamed = await call('PUT', `ws/${ws}/doc/project/${prj.id}`, { data: Object.assign({}, base, { desc: (base.desc || '') + ' (edited)' }), actor: base.owner });
+  assert.equal(renamed.status, 200, 'other settings still save');
+  /* a project with no work yet: first-time setup may set the deadline */
+  const fresh = { id: 'PNEW' + rnd(), name: 'Fresh project ' + rnd(), owner: base.owner, target: '2027-03-01', processIds: [] };
+  assert.equal((await call('PUT', `ws/${ws}/doc/project/${fresh.id}`, { data: fresh, actor: base.owner })).status, 200);
+  assert.equal((await call('PUT', `ws/${ws}/doc/project/${fresh.id}`, { data: Object.assign({}, fresh, { target: '2027-04-01' }), actor: base.owner })).status, 200);
 });

@@ -17,7 +17,7 @@ function rowHTML(j) {
     <div class="hint">Project manager ${esc(pname(j.owner))}</div></a>`;
 }
 
-export function render() {
+function renderPage() {
   const all = store.list('project');
   const sorted = all.map(p => ({ p, k: truthOf(p).k })).sort((a, b) => (ORDER[a.k] ?? 5) - (ORDER[b.k] ?? 5) || String(a.p.target || '').localeCompare(String(b.p.target || ''))).map(x => x.p);
   const active = sorted.filter(p => p.status !== 'live'), live = sorted.filter(p => p.status === 'live');
@@ -33,3 +33,5 @@ export function render() {
 export function bind(root) {
   root.querySelectorAll('[data-new-project]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); newProject(); }));
 }
+/* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */
+export function render(params) { return '<i class="pmo-k3" hidden></i>' + renderPage(params); }

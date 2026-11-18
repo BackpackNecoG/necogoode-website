@@ -446,8 +446,10 @@ function periodSections(p, opts) {
     ? `${q(x.title)}${who(x)} was due ${fds(x.due)}`
     : `${q(x.title)}${who(x)} will finish after its ${fds(x.due)} due date${x.forecast ? ` (expected ${fds(x.forecast)})` : ''}`)) : [], 'Nothing late at the end of the period');
   const tr = p.testsRun;
-  add('tests', 'Tests', tr.runs ? [`${tr.passed} passed, ${tr.failed} failed (${plural(tr.runs, 'test run')})`] : [], `No tests run ${n}`);
-  add('approvals', 'Approvals', p.approvalsGiven.map(a => `${a.bu}'s part approved by ${a.approverName}, ${fdl(a.date)}`), `No approvals ${n}`);
+  /* R13 #2 one testing ledger: each test's latest result per stage, never a sum of runs (engine text) */
+  add('tests', 'Tests', tr.runs ? [tr.text || `${tr.passed} passed, ${tr.failed} failed (${plural(tr.runs, 'test run')})`] : [], `No tests run ${n}`);
+  /* R13 #11: "again" and stale approvals are marked (engine text) */
+  add('approvals', 'Approvals', p.approvalsGiven.map(a => `${a.text || `${a.bu}'s part approved by ${a.approverName}`}, ${fdl(a.date)}`), `No approvals ${n}`);
   add('risks', 'Risks', p.risksOpened.map(r => `New risk: ${r.title} (${r.ownerName})`).concat(p.risksClosed.map(r => `Closed: ${r.title}`)), `No risks opened or closed ${n}`);
   add('changes', p.planChanges.length ? `Plan changes: ${p.planChanges.length}` : 'Plan changes', p.planChanges.map(c => c.text), `No plan changes ${n}`);
   if (opts && opts.showCost) add('spend', 'Spent', [`${money(p.spendInPeriod)} of logged work ${n}`], null);

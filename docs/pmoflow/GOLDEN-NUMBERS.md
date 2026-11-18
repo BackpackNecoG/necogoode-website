@@ -56,7 +56,7 @@ None of these dates is a weekend or a holiday. The launch window has `problem: n
 - **Blocking:** **1** ("1 blocking (holds up 5 tasks)"). Bank remittance details is not available and holds up 5 open tasks; its fix (W6) is planned, so the label stays amber, but it is blocking (R11 one definition).
 - **Reasons, in order:**
   1. "5 tasks late (1 past due, 4 will finish after their due date), but the finish still meets the deadline"
-  2. "Behind on effort: 80% of the work planned by today is done"
+  2. "Behind on effort: 79% of the work planned by today is done" (R13 #6: planned value runs on the Kickoff plan's dates)
   3. "Bank remittance details is not available yet; work is planned to get it"
 - **Who needs to act (7):**
   1. Leo Park: Finish “Set up the bank details form” (was due Nov 16). This is the blocker row (why `blocker`) for Bank remittance details; the "What's blocking" box shows it with "Bank remittance details holds up 5 tasks; work is planned to get it".
@@ -74,10 +74,10 @@ None of these dates is a weekend or a holiday. The launch window has `problem: n
 | Value | Amount |
 |---|---|
 | Budget (BAC) | $48,000 |
-| Planned value (PV) | $28,913.91 |
+| Planned value (PV) | $29,470.20 (R13 #6: from the saved Kickoff plan's dates, never today's) |
 | Earned value (EV) | $23,258.28 |
 | Spent (AC) | $23,668.75 |
-| SPI | **0.80** |
+| SPI | **0.79** |
 | CPI | **0.98** |
 | EAC = Expected cost | **$48,847.12**, over budget by $847.12 |
 | Bottom-up estimate | $45,300 |
@@ -218,8 +218,8 @@ The seed carries dated facts for this (business-day offsets): task `createdAt`/`
 | Blockers resolved | 0 | 1: Sanctions screening result available (Tue Nov 10) |
 | Still open at the end | Bank remittance details (open 21 bd, work planned); the bank-form problem (open 1 bd) | Bank remittance details (open 19 bd) |
 | Behind at the end | **5 late (1 past due, 4 will finish after their due date)**, the same list and text as the project screen | 4 late (4 will finish after their due date), as the docs stood on Nov 13 |
-| Tests | 14 passed, 1 failed (2 runs) | 4 passed, 0 failed (1 run) |
-| Approvals | Procurement (Rosa Vega) | none |
+| Tests (R13: latest result of each test, per stage) | Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). 2 test runs | Try it out: 4 tests passed. 1 test run (a past week never shows today's count) |
+| Approvals | Procurement’s part approved by Rosa Vega; changed since, so it must be approved again | none |
 | Risks | opened: Business testing overlaps the quarter-end close | closed: Screening vendor contract held up in legal review |
 | Spent | $4,350 | $2,468.75 |
 | Expected finish | Dec 7 → Dec 9: moved 2 bd later | Dec 4 → Dec 7: moved 1 bd later |
@@ -245,3 +245,22 @@ Seed day 0, Vendor Onboarding Modernization unless named. Asserted in `engine.te
 | Routing | **0** unmapped teams in the seeded projects (`projectTruth.routing.unmapped`) | Launch approvals |
 | Launch-day plan | **ok** (every step on a business day inside the window) (`projectTruth.launchPlan`) | Launch, gate `cutover-plan` |
 | ERP expected cost | **$10,406.25** = spent $1,406.25 + $9,000 still to do; CPI **0.00**; `ev.bacSource: 'baseline'` | Project header, Portfolio, report |
+
+## R13 (K1): one testing ledger, on every screen
+
+Seed day 0, Vendor Onboarding Modernization. Every testing number is `projectTruth.testing` (one ledger): **total = data cases on information the project changes + business-check scripts**. Asserted in `engine.test.js` (R13 tests) and on screen in `e2e-consistency.js` Part E.
+
+| What | Value | Screens that must agree |
+|---|---|---|
+| Ledger | **9 of 26** passed = **8 cases + 18 scripts** (`testing.cases`, `testing.scripts`) | Testing Simple, Testing Advanced KPIs (`data-kpi-cases` + `data-kpi-scripts` = 26; cases on unchanged information say "N more not counted"), Launch, report |
+| Try it out / Business check | **7/8** and **9/26** (`testing.stages`) | Testing Simple and Advanced tiles, trace strip (`data-trace-uat` = 9/26), report ("now 7 of 8", "now 9 of 26") |
+| Coverage | **1 gap**, **2 spec fields** without a case (Bank remittance details: Bank name, Account number); has tests **1 of 2** | Testing Simple (`data-s2-count` 1/2), trace strip (`data-trace-fields` 2), matrix header (`data-cov-gaps` 1; information the project doesn't change is "Not counted"), gate detail |
+| Gate "Tests" count | **17** tests not passed (26 − 9) (`tests-passed.count`) | Launch Advanced check row (`data-check-count`), never a sum of item kinds |
+| Launch headline | **6 steps left** (`projectTruth.stepsLeft`) | Launch Simple, Launch Advanced title and checks card (`data-steps-left`), desktop and phone |
+| Per-team cards | AP **0/8**, Compliance **9/9**, IT **0/4**, Procurement **1/4**, Treasury **0/12** (`perBU.passed/checks`); a test may cover several teams' parts | Launch part cards, approver pages |
+| Who passed each test | Compliance: "Passed by Priya Shah (Compliance): 9 tests."; Procurement: "Passed by Priya Shah (Compliance, another department): 1 test." (`perBU[bu].passedByText`, `tests[i].passedBy`) | Approver page (Simple and Advanced), `data-passed-by-text` |
+| Report this week | "Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs." Re-passing a test never raises it | Status report "Tests" |
+| Re-approvals | **None** in the seed; Procurement's approval is marked stale in the report | Launch dialog (`data-reapprovals`), report |
+| Queue | Rosa Vega: "Approve Procurement's part again" (re-approval reaches Home before the part is ready) | Home "Waiting for you" (= `personQueue`) |
+| Departments | 6 configured: Accounts Payable (Nina Brooks), Compliance (Dave Ortiz), IT (Sam Keller), PMO (none), Procurement (Rosa Vega), Treasury (Grant Wu) | Approver panel pick list, Admin Departments tab |
+| Money | Vendor Onboarding PV **$29,470.20**, SPI **0.79** (from the saved Kickoff plan's dates; a slip never raises SPI) | Advanced header, dashboard, portfolio |

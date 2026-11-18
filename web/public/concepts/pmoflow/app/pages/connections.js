@@ -4,7 +4,7 @@
    verifies every signed intent. Sync logic lives in app/sync.js (window.PMOSync, byte-identical to api/shared/pmoflow-sync.js).
    Server routes: /api/pmoflow/workspaces/:ws/connections... (api/shared/pmoflow-routes-connect.js). */
 import { store } from '../store.js';
-import { esc, fmt, fmtTime, link, pname, toast, modal, E, activityCard, bindActivity } from '../ui.js';
+import { esc, fmt, fmtTime, link, pname, toast, modal, E, av, activityCard, bindActivity } from '../ui.js';
 
 /* ---------- assets (until the lead adds the tags to index.html) ---------- */
 const APP = (() => { try { return new URL('../', import.meta.url).href; } catch (e) { return '/concepts/pmoflow/app/'; } })();
@@ -180,14 +180,22 @@ function logHTML(c) {
   }).join('')}</div>`;
 }
 
-/* R12 #3: a Done from the tool that PMOFlow held in review (it would close a problem or make information available).
-   Shown while the tool still says Done and PMOFlow has not finished the task itself. */
+/* R12 #3 / R13 #5: a Done from the tool that PMOFlow held in review (it would close a problem, make information available,
+   or finish a task before the work it depends on). The flag rides on the work item (syncHold, see PMOSync.applyInbound) and
+   names who confirms it; shown while PMOFlow has not finished the task itself. */
 function heldNote(c, wid, it, w) {
   if (!wid || !w || w.status === 'done') return null;
+  if (w.syncHold && w.syncHold.reason) return { text: w.syncHold.reason, confirmBy: w.syncHold.confirmBy || null };
   const sync = S();
   if (sync.pmoStatus(c, it.status) !== 'done') return null;
   const h = (c.log || []).find(e => e.op === 'held' && e.workItemId === wid);
-  return h ? h.detail : null;
+  return h ? { text: h.detail, confirmBy: h.confirmBy || null, fromLog: true } : null;
+}
+function holdOwnerHTML(wid, h) {
+  if (h.fromLog && !h.confirmBy) return '';
+  const p = h.confirmBy ? store.person(h.confirmBy) : null;
+  return p ? `<div class="s cx-hold-owner" data-cx-hold-owner="${esc(wid)}">${av(p.id)}<span>Waiting for <b>${esc(p.name)}</b> to confirm it in PMOFlow</span></div>`
+    : `<div class="s cx-hold-owner none" data-cx-hold-owner="${esc(wid)}">Needs an owner to confirm it</div>`;
 }
 /* R11 §9: G1's engine helper (the one definition), shown while it is still true */
 function earlyFlag(wid) {
@@ -207,7 +215,7 @@ function simHTML(c, p) {
       <div class="cx-st"><div class="t">${esc(it.title)}</div><div class="s">${esc(who)}${it.due ? ' · due ' + esc(fmt(it.due)) : ''}${(it.deps || []).length ? ' · after ' + esc(it.deps.join(', ')) : ''}</div>
         <div class="s">In PMOFlow: ${w ? `<b data-cx-pmo="${esc(wid)}">${esc(statusName(p, w.status))}</b>` : '<i>deleted</i>'}</div>
         ${(() => { const t = earlyFlag(wid); return t ? `<div class="s warn cx-flag" data-cx-early="${esc(wid)}" role="note">${esc(t)}.</div>` : ''; })()}
-        ${(() => { const t = heldNote(c, wid, it, w); return t ? `<div class="s warn cx-flag" data-cx-held="${esc(wid)}" role="note">${esc(t)}</div>` : ''; })()}</div>
+        ${(() => { const h = heldNote(c, wid, it, w); return h ? `<div class="s warn cx-flag" data-cx-held="${esc(wid)}" role="note">${esc(h.text)}</div>${holdOwnerHTML(wid, h)}` : ''; })()}</div>
       <label class="cx-ss"><span>${esc(T.name)} status</span><select data-cx-simstatus="${esc(it.key)}" aria-label="Status of ${esc(it.key)} in ${esc(T.simName)}">${statuses.concat(statuses.includes(it.status) ? [] : [it.status]).map(s => `<option ${s === it.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label></div>`;
   }).join('')}</div>`;
 }
@@ -250,7 +258,7 @@ function connectedHTML(c) {
     </div>
     <div class="cx-cols">
       <div class="card"><h3>${esc(T.simName)} <span class="sim">simulated</span></h3>
-        <p class="hint" style="margin:0 0 8px">This is what your team sees in ${esc(T.name)}. Change a status here, as the person it is assigned to would in ${esc(T.name)}: it flows back to PMOFlow, the project status updates, and History records it under their ${esc(T.name)} identity. A Done never closes a problem or makes information available on its own: those wait in review until the retest passes or the information’s owner confirms it.</p>
+        <p class="hint" style="margin:0 0 8px">This is what your team sees in ${esc(T.name)}. Change a status here, as the person it is assigned to would in ${esc(T.name)}: it flows back to PMOFlow, the project status updates, and History records it under their ${esc(T.name)} identity. A Done never closes a problem, makes information available, or finishes a task before the work it depends on: those wait in review, flagged for the person who confirms them, and don’t count as done in the forecast or cost until that person confirms them.</p>
         ${simHTML(c, p)}</div>
       <div class="card"><h3>Sync log <span class="n">${(c.log || []).length}</span></h3>${logHTML(c)}
         <details class="cx-adv"><summary>Security checks</summary>

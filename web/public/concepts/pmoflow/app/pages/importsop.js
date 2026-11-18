@@ -6,7 +6,7 @@
    "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects } from './process.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, ADD_DEPT } from './process.js';
 
 const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
@@ -321,7 +321,8 @@ function foundSummary(d) {
   const bits = [numbered ? n(numbered, 'step', 'steps') + kindTxt : '', n(choices, 'choice', 'choices'), pars ? `${pars} set${pars === 1 ? '' : 's'} of steps done at the same time` : '', n(slas, 'time limit', 'time limits'),
     systems.length ? `${n(systems.length, 'system', 'systems')} (${systems.join(', ')})` : ''].filter(Boolean);
   const last = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0] || 'no steps';
-  const teams = [...new Set((d.teams || []).concat(all.flatMap(x => x.touches || [])))];
+  /* R13 #9: the teams the approver panel lists (the engine's one list), never systems or documents */
+  const teams = draftRouting(d).rt.teams.map(x => x.team);
   /* R11 G2 §1: "9 lines → 9 steps": every numbered or bulleted line of the procedure is accounted for (live counts) */
   const lc = d.lineCount || 0;
   const linesTxt = lc ? `${lc} line${lc === 1 ? '' : 's'} → ${n(numbered, 'step', 'steps') || '0 steps'}${choices ? ', ' + n(choices, 'choice', 'choices') : ''}${pars ? `, ${pars} at the same time` : ''}` : '';
@@ -480,7 +481,7 @@ export function render() {
   return `<datalist id="is-people">${store.state.people.map(p => `<option value="${esc(p.name)}"></option>`).join('')}</datalist><section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · Paste a procedure</div>
       <h1>Paste a procedure you already have</h1><p>Paste your written steps. We turn them into a process map: the steps, who does each one, and the information each step needs. You check every step before anything is saved.</p></div>
     <div class="hdr-side"><div class="is-hdracts"><a class="btn" href="${link('/new')}" data-link>Start from blank</a>${importBtn('Import a Visio or BPMN file', 'Import a Visio (.vsdx) or BPMN 2.0 (.bpmn, .xml) file', 'btn')}</div>
-      <span class="hint is-orimport" data-or-import>Have a diagram instead? Import a Visio or BPMN file.</span></div></section>
+      <span class="hint is-orimport" data-or-import>Have a diagram instead? <button type="button" class="is-linkbtn" data-pick-import>Import a Visio or BPMN file</button>.</span></div></section>
     <div class="is-grid ${d ? 'has-draft' : ''}">
       <div class="card"><h3>Your procedure</h3>
         <div class="field"><textarea class="is-text" data-sop aria-label="Your procedure" placeholder="Paste your procedure here. Numbered steps work best.">${esc(ui.text)}</textarea></div>
@@ -562,7 +563,18 @@ export function bind(root) {
      the click (the button under the pointer is replaced). While a pointer is down the re-draw waits for the click. */
   root.querySelectorAll('[data-f=owner],[data-f=who],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; afterPointer(rerender); });
   root.querySelectorAll('[data-f=who]').forEach(el => el.oninput = () => readDraft(root));
-  root.querySelectorAll('[data-apr-sel]').forEach(el => el.onchange = () => { readDraft(root); afterPointer(rerender); });
+  /* R13 #1: "+ Add a department…" in a team's list (or the button under the panel) adds it for the workspace and picks it */
+  const pickNew = async team => {
+    const name = await addDepartmentFlow(team);
+    if (name && team && ui.draft) { const m = ui.draft.teamDepartments = Object.assign({}, ui.draft.teamDepartments || {}); const k = Object.keys(m).find(x => x.toLowerCase() === team.toLowerCase()) || team; m[k] = name; }
+    store.emit();
+  };
+  root.querySelectorAll('[data-apr-sel]').forEach(el => el.onchange = () => {
+    if (el.value === ADD_DEPT) { const prev = el.closest('[data-apr-dept]').dataset.aprDept || ''; el.value = prev; readDraft(root); pickNew(el.dataset.aprSel); return; }
+    readDraft(root); afterPointer(rerender);
+  });
+  const addD = root.querySelector('[data-apr-adddept]');
+  if (addD) addD.onclick = () => { readDraft(root); const gap = draftRouting(ui.draft).rt.teams.find(t => !t.department); pickNew(gap ? gap.team : ''); };
   root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-f=direction],[data-f=calls]').forEach(el => el.onchange = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));

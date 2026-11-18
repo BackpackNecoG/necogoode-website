@@ -775,3 +775,14 @@ a.rs-part-link .btn,a.rs-part-link .rl-go{align-self:flex-start}
   .rl-gt tr.rl-logrow td{display:block}
   .rl-gt tr.rl-logrow td::before{content:none}
 }
+/* R13 #2: who passed each test on the approver page */
+.rs-passers{margin-top:10px;font-size:13px;color:#334155;line-height:1.45}
+.rs-passers.warn{color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:6px 10px}
+.rs-passer-list{margin-top:6px;font-size:13px}
+.rs-passer-list summary{cursor:pointer;color:#1d4ed8;font-weight:600;min-height:40px;display:flex;align-items:center}
+.rs-passer-list ul{list-style:none;margin:4px 0 0;padding:0;max-height:320px;overflow:auto}
+.rs-passer-list li{display:flex;flex-wrap:wrap;gap:4px 8px;padding:5px 0;border-top:1px solid #eef2f7;min-width:0}
+.rs-passer-list li .rs-tl{min-width:0;overflow-wrap:anywhere}
+.rs-passer-list li small{color:#64748b;font-size:12px}
+.rs-passer-list li.rs-other small{color:#b45309;font-weight:600}
+.rl-co-pb{display:block;color:#b91c1c;font-weight:600;font-size:12px;margin-top:2px}

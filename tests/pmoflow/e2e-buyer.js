@@ -281,6 +281,11 @@ async function browserChecks(browser) {
   const heads = await page.$$eval('thead th', ths => ths.map(t => t.textContent.trim()));
   check('compare: Jira, Planner, Smartsheet, Signavio and PMOFlow columns', ['Jira', 'Planner', 'Smartsheet', 'Signavio', 'PMOFlow'].every(w => heads.some(h => h.includes(w))), heads);
   check("compare: says what PMOFlow deliberately doesn't do", /deliberately/i.test(await page.innerText('main')) && await page.locator('td', { hasText: 'No, deliberately' }).count() >= 2);
+  /* R13 (CONSOLIDATED-R12 §4, Karen): say plainly that PMOFlow is not a recurring-checklist or case tool */
+  const cmpMain = (await page.innerText('main')).replace(/\s+/g, ' ');
+  check('compare: "manages the change to a process, not each run of it"', cmpMain.includes('PMOFlow manages the change to a process, not each run of it'), cmpMain.slice(0, 200));
+  check('compare: recurring runs are listed under what PMOFlow deliberately doesn’t do', /each time it happens/i.test(await page.innerText('#not-h + ul')) &&
+    await page.locator('tbody tr', { hasText: /each time|every time|each week/i }).locator('td[data-col="PMOFlow"]', { hasText: 'No, deliberately' }).count() === 1);
 
   console.log('internal links');
   for (const href of internalLinks) {

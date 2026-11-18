@@ -72,7 +72,10 @@ function defaultRole(person) {
 function settingsOf(docs) {
   const d = ((docs && docs.workspace) || []).find(x => x.id === SETTINGS_ID);
   const s = d && isPlainObject(d.data) ? d.data : {};
+  /* R13: the stored doc also carries fields other streams own (departments: K1's POST /ws/:ws/departments). They ride
+     along untouched in `rest`, so an admin write never wipes them. */
   return {
+    rest: s,
     id: SETTINGS_ID,
     roles: isPlainObject(s.roles) ? s.roles : {},
     invites: Array.isArray(s.invites) ? s.invites.filter(isPlainObject) : [],
@@ -284,7 +287,7 @@ async function chainFor(store, ws, docs) {
 
 /* ---------- persistence ---------- */
 async function saveSettings(store, wsId, s) {
-  const data = { id: SETTINGS_ID, roles: s.roles, invites: s.invites.slice(-MAX_INVITES), anchors: s.anchors.slice(-MAX_ANCHORS) };
+  const data = Object.assign({}, s.rest || {}, { id: SETTINGS_ID, roles: s.roles, invites: s.invites.slice(-MAX_INVITES), anchors: s.anchors.slice(-MAX_ANCHORS) });
   await store.putDoc(wsId, 'workspace', SETTINGS_ID, data);
   return data;
 }
@@ -303,8 +306,21 @@ function federalName(date) {
   const f = eng.federalHolidays(+String(date).slice(0, 4)).find(h => h.date === date);
   return f ? f.name : null;
 }
+/* R13 #1: the department list is the engine's (E.departments), the one list for the approver panel, Admin and invites */
+function departmentsOf(docs) {
+  const eng = engine();
+  if (!eng || typeof eng.departments !== 'function') return [];
+  try { return eng.departments(docs) || []; } catch (e) { return []; }
+}
 function view(docs, s) {
-  return { settings: s, calendar: calendarOf(docs).doc, people: effectiveRoles(docs), seats: seats(docs), roles: ROLES.map(r => ({ id: r, label: ROLE_LABEL[r], paid: PAID.includes(r) })) };
+  const depts = departmentsOf(docs);
+  const deptName = id => (depts.find(d => d.id === id) || {}).name || null;
+  const settings = { id: s.id, roles: s.roles, anchors: s.anchors,
+    invites: s.invites.map(i => Object.assign({}, i, { departmentId: i.departmentId || null, department: i.departmentId ? deptName(i.departmentId) : null })) };
+  const bu = Object.fromEntries(((docs && docs.person) || []).map(d => [d.id, d.data && d.data.bu ? String(d.data.bu) : null]));
+  return { settings, calendar: calendarOf(docs).doc, departments: depts,
+    people: effectiveRoles(docs).map(p => Object.assign(p, { department: bu[p.id] || null })),
+    seats: seats(docs), roles: ROLES.map(r => ({ id: r, label: ROLE_LABEL[r], paid: PAID.includes(r) })) };
 }
 
 /* ---------- sandbox creation (R11 §2) ---------- */
@@ -415,7 +431,10 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
       /* the saved file must carry its signed head; checkpoints come from the server, never from the file */
       const st = await store.getState(ws);
       const v = verifyChain(wsId, entries, settingsOf(st.docs).anchors, { head, requireHead: true, anchorsWithin: true });
-      send(200, { verify: Object.assign(v, { keySource: keyLabel(), fileKeySource: fileKey, format: typeof body.csv === 'string' ? 'csv' : 'json' }) });
+      /* R13 (Jordan): one key-source sentence for both formats, from the key the signature was checked with (a label the
+         file carries is not trusted). Empty when the check failed. */
+      const keyNote = v.ok && v.signed ? `Signed with the ${keyLabel()}.` : '';
+      send(200, { verify: Object.assign(v, { keySource: keyLabel(), fileKeySource: fileKey, keyNote, format: typeof body.csv === 'string' ? 'csv' : 'json' }) });
       return true;
     }
     if (rest[1] === 'anchor' && rest.length === 2) {
@@ -468,11 +487,15 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
       if (!ROLES.includes(role)) { fail(400, 'Role must be Admin, Editor, Approver or Viewer.'); return true; }
       if (s.invites.some(i => i.email === email)) { fail(409, `${email} is already invited.`); return true; }
       if (s.invites.length >= MAX_INVITES) { fail(409, 'Too many open invites. Remove some first.'); return true; }
+      /* R13 #1: an invite may name a department from the workspace's list (optional) */
+      const depId = body.departmentId == null || body.departmentId === '' ? null : String(body.departmentId);
+      const dep = depId ? departmentsOf(docs).find(d => d.id === depId) : null;
+      if (depId && !dep) { fail(400, 'Choose a department from the list, or leave it blank.'); return true; }
       const id = 'inv-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
-      s.invites.push({ id, email, role, by: actor, at: new Date().toISOString() });
+      s.invites.push({ id, email, role, departmentId: dep ? dep.id : null, by: actor, at: new Date().toISOString() });
       const data = await saveSettings(store, wsId, s);
       const after = Object.assign({}, docs, { workspace: [{ id: SETTINGS_ID, data }] });
-      await log('workspace:' + wsId, `Invited ${email} as ${ROLE_LABEL[role]} (no email sent in the demo)`);
+      await log('workspace:' + wsId, `Invited ${email} as ${ROLE_LABEL[role]}${dep ? ' in ' + dep.name : ''} (no email sent in the demo)`);
       send(200, view(after, settingsOf(after)));
       return true;
     }

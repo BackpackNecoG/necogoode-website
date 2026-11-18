@@ -104,3 +104,72 @@ Each stream owns whole files. The engine has a single owner. Item numbers below 
   - all unit suites, lint and your e2e suites pass;
   - check screenshots at 1366 and 390.
 - **Don't commit.** Report in ≤300 words with any cross-stream asks.
+
+## Appendix: R13 engine API (K1, published early; shapes are stable, items marked *landing* are being filled in)
+
+`E` = `api/shared/pmoflow-engine.js` (web copy `app/engine.js`, byte-identical). Render these; never count locally.
+
+### #1 Departments are workspace data
+
+**Stored:** the workspace settings doc, `docs.workspace` entry id `'settings'` (the same doc as `roles`/`invites`/`anchors`):
+
+```js
+settings.departments = [{ id: 'dept-procurement', name: 'Procurement', approvers: ['rv'] }, ...]
+```
+- `id`: `dept-<slug of the name at creation>`; never changes on rename. `name`: unique (case-insensitive, trimmed, 1–60 chars).
+- `approvers`: person ids who approve this department's part of a project. May be empty (then the department's members are eligible, as before).
+- **Membership stays `person.bu = <department name>`.** A rename must rewrite `person.bu`, every `process.teamDepartments` value and every `project.approvers` key: use `E.departmentEdit` below, which returns all the patches.
+- **Seed:** the six existing departments (Accounts Payable, Compliance, IT, PMO, Procurement, Treasury) are ordinary entries; approvers are the department heads (AP `nb`, Compliance `do`, IT `sk`, Procurement `rv`, Treasury `gw`; PMO none).
+- **Old sandboxes** with no `departments` array: the engine derives the list from `person.bu` (as R12), `configured: false`.
+- **K4 heads-up:** `routes-admin.settingsOf()` currently rebuilds the settings doc from `roles/invites/anchors` only. Any admin write must keep `departments` (spread the stored doc first), or a role change wipes them.
+
+**Read:** `E.departments(docs)` → `[{ id, name, approvers: [personId], approverNames: [string], people: [{ id, name }], configured }]`, sorted by name. This is the one list for the approver panel pick list, Admin's Departments tab and invites.
+
+**Write helper (pure):** `E.departmentEdit(docs, op)` → `{ ok, error, departments, people: [{ id, bu }], processes: [{ id, teamDepartments }], projects: [{ id, approvers }] }`. Only the changed docs are listed; the caller saves each.
+- `op = { kind: 'add', name, approvers? }`
+- `op = { kind: 'rename', id, name }`
+- `op = { kind: 'remove', id }`: refused (`ok: false`, error text) while people are still in it; otherwise its `teamDepartments` values become `null` ("Choose who approves for …") and its `project.approvers` keys are dropped.
+- `op = { kind: 'approvers', id, approvers: [personId] }`
+- `op = { kind: 'assign', personId, id | null }`: sets `person.bu` (null clears).
+- Errors are plain sentences: "Name a department.", "A department called Credit already exists.", "Move the 2 people in Credit to another department first."
+
+**Server route (K1, `api/pmoflow/index.js`):** `POST /ws/:ws/departments` `{ op, actor }` with the same `op` as above. Admins and Editors may `add`; `rename`, `remove`, `approvers` and `assign` are Admin only (403 with the standard "Only an Admin…" sentence). It writes the settings doc and the returned person/process/project patches, then appends one audit event ("Added the Credit department", …). Returns `{ ok: true, departments }`. K2's "Add a department" (approver panel) and K4's Admin tab both call this route.
+
+**Routing:** the department names come from `E.departments(docs)`. With a configured list, the built-in six names are no longer assumed: a team routes to a department only through `process.teamDepartments` or a department of the same name (or abbreviation AP/AR/HR/IT). `E.teamRouting(docs, proc).departments` is now `E.departments(docs)` (same `{ name, people }` plus `id`, `approvers`).
+
+**Who may approve a part:** the department's `approvers` when that list is non-empty; otherwise its members. Plus `project.approvers[dept]`. Minus the PM, the launch owner, and anyone barred (does steps in the part, recorded or **assigned** its tests).
+
+### #2 One testing ledger (landed)
+- `projectTruth.testing` adds `cases`, `scripts` (total = cases + scripts; only information the project changes). Advanced KPIs, the trace strip and the coverage matrix read it; unchanged information is "Not counted".
+- `readiness` check `tests-passed.count` = tests not passed (total − passed): the gate row's number.
+- `testing.perBU[bu]` adds `tests: [{ id, kind, label, status, passedBy, passedByName, passedByDept, otherDept, passedAt }]`, `passedByText`, `otherDeptPasses` (approver page: who passed each test).
+- `periodReport(...).testsRun` = `{ runs, tests, passed, failed, blocked, stages: { system, uat }, ledger, text }`: each test's latest result per stage; `ledger` (today's stage counts) only when the window ends today.
+- Launch Simple and Advanced headline: `projectTruth.stepsLeft` ("6 steps left").
+
+### #3 Separation of duties (landed, server-enforced)
+- `E.canAssignTest(docs, prj, testId, actor)` → `null | { rule: 'department', text }`: the PM or someone in a department whose part the test covers. Server stamps `assignedBy` on `testCase` (and on `project.uatScripts[i]`).
+- `E.canPassTest` adds `rule: 'assigner'`: whoever assigned a test can't pass it.
+- PUT `approval` (approved, no `kind`) is refused with `buReady(...).sentence` while the part is not ready: one rule for Simple and Advanced.
+
+### #4 Ownership (landed)
+- `projectTruth.unowned` = open task ids with no real owner. Reason "N tasks need an owner"; label **"Tasks need owners"** (amber) when most open tasks are unowned. One `who` row `{ why: 'owner', person: null, name: 'Needs an owner', what: 'Choose owners for N tasks', ref: 'owners:<prj>', items }`. The "Finish the work" launch step names real owners only, action "N tasks still open (M need an owner)".
+
+### #5 / #12 Held inbound items and the queue (landed)
+- `E.isHeld(w)`: `status !== 'done'` and `w.syncHold`. A held item earns no new EV (`syncHold.progress` if K4 records it, else a 100% from the tool counts 0); a held defect fix never releases its held test.
+- `who` row `{ why: 'hold', ref: 'hold:<id>', person: syncHold.confirmBy | null }`, "Confirm “<task>” finished in <tool>"; with no confirmer, "Needs an owner".
+- `personQueue` adds `{ kind: 'syncHold', id, title, tool, key, reason }` for `confirmBy`, and re-approvals `{ kind: 'approval', reapproval: true, title: "Approve X's part again" }` even before the part is ready.
+
+### #6 EV (landed)
+- Planned value runs on the latest **saved** baseline's dates (`baselines[]` without `auto`); work added since is valued at its own cost on top of BAC. `workItem.cost` = a fixed cost (licence, fee) that adds to the task's cost.
+- No budget, no hours, and an unpriced open task (no owner with a day rate, no fixed cost): `cost.forecast/estimate = null`, `cost.show = false`.
+
+### #10 Removed steps (landed)
+- A removed Today step's team is an approving section (`sectionBus`) and is in the plan's "Tell affected teams". Tasks with `tag: 'tell-removed'` and `teams` already tell those teams; the plan's tell task skips them.
+
+### #11 Reports (landed)
+- `reportLog[i].at` / `lastReportAt` with a time: "since last report" counts timestamped facts after it (`window.since`); day-only facts from the next business day. **K3: write `at: new Date().toISOString()` on the report log entry and `lastReportAt`.**
+- A past range undoes plan changes applied after it (their `snapshots.before`).
+- `approvalsGiven[i]` adds `again`, `stale`, `text`. `projectTruth.reapprovals` / `reapprovalsText` ("Compliance and IT approved again after changes"). An override launch adds a `release:<id>` exception.
+
+### #13 Launch-day card (landed)
+- `E.launchDayCard(docs, prj, today)` → `{ ready, label, text, steps: [{ taskId, task, done, problem, text }] }`; "Ready" only when the gate's `cutover-plan` passes.

@@ -91,7 +91,7 @@ function parseCSV(text) {
    from the engine instead (planned value shifts by a day there; see the doc). */
 const G = {
   vm: { id: 'vendor-modernization', label: 'Some tasks late', done: 7, total: 13, pct: 48, late: 5, lateSplit: '1 past due, 4 will finish after their due date', blocking: 1,
-    who: 7, whoShown: 5, spi: '0.80', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
+    who: 7, whoShown: 5, spi: '0.79', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
     tests: '9/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
     change: '5 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
   erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$10,406', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
@@ -229,6 +229,83 @@ async function goldenNumbers(browser, ymd, at, errors) {
       await page.screenshot({ path: `${SHOTS}/golden-${w}${u.replace(/\W+/g, '-')}.png`, fullPage: true });
     }
   }
+  await ctx.close();
+}
+
+
+/* R13 Part E (K1): ONE testing ledger. Every testing count the R12 reviewers flagged, asserted on every screen where it
+   appears: the report, Testing (Simple and Advanced), the coverage matrix, the Launch gate and per-team cards (Simple and
+   Advanced, 1366 and 390), and the approver page (who passed each test). Values: GOLDEN-NUMBERS.md "R13". */
+const G13 = { total: 26, passed: 9, cases: 8, scripts: 18, try: '7/8', uat: '9/26', gaps: 1, fields: 2, have: '1/2', gateTests: 17, stepsLeft: 6,
+  parts: { 'Accounts Payable': '0/8', Compliance: '9/9', IT: '0/4', Procurement: '1/4', Treasury: '0/12' },
+  compPassedBy: 'Passed by Priya Shah (Compliance): 9 tests.',
+  report: 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.' };
+async function ledgerE(browser, at, errors) {
+  console.log('\nPart E: R13 one testing ledger (fresh sandbox, seed day 0)');
+  const ip = `198.51.100.${(Math.random() * 200 | 0) + 20}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, timezoneId: TZ, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  if (page.clock && page.clock.setFixedTime) await page.clock.setFixedTime(at);
+  page.on('pageerror', e => errors.push('E pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('E console: ' + m.text()); });
+  const STORE = ROOT + '/app/store.js', VM = 'vendor-modernization';
+  const txt = async sel => (await page.locator(sel).first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+  const attr = async (sel, a) => page.locator(sel).first().getAttribute(a).catch(() => null);
+  const adv = async on => { await page.evaluate(async ([u, v]) => (await import(u)).store.setAdvanced(v), [STORE, on]); await page.waitForTimeout(300); };
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]', { timeout: 20000 });
+  await page.evaluate(async u => { const { store } = await import(u); store.setMe && store.setMe('ta'); }, STORE);
+  const t = await page.evaluate(async u => { const { store } = await import(u); return window.PMOEngine.projectTruth(store.state.docs, 'vendor-modernization', store.state.today).testing; }, STORE);
+  check('E engine: ledger 9 of 26 = 8 cases + 18 scripts', t.passed === G13.passed && t.total === G13.total && t.cases === G13.cases && t.scripts === G13.scripts, [t.passed, t.total, t.cases, t.scripts]);
+  /* Testing, Simple */
+  await adv(false);
+  await page.goto(ROOT + '/testing/' + VM); await page.waitForSelector('[data-tests-number]');
+  check('E testing Simple: 9/26, Try it out 7/8, has tests 1/2', (await attr('[data-tests-number]', 'data-tests-number')) === G13.uat && (await attr('[data-stage="try"]', 'data-try-count')) === G13.try && (await attr('[data-s2-count]', 'data-s2-count')) === G13.have);
+  /* Testing, Advanced: KPIs, trace strip, matrix */
+  await adv(true);
+  await page.goto(ROOT + '/testing/' + VM); await page.waitForSelector('[data-cov="dev"]');
+  const kc = +(await attr('[data-kpi-cases]', 'data-kpi-cases')), ks = +(await attr('[data-kpi-scripts]', 'data-kpi-scripts'));
+  check('E testing Advanced: data cases + UAT scripts = the ledger total (8 + 18 = 26), never 14 + 18', kc === G13.cases && ks === G13.scripts && kc + ks === G13.total, [kc, ks]);
+  check('E testing Advanced: tiles 7/8 and 9/26; trace strip 9/26 and 2 spec fields; matrix 1 coverage gap',
+    (await attr('[data-cov="dev"]', 'data-cov-n')) === G13.try && (await attr('[data-cov="uat"]', 'data-cov-n')) === G13.uat && (await attr('[data-trace-uat]', 'data-trace-uat')) === G13.uat
+    && +(await attr('[data-trace-fields]', 'data-trace-fields')) === G13.fields && +(await attr('[data-cov-gaps]', 'data-cov-gaps')) === G13.gaps,
+    [await attr('[data-trace-uat]', 'data-trace-uat'), await attr('[data-trace-fields]', 'data-trace-fields'), await attr('[data-cov-gaps]', 'data-cov-gaps')]);
+  check('E matrix: information the project does not change is "Not counted", never a gap', await page.locator('#coverage tr[data-not-counted].ts-zero').count() === 0 && await page.locator('#coverage tr[data-not-counted]').count() > 0);
+  /* Launch, Advanced at 1366 and 390: one phrase, one number; the tests row = 17 not passed */
+  for (const w of [1366, 390]) {
+    await page.setViewportSize({ width: w, height: 900 });
+    await page.goto(ROOT + '/release/' + VM); await page.waitForSelector('[data-check="tests-passed"]', { timeout: 15000 });
+    check(`E launch Advanced ${w}: "Not ready to launch: 6 steps left" (never "checks not passed"), checks card says 6 steps left`,
+      /Not ready to launch: 6 steps left/.test(await txt('[data-gate]')) && !/checks? not passed/.test(await txt('[data-gate]')) && (await attr('[data-counts]', 'data-steps-left')) === String(G13.stepsLeft), await txt('[data-gate]'));
+    check(`E launch Advanced ${w}: the Tests row counts 17 tests not passed (26 − 9)`, (await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count')) === String(G13.gateTests), await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count'));
+  }
+  await page.setViewportSize({ width: 1366, height: 900 });
+  /* Launch, Simple: the same phrase and number; per-team cards */
+  await adv(false);
+  for (const w of [1366, 390]) {
+    await page.setViewportSize({ width: w, height: 900 });
+    await page.goto(ROOT + '/release/' + VM); await page.waitForSelector('[data-launch-sentence]');
+    check(`E launch Simple ${w}: "Not ready to launch: 6 steps left"`, (await txt('[data-launch-sentence]')) === 'Not ready to launch: 6 steps left', await txt('[data-launch-sentence]'));
+    await page.evaluate(() => document.querySelectorAll('details[data-sec]').forEach(d => { d.open = true; })); await page.waitForTimeout(200);
+    const parts = await page.$$eval('[data-part]', els => els.map(e => [e.dataset.part, (e.querySelector('[data-part-tests]') || { dataset: {} }).dataset.partTests || null]));
+    check(`E launch Simple ${w}: per-team cards AP 0/8, Compliance 9/9, IT 0/4, Procurement 1/4, Treasury 0/12`, Object.entries(G13.parts).every(([bu, v]) => parts.some(([b, x]) => b === bu && x === v)), parts);
+  }
+  await page.setViewportSize({ width: 1366, height: 900 });
+  /* approver page: who passed each test (Simple and Advanced) */
+  for (const on of [false, true]) {
+    await adv(on);
+    await page.goto(ROOT + '/release/' + VM + '?bu=Compliance'); await page.waitForSelector('[data-bu-view]');
+    check(`E approver page (${on ? 'Advanced' : 'Simple'}): "${G13.compPassedBy}" and one row per test with its passer`,
+      (await txt('[data-passed-by-text]')) === G13.compPassedBy && await page.locator('[data-test-passer][data-passed-by="ps"]').count() === 9, await txt('[data-passed-by-text]'));
+    if (!on) check('E approver page Simple: the card count is the same 9/9', (await attr('[data-evidence-line]', 'data-part-tests')) === G13.parts.Compliance);
+  }
+  await page.goto(ROOT + '/release/' + VM + '?bu=Procurement'); await page.waitForSelector('[data-bu-view]');
+  check('E approver page: a pass from another department is flagged (Procurement, Priya Shah of Compliance)', await page.locator('[data-test-passer][data-other-dept]').count() === 1 && /another department/.test(await txt('[data-passed-by-text]')));
+  /* the status report: latest result per test, per stage, with the ledger's counts */
+  await adv(false);
+  await page.goto(ROOT + '/project/' + VM); await page.waitForSelector('[data-report]');
+  await page.click('[data-report]'); await page.waitForSelector('[data-psec="tests"]', { timeout: 30000 });
+  const rep = await txt('[data-psec="tests"]');
+  check('E report: the Tests line uses the ledger (never a sum of runs)', !/\b14 passed\b/.test(rep) && /now 9 of 26 passed/.test(rep) && /now 7 of 8 passed/.test(rep), rep);
   await ctx.close();
 }
 
@@ -563,6 +640,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
   /* ======================= Part D (R10): the golden numbers (docs/pmoflow/GOLDEN-NUMBERS.md), on the screens ======================= */
   console.log('\nPart D: R10 golden numbers (fresh sandbox, seed day 0)');
   await goldenNumbers(browser, ymd, at, errors);
+  await ledgerE(browser, at, errors);
 
   check('no console errors', errors.length === 0, errors);
   await browser.close();
