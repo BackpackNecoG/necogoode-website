@@ -61,6 +61,9 @@
 .cx-st .cx-hold-owner .av{width:20px;height:20px;font-size:9.5px;flex:none}
 .cx-st .cx-hold-owner.none{color:var(--ink2);font-style:italic}
 .cx-ss{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.4px}
+.cx-lx a,.cx-flag a{color:var(--accent);font-weight:600}
+.cx-sctl{display:flex;flex-direction:column;gap:6px}
+.cx-ss input[type=date]{font:inherit;font-size:12.5px;text-transform:none;letter-spacing:0;color:var(--ink);padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:140px}
 .cx-ss select{font:inherit;font-size:12.5px;text-transform:none;letter-spacing:0;color:var(--ink);padding:5px 6px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:140px}
 .cx-log{display:flex;flex-direction:column;max-height:560px;overflow:auto}
 .cx-le{padding:8px 0;border-top:1px solid #f1f2f5;min-width:0}
@@ -98,6 +101,7 @@
   .cx-notify{grid-template-columns:minmax(0,1fr)}
   .cx-check{padding-bottom:0}
   .cx-si{grid-template-columns:auto minmax(0,1fr)}
-  .cx-ss{grid-column:1/-1;flex-direction:row;align-items:center;gap:8px}
+  .cx-sctl{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;gap:12px}
+  .cx-ss{flex-direction:row;align-items:center;gap:8px}
   .cx-lh time{margin-left:0}
 }

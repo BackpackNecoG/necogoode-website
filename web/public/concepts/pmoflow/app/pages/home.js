@@ -3,7 +3,7 @@
    three big choices, then projects and processes (each labelled, one plain sentence each). */
 import { store } from '../store.js';
 import { esc, fmt, link, go, av, pname, LOCK } from '../ui.js';
-import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, availText, changePhrase, factsHTML, truthOf, WAIT_IC } from './project.js';
+import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, confirmDone, availText, changePhrase, factsHTML, truthOf, WAIT_IC } from './project.js';
 
 const PRJ_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M7 13h4M7 17h7"/></svg>';
 const PROC_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="5" rx="1.5"/><rect x="7" y="17" width="10" height="5" rx="1.5"/><path d="M12 7v3M12 14v3"/><path d="M12 10l3 2-3 2-3-2z"/></svg>';
@@ -22,8 +22,8 @@ export function waitingFor() { const list = personQueue(); return { list, total:
 
 /* §7: an approval opens that team's part page */
 const hrefOf = x => x.kind === 'approval' && x.projectId && x.id ? `/release/${encodeURIComponent(x.projectId)}?bu=${encodeURIComponent(x.id)}` : (x.href || '/');
-const KIND_IC = { work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', syncHold: '?', planChange: '✓', information: WAIT_IC, action: '›' };
-const KIND_CLS = { work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', syncHold: 'confirm', planChange: 'approve', information: 'notready', action: 'mention' };
+const KIND_IC = { confirmDone: '✓', work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', syncHold: '?', planChange: '✓', information: WAIT_IC, action: '›' };
+const KIND_CLS = { confirmDone: 'confirm', work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', syncHold: 'confirm', planChange: 'approve', information: 'notready', action: 'mention' };
 function waitHTML() {
   const { list } = waitingFor();
   const pn = id => (store.get('project', id) || {}).name || '';
@@ -35,7 +35,10 @@ function waitHTML() {
     const sub = [pn(x.projectId) ? esc(pn(x.projectId)) : '', due].filter(Boolean).join(' · ');
     const one = x.oneTap && x.oneTap.action;
     const title = esc(x.title || x.what || '');
-    const act = one === 'done' && x.id
+    /* R14 (PMO-1): a Done someone else marked: one tap confirms it (the engine never asks the doer) */
+    const act = kind === 'confirmDone' && x.id
+      ? `<button class="btn primary pmo-big" data-wconfirm="${esc(x.id)}" aria-label="${esc('Confirm it’s done: ' + (x.title || ''))}">✓ Confirm it’s done</button>`
+      : one === 'done' && x.id
       ? `<button class="btn primary pmo-big" data-wdone="${esc(x.id)}" aria-label="${esc((x.oneTap.label || 'Mark done') + ': ' + (x.title || ''))}">✓ ${esc(x.oneTap.label || 'Mark done')}</button>`
       : one === 'confirm' && x.id
       ? `<a class="btn primary pmo-big" data-confirm-data="${esc(x.id)}" href="${link('/data/' + encodeURIComponent(x.id) + '?confirm=1')}" data-link>${esc(x.oneTap.label || 'Confirm')}</a>`
@@ -67,7 +70,7 @@ function projectTile(j) {
     <h4>${esc(j.name)}</h4>
     ${summaryHTML(sm)}
     ${s.total ? `<div class="pmo-prog" data-tile-pct="${s.pct}"><div class="bar" title="${s.pct}% of the budgeted work done"><i style="width:${s.pct}%"></i></div><b>${s.done} of ${s.total}</b><span class="hint">tasks done</span></div>` : truthOf(j).noPlan ? '<div class="pmo-prog" data-no-plan><span class="hint">No plan yet</span></div>' : ''}
-    <div class="pmo-sline pmo-tfacts" data-tile-facts>${factsHTML(j, { cost: store.advanced })}</div>
+    <div class="pmo-sline pmo-tfacts" data-tile-facts>${factsHTML(j, { cost: store.advanced, inLink: true })}</div>
     ${whoLineHTML(j, 2)}</a>`;
 }
 function processTile(p) {
@@ -102,6 +105,7 @@ export function bind(root) {
     el.disabled = true;
     await markDone(el.dataset.wdone); /* shows "Done · Undo" */
   });
+  on('[data-wconfirm]', async el => { el.disabled = true; await confirmDone(el.dataset.wconfirm); });
   on('[data-big="check"]', () => go('/projects'));
 }
 /* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */

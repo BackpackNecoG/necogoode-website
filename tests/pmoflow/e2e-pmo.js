@@ -15,6 +15,16 @@ function check(name, cond, detail) {
   if (cond) { pass++; console.log('  ok   ' + name); }
   else { fail++; failures.push(name); console.log('  FAIL ' + name + (detail !== undefined ? ' :: ' + JSON.stringify(detail) : '')); }
 }
+const R14_KAREN = `Vendor Setup
+1. Buyer gets the vendor request from the requester.
+2. Purchasing mgr sends the vendor our packet.
+3. Vendor sends W-9; Treasury calls to verify bank letter.
+4. Check OFAC/sanctions list.
+5. Credit dept runs a D&B check on the vendor.
+6. Operations confirms the ship-to address.
+7. Purchasing mgr approves the vendor.
+if spend over $25k Karen approves too
+8. AP double-checks the bank letter and sets up the vendor master in the ERP.`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 (async () => {
@@ -220,8 +230,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const pctBefore = await kpiPct();
   await workRow(T2).locator('select[data-status]').selectOption('done'); await settle();
+  /* R14 PMO-1: a Done with an open predecessor (or no hours) earns nothing until someone other than the doer confirms it */
+  const pctDone = await kpiPct();
+  check('R14 PMO-1: a Done with open predecessors does not move progress yet', pctDone === pctBefore, { pctBefore, pctDone });
+  check('R14 PMO-1: the row says it needs someone else to confirm it', /Needs someone else to confirm/.test(await workRow(T2).locator('[data-unconfirmed]').innerText().catch(() => '')));
+  check('R14 PMO-1: the doer gets no Confirm button', await workRow(T2).locator('[data-confirm-done]').count() === 0);
+  await asPersona('^Maya Chen'); await page.waitForSelector('table.pmo-work');
+  await workRow(T2).locator('[data-confirm-done]').click(); await settle();
+  await asPersona('Project Manager'); await page.waitForSelector('table.pmo-work');
   const pctAfter = await kpiPct();
-  check('status change updates progress KPI', pctAfter > pctBefore, { pctBefore, pctAfter });
+  check('status change updates progress KPI (once someone else confirms the Done)', pctAfter > pctBefore, { pctBefore, pctAfter });
+  check('R14 PMO-1: confirmed, the flag is gone', await workRow(T2).locator('[data-unconfirmed]').count() === 0);
   check('done item shows "done <date>"', /done [A-Z][a-z]{2} \d{1,2}/.test(await workRow(T2).locator('.pmo-dl').innerText()));
 
   /* defect work item */
@@ -289,7 +308,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(800); await page.reload(); await page.waitForSelector('.tl button.tbar');
   check('reload: dragged dates persisted', (await getDoc('workItem', dragId)).due === after2.due);
   await openAct(); await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
-  check('history shows "Rescheduled" with a summary', /Rescheduled “.+” on the timeline: .+ → .+ \(\+3d\)/.test(await page.locator('[data-feed="prj-work"]').innerText()));
+  /* R14: the server writes the from → to from the actual diff; the client's words ride along as a note */
+  check('history shows "Rescheduled" with a summary', /Rescheduled .+ on the timeline \(\+3d\)/.test(await page.locator('[data-feed="prj-work"]').innerText()) && /due .+ → .+/i.test(await page.locator('[data-feed="prj-work"]').innerText()));
   await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
 
   /* push an open item's due out by editing it, so baseline variance has something to show (after baseline below) */
@@ -352,7 +372,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('keyboard: status changed from the card select', (await getDoc('workItem', kId)).status === 'prog');
   await dnd(`.pmo-card[data-card="${bId}"]`, '.pmo-col[data-col="idle"] .pmo-col-b');
   check('board drag Done -> Not started clears doneAt', (await getDoc('workItem', bId)).status === 'idle' && !(await getDoc('workItem', bId)).doneAt);
-  check('history: board moves summarised', /Not started → In progress/.test(await feedText()));
+  check('history: board moves summarised', /moved to In progress \(was Not started\)|Not started → In progress/.test(await feedText()));
   await asPersona('^Leo Park'); await page.waitForSelector('[data-board]');
   const lpDrag = await page.evaluate(async u => { const { store } = await import(u); const me = store.state.me; return [...document.querySelectorAll('.pmo-board .pmo-card')].map(c => [store.get('workItem', c.dataset.card).owner === me, c.getAttribute('draggable') === 'true']); }, STORE);
   check('board: non-PM can drag only own cards', lpDrag.length > 0 && lpDrag.every(([own, d]) => own === d) && lpDrag.some(([o]) => !o), lpDrag.length);
@@ -394,7 +414,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('sprint drag: due moved inside the sprint', mAfter.due >= target.start && mAfter.due <= target.end, { due: mAfter.due, target });
   check('sprint drag: duration kept', shift(mAfter.start, mAfter.due) === shift(mBefore.start || mBefore.due, mBefore.due), { mBefore, mAfter });
   check('sprint drag: card shows in target sprint', await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-card="${mId}"]`).count() === 1);
-  check('history: sprint move summarised', new RegExp(`Planned “.+” in ${target.name}`).test(await feedText()));
+  check('history: sprint move summarised', await (async () => { const f = await feedText(); return f.includes('Planned ') && f.includes(target.name); })(), (await feedText()).slice(0, 300));
   /* keyboard alternative + over-capacity: pile one owner's open work into the same sprint */
   for (let k = 0; k < 14 && !(await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-over]`).count()); k++) {
     /* prefer work owned by someone already in the target sprint, so effort grows faster than capacity */
@@ -469,7 +489,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(800); await page.reload(); await page.waitForSelector('[data-board]'); await settle();
   check('reload: filters persist from the URL', await page.locator('.pmo-board .pmo-card').count() === filtered && await page.isChecked('[data-fbar] input[data-f="late"]'));
   await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-  check('history: saved view', (await page.locator('[data-history]').innerText()).includes('Saved view “E2E late open work”'));
+  check('history: saved view', /Saved view ["“]E2E late open work["”]/.test(await page.locator('[data-history]').innerText()));
   await page.selectOption('[data-fbar] select[data-f="owner"]', ownerPick); await settle();
   await page.click('[data-save-view]'); await modalOpen(); await page.fill('.overlay input[name="name"]', 'E2E throwaway view'); await act('save'); await settle();
   await page.click('[data-del-view]'); await modalOpen(); await act('delete'); await settle();
@@ -510,7 +530,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.click('[data-report]');
   await page.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 });
   check('report: headline + the same status label', (await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim().length > 5 && await page.locator(`[data-prj-rep] .rag-${ragK2}`).count() === 1);
-  check('R8 report: facts strip (expected, late, blocking, costs)', await page.locator('[data-prj-rep] [data-rep-facts] [data-t]').count() >= 6);
+  check('R8 report: facts strip (expected, late, blocking, costs)', await page.locator('[data-prj-rep] [data-rep-facts] [data-t]').count() + await page.locator('[data-prj-rep] [data-rep-facts] [data-cost-unknown]').count() >= 6);
   const mail = await page.getAttribute('[data-rep-mail]', 'href');
   const mailU = new URL(mail);
   check('email draft: mailto with subject + plain-text body', /^mailto:[a-z.]+@northwind\.example(,[a-z.]+@northwind\.example)*\?subject=/.test(mail) && mailU.searchParams.get('subject').includes('status') && mailU.searchParams.get('body').includes((await page.locator('[data-prj-rep] .pmo-rep-h').innerText()).trim()), mail.slice(0, 120));
@@ -583,14 +603,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   /* ---------------- baseline ---------------- */
   console.log('baseline');
+  /* R14 PMO-S3: the project already has a saved plan, so "Save plan" routes to Change the plan (the sponsor approves) */
   await page.click('[data-baseline]'); await modalOpen();
-  await page.fill('.overlay input[name="label"]', 'E2E baseline');
-  await act('save'); await settle();
-  const openRow = page.locator('tr[data-wid]').filter({ has: page.locator('select[data-status] option[value="idle"]:checked') }).first();
+  check('R14 PMO-S3: "Save plan" on a planned project explains and offers Change the plan', /already has a saved plan/.test(await page.locator('.overlay [data-rebaseline]').innerText()) && await page.locator('.overlay [data-act="change"]').count() === 1);
+  await shot('r14-rebaseline-1440', false);
+  await page.click('.overlay [data-act="change"]'); await page.waitForSelector('.chg-wiz', { timeout: 10000 });
+  check('R14 PMO-S3: Change the plan opens on dates', await page.isChecked('.chg-wiz input[name="kind"][value="dates"]'));
+  await page.click('.chg-wiz [data-w="cancel"]'); await settle();
+  /* R14: no new saved plan is made here (Change the plan owns that), so pick an open task that the saved plan already has */
+  const inBl = await page.evaluate(async ([u, p]) => { const { store } = await import(u); const prj = store.get('project', decodeURIComponent(p.split('/project/')[1])); const bl = (prj.baselines || []).slice(-1)[0] || { items: {} };
+    const E = window.PMOEngine, D = store.state.docs, t = store.state.today;
+    /* one with slack: moving it a week doesn't push the finish past the deadline (that would go to Change the plan) */
+    const slack = w => { const d = new Date(w.due + 'T12:00:00'); d.setDate(d.getDate() + 7); while ([0, 6].includes(d.getDay())) d.setDate(d.getDate() + 1);
+      const nw = Object.assign({}, w, { due: d.toISOString().slice(0, 10) }); return !E.deadlineBreach || !E.deadlineBreach(D, Object.assign({}, D, { workItem: D.workItem.map(e => e.id === w.id ? { id: e.id, data: nw } : e) }), prj.id, t); };
+    return store.list('workItem', w => w.projectId === prj.id && w.status === 'idle' && bl.items && bl.items[w.id]).filter(slack).map(w => w.id); }, [STORE, prjPath]);
+  const openRow = inBl.length ? page.locator(`tr[data-wid="${inBl[0]}"]`) : page.locator('tr[data-wid]').filter({ has: page.locator('select[data-status] option[value="idle"]:checked') }).first();
   const openTitle = (await openRow.locator('.pmo-wt').innerText()).trim();
   await openRow.locator('[data-edit-work]').click(); await modalOpen();
   const oldDue = await page.inputValue('.overlay input[name="due"]');
-  const d = new Date(oldDue + 'T12:00:00'); d.setDate(d.getDate() + 21);
+  const d = new Date(oldDue + 'T12:00:00'); d.setDate(d.getDate() + 7); while ([0, 6].includes(d.getDay())) d.setDate(d.getDate() + 1);
   await page.fill('.overlay input[name="due"]', d.toISOString().slice(0, 10));
   await act('save'); await settle();
   await page.click('.pmo-tabs a:has-text("Timeline")');
@@ -643,7 +674,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await page.selectOption('.overlay select[name="o_1"]', otherOwner);
     await page.fill('.overlay input[name="e_1"]', '4');
     const s1 = await page.inputValue('.overlay input[name="s_1"]'), d1 = await page.inputValue('.overlay input[name="d_1"]');
-    const ns = await page.evaluate(d => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 5); return x.toISOString().slice(0, 10); }, s1);
+    const ns = await page.evaluate(d => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 1); return x.toISOString().slice(0, 10); }, s1);
     await page.fill('.overlay input[name="s_1"]', ns); await page.locator('.overlay input[name="s_1"]').dispatchEvent('change');
     const nd = await page.inputValue('.overlay input[name="d_1"]');
     check('moving a suggestion start keeps its duration', shift(s1, ns) === shift(d1, nd), { s1, d1, ns, nd });
@@ -757,7 +788,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('reload: risk persisted with edit', (await page.locator('.pmo-rtable tr', { hasText: R1 }).locator('.pmo-sev').innerText()).trim() === '3');
   await page.waitForSelector('[data-feed="risk"] .ev', { timeout: 10000 }).catch(() => {});
   const rfeed = await page.locator('[data-feed="risk"]').innerText();
-  check('risk history shows create + edit', rfeed.includes('Logged risk') && rfeed.includes('Edited risk'), rfeed.slice(0, 200));
+  /* R14: History is server-written from the actual change (Created / Updated …), the client's words a note */
+  check('risk history shows create + edit', /Logged risk|Created risk/.test(rfeed) && /Edited risk|Updated risk/.test(rfeed), rfeed.slice(0, 200));
   /* linked work row shows a risk badge on the project Work tab */
   await page.goto(ROOT + prjPath.replace(/^\/concepts\/pmoflow/, '') + '?mode=work'); await page.waitForSelector('table.pmo-work');
   check('linked work row shows risk badge', await workRow(linkTitle).first().locator('.pmo-riskb').count() === 1, linkTitle);
@@ -848,7 +880,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     vm2.target === vmB.target && JSON.stringify(vm2.budget || null) === JSON.stringify(vmB.budget || null), { rm: vm2.releaseManager, b: vm2.budget });
   check('R5 header: new release manager shown', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
   await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-  check('R5 history: settings change summarised', /Project settings: .*launch owner Tom Alvarez → Leo Park/.test(await page.locator('[data-history]').innerText()));
+  check('R5 history: settings change summarised', /(launch owner|release ?manager|Launch owner|Release manager)\W.*Tom Alvarez → Leo Park/i.test(await page.locator('[data-history]').innerText()), (await page.locator('[data-history]').innerText()).slice(0, 300));
   await sleep(600); await page.reload(); await page.waitForSelector('[data-role-rm]');
   check('R5 reload: settings persisted', (await page.locator('[data-role-rm]').innerText()).includes('Leo Park'));
   /* R13 server: a direct save that moves the deadline is refused (409) on a planned project */
@@ -919,14 +951,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (pair) {
     const rowTxt = await page.locator(`.overlay [data-as-row="${pair.w}"]`).innerText().catch(() => '');
     const f5 = s => new Date(s + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    check('R5 auto-schedule: dragged item proposed after its predecessor', !!prop[pair.w] && prop[pair.w].start >= pair.dd && rowTxt.includes(f5(prop[pair.w].start)), rowTxt);
+    check('R5 auto-schedule: dragged item proposed after its predecessor', !!prop[pair.w] && prop[pair.w].start >= pair.dd && rowTxt.includes(f5(prop[pair.w].start)), { rowTxt, pair, keys: Object.keys(prop), now: await getDoc('workItem', pair.w) });
   }
   await shot('20-autoschedule-preview-1440', false);
-  await act('apply'); await page.waitForSelector('.toast:has-text("Applied")', { timeout: 20000 }).catch(() => {}); await settle();
-  const applied = await Promise.all(Object.entries(prop).map(async ([id, v]) => { const w = await getDoc('workItem', id); return w.start === v.start && w.due === v.due ? null : { id, v, w: [w.start, w.due] }; }));
-  check('R5 auto-schedule: applied dates match the preview', applied.every(x => !x), applied.filter(Boolean));
-  check('R5 auto-schedule: no conflicts left', (await E5('scheduleConflicts', PRJ)).length === 0 && await page.locator('[data-conf-mark]').count() === 0 && await page.locator('[data-conf-bar].has').count() === 0, await E5('scheduleConflicts', PRJ));
-  check('R5 history: auto-schedule moves summarised', /Auto-scheduled “.+”: .+ → .+/.test(await feedText()));
+  await page.click('.overlay [data-act="apply"]'); await settle();
+  /* R14 (PMO-S1): when the moves together push the finish past the deadline, nothing is saved and Change the plan is offered */
+  const asRefused = await page.locator('.overlay [data-deadline-refusal]').count() === 1;
+  if (asRefused) {
+    check('R14 PMO-S1 auto-schedule: refused past the deadline, with why', /past the .* deadline/.test(await page.innerText('.overlay [data-deadline-refusal]')));
+    const nothing = await Promise.all(Object.keys(prop).map(async id => (await getDoc('workItem', id)).start !== prop[id].start || (await getDoc('workItem', id)).due !== prop[id].due));
+    check('R14 PMO-S1 auto-schedule: nothing was saved', nothing.every(Boolean));
+    await page.click('.overlay [data-act="change"]'); await page.waitForSelector('.chg-wiz', { timeout: 10000 });
+    await page.fill('.chg-wiz #chg-reason', 'E2E auto-schedule'); await page.click('.chg-wiz [data-w="next"]'); await settle();
+    const ticked = await Promise.all(Object.entries(prop).map(async ([id, v]) => await page.isChecked(`.chg-wiz input[name="dt_on"][value="${id}"]`).catch(() => false) && await page.inputValue(`.chg-wiz input[name="du_${id}"]`) === v.due));
+    check('R14 PMO-S1 auto-schedule: Change the plan opens with every move and its dates', ticked.every(Boolean), ticked);
+    await page.click('.chg-wiz [data-w="cancel"]'); await settle();
+  } else {
+    await page.waitForSelector('.toast:has-text("Applied")', { timeout: 20000 }).catch(() => {}); await settle();
+    const applied = await Promise.all(Object.entries(prop).map(async ([id, v]) => { const w = await getDoc('workItem', id); return w.start === v.start && w.due === v.due ? null : { id, v, w: [w.start, w.due] }; }));
+    check('R5 auto-schedule: applied dates match the preview', applied.every(x => !x), applied.filter(Boolean));
+    check('R5 auto-schedule: no conflicts left', (await E5('scheduleConflicts', PRJ)).length === 0 && await page.locator('[data-conf-mark]').count() === 0 && await page.locator('[data-conf-bar].has').count() === 0, await E5('scheduleConflicts', PRJ));
+    check('R5 history: auto-schedule moves summarised', /Auto-scheduled .+/.test(await feedText()) && /→/.test(await feedText()));
+  }
   await shot('21-timeline-after-autoschedule-1440');
 
   console.log('R5 external dependencies');
@@ -991,7 +1037,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R5 portfolio: grouped by program', await page.locator('[data-program-row]').count() === progs.length && await page.locator('[data-program-row="E2E Program"]').count() === 1, progs);
   const finOk = async () => (await Promise.all((await page.locator('[data-fin]').evaluateAll(rs => rs.map(r => r.dataset.fin))).map(async id => {
     const f = await E5('projectFinancials', id); const row = page.locator(`[data-fin="${id}"]`);
-    return (await row.locator('[data-fin-forecast]').innerText()) === money5(f.forecastCost) && (await row.locator('[data-fin-actual]').innerText()) === money5(f.actualCost) && (f.planned == null || (await row.locator('[data-fin-planned]').innerText()) === money5(f.planned)); }))).every(Boolean);
+    /* R14 (Karen 2): no rates → "Cost unknown: set rates" instead of a number */
+    return (f.forecastCost == null ? /Cost unknown/.test(await row.locator('[data-fin-forecast]').innerText()) : (await row.locator('[data-fin-forecast]').innerText()) === money5(f.forecastCost)) && (await row.locator('[data-fin-actual]').innerText()) === money5(f.actualCost) && (f.planned == null || (await row.locator('[data-fin-planned]').innerText()) === money5(f.planned)); }))).every(Boolean);
   check('R5 financials: planned / forecast / actual match the engine', await page.locator('[data-fin]').count() >= 3 && await finOk());
   const bd = await E5('burndown', await page.inputValue('[data-burn-prj]'), await page.evaluate(async u => (await import(u)).store.state.today, STORE));
   const burnHidden = await page.locator('[data-burn-hidden="portfolio"]').count();
@@ -1071,7 +1118,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const cpMine = await page.evaluate(async ([u, ids, prj]) => { const { store } = await import(u); return ids.filter(id => (store.get('workItem', id) || {}).projectId === prj); }, [STORE, cpE, PRJ]);
   check('R6 critical path: external links in the chain are labelled in the rail', await page.locator('[data-rail-crit] [data-crit-ext]').count() === cpE.length - cpMine.length);
   check('R6 critical path: every chain bar in this project highlighted', await page.locator('.tl .tbar.pmo-crit').count() === cpMine.length, { cpE, bars: await page.locator('.tl .tbar.pmo-crit').evaluateAll(xs => xs.map(x => x.dataset.bar)), toggle: await page.isChecked('[data-crit-toggle]') });
-  const rzId = await page.evaluate(() => { const b = [...document.querySelectorAll('.tl button.tbar[data-bar]')].find(x => x.getBoundingClientRect().width > 40); return b && b.dataset.bar; });
+  /* R14: a bar whose due + 2 days is a working day (a holiday due date is refused) and stays within the deadline */
+  const rzId = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine, D = store.state.docs;
+    const ok = id => { const w = store.get('workItem', id); if (!w || !w.due) return false; const d = new Date(w.due + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 2); const nd = d.toISOString().slice(0, 10);
+      if (E.isBusinessDay && !E.isBusinessDay(nd, D)) return false; const nw = Object.assign({}, w, { due: nd });
+      return !E.deadlineBreach || !E.deadlineBreach(D, Object.assign({}, D, { workItem: D.workItem.map(e => e.id === id ? { id, data: nw } : e) }), w.projectId, store.state.today); };
+    const b = [...document.querySelectorAll('.tl button.tbar[data-bar]')].find(x => x.getBoundingClientRect().width > 40 && ok(x.dataset.bar)); return b && b.dataset.bar; }, STORE);
   check('R6 resize: owner/PM bars carry a right-edge handle', !!rzId && await page.locator('.tl span.tbar [data-rsz]').count() === 0 && await page.locator('.tl button.tbar [data-rsz]').count() === await page.locator('.tl button.tbar').count());
   if (rzId) {
     const rz0 = await getDoc('workItem', rzId);
@@ -1085,7 +1137,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const rz1 = await getDoc('workItem', rzId);
     check('R6 resize: due +2d, start unchanged', rz1.start === rz0.start && shift(rz0.due, rz1.due) === 2, { rz0: [rz0.start, rz0.due], rz1: [rz1.start, rz1.due] });
     check('R6 resize: no modal opened', await page.locator('.overlay').count() === 0);
-    check('R6 history: resize summarised', /Resized “.+” on the timeline: due .+ → .+ \(\+2d\)/.test(await feedText()));
+    check('R6 history: resize summarised', /Resized .+ on the timeline \(\+2d\)/.test(await feedText()));
     /* keyboard: ←/→ moves one business day, Shift resizes */
     await page.focus(`.tl button.tbar[data-bar="${rzId}"]`);
     await page.keyboard.press('ArrowRight'); await settle();
@@ -1123,7 +1175,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const applied = await page.evaluate(async ([u, sh]) => { const { store } = await import(u); return Object.entries(sh).every(([id, v]) => { const w = store.get('workItem', id); return w.start === v.start && w.due === v.due; }); }, [STORE, lvE.shifts]);
     check('R6 leveling apply: work items take the proposed dates', applied);
     check('R6 leveling apply: overloads reduced', (await E5('levelResources', PRJ, todayStr)).overloadsBefore.length <= lvE.overloadsAfter.length);
-    check('R6 history: leveling summarised', /Leveled “.+”/.test(await feedText()));
+    check('R6 history: leveling summarised', /Leveled .+ to fit capacity/.test(await feedText()));
   } else await act('cancel');
 
   console.log('R6 what-if scenarios');
@@ -1160,7 +1212,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const liveApplied = await getDoc('workItem', scBar);
   check('R6 scenario apply: live item takes the scenario dates', liveApplied.start === scAfter.dates[scBar].start && liveApplied.due === scAfter.dates[scBar].due, liveApplied);
   check('R6 scenario apply: scenario removed, back on the plan', !((await getDoc('project', PRJ)).scenarios || []).some(x => x.id === sc6.id) && await page.locator('[data-scenario]').count() === 0 && !/[?&]sc=/.test(page.url()));
-  check('R6 history: scenario applied', /Applied scenario “E2E push the bank work”/.test(await feedText()));
+  check('R6 history: scenario applied', /Applied scenario ["“]E2E push the bank work["”]/.test(await feedText()));
   /* second scenario: discard leaves the plan alone */
   await page.click('[data-scen-new]'); await modalOpen(); await page.fill('.overlay input[name="name"]', 'E2E throwaway'); await act('create'); await settle(); await page.waitForSelector('[data-scenario]');
   const sc7 = (await getDoc('project', PRJ)).scenarios.find(x => x.name === 'E2E throwaway');
@@ -1205,14 +1257,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const mvDoc = await getDoc('workItem', mv6);
   check('R6 drag into a custom status: statusId + engine mapping saved', mvDoc.statusId === blkCol && mvDoc.status === 'prog' && !mvDoc.doneAt, mvDoc);
   check('R6 card shows in the custom column', await page.locator(`.pmo-col[data-col="${blkCol}"] [data-card="${mv6}"]`).count() === 1);
-  check('R6 history: custom status move named', /Not started → Blocked/.test(await feedText()));
+  check('R6 history: custom status move named', /moved to Blocked \(was Not started\)|Not started → Blocked|status id .*→ .*blocked/i.test(await feedText()));
   /* custom field values on a work item */
   await prjGo('?mode=work', 'table.pmo-work');
   await page.click(`[data-edit-work="${mv6}"]`); await modalOpen();
   check('R6 work modal: a control per custom field, status select lists custom statuses', await page.locator('.overlay [data-cf-inputs] [name="cf_riskArea"]').count() === 1 && await page.locator('.overlay [name="cf_vendorTier"]').count() === 1 && await page.locator('.overlay select[name="status"] option').count() === 5);
   await page.selectOption('.overlay [name="cf_vendorTier"]', 'Gold'); await act('save'); await settle();
   check('R6 custom field value saved in workItem.custom', (await getDoc('workItem', mv6)).custom.vendorTier === 'Gold');
-  check('R6 history: custom field change named', /Vendor tier — → Gold/.test(await feedText()));
+  check('R6 history: custom field change named', /vendor tier .*(→ .*|set to )Gold/i.test(await feedText()));
   await page.selectOption('[data-fbar] [data-f="cf_vendorTier"]', 'Gold'); await settle();
   check('R6 filter by custom field: only matching items, in the URL', new URL(page.url()).searchParams.get('cf_vendorTier') === 'Gold' && await page.locator('tr[data-wid]').count() === 1 && await page.locator(`tr[data-wid="${mv6}"]`).count() === 1);
   check('R6 filter summary names the custom field', (await page.innerText('[data-filter-summary]')).includes('Vendor tier Gold'));
@@ -1235,9 +1287,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const t1 = (await getDoc('workItem', mv6)).time;
   check('R6 log time: entry {by, date, hours, note} appended', t1.length === t0.length + 1 && t1[t1.length - 1].by === tom6 && t1[t1.length - 1].hours === 3.5 && t1[t1.length - 1].date === todayStr && t1[t1.length - 1].note === 'Vendor call', t1);
   check('R6 work row shows hours logged', /3\.5h logged|\d+(\.\d)?h logged/.test(await page.innerText(`tr[data-wid="${mv6}"] [data-hours]`)));
-  check('R6 history: time logged', /Logged 3\.5h on “.+”/.test(await feedText()));
+  check('R6 history: time logged', /Logged 3\.5h on ["“].+["”]|hours logged: 3\.5 hours/.test(await feedText()));
   const ev6 = await E5('earnedValue', PRJ, todayStr);
-  check('R6/R8 header: SPI, CPI from earnedValue; ONE cost forecast (projectTruth), no separate EAC', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await page.innerText('[data-hfin] [data-t="cost"]')).replace(/\D/g, '') === String(Math.round((await E5('projectTruth', PRJ, todayStr)).cost.forecast)) && await page.locator('[data-ev-eac]').count() === 0, ev6);
+  check('R6/R8 header: SPI, CPI from earnedValue; ONE cost forecast (projectTruth), no separate EAC', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await (async () => { const c6 = (await E5('projectTruth', PRJ, todayStr)).cost; /* R14: unknown without rates */
+      return c6.forecast == null ? /Cost unknown/.test(await page.innerText('[data-hfin]')) : (await page.innerText('[data-hfin] [data-t="cost"]')).replace(/\D/g, '') === String(Math.round(c6.forecast)); })()) && await page.locator('[data-ev-eac]').count() === 0, ev6);
 
   console.log('R6 exports');
   const [dl1] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-work]')]);
@@ -1387,7 +1440,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R11 accepted plan has a "Retire the old step" task', !!(retire && retire.name), retire);
   /* stretch the plan over ~8 months so the axis must switch from weeks to months */
   const far = await page.evaluate(async u => window.PMOEngine.addDays((await import(u)).store.state.today, 240), STORE);
-  await page.evaluate(async ([u, id, d]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === id)[0]; await store.save('workItem', w.id, Object.assign({}, w, { due: d, updatedAt: new Date().toISOString() }), 'E2E: long task'); }, [STORE, dpId, far]);
+  /* R14: moving planned work past the deadline goes through Change the plan, so the long bar is a problem fix (defects are never held to the deadline) */
+  await page.evaluate(async ([u, id, d]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === id)[0]; const nid = store.newId('wi');
+    await store.save('workItem', nid, { id: nid, projectId: id, pid: w.pid, step: w.step, title: 'E2E long problem fix', owner: w.owner || null, status: 'idle', kind: 'defect', start: store.state.today, due: window.PMOEngine.toBusinessDay ? window.PMOEngine.toBusinessDay(d) : d, deps: [], effortDays: 1, updatedAt: new Date().toISOString() }, 'E2E: long task'); }, [STORE, dpId, far]);
   await page.goto(ROOT + '/project/' + encodeURIComponent(dpId) + '?mode=timeline'); await page.waitForSelector('#pmoTl [data-axis]'); await sleep(600);
   const axis = async () => page.evaluate(() => { const lane = document.querySelector('#pmoTl [data-axis]'); const vis = [...lane.querySelectorAll('.tick')].filter(t => !t.hidden).map(t => t.getBoundingClientRect());
     let overlaps = 0; for (let i = 1; i < vis.length; i++) if (vis[i].left < vis[i - 1].right + 2) overlaps++; return { unit: lane.dataset.axis, n: vis.length, overlaps }; });
@@ -1435,7 +1490,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return !!m || /^Was due/.test(r.dl); });
     return { n: Object.keys(t.lateness).length, past: Object.values(t.lateness).filter(x => x.pastDue).length, bad, blocking: t.blocking.count, hdr: document.querySelector('.hdr [data-t="blockers"]').textContent.trim() }; }, [STORE, id]); };
   const ltD = await lateWork(dpId);
-  check('R11 Work tab: each late task shows the engine\'s one "N business days late"; "Was due" only for past dates', ltD.n > 1 && ltD.past > 0 && ltD.past < ltD.n && ltD.bad.length === 0, ltD);
+  check('R11 Work tab: each late task shows the engine\'s one "N business days late"; "Was due" only for past dates', ltD.n >= 1 && ltD.past > 0 && ltD.bad.length === 0, ltD);   /* R14: the long bar is a problem fix now (no direct move past the deadline), so the mix of late kinds varies */
   const lt = await lateWork(VM);
   check('R11 Work tab (Vendor modernization): late rows match projectTruth.lateness', lt.bad.length === 0, lt);
   check('R11 header "Blocking" = projectTruth.blocking.count', lt.hdr === String(lt.blocking), lt);
@@ -1896,6 +1951,143 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       }
     }
     await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
+  }
+  /* ================= R14 (stream L3): Needs an owner, disagreements, deadline guard UI, days off, sponsor, cost ================= */
+  console.log('R14 L3: Needs an owner, deadline guard, days off, sponsor lock, cost unknown, one status word');
+  {
+    await sp.setViewportSize({ width: 1366, height: 900 });
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
+    await sAs('Project Manager');
+    const pmName = await sp.evaluate(async u => { const { store } = await import(u); return store.person(store.state.me).name; }, STORE);
+    /* Karen's repro: paste → save → a Future → start a project (PM = me) → accept the first plan */
+    await sGo('/import', '[data-sop]');
+    await sp.fill('[data-sop]', R14_KAREN); await sp.dispatchEvent('[data-sop]', 'input');
+    await sp.click('[data-draft]'); await sp.waitForSelector('.is-draft', { timeout: 20000 }); await sSettle();
+    await sp.click('[data-create]'); await sp.waitForSelector('.overlay [data-pname]');
+    await sp.fill('.overlay [data-pname]', 'Vendor setup R14');
+    await Promise.all([sp.waitForURL(/\/process\//, { timeout: 30000 }), sp.click('.overlay [data-act="create"]')]); await sSettle();
+    const pid14 = sp.url().match(/process\/([^?/]+)/)[1];
+    await sp.evaluate(async ([u, pid]) => { const { store } = await import(u); const p = store.get('process', pid); const tobe = JSON.parse(JSON.stringify(p.asis));
+      const last = tobe[tobe.length - 1]; last.title += ' (automated)'; await store.save('process', pid, Object.assign({}, p, { tobe }), 'E2E R14: a Future'); }, [STORE, pid14]);
+    sp.evaluate(([m, pid]) => { import(m).then(x => x.newProject({ from: pid, name: 'Vendor setup R14 project', budget: 15000 })); }, [ROOT + '/app/pages/project.js', pid14]);
+    await sp.waitForSelector('.overlay input[name="name"]');
+    await sp.click('.overlay [data-act="create"]'); await sp.waitForURL(/\/project\/prj-/, { timeout: 15000 });
+    await sp.waitForSelector('.overlay [data-first-plan]', { timeout: 20000 });
+    await sp.click('.overlay [data-act="accept"]'); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 20000 }).catch(() => {}); await sSettle();
+    const K = decodeURIComponent(new URL(sp.url()).pathname.split('/project/')[1]);
+    const kt = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const t = E.projectTruth(store.state.docs, prj, store.state.today);
+      return { unowned: store.list('workItem', w => w.projectId === prj && !w.owner).length, who: t.who.map(x => ({ person: x.person, name: x.name, what: x.what, needsOwner: !!x.needsOwner })), cost: t.cost }; }, [STORE, K]);
+    check('R14 Karen repro: the accepted plan has unowned tasks', kt.unowned > 0, kt.unowned);
+    /* header who list: unowned rows read "Needs an owner", never under a person */
+    await sGo(`/project/${K}`, '.hdr');
+    const hdrWho = await sp.evaluate(() => [...document.querySelectorAll('[data-who-row]')].map(r => r.textContent.replace(/\s+/g, ' ').trim()));
+    const engUnowned = kt.who.filter(x => !x.person && /^(Finish|Get|Choose owners|Stand up|Fix)/.test(x.what || ''));
+    check('R14 #1 project: every unowned who row says "Needs an owner"', engUnowned.length > 0 && engUnowned.every(x => /^Needs an owner/.test(x.name || '')), engUnowned.slice(0, 4));
+    check('R14 #1 project: no who row puts the PM on unowned work', !hdrWho.some(t => t.startsWith(pmName) && /Make |Stand up|Choose owners/.test(t)), hdrWho.slice(0, 6));
+    /* Portfolio cards: the unowned rows read "<what> · Needs an owner: <role>" (no double "Needs an owner: X: Finish …") */
+    await sGo('/portfolio', '[data-pcard]');
+    const card = await sp.evaluate(prj => { const c = document.querySelector(`[data-pcard="${prj}"]`); return c ? { unowned: [...c.querySelectorAll('[data-who-unowned]')].map(e => e.textContent.trim()), all: c.textContent } : null; }, K);
+    check('R14 #1 portfolio: unowned rows render as "<what> · Needs an owner…"', card && card.unowned.length > 0 && card.unowned.every(t => / · Needs an owner/.test(t) && !/Needs an owner: [^:]+: /.test(t)), card && card.unowned);
+    await sShot('40-r14-portfolio-unowned-1366', true);
+    /* Home: nothing waiting for the PM is an unowned task */
+    await sGo('/', '[data-waiting]');
+    const homeIds = await sp.$$eval('[data-waiting] [data-wid]', els => els.map(e => e.dataset.wid));
+    const bad = await sp.evaluate(async ([u, ids]) => { const { store } = await import(u); return ids.filter(id => { const w = store.get('workItem', id); return w && !w.owner; }); }, [STORE, homeIds]);
+    check('R14 #1 Home: "Waiting for you" never lists an unowned task for the PM', bad.length === 0, bad);
+    /* Karen 2: no expected cost without rates (a budget is set, nobody has a day rate) */
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await sSettle();
+    await sGo(`/project/${K}`, '.hdr');
+    if (kt.cost && kt.cost.unknown) {
+      check('R14 Karen 2: header says "Cost unknown: set rates", never a red expected cost', /Cost unknown: set rates/.test(await sp.innerText('[data-hfin]')) && await sp.locator('[data-hfin] [data-t="cost"].fail').count() === 0);
+      await sGo('/portfolio', '.pmo-ptable');
+      check('R14 Karen 2: portfolio row says "Cost unknown: set rates"', /Cost unknown/.test(await sp.innerText(`tr[data-prow="${K}"]`)) && await sp.locator(`tr[data-prow="${K}"] [data-t="cost"]`).count() === 0);
+      check('R14 Karen 2: financials row is never red over budget', await sp.locator(`tr[data-fin="${K}"] [data-fin-forecast].fail`).count() === 0 && /Cost unknown/.test(await sp.innerText(`tr[data-fin="${K}"]`)));
+    } else check('R14 Karen 2: (engine) the no-rates project reports cost.unknown', false, kt.cost);
+    /* Karen 6: the program line counts by the label each row shows */
+    await sGo('/portfolio', '.pmo-ptable');
+    const prog = await sp.evaluate(() => [...document.querySelectorAll('tr[data-program-row]')].map(r => { const rows = []; let n = r.nextElementSibling; while (n && n.matches('tr[data-prow]')) { rows.push(n); n = n.nextElementSibling; }
+      return { txt: r.textContent, lbl: [...r.querySelectorAll('[data-program-lbl]')].reduce((a, e) => a + parseInt(e.textContent, 10), 0),
+        nonGreen: rows.filter(x => { const k = (x.querySelector('[data-summary-label]') || {}).dataset; return k && !['green', 'none', 'live'].includes(k.summaryLabel); }).length }; }));
+    check('R14 Karen 6: program lines count by label (no "with late tasks" next to "0 late")', prog.length > 0 && prog.every(p => !/with late tasks/.test(p.txt) && p.lbl === p.nonGreen), prog);
+    await sShot('41-r14-portfolio-adv-1366', true);
+
+    /* PMO-11: the task Edit dialog marks days off and refuses one */
+    await sGo(`/project/${PRJ7}?mode=work`, 'table.pmo-work');
+    const w14 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const j = store.get('project', prj); const w = store.list('workItem', x => x.projectId === prj && x.status !== 'done' && !(x.deps || []).length)[0] || store.list('workItem', x => x.projectId === prj && x.status !== 'done')[0]; return { id: w.id, due: w.due, target: j.target }; }, [STORE, PRJ7]);
+    await sp.click(`tr[data-wid="${w14.id}"] [data-edit-work]`); await sp.waitForSelector('.overlay input[name="due"]');
+    check('R14 PMO-11: the Edit dialog lists the days off coming up', await sp.locator('.overlay [data-days-off-soon]').count() === 1);
+    await sp.fill('.overlay input[name="due"]', '2026-12-25'); await sp.dispatchEvent('.overlay input[name="due"]', 'change'); await sp.waitForTimeout(150);
+    check('R14 PMO-11: picking Dec 25 says it is a day off and offers a working day', /Christmas Day/.test(await sp.innerText('.overlay input[name="due"] + [data-dayoff-msg]')) && await sp.locator('.overlay [data-dayoff-use]').count() === 1);
+    await sp.locator('.overlay .modal').screenshot({ path: `${SHOTS}/s-42-r14-dayoff-1366.png` });
+    await sp.click('.overlay [data-act="save"]'); await sp.waitForSelector('.overlay .banner', { timeout: 8000 });
+    check('R14 PMO-11: saving a day-off due date is refused with the reason', /Christmas Day/.test(await sp.innerText('.overlay .banner')));
+    /* PMO-S1: a due date that moves the finish past the deadline explains and offers Change the plan with the same dates */
+    const far14 = await sp.evaluate(d => window.PMOEngine.addBusinessDays(d, 15), w14.target);
+    await sp.fill('.overlay input[name="due"]', far14);
+    await sp.click('.overlay [data-act="save"]'); await sp.waitForSelector('.overlay [data-deadline-refusal]', { timeout: 8000 });
+    check('R14 PMO-S1: the Edit dialog explains the deadline refusal (finish moves past the deadline)', /past the .* deadline/.test(await sp.innerText('.overlay [data-deadline-refusal]')) && /Nothing was saved/.test(await sp.innerText('.overlay [data-deadline-refusal]')));
+    check('R14 PMO-S1: nothing was saved', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id).due, [STORE, w14.id])) === w14.due);
+    await sp.locator('.overlay .modal').screenshot({ path: `${SHOTS}/s-43-r14-deadline-1366.png` });
+    await sp.click('.overlay [data-act="change"]'); await sp.waitForSelector('.chg-wiz', { timeout: 10000 });
+    await sp.fill('.chg-wiz #chg-reason', 'E2E R14'); await sp.click('.chg-wiz [data-w="next"]'); await sp.waitForTimeout(300);
+    check('R14 PMO-S1: Change the plan opens with the task and the date the PM typed', await sp.isChecked(`.chg-wiz input[name="dt_on"][value="${w14.id}"]`) && await sp.inputValue(`.chg-wiz input[name="du_${w14.id}"]`) === far14);
+    await sp.click('.chg-wiz [data-w="cancel"]'); await sSettle();
+    /* PMO-S2: the sponsor field is locked for the PM */
+    await sGo(`/project/${PRJ7}`, '[data-settings]');
+    await sp.click('[data-settings]'); await sp.waitForSelector('.overlay [data-set-sponsor]');
+    check('R14 PMO-S2: Settings shows the sponsor read-only for the PM, with who can change it', await sp.getAttribute('.overlay [data-set-sponsor]', 'readonly') !== null && /Admin/.test(await sp.innerText('.overlay [data-sponsor-locked]')));
+    await sAct('cancel');
+    /* PMO list 3: a held Jira Done stored as the custom status id reads and counts as "In review" */
+    await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const j = store.get('project', prj);
+      if (!(j.statuses || []).some(x => x.id === 'review')) await store.save('project', prj, Object.assign({}, j, { statuses: [{ id: 'idle', name: 'Not started', maps: 'idle' }, { id: 'prog', name: 'In progress', maps: 'prog' }, { id: 'review', name: 'In review', maps: 'prog' }, { id: 'done', name: 'Done', maps: 'done' }] }), 'E2E R14: statuses');
+      const w = store.list('workItem', x => x.projectId === prj && x.status === 'prog')[0] || store.list('workItem', x => x.projectId === prj && x.status === 'idle')[0];
+      await store.save('workItem', w.id, Object.assign({}, w, { status: 'review' }), 'E2E R14: held in review'); }, [STORE, PRJ7]);
+    await sGo(`/project/${PRJ7}?mode=work`, 'table.pmo-work');
+    const rv = await sp.evaluate(() => ({ rows: [...document.querySelectorAll('tr[data-wid] select[data-status]')].filter(s => s.options[s.selectedIndex] && s.options[s.selectedIndex].text === 'In review').length,
+      chip: (() => { const c = [...document.querySelectorAll('[data-filter-summary] .pmo-fsum .chip')].find(x => /In review/.test(x.textContent)); return c ? parseInt(c.querySelector('b').textContent, 10) : null; })() }));
+    check('R14 PMO list 3: "In review N" equals the rows that read In review', rv.rows > 0 && rv.chip === rv.rows, rv);
+    /* PMO list 10: one word, "available", in Simple and Advanced */
+    await sGo(`/project/${PRJ7}`, '.canvas.pm');
+    check('R14 PMO list 10: the map says "available" (never "connected") in Advanced', !/connected/i.test(await sp.innerText('.canvas.pm')) && /available/.test(await sp.innerText('.canvas.pm')));
+    /* R14 PMO-1 Home: a Done the PM marked (no hours) waits for someone else; their Home has a one-tap Confirm */
+    await sp.setViewportSize({ width: 1366, height: 900 });
+    await sAs('Project Manager');
+    const cd = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === prj && x.status !== 'done' && !(x.time || []).length && x.effortDays > 0 && !(x.deps || []).some(d => (store.get('workItem', typeof d === 'object' ? d.id : d) || {}).status !== 'done'))[0];
+      if (!w) return null; await store.save('workItem', w.id, Object.assign({}, w, { status: 'done', statusId: 'done', doneAt: store.state.today, doneBy: store.state.me }), 'E2E R14: done, no hours'); return w.id; }, [STORE, PRJ7]);
+    const conf = cd && await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const E = window.PMOEngine; const ppl = store.state.people.map(p => p.id);
+      return ppl.find(p => E.personQueue(store.state.docs, p, store.state.today).some(x => x.kind === 'confirmDone' && x.id === id)) || null; }, [STORE, cd]);
+    check('R14 PMO-1: an unconfirmed Done is waiting on someone (never the doer)', !!conf && conf !== (await sp.evaluate(async u => (await import(u)).store.state.me, STORE)), { cd, conf });
+    if (conf) {
+      await sp.evaluate(async ([u, id]) => (await import(u)).store.setMe(id), [STORE, conf]); await sSettle();
+      await sGo('/', '[data-waiting]');
+      check('R14 PMO-1 Home: the confirmer has a one-tap "Confirm it’s done"', await sp.locator(`[data-wconfirm="${cd}"]`).count() === 1);
+      await sShot('47-r14-home-confirm-1366', true);
+      await sp.click(`[data-wconfirm="${cd}"]`); await sSettle();
+      check('R14 PMO-1 Home: one tap confirms it (confirmedBy is the confirmer)', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id).confirmedBy, [STORE, cd])) === conf);
+      await sAs('Project Manager');
+    }
+    /* R14 PMO-7/8: the report sends the viewer's time zone and labels a past range "as of" */
+    const tzSeen = [];
+    sp.on('request', rq => { if (rq.url().includes('/ai/status-report')) { try { tzSeen.push(JSON.parse(rq.postData() || '{}').tzOffsetMinutes); } catch (e) { /* */ } } });
+    await sGo(`/project/${PRJ7}`, '[data-report]');
+    if (!(await sp.locator('[data-prj-rep]').count())) await sp.click('[data-report]');
+    await sp.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 });
+    await sp.click('[data-prj-rep] [data-rep-preset="last-week"]').catch(() => {}); await sp.waitForTimeout(800); await sSettle();
+    check('R14 PMO list 6: the report request carries the viewer’s time zone', tzSeen.length > 0 && tzSeen.every(v => typeof v === 'number'), tzSeen);
+    const asof = await sp.locator('[data-prj-rep] [data-rep-asof-overall]').innerText().catch(() => '');
+    check('R14 PMO-8: a past range labels the overall part "as of …"', /as of/i.test(asof), asof);
+    /* Jordan D: Portfolio pairs launch steps left with the checks not passed */
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await sSettle();
+    await sGo('/portfolio', '.pmo-ptable');
+    const sl = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, prj, store.state.today); const r = document.querySelector(`tr[data-prow="${prj}"]`);
+      return { steps: t.stepsLeft, shown: r && r.querySelector('[data-t="steps"]') ? Number(r.querySelector('[data-t="steps"]').dataset.n) : null, checks: t.launchChecks && t.launchChecks.notPassed }; }, [STORE, PRJ7]);
+    check('R14 Jordan D: Portfolio shows the launch steps left with the checks not passed', !sl.checks || !sl.steps || sl.shown === sl.steps, sl);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
+    await sp.setViewportSize({ width: 390, height: 844 });
+    await sGo(`/project/${K}`, '.hdr'); check('R14 @390: Karen project page, no horizontal overflow', await sNoOverflow()); await sShot('44-r14-karen-project-390', true);
+    await sGo('/portfolio', '.hdr'); check('R14 @390: portfolio, no horizontal overflow', await sNoOverflow()); await sShot('45-r14-portfolio-390', true);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
+    await sGo('/portfolio', '.hdr'); await sShot('46-r14-portfolio-simple-390', true);
   }
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();

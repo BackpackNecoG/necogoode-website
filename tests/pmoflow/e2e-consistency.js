@@ -203,7 +203,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
   /* R12 (H1) the counts the R11 reviewers flagged, on every screen where they appear */
   await page.goto(ROOT + '/testing/' + G.vm.id); await page.waitForSelector('[data-tests-number]');
   check(`D R12 #5 Simple "Try it out" shows its own stage (${G.vm.dev}), never the Business check line (${G.vm.uat})`,
-    (await attr('[data-stage="try"]', 'data-try-count')) === G.vm.dev && (await txt('[data-stage="try"]')).startsWith(G.vm.dev.replace('/', ' of ') + ' tests passed') && (await txt('[data-s-progress]')).startsWith(G.vm.uat.replace('/', ' of ') + ' tests passed'),
+    (await attr('[data-stage="try"]', 'data-try-count')) === G.vm.dev && (await txt('[data-stage="try"]')).startsWith(G.vm.dev.replace('/', ' of ') + ' information checks passed') && (await txt('[data-s-progress]')).startsWith(G.vm.uat.replace('/', ' of ') + ' tests passed'),
     [await txt('[data-stage="try"]'), await txt('[data-s-progress]')]);
   await page.goto(ROOT + '/release/' + G.vm.id); await page.waitForTimeout(1200);
   await page.evaluate(() => { const d = document.querySelector('details[data-sec=access]'); if (d) d.open = true; }); await page.waitForTimeout(200);
@@ -239,7 +239,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
 const G13 = { total: 26, passed: 9, cases: 8, scripts: 18, try: '7/8', uat: '9/26', gaps: 1, fields: 2, have: '1/2', gateTests: 17, stepsLeft: 6,
   parts: { 'Accounts Payable': '0/8', Compliance: '9/9', IT: '0/4', Procurement: '1/4', Treasury: '0/12' },
   compPassedBy: 'Passed by Priya Shah (Compliance): 9 tests.',
-  report: 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.' };
+  report: 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.' };
 async function ledgerE(browser, at, errors) {
   console.log('\nPart E: R13 one testing ledger (fresh sandbox, seed day 0)');
   const ip = `198.51.100.${(Math.random() * 200 | 0) + 20}`;

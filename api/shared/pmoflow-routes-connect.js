@@ -31,6 +31,9 @@ const WRITES_PER_MIN = 60;
 const SECRET_SEED = process.env.PMOFLOW_SYNC_SECRET || process.env.PMOFLOW_SALT || 'pmoflow-demo-sync-v1';
 
 function engine() { try { return require('./pmoflow-engine.js'); } catch (e) { return null; } }
+function changeMod() { try { return require('./pmoflow-change.js'); } catch (e) { return null; } }
+/* R14 L4 #1: plan change requests filed by sync live with the other plan changes (and notify their approvers) */
+if (Array.isArray(seedMod.DOC_TYPES)) ['planChange', 'notification'].forEach(t => { if (!seedMod.DOC_TYPES.includes(t)) seedMod.DOC_TYPES.push(t); });
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
 const writes = new Map();
 function limited(ws) {
@@ -108,7 +111,7 @@ async function runSync(ctx, conn, st, opts) {
   const entry = (e) => { const x = Object.assign({ id: 'log-' + crypto.randomBytes(5).toString('hex'), at: nowIso() }, e); entries.push(x); return x; };
   const before = truthSummary(docs, conn.projectId, today);
   /* sent = created + updated + linked; each one is exactly one "PMOFlow → tool" row in the sync log */
-  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0, held: 0 };
+  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0, held: 0, planChanges: 0 };
 
   const exec = (intent) => {
     const signed = sign(intent, secretFor(wsId, conn));
@@ -137,7 +140,7 @@ async function runSync(ctx, conn, st, opts) {
     const res = pull.result;
     if (!res.ok) entry({ dir: 'in', op: 'pull', result: 'failed', detail: res.detail, intent: pull.signed, requests: S.describeRequest(conn, pull.signed) });
     else {
-      const applied = S.applyInbound(conn, docs, res.changes || [], { today, now: nowIso(), toolName: toolName(conn) });
+      const applied = S.applyInbound(conn, docs, res.changes || [], { today, now: nowIso(), toolName: toolName(conn), dueCheck: dueCheckFor(docs, conn, today) });
       conn.cursor = res.cursor || conn.cursor;
       entry({ dir: 'in', op: 'pull', result: 'ok', detail: res.detail, intent: pull.signed, requests: S.describeRequest(conn, pull.signed) });
       for (const u of applied.updates) {
@@ -182,6 +185,18 @@ async function runSync(ctx, conn, st, opts) {
         sum.conflicts++;
       }
       for (const s of applied.skipped) { entry({ dir: 'in', op: 'skip', key: s.key, workItemId: s.workItemId || null, result: 'skipped', detail: s.reason }); sum.skipped++; }
+      /* R14 L4 #1: a tool due date past the deadline is filed as a plan change request; nothing in the plan moves */
+      for (const pc of applied.planChanges || []) {
+        const ext = extActor(conn, pc.by);
+        const r = await fileSyncChange({ store, wsId, docs: st.docs, conn, pc, ext, today });
+        if (r.ignored) { entry({ dir: 'in', op: 'ignore', key: pc.key, workItemId: pc.workItemId, result: 'ignored', by: ext, detail: r.detail }); sum.ignored++; continue; }
+        entry({ dir: 'in', op: 'plan-change', key: pc.key, workItemId: pc.workItemId, title: pc.title, result: 'held', changeId: r.changeId, by: ext, detail: r.detail });
+        if (r.created) {
+          await store.appendEvent(wsId, { actor: ext, action: 'sync-plan-change', ref: 'planChange:' + r.changeId,
+            summary: `From ${S.TOOLS[conn.tool].name} ${pc.key}: "${pc.title}" due date ${pc.from || '(none)'} → ${pc.to} not applied. ${r.detail}`.slice(0, 300) });
+        }
+        sum.planChanges++;
+      }
       for (const g of applied.ignored) { entry({ dir: 'in', op: 'ignore', key: g.key, workItemId: g.workItemId, result: 'ignored', detail: `${S.FIELD_LABELS[g.field]} ${g.value} in ${S.TOOLS[conn.tool].name}: ${g.reason}` }); sum.ignored++; }
       updates = applied.updates;
     }
@@ -195,6 +210,62 @@ async function runSync(ctx, conn, st, opts) {
   conn.lastSync = { at: nowIso(), by: actor, summary: sum };
   conn.log = entries.slice().reverse().concat(conn.log || []).slice(0, LOG_CAP);
   return { sum, entries, before, after, updates };
+}
+
+/* R14 L4 #1: the engine decides whether a tool due date breaches the deadline, exactly as Change the plan does
+   (impact → needsApproval: the deadline moves, or the expected finish moves past it). */
+function syncChangeInput(conn, docs, pc) {
+  const T = S.TOOLS[conn.tool].name;
+  return { projectId: conn.projectId, category: 'other', title: `${T} due date for “${String(pc.title || pc.workItemId).slice(0, 60)}”`,
+    reason: `${T} ${pc.key}: ${pc.by || 'someone'} moved the due date to ${(engine() || {}).fmtDay ? engine().fmtDay(pc.to) : pc.to}, past the deadline.`.slice(0, 200),
+    edits: [{ op: 'set', type: 'workItem', id: pc.workItemId, field: 'due', to: pc.to }] };
+}
+function dueCheckFor(docs, conn, today) {
+  const C = changeMod(), E = engine();
+  if (!C || !E) return undefined;
+  return (wid, to) => {
+    try {
+      const { change, errors } = C.buildChange(syncChangeInput(conn, docs, { workItemId: wid, to, key: '', by: '', title: '' }), docs, { engine: E });
+      if (errors.length || !change.edits.length) return { breach: false };
+      const im = C.impact(docs, C.applyToDocs(docs, change, new Date().toISOString()), conn.projectId, today, { change, engine: E });
+      const need = C.needsApproval(change, im, docs, {});
+      const breach = !!(im.deadline.moved || (im.misses.after && (!im.misses.before || im.finish.after > im.finish.before)));
+      return breach ? { breach: true, reason: im.sentence || need.reasons.join(' ') } : { breach: false };
+    } catch (e) { return undefined; }
+  };
+}
+async function fileSyncChange({ store, wsId, docs, conn, pc, ext, today }) {
+  const C = changeMod(), E = engine();
+  const T = S.TOOLS[conn.tool].name;
+  const fd = d => { try { return d && E && E.fmtDay ? E.fmtDay(d) : (d || ''); } catch (e) { return d || ''; } };
+  const keep = `PMOFlow keeps ${pc.from ? fd(pc.from) : 'its date'} and sends it back to ${T}.`;
+  if (!C || !E) return { ignored: true, detail: `Due date ${fd(pc.to)} in ${T} is past the deadline. ${keep}` };
+  const existing = (docs.planChange || []).map(d => d.data).find(x => x && x.status === 'proposed' && x.source === 'sync' && x.projectId === conn.projectId &&
+    (x.edits || []).some(e => e.type === 'workItem' && e.id === pc.workItemId && e.field === 'due' && e.to === pc.to));
+  if (existing) return { changeId: existing.id, created: false, detail: `${T} asks again to move “${pc.title}” to ${fd(pc.to)}. That plan change is already waiting for approval (${C.waitingText(existing, docs)}). ${keep}` };
+  const requester = S.personByEmail(docs, pc.by, conn.emailDomain);
+  const { change, errors } = C.buildChange(syncChangeInput(conn, docs, pc), docs, { engine: E });
+  if (errors.length || !change.edits.length) return { ignored: true, detail: `Due date ${fd(pc.to)} in ${T}: ${errors[0] || 'nothing to change'} ${keep}` };
+  const at = new Date().toISOString();
+  const im = C.impact(docs, C.applyToDocs(docs, change, at), conn.projectId, today, { change, engine: E });
+  const need = C.needsApproval(change, im, docs, { requester: requester ? requester.id : null });
+  const id = 'chg-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+  const doc = Object.assign({ id }, change, {
+    source: 'sync', fromSync: { tool: conn.tool, key: pc.key, by: pc.by || null, at },
+    status: 'proposed', requestedBy: requester ? requester.id : null, requestedAt: at, impact: im,
+    tolerance: { within: need.within, reasons: need.reasons }, approvers: (need.approvers || []).map(a => Object.assign({}, a, { decision: null, at: null })),
+  });
+  await store.putDoc(wsId, 'planChange', id, doc);
+  (docs.planChange = docs.planChange || []).push({ id, data: doc });
+  const project = projectOf(docs, conn.projectId) || {};
+  const pending = C.pendingApprovers(doc).map(a => a.person).filter(p => p && (docs.person || []).some(d => d.id === p));
+  for (const to of [...new Set(pending)]) {
+    const nid = 'ntf-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+    await store.putDoc(wsId, 'notification', nid, { id: nid, to, text: `${T} (${pc.by || 'someone'}) asks to move “${pc.title}” to ${fd(pc.to)} on ${project.name}. Please approve or reject the plan change. ${im.sentence || ''}`.slice(0, 280),
+      ref: 'project:' + conn.projectId, at, read: false });
+  }
+  const waiting = pending.length ? `Waiting for approval from ${[...new Set(pending)].map(p => personName(docs, p)).join(' and ')}.` : (need.blocked || 'Nobody can approve it yet: set a sponsor.');
+  return { changeId: id, created: true, detail: `Past the deadline, so it went to Change the plan as a request. ${im.sentence || ''} ${waiting} ${keep}`.replace(/\s+/g, ' ').trim() };
 }
 
 /* R11 §9: G1's engine helper is the one definition of "finished before the work it depends on":
@@ -216,6 +287,7 @@ function syncSentence(conn, sum) {
   if (sum.held) parts.push(`${sum.held} Done held for review in PMOFlow${sum.early ? ` (${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on)` : ''}`);
   else if (sum.early) parts.push(`${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on (flagged)`);
   if (sum.conflicts) parts.push(`${sum.conflicts} conflict${sum.conflicts === 1 ? '' : 's'} settled (later change wins)`);
+  if (sum.planChanges) parts.push(`${sum.planChanges} date change${sum.planChanges === 1 ? '' : 's'} past the deadline sent to Change the plan`);
   if (sum.ignored) parts.push(`${sum.ignored} PMOFlow-owned date${sum.ignored === 1 ? '' : 's'} put back`);
   if (sum.refused) parts.push(`${sum.refused} refused by the relay`);
   return parts.length ? parts.join(' · ') : 'Everything was already in sync';

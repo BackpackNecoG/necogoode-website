@@ -91,7 +91,9 @@ async function notify(store, wsId, docs, toIds, actor, text, ref, at) {
 /* Apply: write every edit through the doc store, two Saved plans, the log entry, notifications. */
 async function applyChange(store, wsId, docs, change, actor, today) {
   const E = engine();
-  const conflicts = C.conflicts(docs, change);
+  const conflicts = C.conflicts(docs, Object.assign({}, change, { edits: (change.edits || []).filter(e => !e.knock) }));
+  /* R14 (PMO-9): the knock-on re-dating is recomputed on the plan as it is now, so the tasks that wait on the moved work move with it */
+  change = Object.assign({}, change, { edits: C.withKnockOn(change, docs, today, { engine: E }).edits });
   if (conflicts.length) return { status: 409, body: { error: 'The plan changed since this was proposed: ' + conflicts.slice(0, 3).join('; ') + '. Propose the change again.', reasons: conflicts } };
   const at = new Date().toISOString();
   const project = getDoc(docs, 'project', change.projectId);
@@ -199,8 +201,11 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const actor = actorOf(body);
     const denied = editorError(docs, actor);
     if (denied) { fail(403, denied); return true; }
-    const { change, errors } = C.buildChange(body.change, docs, { engine: E });
+    const built = C.buildChange(body.change, docs, { engine: E });
+    const errors = built.errors;
     if (errors.length) { fail(400, errors[0], errors); return true; }
+    /* R14 (PMO-9): tasks that wait on the moved work are re-dated with it (automatic edits, listed in the change) */
+    const change = C.withKnockOn(built.change, docs, today, { engine: E });
     const project = getDoc(docs, 'project', change.projectId);
     if (project.status === 'live') { fail(409, `${project.name} is live, so its plan is closed. Start a new project for further changes.`); return true; }
     const at = new Date().toISOString();

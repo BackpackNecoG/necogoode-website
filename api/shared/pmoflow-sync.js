@@ -320,8 +320,9 @@
   /* ---------- inbound ---------- */
   /* change: {key, title?, description?, status? (tool status name), assigneeEmail?, due?, updatedAt, changedBy?}. Description is
      plain text (relay converts ADF / HTML). changedBy: the email (or display name) of the person who changed it in the tool.
-     Returns {updates:[{workItemId, key, by, data, changes:[{field, from, to, held?}]}], conflicts, skipped, ignored, held}.
-     opts: {today: 'YYYY-MM-DD', now: ISO, toolName}. conn.links[*].base is updated in place for applied/settled fields.
+     Returns {updates:[{workItemId, key, by, data, changes:[{field, from, to, held?}]}], conflicts, skipped, ignored, held,
+     planChanges:[{key, workItemId, field:'due', from, to, by, title, reason}] (R14: tool dates past the deadline)}.
+     opts: {today: 'YYYY-MM-DD', now: ISO, toolName, dueCheck?}. conn.links[*].base is updated in place for applied/settled fields.
 
      R12 GUARDRAIL (governance never moves from sync). An inbound change may move a work item's status, and nothing else that
      governs the project. Two kinds of work item carry governance on their status, so a "done" from the tool is HELD there:
@@ -378,12 +379,23 @@
     }
     return null;
   }
+  /* R14 L4 #1: would this tool due date take the project past its deadline? opts.dueCheck(workItemId, to, from) -> {breach,
+     reason?} lets the caller decide with the engine's forecast (the server does); without it, a due date after the project
+     deadline (project.target) is a breach. */
+  function dueBreach(opts, project, wid, to, from) {
+    if (opts && typeof opts.dueCheck === 'function') {
+      var r = opts.dueCheck(wid, to, from);
+      return r && typeof r === 'object' ? r : { breach: !!r };
+    }
+    var dl = project && project.target ? str(project.target).slice(0, 10) : '';
+    return { breach: !!(dl && to > dl) };
+  }
   function applyInbound(conn, docs, changes, opts) {
     opts = opts || {};
     var toolName = opts.toolName || (TOOLS[conn.tool] || {}).name || 'the tool';
     var now = opts.now || new Date().toISOString();
     var today = opts.today || now.slice(0, 10);
-    var res = { updates: [], conflicts: [], skipped: [], ignored: [], held: [] };
+    var res = { updates: [], conflicts: [], skipped: [], ignored: [], held: [], planChanges: [] };
     var items = projectItems(docs, conn.projectId), fields = inFields(conn);
     var project = list(docs, 'project').find(function (p) { return p.id === conn.projectId; }) || null;
     var byWid = {};
@@ -412,11 +424,21 @@
         if (em && !person) res.skipped.push({ key: ch.key, workItemId: wid, field: 'assignee', reason: em + ' isn’t a person in PMOFlow, so the owner stays the same.' });
         else if (em) incoming.assignee = em;
       }
-      /* PMOFlow owns due dates and dependencies: a different value in the tool is overwritten on the next sync */
+      /* PMOFlow owns due dates and dependencies: a different value in the tool is overwritten on the next sync.
+         R14 L4 #1: a tool date that would take the project past its deadline is never applied and never just dropped:
+         it is returned in res.planChanges so the caller files it as a plan change request (Change the plan). Until that is
+         approved, PMOFlow's date stands and is sent back to the tool. */
       ['due'].forEach(function (f) {
         if (f in ch && str(ch[f]).slice(0, 10) !== str(base[f]).slice(0, 10)) {
-          res.ignored.push({ key: ch.key, workItemId: wid, field: f, value: str(ch[f]).slice(0, 10), reason: 'PMOFlow owns ' + FIELD_LABELS[f].toLowerCase() + 's; ' + toolName + ' gets PMOFlow’s date back on the next sync.' });
-          base[f] = str(ch[f]).slice(0, 10);   /* differs from PMOFlow, so the next outbound sync re-sends PMOFlow's value */
+          var to = str(ch[f]).slice(0, 10), from = rec[f];
+          var chk = to && to !== from ? dueBreach(opts, project, wid, to, from) : null;
+          if (chk && chk.breach) {
+            res.planChanges.push({ key: ch.key, workItemId: wid, field: f, from: from, to: to, by: entry.by, title: str(w.title),
+              reason: chk.reason || (toolName + ' moved the due date to ' + to + ', past the project deadline' + (project && project.target ? ' (' + project.target + ')' : '') + '.') });
+          } else {
+            res.ignored.push({ key: ch.key, workItemId: wid, field: f, value: to, reason: 'PMOFlow owns ' + FIELD_LABELS[f].toLowerCase() + 's; ' + toolName + ' gets PMOFlow’s date back on the next sync.' });
+          }
+          base[f] = to;   /* differs from PMOFlow, so the next outbound sync re-sends PMOFlow's value */
         }
       });
       fields.forEach(function (f) {

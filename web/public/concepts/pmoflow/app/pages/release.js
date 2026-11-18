@@ -87,7 +87,7 @@ export function effAvail(dataId) {
   if (e && e.effectiveAvail) { try { return e.effectiveAvail(store.state.docs, dataId); } catch (err) { /* fall through */ } }
   return (de && de.avail) || 'missing';
 }
-const AVAIL_TXT = { live: 'Connected', pending: 'Waiting for confirmation', example: 'Sample only', missing: 'Not available yet' };
+const AVAIL_TXT = { live: 'Available', pending: 'Waiting for confirmation', example: 'Sample only', missing: 'Not available yet' };
 
 /* R5 roles: the release manager (defaults to the PM) is the only person who can go live or roll back,
    and can't be counted as a BU approver (separation of duties). */
@@ -99,7 +99,7 @@ function rmLine(prj) {
 }
 
 /* Live evidence (R5): profile with zero blocking drift, a passing connection check, or an attested link + note (weaker). */
-const EV_TXT = { profile: 'Sample data checked: matches the rules', check: 'Connection check passed', attested: 'Owner confirmed with a link and a note (weaker)', seed: 'Connected' };
+const EV_TXT = { profile: 'Sample data checked: matches the rules', check: 'Connection check passed', attested: 'Owner confirmed with a link and a note (weaker)', seed: 'Available' };
 function evidenceOf(de) {
   const ev = de && de.liveEvidence;
   let eng = null; const e = E(); if (e && e.evidenceOf) { try { eng = e.evidenceOf(store.state.docs, de); } catch (err) { eng = null; } }
@@ -250,7 +250,8 @@ function staleChanges(prj, section, a, rd) {
     const x = chk.stale.find(y => y.bu === section.bu); if (!x) return [];
     /* R11: a step-level reason comes with its own words from the engine ("“Capture banking details” owner changed") */
     const lbl = {}; (x.details || []).forEach(d => { lbl[d.ref] = d.label; });
-    const v = (x.changed || []).map(r => { const w = refView(r, prj.id); return /^section:[^#]+#s:/.test(r) && lbl[r] ? Object.assign(w, { text: lbl[r].charAt(0).toUpperCase() + lbl[r].slice(1), href: w.href || null }) : w; });
+    /* R14 (BPM-9): a task changed after approval says what changed, from → to (engine words) */
+    const v = (x.changed || []).map(r => { const w = refView(r, prj.id); return (/^section:[^#]+#s:/.test(r) || /^workItem:/.test(r)) && lbl[r] ? Object.assign(w, { text: lbl[r].charAt(0).toUpperCase() + lbl[r].slice(1), href: w.href || null }) : w; });
     return v.some(y => y.cutover) ? v : co.concat(v);
   }
   if (co.length) return co.concat(staleFallback(prj, section, at));
@@ -438,7 +439,7 @@ export function render(params) {
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>The launch was refused by the server.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || JSON.stringify(r)))}</li>`).join('')}</ul></div>` : ''}
     ${failedRel ? failBanner(prj, failedRel) : ''}
     ${live && releases[0] && isFailedRb(releases[0]) ? rbFailBanner(prj, releases[0]) : ''}
-    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts data-steps-left="${esc(stepsLeftA)}">${live || rd.pass ? esc(countsText(cnt)) : `${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left`}</span></h3>${checks}</div>`}
+    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts data-steps-left="${esc(stepsLeftA)}">${live || rd.pass ? esc(countsText(cnt)) : `${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left`}</span></h3>${!live && !rd.pass && truthOf(prj) && truthOf(prj).launchChecks ? `<div class="hint" data-checks-why="${esc(truthOf(prj).launchChecks.notPassed)}">The ${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left cover${stepsLeftA === 1 ? 's' : ''} the ${esc(truthOf(prj).launchChecks.text)} below.</div>` : ''}${checks}</div>`}
     ${cutoverCard(prj)}
     ${signoffCard(prj, rd)}
     ${grantsCard(prj)}
@@ -829,11 +830,18 @@ function releasedCard(prj, rd, rel) {
   const vers = Object.values(snap).map(Number).filter(Boolean);
   const v = vers.length ? Math.max(...vers) : Math.max(...procs.map(p => p.version || 1), 1);
   const when = rd.releasedAt || (rel && rel.at);
-  const n = countChecks(rd.checks);
-  return `<div class="card rl-released" data-released><h3>Launch summary<span class="n" data-counts>${esc(countsText(n))}</span></h3>
+  /* R14 (Jordan C): a launch on a two-person override says so: an Override badge, every overridden condition listed,
+     and "Launch-day plan is ready" never shows as passed while a launch-day step was still open */
+  const ov = rel && rel.override ? rel.override : null;
+  const ovWhy = ov ? ((ov.guard || []).length ? ov.guard : ['outside the launch window']) : [];
+  const stepsOpen = ovWhy.some(w => /launch-day step/.test(w));
+  const checksAt = (rd.checks || []).map(c => (stepsOpen && c.id === 'cutover-plan' ? Object.assign({}, c, { pass: false, warning: true, status: 'warn', detail: 'Overridden: ' + ovWhy.find(w => /launch-day step/.test(w)) }) : c));
+  const n = countChecks(checksAt);
+  return `<div class="card rl-released" data-released><h3>Launch summary${ov ? ` <span class="badge b-late" data-override-badge>Override</span>` : ''}<span class="n" data-counts>${esc(countsText(n))}</span></h3>
+    ${ov ? `<div class="rl-stale" data-overridden="${ovWhy.length}"><b>Launched with a two-person override${(ov.signoffs || []).length ? ` (${esc((ov.signoffs || []).map(x => x.name).filter(Boolean).join(' and '))})` : ''}</b><ul>${ovWhy.map(w => `<li data-overridden-item>${esc(w.charAt(0).toUpperCase() + w.slice(1))}</li>`).join('')}</ul></div>` : ''}
     <div class="rl-rel-h"><span class="rl-gate-ic">★</span><div><b>Launched v${esc(v)} on ${esc(fmt(when))} by ${esc(pname(rel && rel.by))}</b>
       <span class="hint">${procs.map(p => `${esc(p.name)} v${esc(snap[p.id] || p.version || 1)}`).join(' · ')}. The checks below are as they stood at launch.</span></div></div>
-    <ul class="rl-rel-checks">${rd.checks.map(c => { const st = checkState(c); return `<li class="${st}" data-check-at-release="${esc(c.id)}"><span class="rl-ic ${st}" aria-label="${st}">${ICON[st]}</span><span><b title="${esc(tipOf(c))}">${esc(plainOf(c))}</b> <small>${esc(c.detail || '')}</small></span></li>`; }).join('')}</ul>
+    <ul class="rl-rel-checks">${checksAt.map(c => { const st = checkState(c); return `<li class="${st}" data-check-at-release="${esc(c.id)}"><span class="rl-ic ${st}" aria-label="${st}">${ICON[st]}</span><span><b title="${esc(tipOf(c))}">${esc(plainOf(c))}</b> <small>${esc(c.detail || '')}</small></span></li>`; }).join('')}</ul>
     ${rollbackBlock(prj, procs)}</div>`;
 }
 
@@ -1258,7 +1266,7 @@ export function availOf(dataId) {
   const l = eng('availLabel', dataId);
   if (l && l.label) return { label: l.label, tone: TONE[l.tone] || 'warn', key: l.key };
   const st = effAvail(dataId);
-  return { live: { label: 'Connected', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[st] || { label: 'Not available yet', tone: 'bad' };
+  return { live: { label: 'Available', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[st] || { label: 'Not available yet', tone: 'bad' };
 }
 const firstName = id => String(pname(id)).split(' ')[0];
 const whoList = ids => (ids || []).filter(id => store.person(id)).map(id => `<span class="rs-who" data-who="${esc(id)}">${av(id)} ${esc(pname(id))}</span>`).join('');

@@ -630,3 +630,10 @@ details.is-data:not([open]) > .is-pop{display:none}
 .d-apr-add{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
 .d-apr-add .btn{min-height:40px}
 .d-apr-add .hint{font-size:12px}
+/* R14 L2: branch steps carry the map's step number; per-run information is marked */
+.is-bstep:has(> .is-bn){grid-template-columns:auto minmax(0,1fr) auto}
+.is-step.gate .is-bstep .is-bn{width:22px;height:22px;font-size:11px;margin-top:6px;background:var(--accent-soft);color:var(--accent)}
+.is-perrun{display:block;color:#0f766e;font-size:12px}
+.d-perrun{background:#ccfbf1;color:#0f766e}
+.d-mask-note{font-size:12px}
+.is-bstep .is-facts .chip{max-width:100%;white-space:normal;overflow-wrap:anywhere}

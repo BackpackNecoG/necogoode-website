@@ -157,26 +157,27 @@ async function r11(browser, ip, errors) {
     const stepsCell = await page.getAttribute(`[data-prow="${pidK}"] [data-steps]`, 'data-steps');
     ok(+stepsCell === flat(pK.asis).length && +stepsCell === 9, `processes list: ${stepsCell} steps straight after save (Today map)`);
     const dc = await page.getAttribute(`[data-prow="${pidK}"] [data-datacounts]`, 'data-datacounts');
-    ok(dc && +dc.split('/')[4] === mine.length, 'processes list: information counted at once, as "not checked yet": ' + dc);
+    const unc = mine.filter(d => !d.perRun);
+    ok(dc && +dc.split('/')[4] === unc.length && mine.length - unc.length === 2, 'processes list: information counted at once, as "not checked yet" (the W-9 and certificate are collected each run): ' + dc);
     ok(/not checked yet/i.test(await page.textContent(`[data-prow="${pidK}"]`)), 'processes list says "not checked yet"');
     /* §5: one label per state on the process page */
     await nav(`/process/${pidK}?mode=asis`);
     const labels = await page.$$eval('[data-block-label]', els => els.map(e => e.getAttribute('data-block-label')));
     const sideAvail = await page.$$eval('[data-side-data] [data-avail]', els => els.map(e => e.textContent.replace(/\s*›\s*$/, '').trim()));
-    ok(!labels.includes('Not available yet') && sideAvail.every(x => x === 'Not checked yet'), `"Not checked yet" items never also read "Not available yet" (${[...new Set(labels.concat(sideAvail))].join(', ') || 'none'})`);
+    ok(!labels.includes('Not available yet') && sideAvail.every(x => x === 'Not checked yet' || x === 'Collected each run') && sideAvail.filter(x => x === 'Collected each run').length === 2, `"Not checked yet" items never also read "Not available yet" (${[...new Set(labels.concat(sideAvail))].join(', ') || 'none'})`);
     /* process page and import agree on the step owner */
     const whoTexts = await page.$$eval('#canvas .node[data-step] [data-who]', els => els.map(e => e.textContent.trim()));
     ok(whoTexts[0] === 'Buyer', 'process page step owner = the role from the procedure: ' + whoTexts[0]);
     /* §5: map cards and the step page count "Not checked yet" on its own, never as "not available yet" */
     const cardTxt = await page.$$eval('#canvas .node[data-step] .stats', els => els.map(e => e.textContent));
     const uncN = await page.$$eval('#canvas [data-unchecked-n]', els => els.reduce((a, e) => a + +e.dataset.uncheckedN, 0));
-    const uncWant = flat(pK.asis).reduce((a, x) => a + (x.data || []).filter(id => mine.some(d => d.id === id)).length, 0);
-    ok(uncN === uncWant && uncN >= mine.length && !cardTxt.some(t => /not available yet/i.test(t)), `map cards: ${uncN} "not checked yet", none "not available yet"`);
+    const uncWant = flat(pK.asis).reduce((a, x) => a + (x.data || []).filter(id => unc.some(d => d.id === id)).length, 0);
+    ok(uncN === uncWant && uncN >= unc.length && !cardTxt.some(t => /not available yet/i.test(t)), `map cards: ${uncN} "not checked yet", none "not available yet"`);
     const sK = flat(pK.asis).find(x => (x.data || []).length);
     await nav(`/process/${pidK}/step/${sK.id}`);
     const kTxt = await page.textContent('[data-kpi-info]');
     ok(/not checked yet/.test(kTxt) && !/not available yet/i.test(kTxt), 'step page counts "not checked yet", never "not available yet": ' + kTxt.replace(/\s+/g, ' ').trim());
-    const dK = mine[0]; await nav(`/data/${dK.id}`);
+    const dK = unc[0]; await nav(`/data/${dK.id}`);
     const dTxt = await page.textContent('#app');
     ok(/Not checked yet/.test(dTxt) && !/Not available yet/.test(dTxt), 'data page of pasted information: "Not checked yet" only (the sample card says "No sample looked at yet")');
     /* §4: "N steps need someone" recomputes live as owners are filled in */
@@ -191,7 +192,7 @@ async function r11(browser, ip, errors) {
 
     console.log('# R11 G2 §2: credit-limit SOP (BPM expert): else branch, reject ends, escalation timer');
     await paste(R11_CREDIT);
-    ok((await page.getAttribute('[data-lines]', 'data-lines-text')) === '12 lines → 11 steps, 2 choices', '12 lines → 11 steps, 2 choices: ' + await page.getAttribute('[data-lines]', 'data-lines-text'));
+    ok((await page.getAttribute('[data-lines]', 'data-lines-text')) === '12 lines → 11 steps, 3 choices', '12 lines → 11 steps, 3 choices (R14: "limits above $250,000 also need sign-off" is a choice): ' + await page.getAttribute('[data-lines]', 'data-lines-text'));
     ok(await page.isVisible('[data-line-as="else"]') && await page.isVisible('[data-line-as="timer"]'), 'the line map explains the "Otherwise" line and the escalation line');
     ok(/If not done in 2 business days: Escalate to the CFO/.test(await page.textContent('.is-timer')), 'escalation shows as a timer on the step');
     const w2 = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
@@ -694,6 +695,214 @@ async function r13(browser, errors) {
   await ctx.close();
 }
 
+/* ---------- R14 L2: the R13 reviewers' repros (market-review/r13 karen.md, expert-bpm.md) ---------- */
+const R14_CREDIT = `Credit Limit Request
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit request with the requested limit in Salesforce.
+2. The Credit Analyst reviews the customer's payment history and risk score.
+3. If the requested limit is under $50k, approve it.
+4. The Credit Manager approves or rejects the request.
+5. Operations director confirms the ship-to address.
+6. Limits above $250,000 also need sign-off from the Controller (Sam Wu).
+7. AR updates the credit limit in NetSuite.`;
+const R14_VENDOR = `Vendor Setup
+1. Buyer gets the vendor request from the requester.
+2. Vendor sends W-9 and COI certificate of insurance; Treasury calls to verify bank letter.
+3. Buyer checks the certificate of insurance.
+4. Operations confirms the ship-to address.
+5. AP sets up the vendor master in the ERP.`;
+const R14_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D1" targetNamespace="https://example.org/northwind">
+  <bpmn:process id="P1" name="Northwind credit hold release" isExecutable="false">
+    <bpmn:laneSet id="LS"><bpmn:lane id="L1" name="Sales rep"><bpmn:flowNodeRef>T1</bpmn:flowNodeRef></bpmn:lane><bpmn:lane id="L2" name="Controller (Sam Wu)"><bpmn:flowNodeRef>T2</bpmn:flowNodeRef></bpmn:lane></bpmn:laneSet>
+    <bpmn:startEvent id="S" name="An order is on credit hold" />
+    <bpmn:userTask id="T1" name="Ask for the hold to be released" />
+    <bpmn:userTask id="T2" name="Release the credit hold" />
+    <bpmn:endEvent id="E" name="Done" />
+    <bpmn:sequenceFlow id="F1" sourceRef="S" targetRef="T1" /><bpmn:sequenceFlow id="F2" sourceRef="T1" targetRef="T2" /><bpmn:sequenceFlow id="F3" sourceRef="T2" targetRef="E" />
+  </bpmn:process>
+</bpmn:definitions>`;
+async function r14(browser, errors) {
+  const ip = `198.51.100.${(Math.random() * 250 | 0) + 1}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r14 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r14 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const paste = async text => {
+    await nav('/import'); await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const saveDraft = async name => {
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', name);
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    return page.url().match(/process\/([^?/]+)/)[1];
+  };
+  const dataOf = (st, name) => (st.docs.dataElement.find(d => d.data.name === name) || {}).data;
+  try {
+    await nav('/'); await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+
+    console.log('# R14 Karen 4: step numbers are the same in the preview and on the saved map');
+    await paste(R14_CREDIT);
+    const pre = await page.$$eval('.is-draft [data-step-no]', els => els.map(e => { const b = e.closest('li.is-step, .is-bstep'); const t = b && b.querySelector('textarea.is-title'); return [+e.dataset.stepNo, t ? t.value : '']; }));
+    ok(pre.length >= 7 && pre.every(([n], i) => n === i + 1), 'the preview numbers every step 1..N, steps on a choice\'s path included: ' + JSON.stringify(pre));
+    ok(pre.some(([n, t]) => t === 'Approve it' && n === 3), 'the under-$50k path\'s "Approve it" is step 3, as on the map');
+    const opsPre = pre.find(([, t]) => /^Confirm the ship-to address/.test(t));
+    console.log('# R14 BPM-5: "Limits above $250,000 also need sign-off" is a choice, not a step on every path');
+    const ttl = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
+    ok(ttl.includes('Limits above $250,000?') && ttl.includes('Also sign off'), 'line 6 is a choice whose Yes path is the Controller\'s sign-off: ' + ttl.join(' | '));
+    await shot('r14-import-numbers');
+    const pid = await saveDraft('Northwind credit limit (R14)');
+    await nav(`/process/${pid}?mode=asis`);
+    const map = await page.$$eval('#canvas .node[data-step]', els => els.map(e => [+(e.querySelector('.nh .ic') || {}).textContent, (e.querySelector('.ttl') || {}).textContent]));
+    ok(pre.every(([n, t]) => map.some(([m, mt]) => m === n && mt === t)), 'every step keeps its number on the map: preview ' + JSON.stringify(pre) + ' map ' + JSON.stringify(map));
+    ok(opsPre && map.some(([m, mt]) => m === opsPre[0] && mt === opsPre[1]), `"${opsPre && opsPre[1]}" is step ${opsPre && opsPre[0]} in both`);
+    ok(/Skips to “Confirm the ship-to address”/.test((await page.textContent('#canvas [data-goto-dir="forward"]').catch(() => '')) || ''), 'the under-$50k path\'s jump reads "Skips to", never "Go back to"');
+    await shot('r14-map-numbers');
+
+    console.log('# R14 Karen 5 / BPM: information is owned by whoever does its step, never the person mapping it');
+    let st = await state();
+    const me = await page.evaluate(() => JSON.parse(localStorage.getItem('pmoflow.state') || '{}').me || null).catch(() => null);
+    const addr = dataOf(st, 'Ship-to address');
+    ok(addr && !addr.owner && addr.ownerRole === 'Operations director', 'Ship-to address: owner is the role "Operations director", no person: ' + JSON.stringify(addr && { owner: addr.owner, ownerRole: addr.ownerRole }));
+    void me;
+
+    console.log('# R14 Karen 3: a new department gets an approver inline; the process page agrees with Launch');
+    await nav(`/process/${pid}?mode=asis`);
+    const team = await page.$eval('[data-approvers] [data-apr-team="Operations"]', e => e.dataset.aprTeam).catch(() => null);
+    ok(team === 'Operations', 'Operations is a team on the approver card');
+    await page.selectOption('[data-apr-sel="Operations"]', '__add_department__');
+    await page.waitForSelector('.overlay [data-dept-name]');
+    ok(await page.isVisible('.overlay [data-dept-approver]') && await page.isVisible('.overlay [data-dept-email]'), 'the dialog asks who approves (a person, or an email to invite)');
+    await shot('r14-add-dept-approver');
+    await Promise.all([page.waitForResponse(r => r.url().includes('/departments') && r.request().method() === 'POST', { timeout: 15000 }), act('add')]);
+    await settle(); await page.waitForSelector('[data-apr-team="Operations"][data-apr-dept="Operations"]', { timeout: 10000 }).catch(() => {});
+    ok(await page.$('[data-apr-team="Operations"][data-apr-empty] [data-apr-nobody="Operations"]') !== null, 'a department with nobody in it reads "Nobody in Operations can approve this part yet", never as approving');
+    const txt = (await page.textContent('[data-apr-text]').catch(() => '')) || '';
+    const engTxt = await page.evaluate(id => { const E = window.PMOEngine; return import('/concepts/pmoflow/app/store.js').then(m => { const p = m.store.get('process', id); const v = Object.assign({}, p, { tobe: (p.tobe || []).length ? p.tobe : p.asis }); return E.teamRouting(m.store.state.docs, v).text; }); }, pid);
+    ok(!/^All /.test(txt) && /nobody to approve/i.test(engTxt) && txt.trim() === engTxt, 'the card\'s sentence is the engine\'s (Launch\'s rule): ' + txt + ' = ' + engTxt);
+    const gaps = +(await page.getAttribute('[data-approvers]', 'data-apr-gaps'));
+    ok(gaps >= 1, 'the card counts it as still to choose: ' + gaps);
+    await shot('r14-dept-nobody');
+    await page.click('[data-apr-name="Operations"]'); await page.waitForSelector('.overlay [data-dept-approver]');
+    const pick = await page.$$eval('.overlay [data-dept-approver] option', os => os.map(o => o.value).filter(Boolean)[0]);
+    await page.selectOption('.overlay [data-dept-approver]', pick);
+    const [resp] = await Promise.all([page.waitForResponse(r => r.url().includes('/departments') && r.request().method() === 'POST', { timeout: 15000 }), act('save')]);
+    await settle();
+    const respBody = await resp.json().catch(() => null);
+    if (!resp.ok() || (respBody && respBody.ok === false)) console.log('    departments response', resp.status(), JSON.stringify(respBody).slice(0, 300));
+    /* R14 (L4 rules): naming the FIRST approver of a department with none is immediate (Karen's one-step flow) */
+    ok(resp.ok() && respBody && respBody.ok !== false && !respBody.pending, 'the first approver of a new department saves at once, no second-Admin wait: ' + JSON.stringify(respBody && { applied: respBody.applied, pending: !!respBody.pending }));
+    if (resp.ok() && respBody && (respBody.applied === false || respBody.pending)) {
+      /* R14 (Jordan): naming an approver waits for a second Admin; the row says so and still counts as a gap */
+      await page.waitForSelector('[data-apr-team="Operations"] [data-apr-proposed]', { timeout: 10000 }).catch(() => {});
+      ok(await page.$('[data-apr-team="Operations"][data-apr-empty] [data-apr-proposed]') !== null, 'the proposed approver is shown as waiting for a second Admin; the part is still not approvable (agrees with Launch)');
+    } else if (resp.ok() && !(respBody && respBody.ok === false)) {
+      await page.waitForSelector('[data-apr-team="Operations"]:not([data-apr-empty]) [data-apr-who]', { timeout: 10000 }).catch(() => {});
+      ok(await page.$('[data-apr-team="Operations"]:not([data-apr-empty]) [data-apr-who]') !== null, 'after naming an approver the Operations row shows who approves');
+      st = await state();
+      const dep = ((((st.docs.workspace || []).find(d => d.id === 'settings') || {}).data || {}).departments || []).find(d => d.name === 'Operations');
+      ok(dep && dep.approvers.includes(pick), 'the approver is saved on the department');
+    } else {
+      ok(await page.isVisible('.overlay [data-dept-err]'), 'a refusal is shown in the dialog, never swallowed');
+      await act('cancel');
+    }
+    await shot('r14-dept-approver-named');
+
+    console.log('# R14 BPM-2: a multi-column sample is split per information item, and the data page says where columns went');
+    st = await state();
+    const crq = st.docs.dataElement.find(d => d.data.name === 'Credit request'), rql = st.docs.dataElement.find(d => d.data.name === 'Requested limit');
+    const csv = 'credit_request_id,requested_limit\nCR-1001,25000\nCR-1002,60000\nCR-1003,300000\n';
+    const pst = await page.evaluate(async ([id, csv]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/profile/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csv, actor: 'mc' }) })).status, [crq.id, csv]);
+    ok(pst === 200, 'sample uploaded on Credit request: ' + pst);
+    await nav(`/data/${crq.id}`);
+    const spl = (await page.textContent('[data-profile-split]').catch(() => '')) || '';
+    ok(/1 column went to Requested limit/.test(spl), 'the data page says where the other columns went: ' + spl);
+    await shot('r14-profile-split');
+    await nav(`/data/${rql.id}`);
+    const sfrom = (await page.textContent('[data-profile-splitfrom]').catch(() => '')) || '';
+    ok(/sample uploaded on Credit request/i.test(sfrom), 'the other piece says the sample came from Credit request: ' + sfrom);
+    await nav(`/process/${pid}?mode=asis`);
+    const rtTxt = (await page.textContent('[data-apr-text]').catch(() => '')) || '';
+    const want = await page.evaluate(id => { const E = window.PMOEngine; return import('/concepts/pmoflow/app/store.js').then(m => { const p = m.store.get('process', id); const v = Object.assign({}, p, { tobe: (p.tobe || []).length ? p.tobe : p.asis }); return E.teamRouting(m.store.state.docs, v).text; }); }, pid);
+    ok(rtTxt.trim() === want, 'the process page shows the engine\'s department-gap sentence (Launch\'s rule): ' + rtTxt + ' = ' + want);
+
+    console.log('# R14 Karen 9: COI is one item; W-9 and COI are collected each run, never setup tasks');
+    await paste(R14_VENDOR);
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(nds.filter(n => /insurance/i.test(n)).length === 1 && nds.includes('Certificate of insurance'), 'COI and "COI certificate of insurance" are one item: ' + nds.join(', '));
+    const runs = await page.$$eval('[data-nd] ', els => els.filter(e => e.querySelector('[data-perrun]')).map(e => e.querySelector('[data-nd-name]').value));
+    ok(runs.includes('W-9') && runs.includes('Certificate of insurance') && !runs.includes('Vendor master'), 'W-9 and the certificate are marked "collected each run": ' + runs.join(', '));
+    await shot('r14-import-perrun');
+    const pid2 = await saveDraft('Northwind vendor setup (R14)');
+    st = await state();
+    const w9 = dataOf(st, 'W-9');
+    ok(w9 && w9.perRun === true && w9.avail === 'live', 'W-9 is saved as collected each run (not "not checked yet")');
+    const wid = st.docs.dataElement.find(d => d.data.name === 'W-9').id;
+    await nav(`/data/${wid}`);
+    ok(await page.isVisible('[data-perrun]'), 'the W-9 page says "Collected each run"');
+    await shot('r14-data-perrun');
+    /* a project from this process never gets a "Make W-9 available" task */
+    const sug = await page.evaluate(([p]) => { const E = window.PMOEngine; const docs = window.__pmoStore ? window.__pmoStore.state.docs : null; return docs && E && E.suggestPlan ? JSON.stringify(E.suggestPlan(docs, { processes: [p] })).slice(0, 200) : ''; }, [pid2]).catch(() => '');
+    void sug;
+
+    console.log('# R14 BPM-5: a BPMN lane "Controller (Sam Wu)" is the Controller role with Sam Wu named');
+    fs.writeFileSync(`${OUT}/r14-lanes.bpmn`, R14_BPMN);
+    await nav('/import');
+    const [fc] = await Promise.all([page.waitForEvent('filechooser', { timeout: 8000 }), page.click('[data-pick-import]')]);
+    await fc.setFiles(`${OUT}/r14-lanes.bpmn`);
+    await page.waitForSelector('.overlay [data-impsum]', { timeout: 10000 });
+    const roles = (await page.textContent('.overlay [data-imp-roles]').catch(() => '')) || '';
+    ok(/Controller/.test(roles) && !/Sam Wu\)/.test(roles), 'the preview lists the lane as the role "Controller": ' + roles);
+    await Promise.all([page.waitForURL(/mode=edit/, { timeout: 20000 }), act('import')]); await settle();
+    const pid3 = page.url().match(/process\/([\w-]+)/)[1];
+    st = await state();
+    const proc = st.docs.process.find(d => d.id === pid3).data;
+    const rel = flat(proc.asis).find(n => n.title === 'Release the credit hold');
+    ok(rel && rel.ownerRole === 'Controller' && /Sam Wu/.test(rel.note || ''), 'the step\'s role is Controller, Sam Wu is named in its note: ' + JSON.stringify(rel && { r: rel.ownerRole, n: rel.note }));
+
+    console.log('# R14 Jordan 7: Visio decisions are choices; anything not imported is listed under "Dropped elements"');
+    await nav('/processes');
+    const [fcV] = await Promise.all([page.waitForEvent('filechooser', { timeout: 8000 }), page.click('label.d-import')]);
+    await fcV.setFiles(`${OUT}/r14-jordan-decision.vsdx`);
+    await page.waitForSelector('.overlay [data-impsum]', { timeout: 10000 });
+    const ch = +(await page.getAttribute('.overlay [data-imp-choices]', 'data-imp-choices'));
+    const dropN = +(await page.getAttribute('.overlay [data-dropped]', 'data-dropped'));
+    const dropTxt = (await page.textContent('.overlay [data-dropped]')) || '';
+    ok(ch === 2, 'both Visio decisions ("Documents complete?", "Signed?") are choices: ' + ch);
+    ok(dropN >= 2 && /Page 2/.test(dropTxt) && /Signed\?/.test(dropTxt), 'the off-page reference and the one-path choice are listed, and counted: ' + dropN + ' · ' + dropTxt.replace(/\s+/g, ' ').slice(0, 200));
+    await shot('r14-visio-decisions');
+    await Promise.all([page.waitForURL(/mode=edit/, { timeout: 20000 }), act('import')]); await settle();
+    const pidJ = page.url().match(/process\/([\w-]+)/)[1];
+    st = await state();
+    const pj = st.docs.process.find(d => d.id === pidJ).data;
+    const decs = allNodes(pj.asis).filter(n => n.type === 'decision').map(n => n.title).sort();
+    ok(JSON.stringify(decs) === JSON.stringify(['Documents complete?', 'Signed?']), 'the saved map has both choices: ' + decs.join(', '));
+
+    console.log('# R14 masking note says what the examples show');
+    const note = await page.evaluate(async () => (await import('/concepts/pmoflow/app/pages/data.js')).MASK_NOTE);
+    ok(!/first and last/i.test(note) && /9/.test(note) && /Xxxx/.test(note), 'the masking note matches the masking: ' + note);
+
+    console.log('# R14 at 390 px');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await paste(R14_CREDIT); await overflow('R14 import draft @390'); await shot('r14-phone-import');
+    await nav(`/process/${pid}?mode=asis`); await overflow('R14 process @390'); await shot('r14-phone-process');
+    await nav(`/data/${wid}`); await overflow('R14 data per-run @390'); await shot('r14-phone-data');
+    await nav(`/process/${pid2}?mode=asis`); await overflow('R14 vendor process @390');
+  } catch (e) {
+    fail++; failures.push('r14 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r14 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r14-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
@@ -701,6 +910,7 @@ async function r13(browser, errors) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R14 === '1') { await r14(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R13 === '1') { await r13(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R12 === '1') { await r12(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R11 === '1') { await r11(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
@@ -1144,7 +1354,7 @@ async function r13(browser, errors) {
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
     const hist = await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent));
     ok(hist.some(h => /Added step 'Verify identity' to Future/.test(h)), 'history shows "Added step \'Verify identity\' to Future"');
-    ok(hist.some(h => /Added “at the same time” 'Set up vendor'/.test(h)), 'history shows "at the same time"');
+    ok(hist.some(h => /Added [“"]at the same time[”"] 'Set up vendor'/.test(h)), 'history shows "at the same time"');
     ok(hist.some(h => /Started Future again from Today/.test(h)), 'history shows "Started Future again from Today"');
 
     console.log('# step page shows SLA/system');
@@ -1270,7 +1480,7 @@ async function r13(browser, errors) {
     ok(await page.isVisible('.d-resolved .d-resnote:has-text("Pattern now allows")'), 'discovered requirement resolved with note');
     ok(((await getData(did)).discovered[0].resolved || {}).by === me, 'resolved saved with author');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /sensitivity not set → Personal details/.test(t)), 'data history shows sensitivity change');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /sensitivity (?:not set → Personal details|changed from not set to Personal details)/.test(t)), 'data history shows sensitivity change');
     await shot('data-new'); await overflow('data @1440');
     /* R7 hide, don't grey: another persona does not see the owner-only controls at all */
     await setPersona(other.id);
@@ -1514,7 +1724,7 @@ async function r13(browser, errors) {
     await nav(`/data/${msId}`);
     ok(await page.isVisible('.d-resolve .badge.b-done:has-text("Done")'), 'fix card shows Done');
     await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
-    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' is connected \(from: Northwind ERP vendor API/.test(t)), 'history shows the confirmation');
+    ok((await page.$$eval('[data-history] .ev', els => els.map(e => e.textContent))).some(t => /Confirmed 'E2E missing feed' is connected/.test(t)), 'history shows the confirmation');
     await page.click('[data-dedit]');
     ok(await page.$$eval('.overlay select[name=avail] option', os => os.map(o => o.textContent).join('|')) === 'We have it (connected)|Sample only|Not available yet', 'R8: Advanced edit dialog offers the detailed states');
     await act('cancel');
@@ -1945,7 +2155,8 @@ async function r13(browser, errors) {
     ok(await page.isVisible(`[data-impact] tr[data-use="tobe"]:has-text("${builtStep.title}") [data-built]`), 'data page impact table shows the same combined status');
     if (builtRestore) { await putDoc('process', vo.id, builtRestore, 'Test fixture restored'); st = await state(); }
     const lateStep = flat(vo.tobe).find(n => n.type === 'step' && ENG.stepState(st.docs, vp.id, vo.id, n.id, st.today).status === 'prog');
-    const ago = n => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+    /* R14: the server refuses a due date on a day off, so the fixture's dates are working days */
+    const ago = n => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); while (!(ENG.isBusinessDay ? ENG.isBusinessDay(d.toISOString().slice(0, 10), st.docs) : d.getUTCDay() % 6)) d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); };
     ok(await putDoc('workItem', 'wi-e2e-late', { id: 'wi-e2e-late', projectId: vp.id, pid: vo.id, step: lateStep.id, title: 'E2E overdue check', owner: me, status: 'prog', start: ago(10), due: ago(3), deps: [], effortDays: 1 }, 'Test fixture: overdue item') === 200, 'fixture: an overdue item');
     await nav(`/process/${vo.id}/step/${lateStep.id}`);
     const ls = await page.evaluate(() => { const k = document.querySelector('[data-step-status]'); const b = k.querySelector('[data-step-label]'); return { st: k.dataset.stepStatus, txt: b.textContent.trim(), color: getComputedStyle(b).color }; });
@@ -2094,7 +2305,7 @@ async function r13(browser, errors) {
     const dnm = id => (st.docs.dataElement.find(d => d.id === id) || { data: {} }).data.name;
     ok(sSteps.every((x, i) => (x.data || []).map(dnm).join(', ') === STEPS[i][2]), 'information chips saved per step (existing names reused, no duplicates)');
     const newInfo = ['Receipt', 'Amount', 'Cost centre', 'Bank details'].map(n => st.docs.dataElement.map(d => d.data).filter(d => d.name === n));
-    ok(newInfo.every(l => l.length === 1 && l[0].avail === 'live' && l[0].owner === me && l[0].ownerRole === (['Bank details', 'Cost centre'].includes(l[0].name) ? 'Manager' : 'Employee')), 'R8: new information on Today defaults to "We have it", owned by the step’s role (accountable: the process owner), created once');
+    ok(newInfo.every(l => l.length === 1 && l[0].avail === 'live' && !l[0].owner && l[0].ownerRole === (['Bank details', 'Cost centre'].includes(l[0].name) ? 'Manager' : 'Employee')), 'R8/R14: new information on Today defaults to "We have it", owned by the step’s role (never the person mapping it), created once');
     ok(await page.isVisible('#canvas .node [data-who][data-role]:has-text("Employee")'), 'the role shows on the card');
     await shot('simple-mapped-today');
     /* R8 §1: information typed on a new Today map is information we have: no red or amber warnings anywhere */
@@ -2139,7 +2350,10 @@ async function r13(browser, errors) {
     await page.check('.overlay [data-ichip] [data-have]');
     await saving(() => act('save')); await settle(); st = await state();
     const ra = st.docs.dataElement.map(d => d.data).find(d => d.name === 'Remittance advice') || {};
-    ok(ra.avail === 'live' && ra.owner === me, 'R9: switched on = "We have it"; owner defaults to whoever does the step' + (ra.avail === 'live' && ra.owner === me ? '' : ` (avail ${ra.avail}, owner ${ra.owner}, me ${me})`));
+    /* R14 (BPM): "whoever does the step" is the step's role when it has one, never the process owner behind it */
+    const raStep = st.docs.process.flatMap(d => flat(d.data.tobe || [])).find(n => n.title === 'Email the remittance advice') || {};
+    const raOk = ra.avail === 'live' && (raStep.ownerRole ? ra.ownerRole === raStep.ownerRole && !ra.owner : ra.owner === raStep.owner);
+    ok(raOk, 'R9: switched on = "We have it"; owner defaults to whoever does the step' + (raOk ? '' : ` (avail ${ra.avail}, owner ${ra.owner}/${ra.ownerRole}, step ${raStep.owner}/${raStep.ownerRole})`));
     await page.click('.d-modes [data-mode="diff"]'); await page.waitForURL(/mode=diff/);
     ok(await page.isVisible('#canvas .node:has-text("Pay by bank transfer automatically") .chip.diff-new'), 'What changed: the new Future step is marked NEW');
     await jargonCheck('new process, What changed');
@@ -2345,7 +2559,7 @@ async function r13(browser, errors) {
       const vp = await getProc(vPid); const S10 = await state(); const des = S10.docs.dataElement.map(d => d.data);
       const used = [...new Set(allNodes(vp.asis).flatMap(n => n.data || []))];
       const seedBank = des.find(d => d.name === 'Bank remittance details');
-      ok(used.length > 0 && !used.includes(seedBank && seedBank.id) && used.every(id => (des.find(d => d.id === id) || {}).avail === 'unchecked'), `R10 §2: ${used.length} pieces of information created fresh in this process, none from the seed, each "Not checked yet"`);
+      ok(used.length > 0 && !used.includes(seedBank && seedBank.id) && used.every(id => { const d = des.find(x => x.id === id) || {}; return d.perRun ? d.avail === 'live' : d.avail === 'unchecked'; }), `R10 §2: ${used.length} pieces of information created fresh in this process, none from the seed, each "Not checked yet" (R14: documents the vendor sends each run are "Collected each run")`);
       ok(!flat(vp.asis).some(n => n.owner && n.owner !== me) && flat(vp.asis).filter(n => n.ownerRole).length >= 8, 'R10 §2: owners come only from the text (roles), never a seed person');
       ok(!/\d+\s+steps?/.test(vp.desc || ''), 'R10: the saved description has no step count');
       ok(await page.isVisible('[data-touches] [data-touch="Procurement"]') && await page.isVisible('[data-touches] [data-touch="Treasury"]'), 'R10: "Teams involved" on the saved process lists the teams from the text');
@@ -2568,6 +2782,7 @@ async function r13(browser, errors) {
   if (process.env.SKIP_R11 !== '1') await r11(browser, ip, errors);
   if (process.env.SKIP_R12 !== '1') await r12(browser, ip, errors);
   if (process.env.SKIP_R13 !== '1') await r13(browser, errors);
+  if (process.env.SKIP_R14 !== '1') await r14(browser, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

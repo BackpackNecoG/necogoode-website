@@ -199,7 +199,7 @@ test('profile stores statistics only (no raw CSV value survives)', async () => {
     const raw = cells.filter(v => v && v.length >= 5);
     assert.ok(raw.length > 100);
     for (const v of raw) assert.ok(!json.includes(v), 'raw value leaked into profile');
-    for (const c of stored.data.columns) assert.deepEqual(Object.keys(c).filter(k => !['name', 'nulls', 'distinct', 'minLen', 'maxLen', 'min', 'max', 'charClasses', 'specials', 'patterns', 'examples', 'duplicates'].includes(k)), []);
+    for (const c of stored.data.columns) assert.deepEqual(Object.keys(c).filter(k => !['name', 'nulls', 'distinct', 'minLen', 'maxLen', 'min', 'max', 'charClasses', 'specials', 'patterns', 'examples', 'duplicates', 'duplicateRecords'].includes(k)), []);
   }
   const prof = find(await state(ws), 'profile', 'profile-D2').data;
   const routing = prof.columns.find(c => c.name === 'routing_number');
@@ -442,20 +442,25 @@ test('put doc stamps updatedAt on workItem and process docs only', async () => {
   let st = await state(ws);
   const w = find(st, 'workItem', 'W4').data;
   const before = Date.now();
-  await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: Object.assign({}, w, { status: 'done' }) });
+  await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: Object.assign({}, w, { status: 'prog' }) });
   st = await state(ws);
   const t1 = find(st, 'workItem', 'W4').data.updatedAt;
   assert.ok(Date.parse(t1) >= before - 5);
-  /* client echoes the stored value back unchanged -> server re-stamps */
+  /* R14 PMO-A2: a client echoing the stored value back unchanged changes nothing: no stamp, no history */
   await new Promise(res => setTimeout(res, 5));
-  await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: find(st, 'workItem', 'W4').data });
+  const echo = await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: find(st, 'workItem', 'W4').data });
+  assert.equal(echo.body.unchanged, true);
+  st = await state(ws);
+  assert.equal(find(st, 'workItem', 'W4').data.updatedAt, t1);
+  /* an echoed updatedAt with a real change -> server re-stamps */
+  await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: Object.assign({}, find(st, 'workItem', 'W4').data, { note: 'touched' }) });
   st = await state(ws);
   assert.ok(find(st, 'workItem', 'W4').data.updatedAt > t1);
   /* client-supplied fresh value is kept */
   await call('PUT', `ws/${ws}/doc/workItem/W4`, { actor: 'ps', data: Object.assign({}, w, { updatedAt: '2030-01-01T00:00:00.000Z' }) });
   st = await state(ws);
   assert.equal(find(st, 'workItem', 'W4').data.updatedAt, '2030-01-01T00:00:00.000Z');
-  await call('PUT', `ws/${ws}/doc/process/access-review`, { actor: 'dk', data: find(st, 'process', 'access-review').data });
+  await call('PUT', `ws/${ws}/doc/process/access-review`, { actor: 'dk', data: Object.assign({}, find(st, 'process', 'access-review').data, { desc: 'touched' }) });
   await call('PUT', `ws/${ws}/doc/risk/R4`, { actor: 'dk', data: find(st, 'risk', 'R4').data });
   st = await state(ws);
   assert.ok(find(st, 'process', 'access-review').data.updatedAt);
@@ -637,7 +642,8 @@ test('R3 event summaries use names, never ids', async () => {
   assert.match(s('grant:G2'), /^Updated UAT read access to Bank remittance details: status Requested → Approved; approved by none → [A-Z][a-z]+ [A-Z]/);
   assert.ok(!/\blp\b|approved at/.test(s('grant:G2')), 'names, never ids; no server timestamps as changes');
   assert.equal(s('testRun:TR7'), 'Created UAT run, Nov 4');
-  assert.match(s('workItem:W5'), /: no field changed \(note: “Moved Make the extra-checks list and sign-off form after Write down the risk tier rules and Vendor risk tier review”\)$/);
+  /* R14 PMO-A2: a save that changes nothing is not logged at all */
+  assert.ok(!ev.some(e => e.ref === 'workItem:W5' && /Moved|no field changed/.test(e.summary)));
   assert.equal(s('risk:R3'), 'Deleted risk "Business testing overlaps the quarter-end close"');
   st = await state(ws);
   assertNoIds(ev.map(e => e.summary), st.docs, 'event summaries (incl. seeded)');
@@ -707,8 +713,10 @@ test('R4/R9 report wording: late-by is business days past due, one word "late", 
   const w6 = r.body.risks.find(x => x.startsWith('“Set up the bank details form”'));
   assert.ok(w6, 'task titles are quoted “X”');
   const w6due = find(st, 'workItem', 'W6').data.due;
-  const pastDue = engine ? engine.businessDaysBetween(w6due, st.today) : null;
-  if (pastDue != null) assert.ok(w6.includes(`late by ${pastDue} business day${pastDue === 1 ? '' : 's'}`), w6);
+  /* R14 (PMO list 5): "late by N" is the Work tab's one lateness number (projectTruth.lateness), not just the days past due */
+  const lateBy = engine ? engine.projectTruth(st.docs, 'vendor-modernization', st.today).lateness.W6.days : null;
+  if (lateBy != null) assert.ok(w6.includes(`late by ${lateBy} business day${lateBy === 1 ? '' : 's'}`), w6);
+  void w6due;
   /* R9 §13: "waiting on" only along a real dependency edge */
   const docs = st.docs, wt = id => find(st, 'workItem', id).data;
   r.body.risks.filter(x => /waiting on/.test(x)).forEach(x => {
@@ -912,7 +920,9 @@ test('R5 status report: not-yet-live count and email recipients', async () => {
   assert.ok(r.body.summary.includes(`${notLive} ${notLive === 1 ? 'piece of information is' : 'pieces of information are'} not available yet`));
   assert.ok(!/connected|sample only|waiting for confirmation/i.test(r.body.summary + r.body.asks.join(' ')), 'Simple words only');
   assert.deepEqual(r.body.recipients.map(x => x.email), ['tom.alvarez@northwind.example', 'maya.chen@northwind.example', 'priya.shah@northwind.example',
-    'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example']);
+    'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example', 'dave.ortiz@northwind.example']);
+  /* R14 (Jordan E): everyone with an ask is on the list (Dave Ortiz approves Compliance's part) */
+  assert.ok(r.body.asks.some(a => /^Dave Ortiz:/.test(a)), r.body.asks.join(' | '));
 });
 
 test("R5 SOP parser: reviewers' exact phrasings", () => {
@@ -1700,7 +1710,8 @@ test('R9 §3 (bug B8): a done date is the client\'s today, never the server\'s U
   const ws = await newWs();
   let st = await state(ws);
   const yday = shiftDay(st.today, -1);   /* a client still on the previous local day (evening in the Americas) */
-  const put = (id, patch) => call('PUT', `ws/${ws}/doc/workItem/${id}`, { actor: 'dk', today: yday, data: Object.assign({}, find(st, 'workItem', id).data, patch) });
+  /* R14 PMO-A1: each task is changed by its own owner */
+  const put = (id, patch) => call('PUT', `ws/${ws}/doc/workItem/${id}`, { actor: find(st, 'workItem', id).data.owner, today: yday, data: Object.assign({}, find(st, 'workItem', id).data, patch) });
   let r = await put('W7', { status: 'done', doneAt: undefined });
   assert.equal(r.body.doc.data.doneAt, yday, 'missing doneAt -> the client today');
   r = await put('W11', { status: 'done', doneAt: new Date().toISOString() });
@@ -1756,7 +1767,7 @@ test('R10.1 status report: {preset} or {from, to}; "Overall" + "This period"; pl
   assert.deepEqual([sec.completed.items, sec.completed.empty], [[], 'Nothing completed this week']);
   assert.equal(sec.behind.items[0], '5 late (1 past due, 4 will finish after their due date)');
   /* R13 #2: each test's latest result per stage, with the stage's current count (one ledger) */
-  assert.deepEqual(sec.tests.items, ['Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.']);
+  assert.deepEqual(sec.tests.items, ['Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.']);
   assert.ok(b.sections.every(s => s.items.length || s.empty || ['spend', 'schedule'].includes(s.key)), 'never an empty heading');
   assert.equal(b.overall.needsPurpose, false);
   assert.match(b.overall.budget, /^Higher budget need expected/);
@@ -1924,49 +1935,48 @@ test('R12 #4 who can pass a business check: the assignee or the owning departmen
 });
 
 /* ================================ R13 (K1) ================================ */
-test('R13 #1 POST /ws/:ws/departments: editors add, Admins rename/assign/remove; the settings doc keeps roles', async () => {
+/* R14 (with L4, Jordan A): department changes. First approvers of a department with none: one Admin, at once, dated.
+   With two or more Admins, a move is proposed, and a second Admin (not the proposer, not the person moved) confirms it
+   with the extra sign-in check. A one-Admin workspace applies at once. Every grant is dated (approverSince/buSince). */
+test('R14 departments: first approvers at once; moves need a second Admin with step-up; one-Admin workspaces apply at once', async () => {
   const ws = await newWs();
-  const st0 = await state(ws);
-  const settings0 = find(st0, 'workspace', 'settings').data;
-  assert.equal(settings0.departments.length, 6);
-  /* an Editor (Ana) may add a department from the approver panel */
-  let r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'add', name: 'Credit', approvers: ['gw'] } });
+  const dep = (actor, op) => call('POST', `ws/${ws}/departments`, { actor, op });
+  const settings = async () => find(await state(ws), 'workspace', 'settings').data;
+  /* PMO has no approvers yet: Tom (an Admin) names one, applied at once and dated */
+  let r = await dep('ta', { kind: 'approvers', id: 'dept-pmo', approvers: ['rv'] });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.ok(r.body.departments.some(d => d.name === 'Credit' && d.approvers[0] === 'gw'));
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'add', name: 'credit' } });
-  assert.equal(r.status, 400);
-  assert.equal(r.body.error, 'A department called Credit already exists.');
-  /* an Approver (Dave) may not add; an Editor may not rename */
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'do', op: { kind: 'add', name: 'Sales' } });
+  const pmo = (await settings()).departments.find(d => d.id === 'dept-pmo');
+  assert.deepEqual(pmo.approvers, ['rv']);
+  assert.ok(pmo.approverSince && pmo.approverSince.rv, JSON.stringify(pmo));
+  /* an Editor can't move people */
+  r = await dep('ar', { kind: 'assign', personId: 'lp', id: 'dept-compliance' });
   assert.equal(r.status, 403);
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ar', op: { kind: 'rename', id: 'dept-credit', name: 'Credit Control' } });
-  assert.equal(r.status, 403);
-  assert.match(r.body.error, /Only an Admin/);
-  /* an Admin (Tom) renames, assigns and removes; person.bu follows; roles survive */
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'assign', personId: 'lp', id: 'dept-credit' } });
+  /* two Admins (Tom, Maya): Tom proposes moving Leo; Tom and Leo can't confirm; Maya confirms with step-up */
+  r = await dep('ta', { kind: 'assign', personId: 'lp', id: 'dept-compliance' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'rename', id: 'dept-credit', name: 'Credit Control' } });
+  const pend = (await settings()).pendingDept.find(p => p.status === 'pending' && p.op.personId === 'lp');
+  assert.ok(pend, 'the move waits for a second Admin');
+  assert.equal(find(await state(ws), 'person', 'lp').data.bu, 'Treasury', 'nothing moves before the confirmation');
+  const confirm = (actor, stepUp) => call('POST', `workspaces/${ws}/admin/departments/pending/${pend.id}/confirm`, Object.assign({ actor }, stepUp ? { stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } } : {}));
+  assert.equal((await confirm('ta', true)).status, 403, 'the proposer never confirms');
+  assert.equal((await confirm('mc', false)).status, 403, 'step-up is needed');
+  r = await confirm('mc', true);
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  let st = await state(ws);
-  assert.equal(find(st, 'person', 'lp').data.bu, 'Credit Control');
-  assert.equal(find(st, 'person', 'lp').data.name, 'Leo Park');
-  assert.deepEqual(find(st, 'workspace', 'settings').data.roles, settings0.roles);
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'remove', id: 'dept-credit' } });
-  assert.equal(r.status, 400);
-  assert.equal(r.body.error, 'Move the 1 person in Credit Control to another department first.');
-  await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'assign', personId: 'lp', id: 'dept-treasury' } });
-  r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'remove', id: 'dept-credit' } });
-  assert.equal(r.status, 200);
-  st = await state(ws);
-  assert.ok(!find(st, 'workspace', 'settings').data.departments.some(d => d.id === 'dept-credit'));
-  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: 20 })).body.events.map(e => e.summary);
-  assert.ok(ev.some(s => s === 'Added the Credit department'), ev.join(' | '));
-  assert.ok(ev.some(s => s === 'Renamed the Credit department to Credit Control'));
-  /* the generic doc API still refuses settings writes */
-  r = await call('PUT', `ws/${ws}/doc/workspace/settings`, { actor: 'ta', data: { departments: [] } });
-  assert.equal(r.status, 403);
+  const lp = find(await state(ws), 'person', 'lp').data;
+  assert.equal(lp.bu, 'Compliance');
+  assert.ok(lp.buSince, 'the move is dated');
+  /* the engine rule: Leo joined Compliance after this project's testing started, so he can't pass its Compliance tests */
+  const st = await state(ws);
+  const t = engine.projectTruth(st.docs, 'vendor-modernization', st.today).testing.perBU.Compliance.tests[0];
+  const bar = engine.canPassTest(st.docs, 'vendor-modernization', t.id, 'lp');
+  assert.ok(bar && bar.rule === 'recent-move', JSON.stringify(bar));
+  /* a one-Admin workspace: Maya made an Editor, so Tom's move applies at once */
+  const sd = await settings();
+  await store.putDoc(ws, 'workspace', 'settings', Object.assign({}, sd, { roles: Object.assign({}, sd.roles, { mc: 'editor' }) }));
+  r = await dep('ta', { kind: 'assign', personId: 'ar', id: 'dept-compliance' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(find(await state(ws), 'person', 'ar').data.bu, 'Compliance');
 });
-
 test('R13 #3 server: test assignment across departments is refused; the assigner can\'t pass; approval needs a ready part in every view', async () => {
   const ws = await newWs();
   const st0 = await state(ws);
@@ -1997,11 +2007,16 @@ test('R13 #7 profile: shared bank accounts and near-duplicate names reach the st
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const col = n => r.body.columns.find(c => c.name === n);
   assert.deepEqual([col('account_number').sharedAccount.accounts, col('account_number').sharedAccount.records], [1, 2]);
-  assert.ok(col('legal_name').nearDuplicates && col('legal_name').nearDuplicates.groups >= 1, JSON.stringify(col('legal_name')));
+  /* R14 (BPM-2): legal name and tax id belong to "Vendor legal name & Tax ID", so they are profiled there */
+  assert.deepEqual(r.body.split.map(x => x.dataId), ['D1']);
+  const d1 = find(await state(ws), 'profile', 'profile-D1').data;
+  const ln = d1.columns.find(c => c.name === 'legal_name');
+  assert.ok(ln.nearDuplicates && ln.nearDuplicates.groups >= 1, JSON.stringify(ln));
+  assert.ok(!/Acme|Fabrikam/.test(JSON.stringify(d1)));
   assert.ok(!JSON.stringify(r.body).includes('000123456789') && !/Acme|Fabrikam/.test(JSON.stringify(r.body)), 'no values stored');
   const de = { id: 'DV', name: 'Vendors', fields: [{ name: 'Account number', type: 'digits', minLen: 4, maxLen: 17 }] };
   const tests = engine.generateTests(de, r.body.columns.map(c => Object.assign({}, c, { name: c.name === 'account_number' ? 'Account number' : c.name })), { all: true });
-  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same account number as another record/.test(t.note)), 'a uniqueness test from the stored profile');
+  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same bank account number as another vendor/.test(t.note)), 'a uniqueness test from the stored profile');
 });
 
 /* R13 (K3 finding): once a project has a plan, Settings may not move the deadline or budget around sponsor approval */
@@ -2036,4 +2051,150 @@ test('R13: the history sentence is server-written; a forged client summary is on
   assert.match(ev.summary, /status .* → Done/);
   assert.match(ev.summary, /\(note: “Comment added”\)$/);
   assert.ok(!/^Comment added/.test(ev.summary));
+});
+
+/* ================================ R14 (L1): audit integrity and the deadline guard ================================ */
+const R14put = (ws, type, id, data, actor, extra) => call('PUT', `ws/${ws}/doc/${type}/${id}`, Object.assign({ data, actor }, extra || {}));
+const R14events = async (ws, ref) => (await call('GET', `ws/${ws}/events`, null, { limit: '200' })).body.events.filter(e => !ref || e.ref === ref);
+
+test('R14 PMO-A1/A3: only the owner, the PM, the launch owner or an Admin change a task; hours carry server time; backdated is labelled', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const w8 = find(st, 'workItem', 'W8').data;   // Dev Kumar's task
+  assert.equal(w8.owner, 'dk');
+  // the PMO expert's repro: Ana (an Editor, not the owner) adds 40 backdated hours to Dev's task through the API
+  const forged = await R14put(ws, 'workItem', 'W8', Object.assign({}, w8, { time: (w8.time || []).concat([{ by: 'ar', date: '2026-10-01', hours: 40, note: 'x' }]) }), 'ar', { summary: 'Viewed' });
+  assert.equal(forged.status, 403);
+  assert.match(forged.body.error, /Dev Kumar.*task owner|only/i);
+  /* R14 (Jordan B): the refusal is in History, server-written, and never as if it happened */
+  const ref8 = await R14events(ws, 'workItem:W8');
+  assert.equal(ref8.length, 1); assert.equal(ref8[0].action, 'refused'); assert.match(ref8[0].summary, /^Refused: change to work item .* — Only Dev Kumar/);
+  assert.ok(!/Viewed/.test(ref8[0].summary), 'the client\'s note is never the History text');
+  // the owner logs hours: the server stamps the time; a past date is labelled backdated
+  const today = new Date().toISOString().slice(0, 10);
+  const own = await R14put(ws, 'workItem', 'W8', Object.assign({}, w8, { time: (w8.time || []).concat([{ by: 'dk', date: '2026-10-01', hours: 3, note: 'late entry', at: '2020-01-01T00:00:00.000Z' }]) }), 'dk');
+  assert.equal(own.status, 200);
+  const t = own.body.doc.data.time.slice(-1)[0];
+  assert.ok(Math.abs(Date.parse(t.at) - Date.now()) < 60000, 'server time, never the client\'s');
+  assert.equal(t.backdated, true);
+  assert.match((await R14events(ws, 'workItem:W8'))[0].summary, /backdated/);
+  // the PM may edit anyone's task; another editor may pick up an unowned task
+  assert.equal((await R14put(ws, 'workItem', 'W8', Object.assign({}, own.body.doc.data, { title: w8.title + ' (renamed)' }), 'ta')).status, 200);
+  const w11 = find(st, 'workItem', 'W11').data;
+  assert.equal((await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { owner: undefined, ownerRole: 'Integration' }), 'ta')).status, 200);
+  const un = Object.assign({}, w11, { ownerRole: 'Integration' }); delete un.owner;
+  assert.equal((await R14put(ws, 'workItem', 'W11', Object.assign({}, un, { owner: 'ar' }), 'ar')).status, 200, 'pick up unowned work');
+  void today;
+});
+
+test('R14 PMO-A2: a refused or empty write never appears in History; a note claiming a change that did not happen is dropped', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = (st.docs.project || []).find(p => p.id === 'vendor-modernization').data;
+  // the refused $90,000 budget edit
+  const bud = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { budget: { planned: 90000 } }), prj.owner, { summary: 'Project settings: planned budget $48,000 → $90,000' });
+  assert.equal(bud.status, 409);
+  // the settings dialog keeps the locked budget but its note still claims the edit: no change, nothing logged
+  const same = await R14put(ws, 'project', prj.id, Object.assign({}, prj), prj.owner, { summary: 'Project settings: planned budget $48,000 → $90,000' });
+  assert.equal(same.status, 200);
+  const ev = await R14events(ws, 'project:' + prj.id);
+  assert.ok(!ev.some(e => e.action !== 'refused' && /90,?000/.test(e.summary)), JSON.stringify(ev.map(e => e.summary)));
+  assert.ok(ev.some(e => e.action === 'refused' && /^Refused: change to project .*Change the plan/.test(e.summary)), 'the refusal itself is recorded');
+  // a real change with a false claim in the note: the server sentence stays, the false claim is dropped
+  const real = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { desc: 'New words' }), prj.owner, { summary: 'Project settings: planned budget $48,000 → $90,000; description updated' });
+  assert.equal(real.status, 200);
+  const e2 = (await R14events(ws, 'project:' + prj.id))[0];
+  assert.match(e2.summary, /^Updated project .*: desc/);
+  /* the person's note is kept, quoted, and can't look like a server change */
+  assert.match(e2.summary, /\(note: “Project settings: planned budget \$48,000 to \$90,000; description updated”\)$/, e2.summary);
+  assert.ok(!/→ \$?90/.test(e2.summary), e2.summary);
+});
+
+test('R14 PMO-S1..S3 / PMO-11: deadline guard on task writes, day-off due dates, the sponsor and rebaselining', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  const w11 = find(st, 'workItem', 'W11').data;
+  // the owner moves his own due date past the deadline: refused, Change the plan
+  const late = engine.addBusinessDays(prj.target, 6);
+  const r = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { due: late }), w11.owner);
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /Change the plan/);
+  assert.ok(r.body.deadline && r.body.deadline.target === prj.target);
+  assert.ok((await R14events(ws, 'workItem:W11')).every(e => e.action === 'refused'));
+  // a holiday due date is refused, naming the day
+  const xmas = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { due: '2026-12-25' }), w11.owner);
+  assert.equal(xmas.status, 400);
+  assert.match(xmas.body.error, /Fri Dec 25 is Christmas Day/);
+  // inside the buffer: fine
+  const ok = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { due: engine.addBusinessDays(w11.due, 1) }), w11.owner);
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  // the PM can't make himself sponsor; changing the sponsor needs an Admin or the current sponsor
+  const self = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { sponsor: prj.owner }), prj.owner);
+  assert.equal(self.status, 403);
+  assert.match(self.body.error, /sponsor/);
+  // rebaselining: "Save plan" on a project that has a saved plan goes through Change the plan
+  assert.ok((prj.baselines || []).length, 'the seed has a saved plan');
+  const bl = { id: 'bl-new', label: 'My new plan', at: new Date().toISOString(), items: {} };
+  const rb = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { baselines: prj.baselines.concat([bl]) }), prj.owner);
+  assert.equal(rb.status, 409);
+  assert.match(rb.body.error, /Change the plan/);
+});
+
+test('R14 PMO-1 server: Done is stamped with its doer; only someone else confirms it', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const w7 = find(st, 'workItem', 'W7').data;
+  const done = await R14put(ws, 'workItem', 'W7', Object.assign({}, w7, { status: 'done', doneBy: 'ta' }), w7.owner);
+  assert.equal(done.status, 200);
+  assert.equal(done.body.doc.data.doneBy, w7.owner, 'the doer is the actor, never a name the client sends');
+  const selfC = await R14put(ws, 'workItem', 'W7', Object.assign({}, done.body.doc.data, { confirmedBy: w7.owner }), w7.owner);
+  assert.equal(selfC.status, 403);
+  const pmC = await R14put(ws, 'workItem', 'W7', Object.assign({}, done.body.doc.data, { confirmedBy: 'ta' }), 'ta');
+  assert.equal(pmC.status, 200);
+  assert.ok(pmC.body.doc.data.confirmedAt);
+  assert.equal(engine.unconfirmedDone((await state(ws)).docs, 'W7').flag, false);
+});
+
+test('R14 PMO-7 server: a Done saved after the last report shows in "since last report" (exact server time, viewer\'s clock)', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  const stamp = new Date(Date.now() - 60000).toISOString();   /* the report went out a minute ago */
+  assert.equal((await R14put(ws, 'project', prj.id, Object.assign({}, prj, { lastReportAt: stamp }), prj.owner)).status, 200);
+  const w11 = find(st, 'workItem', 'W11').data;
+  const done = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { status: 'done', time: [{ by: 'dk', date: st.today, hours: 6 }] }), 'dk');
+  assert.equal(done.status, 200);
+  assert.ok(done.body.doc.data.doneTs > stamp);
+  const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: prj.id, preset: 'since-last-report', tzOffsetMinutes: 360 });
+  assert.equal(r.status, 200);
+  const completed = r.body.sections.find(x => x.key === 'completed');
+  assert.ok(completed.items.some(x => x.includes(w11.title)), JSON.stringify(completed));
+  assert.ok(!/UTC/.test(r.body.window.note || ''), r.body.window.note);
+});
+
+test('R14 PMO-S2 (with L4): a plain project PUT uses the one sponsor rule: the PM never sets the sponsor; an Admin does', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  const self = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { sponsor: prj.owner }), prj.owner);
+  assert.equal(self.status, 403);
+  const other = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { sponsor: 'rv' }), prj.owner);
+  assert.equal(other.status, 403, 'the PM does not pick the sponsor');
+  assert.ok(!(await R14events(ws, 'project:' + prj.id)).some(e => e.action !== 'refused' && /sponsor/.test(e.summary)));
+  const byAdmin = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { sponsor: 'rv' }), 'mc');   /* Maya: an Admin, not the PM */
+  assert.equal(byAdmin.status, 200, JSON.stringify(byAdmin.body));
+});
+
+test('R14 BPM-2 server: a multi-column sample uploaded on one item is split per information item; counts are records', async () => {
+  const ws = await newWs();
+  const csv = ['bank_name,vendor_id,account_number', 'First Lakeview Bank,V000123,000123456789', 'First Lakeview Bank,V000124,000123456789', 'Harbor Trust,V000125,000987654321'].join('\n');
+  const r = await call('POST', `ws/${ws}/profile/D2`, { actor: 'lp', csv });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!r.body.columns.some(c => c.name === 'vendor_id'), 'the vendor id column went to Vendor master record');
+  assert.deepEqual(r.body.split.map(x => x.dataId), ['D4']);
+  const st = await state(ws);
+  assert.deepEqual(find(st, 'profile', 'profile-D4').data.columns.map(c => c.name), ['vendor_id']);
+  assert.equal(r.body.columns.find(c => c.name === 'account_number').sharedAccount.records, 2);
+  assert.ok(!JSON.stringify(st.docs.profile).includes('000123456789'), 'no values kept');
 });

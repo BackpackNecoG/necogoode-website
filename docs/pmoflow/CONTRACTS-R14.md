@@ -155,27 +155,42 @@ All new functions are on the shared engine (`E()` in the browser, `require('api/
 ### Cost unknown (Karen 2)
 - `projectTruth.cost` adds `unknown: bool`, `unknownText: 'Cost unknown: set rates'`, `unpriced: n` (open tasks with no owner rate and no fixed cost). When `unknown`: `forecast`, `estimate`, `remaining`, `variance` are `null` and `overBudget` is `false`; `planned` (budget) still shows. Never red "over budget" from default rates. `projectFinancials` follows the same rule.
 
-### One testing counter (BPM-1) *landing*
-- `projectTruth.testing` is the ONE ledger. Every surface reads: `total` (= `cases + scripts`), `passed`, `failed`, `notRun`, `stages[]` (`{key:'system'|'uat', label, total, passed, failed, notRun}`; both stages use the same `total`), `count` ("9 of 26 tests passed"), `coverage.text`.
-- `coverage.allCovered` is true only when every changed piece of information has an item-specific case for every rule field (a generic user-origin case does not count); `coverage.specificGaps` lists pieces covered only by generic cases.
-- `E.testingLine(truth)` → one sentence for headers, Portfolio and the report, e.g. "9 of 26 tests passed (17 not passed yet: 1 failed, 16 not run)".
+### One testing counter (BPM-1) (landed)
+- `projectTruth.testing` is the ONE ledger: `total` (= `cases + scripts`), `passed`, `failed`, `notRun`, `count` ("9 of 26 tests passed"), `status` (every ledger test id), `ledgerText` ("26 tests: 8 information checks and 18 step checks. Try it out runs the 8 information checks; the business check runs all 26.").
+- `stages[]`: `{key:'system', label:'Try it out', unit:'information check', scope}` counts the information checks only; `{key:'uat', unit:'test'}` counts all. Show Try it out as "7 of 8 information checks passed" (never "tests"), so it never reads as a second total. `next` now says "Try out the N information checks".
+- The report's stage lines count only ledger tests (cases on information the project doesn't change no longer leak in: "Try it out: 3 passed, 1 failed (now 7 of 8 passed)").
+- `coverage.allCovered` is true only when no gaps AND no piece has only the basic presence test; `coverage.genericOnly` (ids), `coverage.genericText`; `coverage.elements[].genericOnly/specific`.
+- Testing page (L1): the run row counts ledger tests only (9/26, never 9/32); the matrix badge says "N with a basic test only" instead of "all covered".
 
-### One blocker counter (BPM, Karen 7) *landing*
+### One blocker counter (BPM, Karen 7) (landed)
 - `projectTruth.blocking.holdsUp` = DISTINCT open tasks held (within the project); `blocking.text` "9 blocking (holds up 9 tasks)".
-- `periodReport(...).headline.lateOrBlocked` = header's `lateCount` + `blocking.count` taken from the same projectTruth; `weekly.blockersRaised` = blockers whose information became not available in the period.
-- `E.infoStateCounts(docs, projectId)` → `{notAvailable, notChecked, sampleOnly, have}`: the one split the process page and Launch both show.
+- `blocking.items[].heldIds` (distinct task ids). `projectTruth.lateOrBlocked` → `{count, ids, late, heldUp, text:'7 tasks late or blocked (5 late, 2 held up by missing information)'}`: the header's ONE "late or blocked" number; the report's areas of concern use the same set (`overall.lateOrBlocked`).
+- `periodReport.blockersRaised`: information is dated `unavailableSince`, else `createdAt` (the server now stamps new information and risks), else when the first task it holds up was planned.
+- `E.infoStateCounts(docs, projectId)` → `{have, notAvailable, notChecked, sampleOnly, waiting, problem, total, text:'1 not available, 8 not checked'}`: the one split the process page (L2) and Launch both show.
 
-### Reports (PMO-7/8) *landing*
-- `lastReportStamp(project)` is an exact ISO timestamp; "since last report" compares event times, not days.
-- A past range's headline is computed `asOf` the period end; `report.asOf` = `{date, label}` ("as of Fri Nov 13" or "as of today").
-- Time stamps in the report are formatted with the viewer's offset (`opts.tzOffsetMinutes`); `E.fmtStamp(iso, tzOffsetMinutes)`.
-- "late by N business days" in the report is `projectTruth.lateness[id].days` (same as the Work tab).
+### Reports (PMO-7/8, list 5/6) (landed)
+- The server stamps exact times on tasks: `createdTs`, `assignedTs`, `startedTs`, `doneTs`. "Since last report" compares them with the report's exact time.
+- **L3 ask:** send `tzOffsetMinutes: new Date().getTimezoneOffset()` in the `/ai/status-report` body. `window.note` then reads "Since the last report on Tue Nov 17 at 2:59 AM." Without it the note has no clock time (never UTC). `window.sinceAt` is the ISO time for local formatting; `E.fmtStamp(iso, tzOffsetMinutes)`.
+- A past range: `overall.asOf = {date, past:true, label:'as of Fri Nov 13'}` and the overall label/sentence/schedule/late are computed as of the period end. The headline/risks/asks stay today's: the report body has `asOf: 'as of today'` and the headline ends "(as of today)". `overall.asOf.label` is 'as of today' for a window ending today. Render both labels.
+- "late by N business days" in the report = `projectTruth.lateness[id].days` (the Work tab's number).
+- A plan change in the report: `planChanges[].shiftDays` = its impact's finish before → after (`finishBefore`, `finishAfter`); when a saved forecast predates the period, the slip text says how much the change made: "…16 business days later this week (Dec 7 → Dec 30): 14 business days from the plan change “X” (Dec 9 → Dec 30), 2 business days from work running late".
+- The email list (`recipients`) includes everyone with an ask (`who`), not only the project team.
 
-### Approvals (Karen 8, BPM-9) *landing*
-- A part's approval request waits until its work is done: `approvalsOf` items carry `ready:false, waitingFor:{count, titles}` while any of the part's tasks is open.
-- `approvalsOf` items carry `changedAfter: [{what, from, to}]` when the part changed after its approval ("Step 4 owner: AP clerk → AP lead").
+### Approvals (Karen 8, BPM-9) (landed)
+- A part's work now includes its "Retire the old step" tasks and "tell-removed" tasks, so its approval is not ready (and nobody is asked) until they are done.
+- `approvals[].changedAfter: [{ref, text}]` e.g. "“Capture banking details” due Nov 20 → Dec 3, owner Leo Park → Ana Ruiz"; step changes also name the information and teams involved, from → to. The approval fingerprint now carries the part's task values (`;w:`), so approvals saved from R14 on can say from → to. The Launch card renders it (L1).
 
-### Plan-change knock-on (PMO-9) — engine side; L3 wires it in the change module
+### Plan-change knock-on (PMO-9) — engine side landed; **L3 ask:** wire it in the change module
 - `E.knockOnRedates(docsAfter, projectId, today, {exclude:[ids]})` → change edits `[{type:'workItem', id, op:'set', field:'due', from, to, label, auto:true}]` for open tasks whose expected finish lands after their due date after the change. Applying them re-dates knock-on due dates.
 - `E.pastDueWarnings(docsAfter, projectId, today)` → `[{workId, title, due, forecast, text}]` for the impact screen.
-- The `who` list no longer says "back on schedule" for a task whose expected finish equals its due date.
+- The `who` list no longer says "back on schedule" for a task whose expected finish equals its due date: "Finish “X” by Dec 22: other work waits for it".
+- **L3 ask:** in `C.buildChange`/`C.impact`, add `E.knockOnRedates(after, projectId, today, {exclude: edited ids})` as auto edits (shown as "moves due Nov 27 → Dec 17", applied with the change), and show `E.pastDueWarnings(afterWithRedates, projectId, today)` on the impact screen.
+
+### Also landed (L1)
+- **L3 asks 1–4:** the sentence and the `info` who row name the fix task's owner or "Needs an owner: <role>" (never the data owner/PM); `personQueue` lists a held item once; a Done the PM marked goes to the launch owner, sponsor, then an Admin (never the doer); `AVAIL_LABELS.live.label` is "Available" (the Testing and Launch pages now say Available too).
+- **Profile → tests (BPM-2):** `profileCsv` columns add `duplicateRecords` (records sharing a value). `sharedAccount.text`: "2 account numbers are each on more than one record (4 records in all): …"; only on bank accounts (never "customer account number"). Generated cases carry `signal: 'shared-account'|'duplicate'|'near-duplicate'` and `setup` ("Setup: first save a record with this value, then enter it on a second record." — why it differs from the valid case). Amount/limit/score fields typed text are numbers (`fieldSpec(...).inferred`; a score is 0–100). A shape most rows have is never "should be rejected". `E.splitSampleColumns(docs, dataId, names)`; the profile route splits a multi-column sample per information item (response `split: [{dataId, name, columns}]`). **L2 ask:** show `split` ("2 columns went to Vendor master record") after an upload.
+- **Jordan A:** department changes are dated (`person.buSince`, `department.approverSince`); `E.grantTooRecent(docs, project, bu, personId)`. A person moved in or named approver after the part was in flight (its project's first test result, or the part's first approval) can't pass its tests (`canPassTest` rule `'recent-move'`) and is not an eligible approver. **L4:** your two-person route calls `departmentEdit` at apply time, which stamps that time; pass `at` if you want the proposal time instead.
+- **Jordan B:** every refused doc write (400/403/409) appends a History event `action:'refused'`, summary "Refused: change to work item “X” (due Nov 20 → Jan 5) — <reason>". **L4:** the audit export/verify should accept action `refused`.
+- **Jordan C:** a launch with an override records one release exception per overridden condition (`exceptions[].override: true`); the Launch summary shows an Override badge, lists every overridden condition, and shows "Launch-day plan is ready" as a warning when a launch-day step was open.
+- **Jordan D:** Launch's checks card explains "The 6 steps left cover the 9 checks not passed below" (`projectTruth.launchChecks`). **L3 ask:** Portfolio should say the same pair (`stepsLeft` + `launchChecks.text`).
+- **History:** the server's diff skips server stamps (`…At`, `…Ts`, `doneBy`); hours read "hours logged: 3 hours on Oct 1 (logged Nov 18, backdated) by Dev Kumar".

@@ -102,3 +102,21 @@
   .adm-dpick{grid-template-columns:1fr}
   .adm-dacts .btn{min-height:40px}
 }
+
+/* R14 L4 #2: project sponsors (Admin › People) */
+.adm-sphint{margin-bottom:6px}
+.adm-spon{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1.2fr) minmax(0,1fr);gap:6px 16px;padding:10px 0;border-top:1px solid #f1f2f5;align-items:start}
+.adm-spon:first-child{border-top:0}
+.adm-spl{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--ink3);margin-bottom:3px}
+.adm-spon select{font:inherit;font-size:13px;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
+.adm-spon select:disabled{background:#f9fafb;color:var(--ink2)}
+@media (max-width:640px){ .adm-spon{grid-template-columns:minmax(0,1fr)} }
+/* R14 (Jordan): department changes waiting for a second Admin */
+.adm-pend{border-color:#f5d48a}
+.adm-pitem{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-start;justify-content:space-between;padding:10px 0;border-top:1px solid #f1f2f5}
+.adm-pitem:first-of-type{border-top:0}
+.adm-pitem > div:first-child{min-width:0;flex:1 1 260px;overflow-wrap:anywhere}
+.adm-pacts{display:flex;gap:8px;flex-wrap:wrap}
+.adm-pacts .btn{min-height:32px}
+.adm-dpend{color:#92400e;margin-top:4px}
+.adm-refused{color:#b91c1c;font-weight:600}

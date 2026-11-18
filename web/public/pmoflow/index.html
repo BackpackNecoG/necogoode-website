@@ -35,6 +35,7 @@
     <p class="kicker">PMOFlow · process change, planned</p>
     <h1>Whether you bring your existing tools or start fresh with us, <em>PMOFlow does the heavy lifting for your operations.</em></h1>
     <p class="lede">Your process map is the project plan. Map how the work runs today and how it should run. PMOFlow shows what changed, builds the plan, tracks it, tests with real data, gets each department to approve its part, and launches with an undo plan.</p>
+    <p class="path-line" data-pmo-lead><b>Already using Jira or Azure DevOps?</b> Keep your workflow. <a href="#paths">See how sync works</a></p>
     <p class="path-line" data-oneliner><b>No migration project.</b> Connect what you have, or don’t.</p>
     <div class="cta-row">
       <a class="btn" href="/pmoflow/demo" data-cta="book">Book a demo</a>
@@ -56,13 +57,14 @@
       <h2 id="paths-h">Start where you are. <em>PMOFlow takes it from there.</em></h2>
     </div>
     <div class="cards two" data-paths>
+      <div class="card" data-path="existing"><h3>Already using Jira or Azure DevOps? Keep your workflow.</h3>
+        <p class="soft">Your engineers stay in the tool they know. PMOFlow syncs both ways: work items flow out to your tools, and status flows back into the plan. Notifications reach Teams and Outlook.</p>
+        <p class="soft">The plan stays governed. If a date changed in Jira would take the project past its deadline, PMOFlow sends it to the sponsor as a plan change instead of moving the plan.</p>
+        <p class="soft">No migration project. Connect what you have, or don’t.</p></div>
       <div class="card" data-path="fresh"><h3>Starting fresh</h3>
         <p class="soft">Run the whole change in PMOFlow, from the first map to launch day.</p>
         <p class="mono small" data-flow>map → plan → track → test → approve → launch</p>
         <p class="soft">No other tools needed. The Team plan covers it on its own.</p></div>
-      <div class="card" data-path="existing"><h3>Already using Jira or Azure DevOps?</h3>
-        <p class="soft">Keep your workflow. PMOFlow syncs both ways: work items flow out to your tools, and status flows back into the plan. Notifications reach Teams and Outlook.</p>
-        <p class="soft">No migration project. Connect what you have, or don’t.</p></div>
     </div>
     <div class="cards three" data-u="mt16">
       <div class="card mini"><h3>No migration project</h3><p class="soft">Start with one process change. Connect your tools on day one, later, or never.</p></div>
@@ -125,11 +127,11 @@
 <section class="block faq" aria-labelledby="faq-h">
   <div class="wrap">
     <div class="section-head"><p class="kicker">Questions</p><h2 id="faq-h">Frequently asked</h2></div>
-    <details><summary>Do we need Jira, Azure DevOps or Planner to use PMOFlow?</summary><div><p>No. PMOFlow runs the whole change on its own, from map to launch. If you already use Jira or Azure DevOps, you can keep your workflow: work items sync both ways (titles, descriptions and status), while PMOFlow keeps the due dates and dependencies that come from the process change. Sync is part of the Business plan. No migration project. Connect what you have, or don’t.</p></div></details>
+    <details><summary>Do we need Jira, Azure DevOps or Planner to use PMOFlow?</summary><div><p>No. PMOFlow runs the whole change on its own, from map to launch. If you already use Jira or Azure DevOps, you can keep your workflow: work items sync both ways (titles, descriptions and status), while PMOFlow keeps the due dates and dependencies that come from the process change. A due date changed in Jira or Azure DevOps that would take the project past its deadline becomes a plan change for the sponsor to approve; it never moves the plan on its own. Sync is part of the Business plan. No migration project. Connect what you have, or don’t.</p></div></details>
     <details><summary>Where does our data live?</summary><div><p>In your own Microsoft tenant. PMOFlow is a display layer: your process and project records sit behind an API that runs in your Azure subscription, and integration keys stay in your Key Vault. <a href="/pmoflow/security">Read the security page.</a></p></div></details>
     <details><summary>Who needs a paid seat?</summary><div><p>Only editors, the people who build maps and plans. Viewers and approvers are free on every plan. Editor seats start at <span data-price="from">see pricing</span> a month, <span data-price="billing">billed annually</span>. <a href="/pmoflow/pricing">See pricing.</a></p></div></details>
     <details><summary>Can we try it before we buy?</summary><div><p>Yes, two ways. Open the <a href="/concepts/pmoflow/">live demo</a> now, with no sign-up. Or run a <span data-price="pilot.days">90</span>-day pilot on your own process for <span data-price="pilot.price">a fixed fee</span>, <span data-price="pilot.note">credited to your first year</span>.</p></div></details>
-    <details><summary>Is PMOFlow SOC 2 certified?</summary><div><p>Not yet. A third-party penetration test is targeted for Q1 2027 and SOC 2 Type I for Q3 2027, followed by Type II. The <a href="/pmoflow/security">security page</a> separates what is in place today from what is planned.</p></div></details>
+    <details><summary>Does PMOFlow have a SOC 2 report?</summary><div><p>Not yet. A third-party penetration test is targeted for Q1 2027 and SOC 2 Type I for Q3 2027, followed by Type II. The <a href="/pmoflow/security">security page</a> separates what is in place today from what is planned.</p></div></details>
     <details><summary>Can we bring the process maps we already have?</summary><div><p>Yes. Paste a written procedure and it becomes a map, import BPMN, or import a Visio (.vsdx) flowchart. You can also start from a template such as vendor onboarding or invoice approval.</p></div></details>
     <details><summary>Does it do timesheets, a report builder or process mining?</summary><div><p>No, on purpose. Those belong to the project and process suites you may already own. PMOFlow stays focused on taking one process change from map to launch. <a href="/pmoflow/compare">See how it fits with your tools.</a></p></div></details>
     <details><summary>What happens to what I enter in the live demo?</summary><div><p>It lives in a private sandbox for 30 days, alongside fictional Northwind data. Please don’t enter real company or personal data in the demo.</p></div></details>

@@ -2,7 +2,7 @@
    /project/:prj?mode=map|timeline|work
    Also exports small PMO helpers reused by home.js and portfolio.js. */
 import { store } from '../store.js';
-import { renderChangesSection, bindChangesSection, taskChangesHTML } from './changes.js';
+import { renderChangesSection, bindChangesSection, taskChangesHTML, openChangeWizard, ensureAssets as ensureChangeAssets, bindDayOff, dayOffText, daysOffSoonHTML } from './changes.js';
 import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, bindComments, bindHistory, commentsPanel, historyPanel } from '../ui.js';
 
 /* ---------------------------------------------------------------- shared helpers */
@@ -138,13 +138,16 @@ function normTruth(t, j) {
   const pastDue = num(t.pastDueCount) || 0, finishAfterDue = num(t.finishAfterDueCount, t.runningLateCount) || 0;
   const buffer = num(t.bufferDays, t.buffer, t.bufferBizDays, sched.bufferDays, sched.buffer);
   const ac = num(cost.actual, cost.actualCost, ev.ac);
-  const eac = num(cost.forecast, cost.forecastCost, cost.eac, cost.forecastAtCompletion, ev.eac);
+  /* R14 (Karen 2): the engine's cost.forecast is null when no rates are set ("Cost unknown: set rates"); never fall back
+     to an EV number built on the default rate */
+  const eac = 'forecast' in cost ? num(cost.forecast) : num(cost.forecastCost, cost.eac, cost.forecastAtCompletion, ev.eac);
   const allDone = total > 0 && done === total;
   return {
     src: 'engine', k, label, sentence,
     /* R9 §1: `who` is the one ranked list (header, What's blocking, Who needs to act, Up next, home card) */
     who: (Array.isArray(t.who) ? t.who : Array.isArray(st.who) ? st.who : [])
-      .map(w => ({ person: personOf(w.person) || null, name: w.name || null, action: String(w.what || w.action || ''), why: String(w.why || ''), href: String(w.href || '/project/' + j.id), ref: w.ref || null }))
+      .map(w => ({ person: personOf(w.person) || null, name: w.name || null, action: String(w.what || w.action || ''), why: String(w.why || ''), href: String(w.href || '/project/' + j.id), ref: w.ref || null,
+        needsOwner: !!w.needsOwner || (!personOf(w.person) && /^Needs an owner/.test(String(w.name || ''))) }))
       .filter(w => w.action),
     /* R10 §2: "% done" is projectTruth.pctDone (EV ÷ budget), the same share earned value uses */
     total, done, pct: num(t.pctDone, prog.pct, t.pct, t.percent) != null ? Math.round(num(t.pctDone, prog.pct, t.pct, t.percent)) : (total ? Math.round(done / total * 100) : 0),
@@ -154,7 +157,8 @@ function normTruth(t, j) {
     actualFinish: dateOf(t.actualFinish, sched.actualFinish), buffer, late, lateIds, pastDue, finishAfterDue, blockers,
     stepsLeft: num(t.stepsLeft), launchChecks: t.launchChecks && typeof t.launchChecks === 'object' ? t.launchChecks : null, advancedNote: t.advancedNote || st.advancedNote || null,
     launchSteps: ls, tests: (num(tests.passed) != null || num(tests.total) != null) ? { passed: num(tests.passed) || 0, total: num(tests.total) || 0, text: String(tests.count || tests.text || tests.label || '') } : null,
-    cost: { planned: num(cost.planned, cost.budget, t.budget) || 0, actual: ac || 0, forecast: eac || 0, show: cost.show != null ? !!cost.show : true },
+    cost: { planned: num(cost.planned, cost.budget, t.budget) || 0, actual: ac || 0, forecast: eac || 0, known: eac != null && cost.unknown !== true && cost.known !== false,
+      unknownText: String(cost.unknownText || cost.text || 'Cost unknown: set rates'), show: cost.show != null ? !!cost.show : true },
     ev: Object.values(ev).some(v => v != null) ? Object.assign(ev, { eac: eac != null ? eac : ev.eac }) : null,
     burn: { status: String(burn.status || burn.direction || burn.trend || ''), text: String(burn.text || burn.sentence || burn.label || BURN_WORDS[burn.direction || burn.status] || ''),
       show: burn.show != null ? !!burn.show : burn.sprintsOnly != null ? !burn.sprintsOnly : burn.agree != null ? !!burn.agree : burn.agrees != null ? !!burn.agrees : true },
@@ -292,8 +296,8 @@ function spanWords(d) {
   const w = Math.round(d / 7); return `about ${plural(w, 'week')}`;
 }
 const personOf = x => typeof x === 'object' && x ? (x.id || x.person) : x;
-/* Plain state label for a piece of information: Connected / Sample only / Not available yet / Waiting for confirmation. */
-const AVAIL_PLAIN = { live: ['Connected', 'pass'], example: ['Sample only', 'warn'], missing: ['Not available yet', 'fail'], pending: ['Waiting for confirmation', 'warn'] };
+/* Plain state label for a piece of information (R14: one word, "available", in Simple and Advanced): Available / Sample only / Not available yet / Waiting for confirmation. */
+const AVAIL_PLAIN = { live: ['Available', 'pass'], example: ['Sample only', 'warn'], missing: ['Not available yet', 'fail'], pending: ['Waiting for confirmation', 'warn'] };
 export function availText(dataId) {
   const r = eng('availLabel', null, docs(), dataId);
   const k = effAvail(dataId), x = AVAIL_PLAIN[k] || AVAIL_PLAIN.missing; /* key = effective state, for logic */
@@ -341,7 +345,7 @@ export function whoActs(j, n) {
   return truthOf(j).who.filter(x => { const k = x.person || x.name || x.action; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, n || 3);
 }
 export const whoName = x => x.person ? pname(x.person) : (x.name && x.name !== '—' ? x.name : 'Nobody yet');
-const WHY_LBL = { blocker: 'Blocking', 'past-due': 'Late', delaying: 'Late', late: 'Late', deadline: 'Deadline', info: 'Information', problem: 'Problem', approval: 'Approval', test: 'Tests', plan: 'Plan' };
+const WHY_LBL = { confirm: 'Confirm', hold: 'Confirm', owner: 'Owners', blocker: 'Blocking', 'past-due': 'Late', delaying: 'Late', late: 'Late', deadline: 'Deadline', info: 'Information', problem: 'Problem', approval: 'Approval', test: 'Tests', plan: 'Plan' };
 const WHY_ADV = { 'past-due': 'Past due', delaying: 'Holding up others', late: 'Finishes after due' };
 export const whyLabel = why => (!isSimple() && WHY_ADV[why]) || WHY_LBL[why] || '';
 /* One `who` row: person · what to do · why tag, linking to where it's done. */
@@ -354,7 +358,10 @@ export function whoRowHTML(x, i) {
 export function whoLineHTML(j, n, label) {
   const who = whoActs(j, n);
   if (!who.length) return '';
-  return `<div class="pmo-who" data-who>${label ? `<span class="lbl">${esc(label)}</span>` : ''}${who.map((x, i) => `<span class="pmo-who-r" data-who-i="${i}">${x.person ? av(x.person) : ''}<span><b data-who-name>${esc(whoName(x))}</b>: ${esc(x.action)}</span></span>`).join('')}</div>`;
+  /* R14 (L3 #1): unowned work reads "<what> · Needs an owner: <role>", never under a person and never "Needs an owner: X: Finish …" */
+  return `<div class="pmo-who" data-who>${label ? `<span class="lbl">${esc(label)}</span>` : ''}${who.map((x, i) => x.needsOwner
+    ? `<span class="pmo-who-r pmo-who-unowned" data-who-i="${i}" data-who-unowned><span>${esc(x.action)} · <b data-who-name class="pmo-noowner">${esc(whoName(x))}</b></span></span>`
+    : `<span class="pmo-who-r" data-who-i="${i}">${x.person ? av(x.person) : ''}<span><b data-who-name>${esc(whoName(x))}</b>: ${esc(x.action)}</span></span>`).join('')}</div>`;
 }
 /* Steps to launch: engine launchSteps (plain words, done/next, who acts), else the readiness checks in plain words. */
 export function launchStepsOf(j) {
@@ -451,10 +458,23 @@ export function taskFlagsHTML(w, j) {
   }
   if (w.status !== 'done') return '';
   const out = [];
+  /* R14 (PMO-1): a Done with an open predecessor or no hours earns nothing until someone other than the doer confirms it */
+  const uc = !w.confirmedBy ? eng('unconfirmedDone', null, docs(), w) : null;
+  if (uc && uc.flag) {
+    const can = store.state.me && store.state.me !== uc.doer;
+    out.push(`<span class="pmo-evflag pmo-unconf" data-unconfirmed="${esc(w.id)}" title="${esc(uc.text)}">⚠ ${esc(uc.text)}${can ? ` <button type="button" class="btn sm" data-confirm-done="${esc(w.id)}">Confirm it’s done</button>` : uc.doer ? ` <b>${esc(pname(uc.doer))} can’t confirm their own task</b>` : ''}</span>`);
+    return `<div class="pmo-tflags">${out.join('')}</div>`;
+  }
   if ((w.deps || []).length) { const r = eng('doneBeforeDeps', null, docs(), w.id); if (r && r.flag) out.push(`<span class="pmo-evflag" data-done-early="${esc(w.id)}" title="${esc(r.text)}">⚠ Finished before the work it depends on</span>`); }
   const fl = j ? ((truthOf(j).raw || {}).evFlags || []).find(f => f && f.key === 'done-no-hours') : null;
   if (fl && (fl.items || []).includes(w.id)) out.push(`<span class="pmo-evflag" data-done-no-hours="${esc(w.id)}" title="${esc(fl.text)}">⚠ Done with no hours logged</span>`);
   return out.length ? `<div class="pmo-tflags">${out.join('')}</div>` : '';
+}
+/* R14 (PMO-1): someone other than the doer confirms a Done (the server stamps confirmedAt and refuses the doer) */
+export async function confirmDone(id) {
+  const w = store.get('workItem', id); if (!w || w.status !== 'done') return;
+  try { await psave('workItem', id, Object.assign({}, w, { confirmedBy: store.state.me }), `Confirmed “${w.title}” is done`); toast(`Confirmed: “${w.title}”`); }
+  catch (e) { /* psave said why */ }
 }
 /* One-tap done, used on home and on the project. Sets status done and doneAt (applyDone). */
 export async function markDone(id) {
@@ -475,7 +495,10 @@ export function statusesOf(j) {
 export function statusOf(w, j) {
   const ss = statusesOf(j);
   const hit = w.statusId && ss.find(x => x.id === w.statusId && x.maps === w.status);
-  return hit || ss.find(x => x.maps === w.status) || { id: w.status, name: STATUS_LBL[w.status] || w.status, maps: w.status };
+  /* R14 (PMO list 3): a custom status id stored as the status itself (a held Jira Done is written as 'review') is that
+     custom status, so the "In review" count and the rows that read In review agree */
+  const byId = !MAPS.includes(w.status) && ss.find(x => x.id === w.status);
+  return hit || byId || ss.find(x => x.maps === w.status) || { id: w.status, name: STATUS_LBL[w.status] || w.status, maps: w.status };
 }
 export const statusName = (w, j) => statusOf(w, j).name;
 /* project.fields: [{key, label, type: text|number|select, options}]; values in workItem.custom[key]. */
@@ -530,7 +553,49 @@ const denied = e => e && e.status === 403 ? `Not saved: ${e.message && !/^HTTP/.
 export async function psave(type, id, data, summary) {
   if (type === 'workItem' && data) data = stampWork(store.get('workItem', id), data);
   try { return await store.save(type, id, data, summary); }
-  catch (e) { toast(denied(e)); if (e && typeof e === 'object') e.pmoHandled = true; throw e; }
+  catch (e) {
+    /* R14 (PMO-S1..S3): the server refuses a direct edit that moves the finish past the deadline (409 "Use Change the
+       plan…"); say why in plain words and offer Change the plan with the same dates, instead of a bare error toast */
+    if (e && e.status === 409 && /change the plan/i.test(String(e.message || '')) && (type === 'workItem' || type === 'project')) {
+      const prj = type === 'project' ? id : data && data.projectId;
+      offerChangePlan(store.get('project', prj), type === 'workItem' ? data : null, String(e.message || '')).catch(() => {});
+    } else toast(denied(e));
+    if (e && typeof e === 'object') e.pmoHandled = true; throw e;
+  }
+}
+/* R14 (PMO-S1): a task edit that would move the expected finish past the deadline. Runs the engine on a copy of the docs
+   with the edited task (never a local rule): {before, after, target} when it breaches, else null. */
+export function deadlineBreach(j, next) {
+  if (!j || !next || !j.target || !window.PMOEngine) return null;
+  const nid = next.id || '__new_task__';
+  const D = docs(), arr = (D.workItem || []).filter(e => e.id !== nid).concat([{ id: nid, data: Object.assign({}, next, { id: nid }) }]);
+  /* the engine's own guard (the same one the server runs), when present */
+  if (typeof window.PMOEngine.deadlineBreach === 'function') {
+    const b = eng('deadlineBreach', null, D, Object.assign({}, D, { workItem: arr }), j.id, today());
+    return b ? { before: b.finishBefore, after: b.finishAfter, target: b.target, text: b.text } : null;
+  }
+  const tb = eng('projectTruth', null, D, j.id, today()), ta = eng('projectTruth', null, Object.assign({}, D, { workItem: arr }), j.id, today());
+  if (!tb || !ta || !ta.forecastFinish) return null;
+  const was = tb.forecastFinish, now = ta.forecastFinish;
+  if (!(now > j.target)) return null;
+  if (was && was > j.target && !(now > was)) return null;
+  return { before: was, after: now, target: j.target };
+}
+/* "This needs Change the plan": what happened, who approves, one button that opens the wizard with the same dates */
+export async function offerChangePlan(j, w, serverMsg, breach, many) {
+  if (!j) { toast(serverMsg || 'Use Change the plan.'); return; }
+  if (many && many.breach) breach = { before: many.breach.finishBefore, after: many.breach.finishAfter, target: many.breach.target };
+  try { await ensureChangeAssets(); } catch (e) { /* the wizard says so itself */ }
+  const sp = window.PMOChange && window.PMOChange.sponsorOf ? window.PMOChange.sponsorOf(docs(), j, [store.state.me]) : null;
+  const what = breach && (w || many) ? `${many ? esc(many.what || 'These moves') : `Moving “${esc(w.title)}”`} would move the expected finish from <b>${esc(fmt(breach.before))}</b> to <b>${esc(fmt(breach.after))}</b>, past the <b>${esc(fmt(breach.target))}</b> deadline.`
+    : esc(serverMsg || 'This change would move the expected finish past the deadline.');
+  const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal><p style="margin:0">${what}</p>
+      <p class="hint" style="margin:8px 0 0">Nothing was saved. A change that moves the finish past the deadline goes through <b>Change the plan</b>, so ${sp ? `the sponsor, <b>${esc(pname(sp))}</b>,` : 'the sponsor'} can approve it. You fill in why; we show the impact first.</p></div>`,
+    actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
+  if (r.action !== 'change') return;
+  const cur = w && w.id ? store.get('workItem', w.id) : null;
+  if (many && many.dates) return openChangeWizard(j.id, { kinds: ['dates'], dates: many.dates });
+  openChangeWizard(j.id, cur && cur.status !== 'done' ? { taskId: cur.id, start: w.start, due: w.due, kinds: ['dates'] } : { kinds: [w ? 'work' : 'deadline'] });
 }
 /* R10.1: the dated facts the status report's time window reads (local dates): created, assigned, started. */
 export function stampWork(prev, data) {
@@ -664,14 +729,23 @@ export function bindFeed(root, key, match) {
    that applies the same rule: cost = effortDays × the owner's dayRate (default 800). */
 export function financials(j) {
   const c = truthOf(j).cost;
-  return { planned: c.planned, forecast: c.forecast, actual: c.actual, src: 'truth' };
+  return { planned: c.planned, forecast: c.forecast, actual: c.actual, known: c.known !== false, src: 'truth' };
 }
+/* R14 (Karen 2): no expected cost without day rates. "Cost unknown: set rates" (a link to the rates), never a red
+   "over budget" from the default rate. `over` is only ever true for a known expected cost. */
+export const costKnown = j => financials(j).known;
+export const costOver = j => { const c = financials(j); return !!(c.known && c.planned && c.forecast > c.planned); };
+export const costUnknownText = j => truthOf(j).cost.unknownText || 'Cost unknown: set rates';
+/* inside a card that is itself a link (home tiles, portfolio cards) it is plain text: links never nest */
+export const costUnknownHTML = (j, inLink) => inLink ? `<span class="pmo-cost-unknown" data-cost-unknown title="Expected cost needs each owner’s day rate. Set rates in Portfolio › Workload.">${esc(costUnknownText(j))}</span>`
+  : `<a class="pmo-cost-unknown" href="${link('/portfolio')}#pmo-workload" data-link data-cost-unknown title="Expected cost needs each owner’s day rate. Set rates in Portfolio › Workload.">${esc(costUnknownText(j))}</a>`;
+export const expectedCostHTML = (j, inLink) => costKnown(j) ? `<b data-t="cost" class="${costOver(j) ? 'fail' : ''}">${esc(money(financials(j).forecast))}</b>` : costUnknownHTML(j, inLink);
 /* Planned / actual / forecast cost, one format everywhere. */
-export function costHTML(j, cls) {
+export function costHTML(j, cls, inLink) {
   const c = financials(j);
   /* R9 §11/§13: "Expected cost" (never "Forecast cost"), shown only when a budget or day rates exist */
   if (!truthOf(j).cost.show) return '';
-  return `<span class="pmo-cost ${cls || ''}" data-cost><span>Budget <b data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</b></span><span>Spent <b data-t="actual">${esc(money(c.actual))}</b></span><span>Expected cost <b data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</b></span></span>`;
+  return `<span class="pmo-cost ${cls || ''}" data-cost><span>Budget <b data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</b></span><span>Spent <b data-t="actual">${esc(money(c.actual))}</b></span><span>${costKnown(j) ? `Expected cost ${expectedCostHTML(j, inLink)}` : costUnknownHTML(j, inLink)}</span></span>`;
 }
 /* The standard facts line (projectTruth): expected finish, late count, blockers. Used by header, home card, portfolio, report. */
 export function factsHTML(j, opts) {
@@ -683,7 +757,9 @@ export function factsHTML(j, opts) {
   const nb = live ? 0 : blockingCount(t);   /* R11: projectTruth.blocking */
   /* R10 §5: Simple shows the split too ("5 late (1 past due, 4 will finish after their due date)"), from projectTruth.lateText */
   const brk = t.late && lateSplitText(t) ? ` <span class="hint" data-late-breakdown>(${esc(lateSplitText(t))})</span>` : '';
-  return `${when}<span><b data-t="late" class="${t.late ? 'fail' : ''}">${t.late}</b> late${brk}</span><span><b data-t="blockers" class="${nb ? 'fail' : ''}">${nb}</b> blocking</span>${!isSimple() && t.advancedNote && !live ? `<span class="pmo-advnote" data-adv-note>${esc(t.advancedNote)}</span>` : ''}${opts.cost ? costHTML(j) : ''}`;
+  /* R14 (PMO-1): Done tasks that earn nothing until someone else confirms them (projectTruth.unconfirmed) */
+  const uc = !live && t.raw && t.raw.unconfirmed && t.raw.unconfirmed.count ? t.raw.unconfirmed : null;
+  return `${when}<span><b data-t="late" class="${t.late ? 'fail' : ''}">${t.late}</b> late${brk}</span><span><b data-t="blockers" class="${nb ? 'fail' : ''}">${nb}</b> blocking</span>${!live && t.raw && t.raw.lateOrBlocked && t.raw.lateOrBlocked.count ? `<span class="pmo-lob" data-t="lateOrBlocked" title="${esc(t.raw.lateOrBlocked.text || '')}"><b>${t.raw.lateOrBlocked.count}</b> late or blocked</span>` : ''}${uc ? `<span class="warn" data-t="unconfirmed" title="${esc(uc.text || '')}"><b>${uc.count}</b> done, not confirmed</span>` : ''}${!isSimple() && t.advancedNote && !live ? `<span class="pmo-advnote" data-adv-note>${esc(t.advancedNote)}</span>` : ''}${opts.cost ? costHTML(j, '', opts.inLink) : ''}`;
 }
 /* Burndown: remaining effort over time (work drops off on its doneAt), plus an ideal line from start to target.
    Normalised to {points: [{date, remaining, ideal}], total, start, end}. */
@@ -794,10 +870,10 @@ function nodeHTML(n, pid, prj, idx, dp) {
     const causing = items.some(w => w.status !== 'done' && !!(fcAll[w.id] || {}).causesSlip); /* the engine's holds-up flag */
     const awaitingData = !!st && st.status === 'done' && eff.some(x => x[1] !== 'live');
     body = `<div class="meta">${stBadge(st, causing, awaitingData, lateN)}${gap ? '<span class="badge b-soon">No tasks yet</span>' : ''}${defects ? `<span class="badge b-late">${BUG} ${defects} ${isSimple() ? 'problem' : 'defect'}${defects > 1 ? 's' : ''}</span>` : ''}</div>
-      <div class="stats">${items.length ? `<span>Tasks <b>${done}/${items.length}</b> done</span>` : ''}${dl.length ? `<span>Information <b>${live}/${dl.length}</b> ${isSimple() ? 'available' : 'connected'}</span>` : ''}</div>
+      <div class="stats">${items.length ? `<span>Tasks <b>${done}/${items.length}</b> done</span>` : ''}${dl.length ? `<span>Information <b>${live}/${dl.length}</b> available</span>` : ''}</div>
       ${red.length || amber.length ? `<div class="chips">${red.map(d => `<a class="chip block" href="${link('/data/' + encodeURIComponent(d))}" data-link>${WAIT_IC} Waiting on ${esc(dataName(d))}</a>`).join('')}${amber.map(([d, e]) => e === 'pending'
         ? `<a class="chip pmo-amber" data-pending href="${link('/data/' + encodeURIComponent(d))}" data-link title="Fix done, waiting for the owner to confirm." aria-label="${esc(dataName(d))}: waiting for confirmation"><i class="pmo-adot"></i>Waiting for confirmation: ${esc(dataName(d))}</a>`
-        : `<a class="chip pmo-amber" href="${link('/data/' + encodeURIComponent(d))}" data-link title="Sample only. Needs to be connected before launch." aria-label="${esc(dataName(d))}: sample only, needs to be connected before launch"><i class="pmo-adot"></i>Sample only: ${esc(dataName(d))}</a>`).join('')}</div>` : ''}`;
+        : `<a class="chip pmo-amber" href="${link('/data/' + encodeURIComponent(d))}" data-link title="Sample only. The real information must be available before launch." aria-label="${esc(dataName(d))}: sample only, the real information must be available before launch"><i class="pmo-adot"></i>Sample only: ${esc(dataName(d))}</a>`).join('')}</div>` : ''}`;
   }
   const goAttr = trig ? '' : `data-go="/process/${esc(pid)}/step/${esc(n.id)}"`;
   return `<div class="${cls}" data-step="${esc(n.id)}" ${goAttr}>
@@ -1108,6 +1184,15 @@ let arrowsResize = false;
 let refocusBar = null, refocusUntil = 0; /* keyboard moves re-render the timeline (twice per save); focus returns to the same bar */
 /* Commit new dates from a drag, resize or key press: to the live plan (owner/PM), or into the open scenario (PM). */
 async function commitDates(j, w, start, due, how, sc) {
+  /* R14 (PMO-11): a bar dropped onto a day off lands on the working day before it (the same span), never a refusal */
+  if (!sc && due !== w.due) {
+    const p = eng('dueDateProblem', null, due, docs());
+    if (p && p.suggestion) {
+      const back = dayDiff(due, p.suggestion); due = p.suggestion;
+      if (how !== 'resize' && start) { start = addDays(start, -back); const ps = eng('dueDateProblem', null, start, docs()); if (ps && ps.suggestion) start = ps.suggestion; }
+      if (start && start > due) start = due;
+    }
+  }
   const s0 = w.start || w.due;
   if (start === s0 && due === w.due) return;
   if (sc) {
@@ -1123,8 +1208,8 @@ async function commitDates(j, w, start, due, how, sc) {
   const dd = dayDiff(start, s0), de = dayDiff(due, w.due);
   const sign = n => (n > 0 ? '+' : '') + n + 'd';
   const summary = how === 'resize'
-    ? `Resized “${w.title}” on the timeline: due ${fmt(w.due)} → ${fmt(due)} (${sign(de)})`
-    : `Rescheduled “${w.title}” on the timeline: ${fmt(s0)} – ${fmt(w.due)} → ${fmt(start)} – ${fmt(due)} (${sign(dd)})`;
+    ? `Resized “${w.title}” on the timeline (${sign(de)})`
+    : `Rescheduled “${w.title}” on the timeline (${sign(dd)})`;   /* R14: the server writes the from → to itself */
   await psave('workItem', w.id, next, summary);
   const nConf = schedConflicts(j.id).filter(c => c.workId === w.id || depId(c.dep) === w.id).length;
   if (how !== 'key') toast(`${how === 'resize' ? `Due ${de > 0 ? 'later' : 'earlier'} by ${Math.abs(de)} day${Math.abs(de) === 1 ? '' : 's'}` : `Moved ${dd > 0 ? 'later' : 'earlier'} by ${Math.abs(dd)} day${Math.abs(dd) === 1 ? '' : 's'}`}${nConf ? ` · ${nConf} scheduling conflict${nConf === 1 ? '' : 's'}: try Auto-schedule` : ''}`);
@@ -1157,10 +1242,17 @@ async function autoSchedule(j) {
   const ov = [...document.querySelectorAll('.overlay')].pop(); if (ov) ov.querySelector('.modal').classList.add('pmo-wide');
   const r = await pending;
   if (r.action !== 'apply' || !isPM(store.get('project', j.id))) return;
+  /* R14 (PMO-S1): moves that together push the finish past the deadline go through Change the plan (same dates) */
+  if (window.PMOEngine && typeof window.PMOEngine.deadlineBreach === 'function') {
+    const D = docs(), mv = new Map(moves.map(({ w, v }) => [w.id, v]));
+    const after = Object.assign({}, D, { workItem: (D.workItem || []).map(e => mv.has(e.id) ? { id: e.id, data: Object.assign({}, e.data, mv.get(e.id)) } : e) });
+    const b = eng('deadlineBreach', null, D, after, j.id, today());
+    if (b) return offerChangePlan(j, null, '', null, { breach: b, dates: Object.fromEntries([...mv].map(([id, v]) => [id, { start: v.start, due: v.due }])), what: `These ${plural(moves.length, 'move')}` });
+  }
   let n = 0;
   for (const { w, v } of moves) {
     const cur = store.get('workItem', w.id) || w;
-    await psave('workItem', w.id, Object.assign({}, cur, { start: v.start, due: v.due, updatedAt: stamp() }), `Auto-scheduled “${w.title}”: ${fmt(cur.start)} – ${fmt(cur.due)} → ${fmt(v.start)} – ${fmt(v.due)}`);
+    await psave('workItem', w.id, Object.assign({}, cur, { start: v.start, due: v.due, updatedAt: stamp() }), `Auto-scheduled “${w.title}” after its predecessors`);
     n++;
   }
   const left = schedConflicts(j.id).length;
@@ -1355,7 +1447,7 @@ const mapLegend = () => `    <div class="card" data-legend><h3>How to read the m
       <div><span class="sw" style="border:2px solid var(--soon)"></span>Due within 5 days</div>
       <div><span class="sw" style="border:2px solid var(--late)"></span>Late</div>
       <div><span class="chip block" style="padding:1px 6px">${WAIT_IC}</span> Waiting on information</div><div><span class="pmo-card-lock">${LOCK}</span> You can’t edit this card</div>
-      <div><span class="chip pmo-amber" style="padding:1px 6px"><i class="pmo-adot"></i></span> Sample only: needs to be connected before launch</div>
+      <div><span class="chip pmo-amber" style="padding:1px 6px"><i class="pmo-adot"></i></span> Sample only: the real information must be available before launch</div>
       <div>${SLIP_BADGE} Its work pushes back later work</div>
       <div><span class="chip diff-new">NEW</span> Not in today’s process</div>
       <div><span class="chip diff-changed">CHANGED</span> Different from today</div></div>
@@ -1678,7 +1770,7 @@ async function moveToSprint(j, id, spId) {
   const dd = dayDiff(due, w.due);
   if (!dd && w.sprintId === sp.id) { rerender(); return; }
   const next = Object.assign({}, w, { sprintId: sp.id, start: addDays(s0, dd), due, updatedAt: stamp() });
-  await psave('workItem', w.id, next, `Planned “${w.title}” in ${sp.name} (${fmt(sp.start)} – ${fmt(sp.end)})${dd ? `: ${fmt(s0)} – ${fmt(w.due)} → ${fmt(next.start)} – ${fmt(next.due)} (${dd > 0 ? '+' : ''}${dd}d, same duration)` : ', dates unchanged'}`);
+  await psave('workItem', w.id, next, `Planned “${w.title}” in ${sp.name} (${fmt(sp.start)} – ${fmt(sp.end)})${dd ? `, moved ${dd > 0 ? '+' : ''}${dd}d, same duration` : ', dates unchanged'}`);
   toast(`Moved to ${sp.name}`);
 }
 async function planSprints(j, err, v) {
@@ -1738,7 +1830,7 @@ export function dataNotLive(j) {
   return { n: Object.values(by).reduce((a, b) => a + b, 0), of: ids.length, by };
 }
 /* R12 #7: each state in the words the process and data pages use ("Not checked yet" is never called "not available yet") */
-export const notLiveText = x => { const b = x.by || {}; return `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not connected yet${x.n ? ` (${[b.missing ? b.missing + ' not available yet' : '', b.unchecked ? b.unchecked + ' not checked yet' : '', b.problem ? b.problem + ' with a problem' : '', b.example ? b.example + ' sample only' : '', b.pending ? b.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`; };
+export const notLiveText = x => { const b = x.by || {}; return `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not ready yet${x.n ? ` (${[b.missing ? b.missing + ' not available yet' : '', b.unchecked ? b.unchecked + ' not checked yet' : '', b.problem ? b.problem + ' with a problem' : '', b.example ? b.example + ' sample only' : '', b.pending ? b.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`; };
 const esc0 = x => String(x == null ? '' : x);
 /* R10.1 stream R: the report's time window. Presets are the engine's (periodWindow); the last choice is kept per project. */
 export const REPORT_PRESETS = [['this-week', 'This week'], ['last-week', 'Last week'], ['last-2-weeks', 'Last 2 weeks'], ['this-month', 'This month'], ['since-last-report', 'Since last report'], ['whole-project', 'Whole project']];
@@ -1757,7 +1849,7 @@ export function reportText(j, d) {
   const t = truthOf(j), c = t.cost;
   const B = blockingInfo(t), live = j.status === 'live';   /* R11: one blocking definition, its own words */
   const flags = [!live && t.raw && t.raw.launchFlag, ...evFlagTexts(t)].filter(Boolean);
-  const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${!live && launchLeft(t).text ? ` Launch: ${launchLeft(t).text}.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
+  const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${!live && launchLeft(t).text ? ` Launch: ${launchLeft(t).text}.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, ${c.known ? 'expected cost ' + money(c.forecast) : (c.unknownText || 'Cost unknown: set rates').replace(/^C/, 'c')}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
   const o = d.overall;
   const overall = o ? `\nOVERALL\n${o.needsPurpose ? 'Purpose: not written yet (add a one-line purpose in the project settings).' : `Purpose: ${o.purpose || o.description}`}\n` +
     [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
@@ -1811,6 +1903,13 @@ function periodHTML(d) {
   return `<h4 class="pmo-rep-part" data-rep-period-h>${esc(d.periodHeading || 'This period')}</h4>
     ${d.periodSummary ? `<p class="pmo-rep-p" data-rep-psum>${esc(d.periodSummary)}</p>` : ''}<div class="pmo-rep-period" data-rep-period>${secs}</div>`;
 }
+const overallAsOf = d => { const a = d && d.overall && d.overall.asOf; return a ? String(typeof a === 'object' ? a.label || '' : a) : ''; };
+/* R14 (PMO-8): a past range says which parts are as of the period end and which are as of today */
+export function asOfHeadHTML(d) {
+  const a = d && d.asOf ? String(typeof d.asOf === 'object' ? d.asOf.label || '' : d.asOf) : '';
+  if (!a || (d.headline && String(txt(d.headline)).includes(a))) return '';
+  return `<div class="hint" data-rep-asof>Headline, risks and asks: ${esc(a)}.</div>`;
+}
 function overallHTML(j, o) {
   if (!o) return '';
   const owner = store.state.me === j.owner;
@@ -1837,9 +1936,10 @@ function reportPanelHTML(j, r) {
       ${d.window ? `<div class="pmo-rep-window" data-rep-window>${esc(windowWords(d.window))}${d.window.note ? ` <span class="hint">${esc(d.window.note)}</span>` : ''}</div>` : ''}
       <div class="pmo-rep-top">${ragBadge(r)}<span class="pmo-src ${ai ? 'ai' : ''}" data-rep-src>${esc(d.sourceLabel ? String(d.sourceLabel) : ai ? '✦ Written by AI' : 'Written from the project’s facts')}</span><span class="hint">${esc(fmt(today()))} · ${ai ? 'from the project’s facts only; check before sending' : 'check before sending'}</span></div>
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
-      <h4 class="pmo-rep-part">Overall</h4>
+      ${asOfHeadHTML(d)}
+      <h4 class="pmo-rep-part">Overall${overallAsOf(d) ? ` <span class="hint" data-rep-asof-overall>(${esc(overallAsOf(d))})</span>` : ''}</h4>
       ${overallHTML(j, d.overall)}
-      <div class="pmo-sline pmo-rep-facts" data-rep-facts>${factsHTML(j, { cost: true })}</div>
+      <div class="pmo-sline pmo-rep-facts" data-rep-facts>${overallAsOf(d) && overallAsOf(d) !== 'as of today' ? '<span class="hint" data-rep-facts-today>Today:</span>' : ''}${factsHTML(j, { cost: true })}</div>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-fact hint" data-rep-notlive>Information: ${esc(notLiveText(dataNotLive(j)))}.</div>
       <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div>
@@ -1859,7 +1959,7 @@ async function openReport(j, range) {
   reports[j.id] = { loading: true, range }; rerender();
   try {
     const events = await reportEvents();
-    const r = await store.api('/ai/status-report', Object.assign({ projectId: j.id, today: today(), events }, range.preset === 'custom' ? { preset: 'custom', from: range.from, to: range.to } : { preset: range.preset }));
+    const r = await store.api('/ai/status-report', Object.assign({ projectId: j.id, today: today(), events, tzOffsetMinutes: new Date().getTimezoneOffset() }, range.preset === 'custom' ? { preset: 'custom', from: range.from, to: range.to } : { preset: range.preset }));
     reports[j.id] = { data: (r && (r.report || r)) || {}, range };
     rememberReport(j, reports[j.id].data);
   }
@@ -2042,7 +2142,7 @@ function stepOptions(j, selPid, selStep) {
     return `<optgroup label="${esc(p.name)}">${planNodes(pid).map(s => `<option value="${esc(pid)}::${esc(s.id)}" ${pid === selPid && s.id === selStep ? 'selected' : ''}>${Array.isArray(s.branches) ? '◆ ' : ''}${esc(s.title)}</option>`).join('')}</optgroup>`;
   }).join('');
 }
-const EFF_LBL = { live: 'connected', example: 'sample only', missing: 'not available yet', pending: 'waiting for confirmation' };
+const EFF_LBL = { live: 'available', example: 'sample only', missing: 'not available yet', pending: 'waiting for confirmation' };
 /* R3: the "Resolves" select lists only data used by this project's processes (plus the current value, so it is never lost). */
 function resolvesOptions(j, cur) {
   const ids = projectData(j);
@@ -2055,6 +2155,9 @@ const stamp = () => new Date().toISOString();
 function applyDone(prev, next) {
   if (next.status === 'done') next.doneAt = (prev && prev.status === 'done' && prev.doneAt) ? prev.doneAt : today();
   else delete next.doneAt;
+  /* R14 (PMO-1): who marked it done (the server stamps the same: the actor); a reopened task needs a new confirmation */
+  if (next.status === 'done' && !(prev && prev.status === 'done')) { next.doneBy = store.state.me; delete next.confirmedBy; }
+  else if (next.status !== 'done') { delete next.doneBy; delete next.confirmedBy; }
   return next;
 }
 /* R6 custom fields on the work item modal; values live in workItem.custom[key]. */
@@ -2128,7 +2231,8 @@ async function editWork(j, w, err) {
     <div class="frow"><div class="field"><label>Owner</label><select name="owner" data-wi-owner><option value="" ${ownerKnown ? '' : 'selected'}>${esc(w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner')}</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === w.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select name="kind">${Object.entries(KIND_LBL).map(([k, l]) => `<option value="${k}" ${w.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
     <div class="field"><label>Step it delivers</label>${stepOpts ? `<select name="step">${stepOpts}</select>` : '<div class="hint">Link a process first. Tasks attach to a step of the future process.</div>'}</div>
-    <div class="frow"><div class="field"><label>Start</label><input type="date" name="start" value="${esc(w.start || '')}" /></div><div class="field"><label>Due</label><input type="date" name="due" value="${esc(w.due || '')}" /></div></div>
+    <div class="frow"><div class="field"><label>Start</label><input type="date" name="start" value="${esc(w.start || '')}" data-dayoff /></div><div class="field"><label>Due</label><input type="date" name="due" value="${esc(w.due || '')}" data-dayoff /></div></div>
+    ${daysOffSoonHTML(w.start && w.start > today() ? w.start : today())}
     <div class="frow"><div class="field"><label>Status</label><select name="status">${statusesOf(j).map(x => `<option value="${esc(x.id)}" ${statusOf(w, j).id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
       <div class="field"><label>Effort (person-days)</label><input type="number" name="effortDays" min="0.5" max="200" step="0.5" value="${esc(effortOf(w))}" /></div></div>
     ${customFieldInputs(j, w)}
@@ -2142,7 +2246,10 @@ async function editWork(j, w, err) {
       ${blocked.size > 1 ? '<div class="hint">Items that already depend on this one are hidden to prevent loops.</div>' : ''}</div>`;
   const acts = [{ id: 'save', label: isNew ? 'Add work item' : 'Save changes', primary: true }];
   if (!isNew) acts.unshift({ id: 'delete', label: 'Delete', danger: true });
-  const r = await modal({ title: isNew ? 'Add work item' : 'Edit work item', body, actions: acts });
+  ensureChangeAssets().catch(() => {});
+  const pr = modal({ title: isNew ? 'Add work item' : 'Edit work item', body, actions: acts });
+  bindDayOff(([...document.querySelectorAll('.overlay .modal .mb')].pop()));   /* R14 (PMO-11): days off marked as you pick */
+  const r = await pr;
   if (r.action === 'delete') return deleteWork(j, w);
   if (r.action !== 'save') return;
   const f = r.form;
@@ -2165,9 +2272,17 @@ async function editWork(j, w, err) {
   if (!next.pid || !next.step) return editWork(j, next, 'Pick the step this task delivers.');
   if (!next.start || !next.due) return editWork(j, next, 'Set both a start and a due date.');
   if (next.due < next.start) return editWork(j, next, 'The due date is before the start date.');
+  /* R14 (PMO-11): no start or due on a day off (the server refuses it too) */
+  const offErr = (next.start !== (prev && prev.start) && dayOffText(next.start) ? 'Start: ' + dayOffText(next.start) : '') || (next.due !== (prev && prev.due) && dayOffText(next.due) ? 'Due: ' + dayOffText(next.due) : '');
+  if (offErr) return editWork(j, next, offErr);
   if (!(eff > 0) || eff > 200) return editWork(j, Object.assign(next, { effortDays: 1 }), 'Effort must be between 0.5 and 200 person-days.');
   applyDone(prev, next);
   next.updatedAt = stamp();
+  /* R14 (PMO-S1): an edit that moves the finish past the deadline is never saved here: it goes through Change the plan */
+  /* the same scope as the server's guard: plan moves only (not a status change), and a new task only once a plan is saved */
+  const planMove = isNew ? (j.baselines || []).length > 0 : ['due', 'start', 'effortDays', 'deps', 'pid', 'step', 'resolves'].some(k => JSON.stringify(prev[k] == null ? null : prev[k]) !== JSON.stringify(next[k] == null ? null : next[k]));
+  const br = planMove && next.kind !== 'defect' ? deadlineBreach(j, next) : null;
+  if (br) return offerChangePlan(j, next, '', br);
   if (isNew) {
     next.id = store.newId('wi');
     await psave('workItem', next.id, next, `Added work item “${next.title}” to step “${stepTitle(next.pid, next.step)}”`);
@@ -2177,7 +2292,7 @@ async function editWork(j, w, err) {
   const ch = [];
   if (prev.title !== next.title) ch.push(`renamed from “${prev.title}”`);
   if (prev.status !== next.status || statusOf(prev, j).id !== statusOf(next, j).id) ch.push(`status ${statusName(prev, j)} → ${statusName(next, j)}`);
-  fieldsOf(j).forEach(fd => { if (fieldVal(prev, fd) !== fieldVal(next, fd)) ch.push(`${fd.label} ${fieldVal(prev, fd) || '—'} → ${fieldVal(next, fd) || '—'}`); });
+  fieldsOf(j).forEach(fd => { if (fieldVal(prev, fd) !== fieldVal(next, fd)) ch.push(`${fd.label} set to ${fieldVal(next, fd) || 'blank'}`); });
   if ((prev.owner || null) !== (next.owner || null)) ch.push(`owner ${ownerText(prev)} → ${ownerText(next)}`);
   if (prev.start !== next.start) ch.push(`start ${fmt(prev.start)} → ${fmt(next.start)}`);
   if (prev.due !== next.due) ch.push(`due ${fmt(prev.due)} → ${fmt(next.due)}`);
@@ -2194,7 +2309,9 @@ async function editWork(j, w, err) {
   if (removed.length) ch.push(`no longer after ${removed.map(d => t(d.id)).join(', ')}`);
   retyped.forEach(d => ch.push(`dependency on ${t(d.id)} now ${d.type}${d.lag ? (d.lag > 0 ? ' +' : ' ') + d.lag + 'd lag' : ', no lag'}`));
   if (!ch.length) { toast('No changes'); return; }
-  await psave('workItem', next.id, next, `Edited “${next.title}”: ${ch.join('; ')}`);
+  /* R14: the server writes what changed from the actual diff; the note says only what was done */
+  const said = ch.filter(c => !c.includes('→'));
+  await psave('workItem', next.id, next, `Edited “${next.title}”${said.length ? ': ' + said.join('; ') : ''}`);
   toast('Work item saved');
 }
 async function deleteWork(j, w) {
@@ -2218,7 +2335,7 @@ async function setStatus(j, id, statusKey) {
   if (prevSt.id === st.id && w.status === st.maps) return;
   if (!canEditWork(w, j)) { toast(lockTitle(w, j)); rerender(); return; }
   const next = applyDone(w, Object.assign({}, w, { status: st.maps, statusId: st.id, updatedAt: stamp() }));
-  await psave('workItem', id, next, `“${w.title}”: ${prevSt.name} → ${st.name}${st.maps === 'done' && w.status !== 'done' ? ' (finished ' + fmt(next.doneAt) + ')' : ''}`);
+  await psave('workItem', id, next, `“${w.title}” moved to ${st.name} (was ${prevSt.name})${st.maps === 'done' && w.status !== 'done' ? ', finished ' + fmt(next.doneAt) : ''}`);
   if (st.maps === 'done' && w.status !== 'done') undoToast(`Done: “${w.title}”`, () => undoDone(j, w));
   else toast(`Marked ${st.name.toLowerCase()}`);
 }
@@ -2262,6 +2379,19 @@ async function saveBaseline(j) {
   if (!isPM(j)) { toast(pmOnly(j, 'save the plan')); return; }
   const items = projectItems(j.id);
   if (!items.length) { toast('Add tasks before saving the plan'); return; }
+  /* R14 (PMO-S3): once a plan is saved, saving another would reset what the schedule is measured against, so it goes
+     through Change the plan (the sponsor approves; the plan before and after an applied change is saved automatically) */
+  const bls = (j.baselines || []).filter(Boolean);
+  if (bls.length) {
+    const last = bls[bls.length - 1];
+    await ensureChangeAssets().catch(() => {});
+    const sp = window.PMOChange && window.PMOChange.sponsorOf ? window.PMOChange.sponsorOf(docs(), j, [store.state.me]) : null;
+    const r0 = await modal({ title: 'Save plan', body: `<div data-rebaseline><p style="margin:0">This project already has a saved plan: <b>${esc(last.label || 'Saved plan')}</b>${last.at ? ` (${esc(fmt(String(last.at).slice(0, 10)))})` : ''}. Progress and SPI are measured against it.</p>
+      <p class="hint" style="margin:8px 0 0">To re-plan, use <b>Change the plan</b>: you say why, see the impact, and ${sp ? `the sponsor, <b>${esc(pname(sp))}</b>,` : 'the sponsor'} approves it if it moves the deadline or the budget. When it is applied, the plan before and after is saved automatically.</p></div>`,
+      actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
+    if (r0.action === 'change') openChangeWizard(j.id, { kinds: ['dates'] });
+    return;
+  }
   const n = (j.baselines || []).length + 1;
   const r = await modal({ title: 'Save plan', body: `<p class="hint" style="margin:0">Keeps a copy of the start and due dates of all ${items.length} tasks. Compare later in Timeline or Portfolio › Changes since the saved plan.</p>
     <div class="field"><label>Label</label><input name="label" maxlength="60" value="${esc('Saved plan ' + n + ' · ' + fmt(today()))}" /></div>`, actions: [{ id: 'save', label: 'Save plan', primary: true }] });
@@ -2424,6 +2554,22 @@ async function suggestModal(j, items, meta, err) {
 }
 async function createSuggestions(j, items, picked, meta) {
   const ids = {}; picked.forEach(i => { ids[i] = store.newId('wi'); });
+  /* R14 (PMO-S1): on a project with a saved plan, new work that moves the finish past the deadline goes through Change
+     the plan as a scope change (the wizard lists these exact tasks; the sponsor approves) */
+  if ((j.baselines || []).length && window.PMOEngine && typeof window.PMOEngine.deadlineBreach === 'function') {
+    const ws = [...picked].sort((a, b) => a - b).map(i => { const x = items[i];
+      return { id: ids[i], projectId: j.id, pid: x.pid, step: x.step, title: x.title.slice(0, 140), owner: x.owner, status: 'idle', kind: x.kind, start: x.start, due: x.due, effortDays: x.effortDays,
+        deps: x.deps.map(d => d[0] === 'S' ? ids[Number(d.slice(2))] : d.slice(2)).filter(Boolean) }; });
+    const D = docs(), after = Object.assign({}, D, { workItem: (D.workItem || []).concat(ws.map(w => ({ id: w.id, data: w }))) });
+    const b = eng('deadlineBreach', null, D, after, j.id, today());
+    if (b) {
+      await ensureChangeAssets().catch(() => {});
+      const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal><p style="margin:0">Adding ${plural(ws.length, 'task')} would move the expected finish from <b>${esc(fmt(b.finishBefore))}</b> to <b>${esc(fmt(b.finishAfter))}</b>, past the <b>${esc(fmt(b.target))}</b> deadline.</p>
+        <p class="hint" style="margin:8px 0 0">Nothing was added. Use <b>Change the plan</b>: these tasks are listed there as a scope change, and the sponsor approves it.</p></div>`, actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
+      if (r.action === 'change') openChangeWizard(j.id, { kinds: ['scope'], category: 'scope', reason: 'Add the suggested work', suggestions: ws });
+      return;
+    }
+  }
   let n = 0;
   for (const i of [...picked].sort((a, b) => a - b)) {
     const x = items[i];
@@ -2609,6 +2755,7 @@ export async function newProject(prefill, err) {
 /* R5 project settings: the PM edits name, target, roles, program and budget. The server rejects role changes from anyone else. */
 async function editSettings(j, err, prefill) {
   if (!isPM(j)) { toast(pmOnly(j, 'change project settings')); return; }
+  const cur0 = store.get('project', j.id) || j;
   const v = Object.assign({ name: j.name, desc: j.desc || '', target: j.target, owner: j.owner, releaseManager: j.releaseManager && j.releaseManager !== j.owner ? j.releaseManager : '', sponsor: j.sponsor || '', program: j.program || '', budget: j.budget && j.budget.planned != null ? j.budget.planned : '' }, prefill || {});
   /* R13 #3: the sponsor approves plan changes past the deadline or budget; unset, the project's default approver does */
   const dflt = window.PMOChange ? window.PMOChange.sponsorOf(docs(), Object.assign({}, j, { sponsor: null })) : null;
@@ -2622,14 +2769,16 @@ async function editSettings(j, err, prefill) {
     <div class="field"><label for="ps-desc">Description</label><textarea id="ps-desc" name="desc" maxlength="600">${esc(v.desc)}</textarea></div>
     <div class="field"><label for="ps-target">Deadline</label><input id="ps-target" type="date" name="target" value="${esc(v.target || '')}" ${locked ? 'readonly aria-readonly="true"' : ''} />${locked ? lockHint : ''}</div>
     ${roleFields(v, store.state.me)}
-    <div class="field"><label for="ps-sponsor">Sponsor</label><select id="ps-sponsor" name="sponsor" data-set-sponsor><option value="" ${v.sponsor ? '' : 'selected'}>Not set${dflt ? ': ' + esc(pname(dflt)) + ' approves (owns a linked process)' : ''}</option>${peopleOpts(v.sponsor, store.state.me)}</select><div class="hint">Approves plan changes that move the deadline, push the finish past it, or change the budget. Nobody approves their own change.</div></div>
+    <div class="field"><label for="ps-sponsor">Sponsor</label><input id="ps-sponsor" data-set-sponsor readonly aria-readonly="true" value="${esc(cur0.sponsor && cur0.sponsor !== cur0.owner && store.person(cur0.sponsor) ? pname(cur0.sponsor) : dflt ? pname(dflt) + ' (default approver)' : 'Not set')}" />
+      <div class="hint" data-sponsor-locked>Approves plan changes that move the deadline, push the finish past it, or change the budget. The project manager doesn’t choose the sponsor: an Admin sets it in <b>Admin › People › Project sponsors</b>.</div></div>
     ${pmoHtml}
-    <div class="hint" data-set-fin>Expected cost ${esc(money(fin.forecast))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
+    <div class="hint ${costOver(j) ? 'pmo-set-over' : ''}" data-set-fin>${fin.known ? `Expected cost ${esc(money(fin.forecast))}${fin.planned ? (costOver(j) ? ` · <b class="fail" data-set-over>${esc(money(fin.forecast - fin.planned))} over the ${esc(money(fin.planned))} budget</b>` : ` · within the ${esc(money(fin.planned))} budget`) : ''}` : esc(costUnknownText(j))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
   const r = await modal({ title: 'Project settings', body, actions: [{ id: 'save', label: 'Save settings', primary: true }] });
   if (r.action !== 'save') return;
   const f = r.form;
   const cur = store.get('project', j.id) || j;
-  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: f.owner || cur.owner, releaseManager: f.releaseManager || '', sponsor: f.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
+  /* R14 (PMO-S2): the sponsor never changes from here (the PM can't pick one, least of all himself) */
+  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: f.owner || cur.owner, releaseManager: f.releaseManager || '', sponsor: cur.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
   if (!vals.name) return editSettings(cur, 'Give the project a name.', vals);
   if (!vals.target) return editSettings(cur, 'Set a deadline.', vals);
   const bud = budgetOf(vals.budget);
@@ -2651,7 +2800,9 @@ async function editSettings(j, err, prefill) {
   if ((cur.program || '') !== (next.program || '')) ch.push(next.program ? `program “${next.program}”` : 'removed from its program');
   if ((cur.sponsor || '') !== (next.sponsor || '')) ch.push(next.sponsor ? `sponsor ${cur.sponsor ? pname(cur.sponsor) + ' → ' : ''}${pname(next.sponsor)}` : 'sponsor cleared');
   const pb = cur.budget && cur.budget.planned != null ? cur.budget.planned : null;
-  if (pb !== bud) ch.push(bud != null ? `planned budget ${pb != null ? money(pb) + ' → ' : ''}${money(bud)}` : 'planned budget cleared');
+  /* R14: the note describes what is saved (a locked budget never changes here, so it never claims "$48,000 → $90,000") */
+  const nb = next.budget && next.budget.planned != null ? next.budget.planned : null;
+  if (pb !== nb) ch.push(nb != null ? `planned budget ${pb != null ? money(pb) + ' → ' : ''}${money(nb)}` : 'planned budget cleared');
   if (!ch.length) { toast('No changes'); return; }
   await psave('project', cur.id, next, `Project settings: ${ch.join('; ')}`);
   toast('Settings saved');
@@ -2779,7 +2930,7 @@ async function levelResources(j) {
   if (r.action !== 'apply' || !isPM(store.get('project', j.id))) return;
   for (const { w, start, due } of moves) {
     const cur = store.get('workItem', w.id) || w;
-    await psave('workItem', w.id, Object.assign({}, cur, { start, due, updatedAt: stamp() }), `Leveled “${w.title}”: ${fmt(cur.start)} – ${fmt(cur.due)} → ${fmt(start)} – ${fmt(due)} (capacity)`);
+    await psave('workItem', w.id, Object.assign({}, cur, { start, due, updatedAt: stamp() }), `Leveled “${w.title}” to fit capacity`);
   }
   toast(`Applied ${moves.length} shift${moves.length === 1 ? '' : 's'}`);
 }
@@ -2809,7 +2960,7 @@ async function applyScenario(j, sc, f) {
   if (r.action !== 'apply') return;
   for (const { w, s } of ch) {
     const cur = store.get('workItem', w.id) || w;
-    await psave('workItem', w.id, Object.assign({}, cur, { start: s.start, due: s.due, updatedAt: stamp() }), `Applied scenario “${sc.name}” to “${w.title}”: ${fmt(cur.start)} – ${fmt(cur.due)} → ${fmt(s.start)} – ${fmt(s.due)}`);
+    await psave('workItem', w.id, Object.assign({}, cur, { start: s.start, due: s.due, updatedAt: stamp() }), `Applied scenario “${sc.name}” to “${w.title}”`);
   }
   const pj = store.get('project', j.id) || j;
   history.replaceState({}, '', scenURL(j, null, f));
@@ -2854,6 +3005,7 @@ export function bind(root, params) {
   on('[data-draft-dismiss]', () => dropDraft(cur(), 'Dismissed the suggested plan'));
   on('[data-add-work]', () => editWork(cur(), null));
   on('[data-edit-work]', el => editWork(cur(), store.get('workItem', el.dataset.editWork)));
+  on('[data-confirm-done]', el => { el.disabled = true; confirmDone(el.dataset.confirmDone); });
   on('[data-del-work]', el => { const w = store.get('workItem', el.dataset.delWork); if (w) deleteWork(cur(), w); });
   on('[data-wgroup]', el => { workGroup = el.dataset.wgroup; rerender(); });
   on('tr[data-tg]', el => { const k = el.dataset.tg; folded.has(k) ? folded.delete(k) : folded.add(k); rerender(); });

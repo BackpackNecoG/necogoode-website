@@ -230,6 +230,12 @@
     { re: /\breceipts?\b/i, name: 'Receipts' },
     { re: /\bpurchase orders?\b|\bPOs?\b(?!\s+(?:number|no\.?|#))/, name: 'Purchase order' },
   ];
+  /* "COI" and "certificate of insurance", "SOW" and "statement of work": the abbreviation is the words' initials */
+  function isAcronymOf(abbr, words) {
+    const a = String(abbr || ''); if (!/^[A-Z]{2,6}s?$/.test(a)) return false;
+    const x = a.replace(/s$/, '').toLowerCase(), ini = ws => ws.map(w => String(w).charAt(0).toLowerCase()).join('');
+    return words.length >= 2 && (ini(words) === x || ini(words.filter(w => !/^(of|and|&|the|for)$/i.test(w))) === x);
+  }
   /* every information noun phrase in a line, e.g. "Contractor request form", "W-9", "Certificate of insurance" */
   function infoPhrases(line) {
     const words = String(line).replace(/[“”"()]/g, ' ').replace(/[,;:.!?](?=\s|$)/g, ' , ').split(/\s+/).filter(Boolean);
@@ -255,7 +261,10 @@
       if (OF_HEADS.test(w) && next && /^of$/i.test(next)) {
         const tail = [];
         for (let i = k + 2; i < words.length && tail.length < 2; i++) { const x = bare(words[i]).toLowerCase(); if (x === ',' || DET.test(x) || PREP.test(x) || /^(and|or)$/.test(x) || isBase(x) || verbBase(x)) break; tail.push(x); }
-        if (tail.length) { out.push(cap(mods.concat([head, 'of'], tail).join(' '))); return; }
+        /* R14 (Karen 9): "COI certificate of insurance" is the certificate of insurance, written once */
+        const ws = mods.concat([head, 'of'], tail);
+        if (mods.length && isAcronymOf(mods[0], ws.slice(1))) ws.shift();
+        if (tail.length) { out.push(cap(ws.join(' '))); return; }
       }
       /* "calls the vendor's known number" -> "Vendor phone number" (never "Known number") */
       if (/^numbers?$/i.test(w) && !mods.length && /\b(call|calls|called|phone|phones|ring|rings|dial|dials|text|texts)\b/i.test(line)) {
@@ -391,6 +400,60 @@
     ['c', 'i'].forEach(k => (r[k] || []).forEach(w => { const l = x[k] || (x[k] = []); if (!l.includes(w)) l.push(w); }));
   };
 
+  /* ---------------------------------------------------------------- R14: one reading of "Role (Name)" */
+  /* the same rule for pasted text, Visio shape text, Visio and BPMN lane names: "Controller (Sam Wu)" -> {role:
+     'Controller', name: 'Sam Wu'}; "Sam Wu (Controller)" the same; "the credit manager" -> {role: 'Credit manager'};
+     "Sam Wu" -> {name: 'Sam Wu'}; anything else is a role as written. */
+  const looksName = x => /^[A-Z][a-z'’-]+(?:\s+[A-Z][\w'’-]+){0,2}$/.test(x) && !x.split(/\s+/).some(w => roleNoun(w) || isTeam(w)) && !SYS_RE.test(x);
+  const looksRole = x => { const ws = squash(x).replace(/^(the|a|an|our|your|their)\s+/i, '').split(' '); return !!ws[0] && (roleWords(ws) || isTeam(ws.join(' '))); };
+  function roleAndName(text) {
+    const t = squash(text).replace(/^(the|a|an|our|your|their)\s+/i, '');
+    if (!t) return { role: '', name: '' };
+    const m = /^(.*?)\s*\(([^()]{1,40})\)$/.exec(t);
+    if (m) {
+      const a = squash(m[1]), b = squash(m[2]);
+      if (a && looksRole(a) && looksName(b)) return { role: canonRole(a), name: b };
+      if (a && looksName(a) && looksRole(b)) return { role: canonRole(b), name: a };
+      if (a && looksRole(a) && looksRole(b)) return { role: canonRole(a), name: '' };
+    }
+    if (looksRole(t)) return { role: canonRole(t), name: '' };
+    if (looksName(t) && t.split(' ').length >= 2) return { role: '', name: t };
+    return { role: cap(t), name: '' };
+  }
+  /* R14 (BPM-5): an amount threshold a choice tests: "Requested limit under $50k?" -> {subject, op: '<', amount: 50000} */
+  const THRESH_RE = /^(.*?)\s*\b(?:is\s+|are\s+)?(above|over|exceeds?|exceeding|greater than|more than|at least|under|below|less than|at most|up to|no more than)\s+\$\s?([\d,]+(?:\.\d+)?)\s*([kKmM])?\b/i;
+  function thresholdOf(title) {
+    const m = THRESH_RE.exec(String(title || '')); if (!m) return null;
+    const amount = Number(m[3].replace(/,/g, '')) * (/k/i.test(m[4] || '') ? 1000 : /m/i.test(m[4] || '') ? 1e6 : 1);
+    if (!isFinite(amount)) return null;
+    const subject = squash(m[1]).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/\s+(?:is|are)$/, '') || 'amount';
+    return { subject, op: /^(under|below|less than|at most|up to|no more than)$/i.test(m[2]) ? '<' : '>', amount };
+  }
+  /* two thresholds on the same thing that no value can meet together ("under $50k" and "above $250,000") */
+  function thresholdsDisjoint(a, b) {
+    if (!a || !b || a.op === b.op) return false;
+    const stem = s => String(s || '').split(/\s+/).filter(w => w.length >= 4).map(w => w.replace(/(ies)$/, 'y').replace(/s$/, ''));
+    const sa = stem(a.subject), sb = stem(b.subject);
+    if (!(a.subject === b.subject || sa.some(w => sb.includes(w)) || a.subject === 'amount' || b.subject === 'amount')) return false;
+    const lo = a.op === '<' ? a : b, hi = a.op === '<' ? b : a;
+    return hi.amount >= lo.amount;
+  }
+  /* R14 (Karen 9): documents a counterparty sends on every run (a W-9, a certificate of insurance) are collected each
+     time the process runs; they are never a one-off "make it available" setup task */
+  const EXTERNAL = /^(vendors?|suppliers?|customers?|clients?|contractors?|applicants?|candidates?|new hires?|members?|patients?|students?|carriers?|tenants?|brokers?)$/i;
+  const EXTERNAL_IN = /\b(?:from|by)\s+(?:the\s+|each\s+|every\s+)?(vendor|supplier|customer|client|contractor|applicant|candidate|new hire|member|patient|student|carrier|tenant|broker)s?\b/i;
+  const PER_RUN_NAME = /^(W-\d+\w*|W-8\w*|I-9|1099(?:-\w+)?|Certificate of insurance|Proof of insurance|Signed W-9)$/i;
+  const DOCLIKE = /(^[A-Z]{1,3}-\d|\b(forms?|certificates?|letters?|invoices?|receipts?|statements?|licen[cs]es?|permits?|ids?|passports?|contracts?|agreements?|applications?|quotes?|quotations?|proofs?|copy|copies|documents?|packets?)\b)/i;
+  function perRunOf(name, actor, line, ctxText) {
+    const a = squash(actor).toLowerCase();
+    const ext = EXTERNAL.test(a) ? a : '';
+    const from = EXTERNAL_IN.exec(String(line || ''));
+    const party = ext || (from ? from[1].toLowerCase() : '');
+    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)))) return null;
+    const p = party || ((EXTERNAL_IN.exec(ctxText || '') || /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire)s?\b/i.exec(ctxText || '') || [])[1] || '').toLowerCase();
+    return { perRun: true, perRunText: `Collected ${p ? `from the ${p.replace(/s$/, '')} ` : ''}each time the process runs, so it is not a one-off setup task.` };
+  }
+
   /* ---------------------------------------------------------------- the SOP parser */
   const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event|procedure|process|name|notes?)\b\s*[:\-–—]/i;
   const TRIGGER_LINE = /^(trigger|start(?:ing)? event|starts? when|begins? when)\s*[:\-–—]\s*(.+)$/i;
@@ -400,6 +463,8 @@
   const SUBNUM = /^\d+\.\d+[.):]?\s+/;
   const LETTER = /^(?:[a-h]|[ivx]{1,4})[.)]\s+/i;
   const BULLET = /^[-*•–]\s+/;
+  /* R14: "<things> above $N (also) need(s) sign-off / approval / a review from <role>" */
+  const NEED_RE = /^(?:(?:the|all|any)\s+)?([A-Za-z][\w -]{1,40}?)\s+(above|over|exceeding|greater than|more than|under|below|less than)\s+(\$\s?[\d,]+(?:\.\d+)?\s*[kKmM]?)\s+(also\s+)?(?:need|needs|require|requires|must\s+(?:have|get)|get|gets)\s+(?:an?\s+|the\s+)?(?:extra\s+|additional\s+|second\s+)?(sign-?off|approval|review|signature)\s+(?:from|by)\s+(?:the\s+)?(.+)$/i;
   /* qualifier clauses that stay in the note ("…, usually by email, sometimes fax") */
   const QUALIFIER = /^(usually|sometimes|often|typically|normally|generally|mostly|occasionally|e\.g\.|for example|such as|including|which|who|where|so that|because|as needed|if needed|when needed|as required|either|via|by (?:email|e-mail|phone|fax|post|mail|courier|hand)|or by|and usually|but)\b/i;
 
@@ -448,6 +513,7 @@
       if (!p) { if (newData.length >= 25) return; p = { key, name, reason: `Mentioned in "${clip(line, 80)}".`, steps: [] }; newData.push(p); }
       if (node && node.id && !p.steps.includes(node.id)) p.steps.push(node.id);
       if (node) { const nd = node.newData || (node.newData = []); if (!nd.some(x => x.key === key)) nd.push({ key, name: p.name }); }
+      if (!p.perRun) { const pr = perRunOf(p.name, node && node.ownerRole, line, text); if (pr) Object.assign(p, pr); }
     };
 
     /* one clause -> a step (or a wait) */
@@ -593,6 +659,17 @@
             made = { id: id('d'), type: 'decision', title: decisionTitle(ws.slice(0, j).join(' ')), branches: [{ label: 'Yes', nodes: [st] }, { label: 'No', nodes: [] }] };
           }
           if (made) { dec = made; out.push(dec); lastDec = dec; return; }
+        }
+        /* R14 (BPM-5): "Limits above $250,000 also need sign-off from the Controller (Sam Wu)": a choice whose Yes path is
+           the extra sign-off, never a step every request goes through */
+        const need = !main && si === 0 && NEED_RE.exec(stripEnd(sen));
+        if (need && (roleWords(squash(need[6]).replace(/\s*\([^)]*\)\s*$/, '').replace(/^(the|a|an)\s+/i, '').split(' ')) || isTeam(squash(need[6])))) {
+          const verb = /^sign/i.test(need[5]) ? (/off/i.test(need[5]) ? 'signs off' : 'signs') : /^approv/i.test(need[5]) ? 'approves' : 'reviews';
+          const st = makeStep(`${squash(need[6])} ${verb}`, full, { dataText: sen });
+          if (st.type === 'step' && need[4]) { st.title = 'Also ' + st.title.replace(/^./, c => c.toLowerCase()); st.approval = true; }
+          else if (st.type === 'step' && verb !== 'reviews') st.approval = true;
+          dec = { id: id('d'), type: 'decision', title: decisionTitle(`${need[1]} ${need[2]} ${need[3]}`), branches: [{ label: 'Yes', nodes: [st] }, { label: 'No', nodes: [] }] };
+          out.push(dec); lastDec = dec; return;
         }
         /* "…, if it is over $5,000" / "… only if …" with no comma before the action */
         const trail = /^(.+?)\s+(?:only\s+)?(if|unless)\s+(.+)$/i.exec(sen);
@@ -790,6 +867,9 @@
     walk(nodes, n => (n.branches || []).forEach(b => { if (b.gotoNum != null) { if (lineFirst[b.gotoNum]) b.goto = lineFirst[b.gotoNum]; delete b.gotoNum; } }));
     /* R11: a rejected request stops unless the procedure says where it goes */
     walk(nodes, endRejectPath);
+    /* R14 (BPM-5): the amount threshold each choice tests, so a path that took "under $50k" is never tested through
+       "above $250,000" (business tests read decision.threshold with thresholdsDisjoint) */
+    walk(nodes, n => { if (n.type === 'decision') { const th = thresholdOf(n.title); if (th) n.threshold = th; } });
     /* R13 #8: one actor however it is written. "Controller (Sam Wu)", "the Controller" and "Sam Wu" are the same person
        when the procedure ties the name to the role once; their steps share the role and their RACI the "Role (Name)" */
     const al = actorAliases(nodes);
@@ -1021,18 +1101,29 @@
     const page = parseXml(utf8(files[pageName]));
     const shapes = {}, dropped = [];
     const shapesEl = kid(page, 'Shapes');
+    /* R14 (Jordan 7): a connector glued to a sub-shape of a step or a choice is glued to that step or choice */
+    const alias = {};
+    const aliasIn = (c, top) => { alias[c.attrs.ID] = top; kids(kid(c, 'Shapes'), 'Shape').forEach(x => aliasIn(x, top)); };
     const visit = (sh, parent) => {
       const idv = sh.attrs.ID; const master = masters[sh.attrs.Master] || (parent && parent.master) || sh.attrs.NameU || sh.attrs.Name || '';
       let text = squash(textOf(kid(sh, 'Text'))), role = '';
+      /* R14 (Jordan 7): a grouped shape (a decision drawn as a group) keeps its words in a sub-shape */
+      const subs = kids(kid(sh, 'Shapes'), 'Shape');
+      if (!text && subs.length) text = squash(subs.map(c => textOf(kid(c, 'Text'))).filter(Boolean)[0] || '');
       /* R13 #14 (Jordan): "Benefits Analyst: Check eligibility" names who does the step */
-      const rt = /^([A-Za-z][\w&/' -]{1,40}?):\s+(\S.*)$/.exec(text);
-      if (rt && (roleWords(rt[1].trim().split(/\s+/)) || isTeam(rt[1].trim()))) { role = canonRole(rt[1].trim()); text = rt[2]; }
+      /* R14 (BPM-5): "Controller (Sam Wu): Sign off" and "Submit the request (Sales rep)" name who does it too; the lane
+         keeps "Role (Name)" so the BPMN reader reads it the one way (roleAndName) */
+      const roleText = x => { const rn = roleAndName(x); return rn.role ? (rn.name ? `${rn.role} (${rn.name})` : rn.role) : ''; };
+      const rt = /^([A-Za-z][\w&/' -]{1,40}?(?:\s*\([^()]{1,40}\))?):\s+(\S.*)$/.exec(text);
+      if (rt && (looksRole(rt[1].replace(/\s*\([^()]*\)$/, '')) || looksRole(rt[1]))) { role = roleText(rt[1].trim()); text = rt[2]; }
+      const tr = !role && /^(\S.*?\S)\s*\(([^()]{2,40})\)$/.exec(text);
+      if (tr && looksRole(tr[2])) { role = roleText(tr[2]); text = tr[1]; }
       /* R12: a 1-D shape (it has a begin and an end point) is a connector whatever its master is called */
       const oneD = kids(sh, 'Cell').some(c => c.attrs.N === 'BeginX') && kids(sh, 'Cell').some(c => c.attrs.N === 'EndX');
       const kind = oneD ? 'connector' : refineKind(shapeKind(master, text), text);
       const s = { id: idv, master, text, role, kind, x: cell(sh, 'PinX'), y: cell(sh, 'PinY'), w: cell(sh, 'Width'), h: cell(sh, 'Height') };
       shapes[idv] = s;
-      kids(kid(sh, 'Shapes'), 'Shape').forEach(c => { if (kind === 'lane' || kind === 'ignore') visit(c, null); });
+      kids(kid(sh, 'Shapes'), 'Shape').forEach(c => { if (kind === 'lane' || kind === 'ignore') visit(c, null); else aliasIn(c, idv); });
     };
     kids(shapesEl, 'Shape').forEach(sh => visit(sh, null));
     /* connectors: BeginX -> from shape, EndX -> to shape */
@@ -1041,7 +1132,7 @@
     /* R12: the sheet a Connect starts from at its BeginX / EndX is a connector, whatever its master is called */
     connEls.forEach(c => { const s = shapes[c.attrs.FromSheet]; if (s && /^(Begin|End)/i.test(c.attrs.FromCell || '')) s.kind = 'connector'; });
     connEls.forEach(c => {
-      const con = c.attrs.FromSheet, to = c.attrs.ToSheet, which = c.attrs.FromCell;
+      const con = c.attrs.FromSheet, to = alias[c.attrs.ToSheet] || c.attrs.ToSheet, which = c.attrs.FromCell;
       if (!shapes[con] || !shapes[to]) return;
       const e = ends[con] || (ends[con] = {});
       if (/^Begin/i.test(which)) e.from = to; else if (/^End/i.test(which)) e.to = to;
@@ -1078,7 +1169,9 @@
     const name = opts.name || pageTitle || docTitle || '';
     const bpmn = vsdxBpmn({ name: name || 'Imported Visio process', shapes, flowShapes, links: links.filter(l => flowKinds.has(shapes[l.from].kind) && flowKinds.has(shapes[l.to].kind)), laneOf, dataOf, ins, outs });
     const c = { steps: flowShapes.filter(s => s.kind === 'process' || s.kind === 'wait').length, decisions: flowShapes.filter(s => s.kind === 'decision').length, parallels: flowShapes.filter(s => s.kind === 'parallel').length };
-    return Object.assign({ name, lanes: lanes.map(l => l.name), links, dropped, bpmn }, c);
+    /* R14 (Jordan 7): every flow shape, by the id it has in the BPMN, so the app can list any it could not place */
+    const flowIds = flowShapes.filter(s => s.kind !== 'start' && s.kind !== 'end').map(s => ({ id: 'V_' + String(s.id).replace(/[^\w.-]/g, '_'), name: s.text || (s.kind + ' ' + s.id), type: s.kind === 'decision' ? 'choice' : s.kind === 'parallel' ? 'at the same time' : s.kind === 'wait' ? 'wait' : 'step' }));
+    return Object.assign({ name, lanes: lanes.map(l => l.name), links, dropped, bpmn, flowIds }, c);
   }
   const xa = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   /* Visio shapes -> BPMN 2.0 (role lanes, data objects with data input associations) */
@@ -1204,7 +1297,7 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
       const [title, role, data, o] = s; const opt = o || {};
       const n = { id: 't' + (++seq), type: 'step', title, ownerRole: role, touches: teamOfRole(role), subs: [], newData: [] };
       if (opt.sla) n.sla = opt.sla; if (opt.system) n.system = opt.system;
-      (data || []).forEach(nm => { const key = ndKey(nm); let p = newData.find(x => x.key === key); if (!p) { p = { key, name: nm, reason: `Used in the ${t.name.toLowerCase()} template.`, steps: [] }; newData.push(p); } p.steps.push(n.id); n.newData.push({ key, name: nm }); });
+      (data || []).forEach(nm => { const key = ndKey(nm); let p = newData.find(x => x.key === key); if (!p) { p = Object.assign({ key, name: nm, reason: `Used in the ${t.name.toLowerCase()} template.`, steps: [] }, perRunOf(nm, role, title, t.name + ' ' + t.desc) || {}); newData.push(p); } p.steps.push(n.id); n.newData.push({ key, name: nm }); });
       return n;
     };
     const mk = s => {
@@ -1219,6 +1312,6 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
     return { id: t.id, name: t.name, desc: t.desc, trigger: t.trigger, nodes, newData, teams, notes: '', source: 'template' };
   }
 
-  return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn,
+  return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn, roleAndName, thresholdOf, thresholdsDisjoint, perRunOf,
     RACI_ROLES, raciOf, raciEmpty, raciText, raciIn, actorAliases, actorKey, raciRowsOf, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
 });

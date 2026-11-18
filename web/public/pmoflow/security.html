@@ -90,6 +90,8 @@
       <li><span class="tag now">In place</span> <b>Separate approvers.</b> Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.</li>
       <li><span class="tag now">In place</span> <b>Passing tests.</b> People pass only tests assigned to them or to no one, and a test linked to an open problem can’t pass until it is fixed.</li>
       <li><span class="tag now">In place</span> <b>Two people for launch overrides.</b> Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.</li>
+      <li><span class="tag now">In place</span> <b>Department changes.</b> Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it, and nothing changes until then. In a workspace with one Admin, those changes apply at once and History says so. Each membership and approver keeps the date it started.</li>
+      <li><span class="tag now">In place</span> <b>Recent moves.</b> Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.</li>
       <li><span class="tag now">In place</span> <b>No Admin exemption.</b> The server checks every rule above, for Admins too.</li>
       <li><span class="tag now">In place</span> <b>Each department approves only its own part</b> of a process change.</li>
     </ul>
@@ -101,6 +103,7 @@
     <h2 id="audit-h">Audit</h2>
     <ul class="fact-list">
       <li><span class="tag now">In place</span> <b>Every change is recorded in history:</b> who, what and when.</li>
+      <li><span class="tag now">In place</span> <b>History text is written by the server from the actual change.</b> For each saved change the server compares the record before and after and writes the sentence itself, field by field (for example: due “2026-12-08” → “2027-01-07”). Anything the person typed is kept only as a quoted note after it, so a change can’t be logged as something else. Entries saved before this rule keep the wording they had, and the Admin history marks them as older entries.</li>
       <li><span class="tag now">In place</span> <b>Audit export</b> as CSV or JSON. Each entry carries a SHA-256 fingerprint of itself and the entry before it.</li>
       <li><span class="tag now">In place</span> <b>Signed exports.</b> A full JSON export carries a signed head: the number of entries and the last fingerprint, signed (HMAC-SHA256) with a key held by the PMOFlow service. Checking the file in Admin catches an edited entry, entries removed from the end, and fingerprints recomputed after export.</li>
       <li><span class="tag now">In place</span> <b>Checkpoints.</b> Each export records the current head, so a later change to history up to that point shows up as broken.</li>

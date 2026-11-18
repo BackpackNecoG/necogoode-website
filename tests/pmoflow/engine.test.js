@@ -1281,7 +1281,12 @@ test('R5 financials: workCost, projectFinancials, burndown', () => {
   // dk: W3, W7, W9 at 1 day × 1000 + W8 5000 = 8000; others: W1, W2, W4, W5, W6, W10 at 800 = 4800 → 12800 (+W11 dk 1000) = 13800
   // R8: actualCost = logged hours × rate (none logged here → 0); forecastCost = EAC (bottom-up estimate before actuals)
   // R10 §2: no CPI yet, so the forecast is the estimate (forecastBasis says so)
-  assert.deepEqual(f, { planned: 9000, estimate: 13800, forecastCost: 13800, forecastBasis: 'estimate', eacMethod: 'bottom-up', actualCost: 0, remainingCost: 13800, variance: 4800, overBudget: true, program: 'Supplier Excellence' });
+  // R14 Karen 2: only dk has a rate, so the other open tasks would be default-rate guesses: "Cost unknown: set rates"
+  assert.deepEqual(f, { planned: 9000, estimate: null, forecastCost: null, forecastBasis: 'estimate', eacMethod: 'bottom-up', actualCost: 0, remainingCost: null, variance: null, overBudget: false, program: 'Supplier Excellence', unknown: true, unknownText: 'Cost unknown: set rates', unpriced: 5 });
+  // with a rate for everyone (800 for all but dk), the R5 numbers hold
+  const d2 = baseDocs(); d2.person.forEach(e => { e.data.dayRate = e.id === 'dk' ? 1000 : 800; }); d2.workItem.find(e => e.id === 'W8').data.effortDays = 5;
+  d2.project[0].data.budget = { planned: 9000 }; d2.project[0].data.program = 'Supplier Excellence';
+  assert.deepEqual(E.projectFinancials(d2, PRJ), { planned: 9000, estimate: 13800, forecastCost: 13800, forecastBasis: 'estimate', eacMethod: 'bottom-up', actualCost: 0, remainingCost: 13800, variance: 4800, overBudget: true, program: 'Supplier Excellence', unknown: false, unpriced: 0 });
   const bd = E.burndown(d, PRJ, TODAY);
   assert.deepEqual(bd[0], { date: '2026-10-08', remaining: 15, ideal: 15 });
   assert.equal(bd[bd.length - 1].date, '2026-12-15'); assert.equal(bd[bd.length - 1].ideal, 0);
@@ -1572,7 +1577,7 @@ test('R7 availLabel: one label set from effectiveAvail', () => {
   deepFreeze(d);
   // R8 Advanced: the detailed labels
   const A = { advanced: true };
-  assert.deepEqual(E.availLabel(d, 'D4', A), { state: 'live', key: 'connected', label: 'Connected', tone: 'green' });
+  assert.deepEqual(E.availLabel(d, 'D4', A), { state: 'live', key: 'connected', label: 'Available', tone: 'green' });   // R14: one word
   assert.deepEqual(E.availLabel(d, 'D8', A), { state: 'example', key: 'sample', label: 'Sample only', tone: 'amber' });
   assert.deepEqual(E.availLabel(d, 'D2', A), { state: 'missing', key: 'notyet', label: 'Not available yet', tone: 'red' });
   assert.deepEqual(E.availLabel(d, 'D5', A), { state: 'pending', key: 'waiting', label: 'Waiting for confirmation', tone: 'amber' });
@@ -1738,7 +1743,7 @@ test('R7 re-approval scope: one owner change stales only the sections it touches
   const fp = bu => E.sectionFingerprint(d, PRJ, bu);
   d.approval.forEach(e => { e.data.fingerprint = fp(e.data.bu); });
   assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
-  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+;v:[^;]+$/);
+  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+;v:[^;]+;w:[^;]+$/);   // R14: + the part's tasks (w)
   // s3 moves from Leo Park (Treasury) to Ana Ruiz (Accounts Payable); the process is stamped as a whole
   d.process[0].data.tobe.find(n => n.id === 's3').owner = 'ar';
   d.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
@@ -1917,6 +1922,7 @@ test('R8 §1 availLabel: Simple has two states; Advanced keeps the detailed labe
 
 test('R8 §2 projectTruth holds every number, date and label', () => {
   const d = withHoldResolver(baseDocs());
+  d.person.forEach(e => { e.data.dayRate = 800; });   // R14: an expected cost needs a rate for the open work
   d.project[0].data.budget = { planned: 9000 };
   d.workItem.find(e => e.id === 'W1').data.time = [{ by: 'mc', date: '2026-10-15', hours: 16 }];
   deepFreeze(d);
@@ -2086,7 +2092,7 @@ test('R8 §4 tests only for changed information; "Create the tests" covers all o
   // no system run at all → "Try it out" is the next action (no separate build gate)
   const u = readyDocs(); u.testRun.splice(0, 1);
   const us = E.testingSummary(u, PRJ, TODAY);
-  assert.equal(us.done, false); assert.equal(us.stage, 'tryout'); assert.equal(us.nextAction.label, 'Try out the 10 tests');
+  assert.equal(us.done, false); assert.equal(us.stage, 'tryout'); assert.equal(us.nextAction.label, 'Try out the 10 information checks');   // R14: the stage's own unit
   assert.ok(!/build/i.test(us.sentence));
   // an unchanged element's missing tests do not block
   const v = readyDocs(); v.testCase = v.testCase.filter(e => e.id !== 'CD6' && e.id !== 'CD1');
@@ -2192,7 +2198,7 @@ test('R9 §1 one late list, three labels, the status sentence, a ranked who, ste
   assert.equal(r.who[0].why, 'blocker'); assert.equal(r.label, 'Will miss the deadline');
   // R11 §5: the 'blocker' rows are exactly projectTruth.blocking (holds up an open task, planned or not); a planned
   // blocker's row is its open fix task's action; missing information that holds nothing up is an 'info' row
-  assert.deepEqual(r.who.filter(x => x.why === 'blocker').map(x => x.what), ['Plan work to get Vendor risk tier', 'Finish “Stand up structured bank capture” (was due Nov 3)', 'Get “Sign screening vendor contract” back on schedule']);
+  assert.deepEqual(r.who.filter(x => x.why === 'blocker').map(x => x.what), ['Plan work to get Vendor risk tier', 'Finish “Stand up structured bank capture” (was due Nov 3)', 'Finish “Sign screening vendor contract”']);   // R14: on schedule itself, never "back on schedule"
   assert.deepEqual(r.who.filter(x => x.why === 'blocker').map(x => x.ref).sort(), r.blocking.items.map(b => 'data:' + b.dataId).sort());
   assert.equal(r.who.filter(x => x.why === 'blocker').length, r.blocking.count);
   assert.ok(r.who.some(x => x.why === 'info' && x.what === 'Plan work to get Payment hold list'));
@@ -2880,7 +2886,7 @@ test('R10 "Not checked yet": imported information (avail unchecked) is never "We
     assert.equal(tw.window.label, 'Week of Mon Nov 16 – Fri Nov 20');
     assert.deepEqual([ids(tw.completed), ids(tw.assigned), ids(tw.started)], [[], ['W12'], ['W12', 'W8']]);
     assert.deepEqual([ids(tw.blockersRaised), ids(tw.blockersResolved), tw.blockersOpenAtEnd.map(b => [b.id, b.daysOpen])], [['work:W12'], [], [['data:D2', 21], ['work:W12', 1]]]);
-    assert.deepEqual([tw.behindAtEnd.length, tw.behindText, tw.testsRun.passed, tw.testsRun.failed], [5, '5 late (1 past due, 4 will finish after their due date)', 14, 1]);
+    assert.deepEqual([tw.behindAtEnd.length, tw.behindText, tw.testsRun.passed, tw.testsRun.failed], [5, '5 late (1 past due, 4 will finish after their due date)', 12, 1]);   // R14: only ledger tests
     assert.deepEqual([tw.approvalsGiven.map(a => a.bu), ids(tw.risksOpened), ids(tw.risksClosed), tw.spendInPeriod], [['Procurement'], ['R3'], [], 4350]);
     assert.deepEqual([tw.forecastFinishThen, tw.forecastFinishNow, tw.slipDays], ['2026-12-07', '2026-12-09', 2]);
     // consistency: the window ends today, so "behind" is exactly the project screen's late list
@@ -3096,20 +3102,20 @@ test('R12 #11 profiling: shared bank account, near-duplicate names, whitespace; 
   const prof = E.profileCsv(csv);
   const col = n => prof.find(c => c.name === n);
   assert.deepEqual([col('Account number').sharedAccount.accounts, col('Account number').sharedAccount.records], [1, 3]);
-  assert.match(col('Account number').sharedAccount.text, /same account number is on 3 records/);
+  assert.match(col('Account number').sharedAccount.text, /One account number is on 3 records/);   // R14 wording
   assert.deepEqual([col('Vendor name').nearDuplicates.groups, col('Vendor name').nearDuplicates.records], [1, 2]);
   assert.deepEqual(col('Vendor name').whitespace, { count: 2, firstRow: 3 });
   assert.ok(!JSON.stringify(prof).includes('000123456789') && !JSON.stringify(prof).includes('Acme'), 'no values kept');
   const de = { id: 'DV', name: 'Vendors', fields: [{ name: 'Vendor name', type: 'text', required: true, maxLen: 60 }, { name: 'Tax ID', format: '##-#######', type: 'text', unique: true }, { name: 'Account number', type: 'digits', minLen: 4, maxLen: 17 }] };
   const lines = E.profileLines(de, { rows: 5, columns: E.profileCsv(csv, { dataElement: de }) });
-  assert.match(lines.find(l => l.field === 'Account number').text, /same account number is on 3 records/);
+  assert.match(lines.find(l => l.field === 'Account number').text, /One account number is on 3 records/);
   assert.match(lines.find(l => l.field === 'Vendor name').text, /2 have extra spaces, 2 look like duplicates/);
   const tests = E.generateTests(de, E.profileCsv(csv, { dataElement: de }), { all: true });
   // the observed valid short name ("ABC" shape) is never a "should be rejected" test
   assert.ok(!tests.some(t => t.field === 'Vendor name' && t.origin === 'profile' && /Observed shape/.test(t.note) && t.expect === 'reject'), JSON.stringify(tests.filter(t => t.field === 'Vendor name')));
   // duplicate warnings become uniqueness tests
   assert.ok(tests.some(t => t.field === 'Tax ID' && t.expect === 'reject' && /Same value as another record/.test(t.note)));
-  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same account number as another record/.test(t.note)));
+  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same bank account number as another vendor \(3 records share 1 account number/.test(t.note)));
 });
 
 /* ================================ Round 13 (K1): close the R12 review findings ================================ */
@@ -3194,14 +3200,15 @@ test('R13 #1 approvals route to a custom department and only its named approvers
 test('R13 #2 one testing ledger: the report counts each test\'s latest result per stage, never the sum of runs', () => {
   const d0 = SEED.seed(GOLD_DAY).docs;
   const tw0 = E.periodReport(d0, PRJ, { preset: 'this-week' }, GOLD_DAY).testsRun;
-  // this week: Try it out TC1–TC6 (5 passed, TC4 failed), Business check 9 passed; 2 runs
-  assert.deepEqual([tw0.stages.system.passed, tw0.stages.system.failed, tw0.stages.uat.passed, tw0.stages.uat.failed, tw0.runs, tw0.tests], [5, 1, 9, 0, 2, 15]);
-  assert.equal(tw0.text, 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.');
+  // this week: Try it out TC3–TC6 (3 passed, TC4 failed; R14: TC1–TC2 test information this project doesn't change, so
+  // they are not in its ledger), Business check 9 passed; 2 runs
+  assert.deepEqual([tw0.stages.system.passed, tw0.stages.system.failed, tw0.stages.uat.passed, tw0.stages.uat.failed, tw0.runs, tw0.tests], [3, 1, 9, 0, 2, 13]);
+  assert.equal(tw0.text, 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.');
   // Jordan's repro: re-passing 4 tests already passed raises no count
   const again = { id: 'TR-again', projectId: PRJ, env: 'uat', at: GOLD_DAY + 'T16:00:00.000Z', by: 'ps', results: ['TC11', 'TC12', 'TC13', 'TC14'].map(caseId => ({ caseId, outcome: 'pass' })) };
   const d1 = Object.assign({}, d0, { testRun: d0.testRun.concat([{ id: again.id, data: again }]) });
   const tw1 = E.periodReport(d1, PRJ, { preset: 'this-week' }, GOLD_DAY).testsRun;
-  assert.deepEqual([tw1.stages.uat.passed, tw1.runs, tw1.tests], [9, 3, 15]);
+  assert.deepEqual([tw1.stages.uat.passed, tw1.runs, tw1.tests], [9, 3, 13]);
   assert.equal(E.projectTruth(d1, PRJ, GOLD_DAY).testing.passed, 9);
   // a later fail of the same test replaces its pass in the period count
   const fail1 = { id: 'TR-fail', projectId: PRJ, env: 'uat', at: GOLD_DAY + 'T17:00:00.000Z', by: 'ps', results: [{ caseId: 'TC11', outcome: 'fail' }] };
@@ -3384,10 +3391,11 @@ test('R13 #11 reports: exact-time "since last report", no present-day leakage, s
   const pc = (id, at) => ({ id, data: { id, projectId: PRJ, title: 'Change ' + id, status: 'applied', at, appliedAt: at, decidedBy: 'ta', impact: {} } });
   const d1 = Object.assign({}, d0, { planChange: [pc('c-before', GOLD_DAY + 'T09:00:00.000Z'), pc('c-after', GOLD_DAY + 'T11:00:00.000Z')],
     project: d0.project.map(p => p.id === PRJ ? { id: PRJ, data: Object.assign({}, prj, { lastReportAt: GOLD_DAY + 'T10:00:00.000Z', reportLog: (prj.reportLog || []).concat([{ date: GOLD_DAY, at: GOLD_DAY + 'T10:00:00.000Z' }]) }) } : p) });
-  const r = E.periodReport(d1, PRJ, { preset: 'since-last-report' }, GOLD_DAY);
+  const r = E.periodReport(d1, PRJ, { preset: 'since-last-report', tzOffsetMinutes: 0 }, GOLD_DAY);
   assert.deepEqual(r.planChanges.map(c => c.id), ['c-after']);
   assert.equal(r.window.since, GOLD_DAY + 'T10:00:00.000Z');
-  assert.match(r.window.note, /10:00/);
+  assert.match(r.window.note, /10:00 AM\.$/);   // R14: the viewer's clock, never "UTC"
+  assert.ok(!/UTC/.test(E.periodReport(d1, PRJ, { preset: 'since-last-report' }, GOLD_DAY).window.note));
   // a past range reads the plan as it stood then: a change applied later is undone in "behind at the end"
   const w6 = d0.workItem.find(e => e.id === 'W6').data;
   const later = { id: 'c-later', projectId: PRJ, title: 'Slip', status: 'applied', at: GOLD_DAY + 'T09:00:00.000Z', appliedAt: GOLD_DAY + 'T09:00:00.000Z',
@@ -3437,4 +3445,304 @@ test('R13: who never attributes unowned work to the PM; it reads "Needs an owner
   assert.equal(r2.name, 'Needs an owner: Vendor');
   assert.ok(!T.who.some(x => x.workId === row.workId && x.person === pm), 'never the PM');
   assert.ok(!E.personQueue(d, pm, GOLD_DAY).some(q => q.id === row.workId), 'not in the PM\'s Waiting for you');
+});
+
+/* ================================ R14 (L1): close the R13 review findings ================================ */
+const R14set = (d, id, patch) => Object.assign({}, d, { workItem: d.workItem.map(e => e.id === id ? { id, data: Object.assign({}, e.data, patch) } : e) });
+
+test('R14 PMO-1: a Done with an open predecessor and 0 hours stays out of EV and the forecast until someone else confirms it', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const t0 = E.projectTruth(d0, PRJ, GOLD_DAY);
+  // the PMO expert's repro: W7 (waits on the open W6, 4 days estimated) marked Done in the Work tab with no hours
+  const d1 = R14set(d0, 'W7', { status: 'done', doneAt: GOLD_DAY, doneBy: 'dk' });
+  const u = E.unconfirmedDone(d1, 'W7');
+  assert.equal(u.flag, true);
+  assert.deepEqual(u.reasons.sort(), ['no-hours', 'open-predecessor']);
+  assert.equal(u.doer, 'dk');
+  const t1 = E.projectTruth(d1, PRJ, GOLD_DAY);
+  assert.deepEqual([t1.ev.EV, t1.ev.SPI, t1.ev.CPI, t1.ev.EAC, t1.cost.forecast, t1.forecastFinish], [t0.ev.EV, t0.ev.SPI, t0.ev.CPI, t0.ev.EAC, t0.cost.forecast, t0.forecastFinish]);
+  assert.equal(t1.unconfirmed.count, 1);
+  assert.match(t1.unconfirmed.text, /1 task marked Done needs someone else to confirm it/);
+  // who: the PM confirms (never the doer)
+  const row = t1.who.find(x => x.why === 'confirm');
+  assert.ok(row, JSON.stringify(t1.who.map(x => x.why)));
+  assert.equal(row.person, 'ta');
+  assert.equal(row.what, 'Confirm “' + d0.workItem.find(e => e.id === 'W7').data.title + '” is done');
+  assert.ok(E.personQueue(d1, 'ta', GOLD_DAY).some(q => q.id === 'W7'), 'Home: in the PM\'s Waiting for you');
+  // confirmed by someone else: it counts
+  const d2 = R14set(d1, 'W7', { confirmedBy: 'ta', confirmedAt: GOLD_DAY + 'T12:00:00.000Z' });
+  assert.equal(E.unconfirmedDone(d2, 'W7').flag, false);
+  const t2 = E.projectTruth(d2, PRJ, GOLD_DAY);
+  assert.ok(t2.ev.EV > t0.ev.EV);
+  assert.equal(t2.unconfirmed.count, 0);
+  // self-confirmation does not count
+  assert.equal(E.unconfirmedDone(R14set(d1, 'W7', { confirmedBy: 'dk' }), 'W7').flag, true);
+  // an ordinary Done (hours logged, predecessors done) needs nobody
+  assert.equal(E.unconfirmedDone(d0, 'W3').flag, false);
+});
+
+test('R14 PMO-S1/PMO-11: deadline guard and day-off due dates are engine rules the server and sync share', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const prj = d0.project.find(p => p.id === PRJ).data;
+  assert.equal(E.deadlineBreach(d0, d0, PRJ, GOLD_DAY), null);
+  const d1 = R14set(d0, 'W11', { due: E.addBusinessDays(prj.target, 5) });
+  const b = E.deadlineBreach(d0, d1, PRJ, GOLD_DAY);
+  assert.ok(b, 'moving a task past the deadline is a breach');
+  assert.equal(b.target, prj.target);
+  assert.ok(b.finishAfter > prj.target);
+  assert.match(b.text, /past the .* deadline/);
+  // inside the buffer: fine
+  assert.equal(E.deadlineBreach(d0, R14set(d0, 'W11', { due: E.addBusinessDays(d0.workItem.find(e => e.id === 'W11').data.due, 2) }), PRJ, GOLD_DAY), null);
+  // Dec 25 is a day off
+  const p = E.dueDateProblem('2026-12-25', d0);
+  assert.equal(p.name, 'Christmas Day');
+  assert.equal(p.text, 'Fri Dec 25 is Christmas Day, a day off. Pick a working day, such as Thu Dec 24.');
+  assert.match(E.dueDateProblem('2026-12-26', d0).text, /^Sat Dec 26 is a weekend day/);
+  assert.equal(E.dueDateProblem('2026-12-24', d0), null);
+});
+
+test('R14 Karen 2: no expected cost without rates: "Cost unknown: set rates", never red over budget from default rates', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  // a budget is set but nobody doing the open work has a day rate (new people added inline, or "Needs an owner")
+  d.project.push({ id: 'pk', data: { id: 'pk', name: 'Karen budget', owner: 'mc', processes: ['expense-reimbursement'], status: 'active', target: E.addBusinessDays(GOLD_DAY, 40), budget: { planned: 15000 }, baselines: [] } });
+  E.planToWork('pk', E.suggestWorkFromDiff(d, 'pk', GOLD_DAY)).forEach(w => { delete w.owner; w.ownerRole = 'Operations director'; d.workItem.push({ id: w.id, data: w }); });
+  const t = E.projectTruth(d, 'pk', GOLD_DAY);
+  assert.equal(t.cost.unknown, true);
+  assert.equal(t.cost.unknownText, 'Cost unknown: set rates');
+  assert.deepEqual([t.cost.forecast, t.cost.estimate, t.cost.variance, t.cost.overBudget, t.cost.planned], [null, null, null, false, 15000]);
+  assert.ok(t.cost.unpriced > 0);
+  const f = E.projectFinancials(d, 'pk', GOLD_DAY);
+  assert.deepEqual([f.forecastCost, f.overBudget, f.unknown], [null, false, true]);
+  const rep = E.periodReport(d, 'pk', { preset: 'this-week' }, GOLD_DAY);
+  assert.ok(!/over/i.test(String(rep.overall.budget.text || '')), rep.overall.budget.text);
+  assert.match(String(rep.overall.budget.text || ''), /Cost unknown: set rates/);
+  // the seeded project (everyone has a rate) is unchanged
+  assert.equal(E.projectTruth(SEED.seed(GOLD_DAY).docs, PRJ, GOLD_DAY).cost.unknown, false);
+});
+
+test('R14 BPM/Karen 7: "holds up N tasks" counts distinct tasks within the project', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  // a second missing piece used by the same steps as Bank remittance details: the same tasks must not count twice
+  const d4 = d.dataElement.find(e => e.id === 'D4').data; d4.avail = 'missing'; delete d4.check; delete d4.liveConfirmedBy;
+  const t = E.projectTruth(d, PRJ, GOLD_DAY);
+  const open = t.tasks.open;
+  assert.ok(t.blocking.count >= 2, JSON.stringify(t.blocking));
+  assert.ok(t.blocking.holdsUp <= open, JSON.stringify([t.blocking.holdsUp, open]));
+  const ids = new Set(); t.blocking.items.forEach(b => (b.heldIds || []).forEach(x => ids.add(x)));
+  assert.equal(t.blocking.holdsUp, ids.size);
+});
+
+test('R14 PMO list 9: no "back on schedule" ask for a task whose expected finish equals its due date', () => {
+  const s0 = SEED.seed(GOLD_DAY).docs;
+  // the PMO expert's repro: a task due Dec 22, expected Dec 22, holds up a successor due the same day
+  const w11 = s0.workItem.find(e => e.id === 'W11').data;
+  const x = { id: 'W-x', projectId: PRJ, title: 'Follow-on check', owner: 'ar', status: 'idle', start: w11.due, due: w11.due, deps: ['W11'], effortDays: 2, kind: 'other' };
+  const d0 = Object.assign({}, s0, { workItem: s0.workItem.concat([{ id: x.id, data: x }]) });
+  const t = E.projectTruth(d0, PRJ, GOLD_DAY);
+  const fc = E.forecastAll(d0, GOLD_DAY);
+  assert.equal(fc.W11.forecast, E.toBusinessDay(w11.due));
+  assert.ok(!t.who.some(r => r.ref === 'work:W11' && /back on schedule/.test(r.what)), JSON.stringify(t.who.filter(r => r.ref === 'work:W11')));
+  t.who.filter(x => /back on schedule/.test(x.what)).forEach(x => {
+    const id = x.workId || (x.ref || '').replace(/^work:/, '');
+    const w = d0.workItem.find(e => e.id === id).data;
+    assert.ok(fc[id].forecast > E.toBusinessDay(w.due), x.what + ' expected ' + fc[id].forecast + ' due ' + w.due);
+  });
+});
+
+test('R14 PMO-7/8 + list 6: "since last report" by exact time, past ranges as of their end, the viewer\'s clock, one late-or-blocked count', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const prj = d0.project.find(p => p.id === PRJ).data;
+  // the PMO expert's repro: a report at 2:59 (Chicago, 08:59 UTC), then a Done at 3:01
+  const w11 = d0.workItem.find(e => e.id === 'W11').data;
+  const d1 = Object.assign({}, R14set(d0, 'W11', { status: 'done', doneAt: GOLD_DAY, doneTs: GOLD_DAY + 'T09:01:00.000Z', doneBy: 'dk', time: [{ by: 'dk', date: GOLD_DAY, hours: 8 }] }), {
+    project: d0.project.map(p => p.id === PRJ ? { id: PRJ, data: Object.assign({}, prj, { lastReportAt: GOLD_DAY + 'T08:59:00.000Z' }) } : p) });
+  const r = E.periodReport(d1, PRJ, { preset: 'since-last-report', tzOffsetMinutes: 360 }, GOLD_DAY);
+  assert.deepEqual(r.completed.map(x => x.id), ['W11'], JSON.stringify(r.completed));
+  assert.match(r.window.note, /at 2:59 AM\./);
+  void w11;
+  // a past range: the headline is as of the period end, and says so
+  const lw = E.periodReport(d0, PRJ, { preset: 'last-week' }, GOLD_DAY);
+  assert.equal(lw.overall.asOf.past, true);
+  assert.match(lw.overall.asOf.label, /^as of (Mon|Tue|Wed|Thu|Fri) /);
+  assert.equal(E.periodReport(d0, PRJ, { preset: 'this-week' }, GOLD_DAY).overall.asOf.label, 'as of today');
+  // one "late or blocked" count: the report's areas of concern use the header's set
+  const t = E.projectTruth(d0, PRJ, GOLD_DAY);
+  const ids = new Set(t.late); t.blocking.items.forEach(b => b.heldIds.forEach(x => ids.add(x)));
+  assert.equal(t.lateOrBlocked.count, ids.size);
+  const tw = E.periodReport(d0, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  tw.overall.concerns.forEach(c => assert.equal(c.of, t.lateOrBlocked.count));
+  // Karen 7: blockers raised in the period = blocking information whose work was planned in the period
+  const d3 = SEED.seed(GOLD_DAY).docs;
+  d3.dataElement.push({ id: 'DK1', data: { id: 'DK1', name: 'Vendor W-9 form', avail: 'missing', createdAt: GOLD_DAY } });
+  d3.process.find(p => p.id === 'vendor-onboarding').data.tobe.find(n => n.id === 's1').data.push('DK1');
+  const r3 = E.periodReport(d3, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  assert.ok(r3.blockersRaised.some(b => b.dataId === 'DK1'), JSON.stringify(r3.blockersRaised));
+});
+
+test('R14 Karen 8 / BPM-9: a part\'s approval waits for its retire work; "Changed after approval" says from → to', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  // Karen: Treasury's removed Today step ("Print and file the bank letter") has its "Retire the old step" task still open
+  const wr = { id: 'WR', projectId: PRJ, pid: 'vendor-onboarding', step: null, retires: 'a3b', title: 'Retire the old step: Print and file the bank letter', owner: 'lp', status: 'idle', start: GOLD_DAY, due: E.addBusinessDays(GOLD_DAY, 3), deps: [], effortDays: 1, kind: 'other', tag: 'retire' };
+  const d1 = Object.assign({}, d0, { workItem: d0.workItem.concat([{ id: wr.id, data: wr }]) });
+  const br = E.buReady(d1, PRJ, 'Treasury');
+  assert.ok(br.waiting.find(x => x.kind === 'work').items.includes('WR'), JSON.stringify(br.waiting));
+  // BPM-9: approve Compliance with a fingerprint, then move one of its tasks: the card says what changed, from → to
+  const at = GOLD_DAY + 'T09:00:00.000Z';
+  const fp = E.sectionFingerprint(d0, PRJ, 'Compliance');
+  const sc = E.projectTruth(d0, PRJ, GOLD_DAY).approvals.find(a => a.bu === 'Compliance');
+  const appr = { id: 'A-c', projectId: PRJ, bu: 'Compliance', approver: sc.approver, decision: 'approved', stepUp: true, at, snapshotAt: at, fingerprint: fp };
+  const w = d0.workItem.map(e => e.data).find(x => x.projectId === PRJ && x.status !== 'done' && E.buReady(d0, PRJ, 'Compliance') && x.owner === 'ps') ||
+    d0.workItem.map(e => e.data).find(x => x.projectId === PRJ && x.owner === 'ps');
+  const d2 = Object.assign({}, R14set(d0, w.id, { due: E.addBusinessDays(w.due, 2), updatedAt: GOLD_DAY + 'T10:00:00.000Z' }), { approval: d0.approval.concat([{ id: appr.id, data: appr }]) });
+  const a2 = E.projectTruth(d2, PRJ, GOLD_DAY).approvals.find(a => a.bu === 'Compliance');
+  if (a2.stale) {
+    const hit = a2.changedAfter.find(x => x.ref === 'workItem:' + w.id);
+    assert.ok(hit, JSON.stringify(a2.changedAfter));
+    assert.match(hit.text, new RegExp('due ' + E.fmtDay(w.due) + ' → ' + E.fmtDay(E.addBusinessDays(w.due, 2))));
+  } else assert.fail('the moved task should reopen Compliance\'s approval: ' + JSON.stringify(a2));
+});
+
+test('R14 PMO-9: knock-on re-dating edits and impact warnings; R14 one information split', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  // the re-plan: W6 (holds up W7, W8, W10) moves out 10 business days
+  const w6 = d0.workItem.find(e => e.id === 'W6').data;
+  const d1 = R14set(d0, 'W6', { due: E.addBusinessDays(GOLD_DAY, 10), start: GOLD_DAY });
+  const warn = E.pastDueWarnings(d1, PRJ, GOLD_DAY);
+  assert.ok(warn.some(x => x.workId === 'W7'), JSON.stringify(warn));
+  assert.match(warn.find(x => x.workId === 'W7').text, /will be late: expected/);
+  const ed = E.knockOnRedates(d1, PRJ, GOLD_DAY, { exclude: ['W6'] });
+  assert.ok(ed.length && ed.every(e => e.type === 'workItem' && e.op === 'set' && e.field === 'due' && e.auto && e.to > e.from), JSON.stringify(ed));
+  assert.ok(!ed.some(e => e.id === 'W6'));
+  // applied: no knock-on task is still late for that reason
+  let d2 = d1; ed.forEach(e => { d2 = R14set(d2, e.id, { due: e.to }); });
+  const fc = E.forecastAll(d2, GOLD_DAY);
+  ed.forEach(e => assert.equal(fc[e.id].sched === 'slip', false, e.label));
+  void w6;
+  const c = E.infoStateCounts(d0, PRJ);
+  assert.equal(c.total, c.have + c.notAvailable + c.notChecked + c.sampleOnly + c.waiting + c.problem);
+  assert.match(c.text, /1 not available/);
+});
+
+test('R14 (L3 asks): an unowned fix is never named after the PM or data owner; a held item is on Home once; PM-done confirmations go to someone else', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const w6 = d.workItem.find(e => e.id === 'W6').data; delete w6.owner; w6.ownerRole = 'Treasury analyst';
+  // the sentence names "Needs an owner", never Leo (data owner) or Tom (PM)
+  const t = E.projectTruth(d, PRJ, GOLD_DAY);
+  assert.ok(!/\((Leo Park|Tom Alvarez|Maya Chen)\)/.test(t.sentence.replace(/^.*?late; first: “[^”]*” /, '')) || /Needs an owner/.test(t.sentence), t.sentence);
+  t.who.filter(x => x.workId === 'W6').forEach(x => assert.equal(x.person, null));
+  // a held Jira item: one "Confirm" row on the confirmer's Home
+  const h = { kind: 'order', reason: 'x', confirmBy: 'dk', tool: 'Jira', key: 'VOM-8', toolStatus: 'Done', by: 'dk', at: GOLD_DAY + 'T15:00:00.000Z' };
+  const d1 = R14set(SEED.seed(GOLD_DAY).docs, 'W7', { status: 'review', syncHold: h });
+  assert.equal(E.personQueue(d1, 'dk', GOLD_DAY).filter(x => /^Confirm /.test(x.title || x.what)).length, 1);
+  // the PM (also the launch owner) marks a task done with no hours: someone else is asked to confirm
+  const d2 = SEED.seed(GOLD_DAY).docs;
+  const prj = d2.project.find(p => p.id === PRJ).data; delete prj.releaseManager;
+  const d3 = R14set(d2, 'W11', { owner: prj.owner, status: 'done', doneAt: GOLD_DAY, doneBy: prj.owner });
+  const row = E.projectTruth(d3, PRJ, GOLD_DAY).who.find(x => x.why === 'confirm');
+  assert.ok(row && row.person && row.person !== prj.owner, JSON.stringify(row));
+});
+
+test('R14 BPM-2: profile warnings become tests with the right counts; bank wording only on bank fields; amounts and scores are numbers; samples split per item', () => {
+  // two shared accounts (4 records), three repeated tax ids... counts are records, never just repeats
+  const csv = ['Vendor name,Tax ID,Bank account number,Customer account number',
+    'Acme Supply Inc,12-3456789,000123456789,C100', 'ACME Supply,12-3456789,000123456789,C100',
+    'Fabrikam,45-1112223,000987654321,C200', 'Fabrikam Metals,45-1112223,000987654321,C300', 'Contoso,45-1112223,000555666777,C400'].join('\n');
+  const prof = E.profileCsv(csv, { context: 'Bank remittance details' });
+  const col = n => prof.find(c => c.name === n);
+  assert.deepEqual([col('Bank account number').sharedAccount.accounts, col('Bank account number').sharedAccount.records], [2, 4]);
+  assert.match(col('Bank account number').sharedAccount.text, /^2 account numbers are each on more than one record \(4 records in all\)/);
+  assert.equal(col('Customer account number').sharedAccount, undefined, 'a customer account number never gets the shared-bank wording');
+  assert.equal(col('Tax ID').duplicateRecords, 5);
+  const de = { id: 'DV', name: 'Vendors', fields: [{ name: 'Vendor name', type: 'text', required: true }, { name: 'Tax ID', format: '##-#######', type: 'text', unique: true }, { name: 'Bank account number', type: 'digits' }] };
+  const tests = E.generateTests(de, prof, { all: true });
+  assert.ok(tests.some(t => t.field === 'Bank account number' && t.signal === 'shared-account' && /4 records share 2 account numbers/.test(t.note)), JSON.stringify(tests.filter(t => t.field === 'Bank account number').map(t => t.note)));
+  assert.ok(tests.some(t => t.field === 'Vendor name' && t.signal === 'near-duplicate' && t.expect === 'reject'), 'near-duplicate names become a test');
+  assert.ok(tests.filter(t => t.setup).every(t => /^Setup: first save a record/.test(t.setup)), 'a duplicate test says why it differs from the valid test');
+  // numeric inference: a "requested limit" typed as text is a number; a score above 100 is out of range
+  const lim = E.fieldSpec({ name: 'requested_limit', type: 'text' }), sc = E.fieldSpec({ name: 'risk_score', type: 'text' });
+  assert.deepEqual([lim.type, E.validate(lim, 'Abcdef'), E.validate(lim, '25000')], ['currency', false, true]);
+  assert.deepEqual([sc.type, E.validate(sc, 'abc'), E.validate(sc, '101'), E.validate(sc, '87')], ['number', false, false, true]);
+  assert.equal(E.fieldSpec({ name: 'Customer account number', type: 'text' }).type, 'text');
+  // a majority shape is never "should be rejected"
+  const shapes = ['Name,Code', 'a,AB-12', 'b,AB-13', 'c,AB-14', 'd,AB-15', 'e,AB-16', 'f,AB-17', 'g,AB-18', 'h,AB-19', 'i,X1', 'j,Y2'].join('\n');
+  const t2 = E.generateTests({ id: 'DS', name: 'Codes', fields: [{ name: 'Code', type: 'text' }] }, E.profileCsv(shapes), { all: true });
+  assert.ok(!t2.some(t => /Observed shape/.test(t.note) && /8 of 10/.test(t.note) && t.expect === 'reject'), JSON.stringify(t2.map(t => [t.note, t.expect])));
+  // a 3-column sample uploaded on one item is split per information item used by the same steps
+  const d = SEED.seed(GOLD_DAY).docs;
+  const split = E.splitSampleColumns(d, 'D2', ['bank_name', 'vendor_id', 'mystery']);
+  assert.ok(split.D2.includes('mystery') && split.D2.includes('bank_name'), JSON.stringify(split));
+  assert.deepEqual(split.D4, ['vendor_id'], JSON.stringify(split));
+});
+
+test('R14 Jordan A: a department move or new approver grants no rights on a part already in flight', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const comp = E.departments(d0).find(x => x.name === 'Compliance');
+  const at = GOLD_DAY + 'T20:00:00.000Z';   // after the project's testing started
+  const r = E.departmentEdit(d0, { kind: 'assign', personId: 'ar', id: comp.id, at });
+  assert.ok(r.ok !== false, JSON.stringify(r));
+  const d1 = Object.assign({}, d0, { person: d0.person.map(e => { const x = r.people.find(p => p.id === e.id); return x ? { id: e.id, data: Object.assign({}, e.data, x) } : e; }) });
+  assert.equal(d1.person.find(e => e.id === 'ar').data.buSince, at);
+  const tests = E.projectTruth(d1, PRJ, GOLD_DAY).testing.perBU.Compliance.tests.filter(t => !t.passedBy);
+  const tid = (tests[0] || E.projectTruth(d1, PRJ, GOLD_DAY).testing.perBU.Compliance.tests[0]).id;
+  const bar = E.canPassTest(d1, PRJ, tid, 'ar');
+  assert.ok(bar && bar.rule === 'recent-move', JSON.stringify(bar));
+  // named as a Compliance approver after the fact: not eligible for this project's Compliance part
+  const r2 = E.departmentEdit(d1, { kind: 'approvers', id: comp.id, approvers: comp.approvers.concat(['ar']), at });
+  const settings = d1.workspace.find(w => w.id === 'settings').data;
+  const d2 = Object.assign({}, d1, { workspace: d1.workspace.map(w => w.id === 'settings' ? { id: 'settings', data: Object.assign({}, settings, { departments: r2.departments }) } : w) });
+  const a = E.projectTruth(d2, PRJ, GOLD_DAY).approvals.find(x => x.bu === 'Compliance');
+  assert.ok(!a.eligible.includes('ar'), JSON.stringify(a.eligible));
+  // a part not yet in flight (no tests, no approvals): the move counts
+  const d3 = Object.assign({}, d1, { testRun: [], approval: [] });
+  assert.equal(E.grantTooRecent(d3, d3.project.find(p => p.id === PRJ).data, 'Compliance', 'ar'), false);
+});
+
+test('R14 Jordan D: the report\'s finish move and the plan change\'s say the same thing', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const at = GOLD_DAY + 'T15:00:00.000Z';
+  const t0 = E.projectTruth(d0, PRJ, GOLD_DAY);
+  const w11 = d0.workItem.find(e => e.id === 'W11').data;
+  const to = E.addBusinessDays(t0.forecastFinish, 14);
+  const dm = R14set(d0, 'W11', { due: to });
+  const after = E.projectTruth(dm, PRJ, GOLD_DAY).forecastFinish;
+  const c = { id: 'c14', projectId: PRJ, title: 'Slip W11', status: 'applied', at, appliedAt: at, decidedBy: 'mc', impact: { finish: { before: t0.forecastFinish, after } } };
+  const d1 = Object.assign({}, dm, { planChange: [{ id: c.id, data: c }] });
+  const n = E.businessDaysBetween(t0.forecastFinish, after);
+  const r = E.periodReport(d1, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  const pc = r.planChanges.find(x => x.id === 'c14');
+  assert.equal(pc.shiftDays, n);
+  // the seed has a saved forecast from before this week, so the period's move is longer; it says how much the change made
+  assert.match(r.slipText, new RegExp(n + ' business days from the plan change “Slip W11” \\(' + E.fmtDay(t0.forecastFinish) + ' → ' + E.fmtDay(after) + '\\)'), r.slipText);
+  // with no saved forecast, the report's move is the change's move
+  const pr = d1.project.find(p => p.id === PRJ).data;
+  const d2 = Object.assign({}, d1, { project: d1.project.map(p => p.id === PRJ ? { id: PRJ, data: Object.assign({}, pr, { forecastLog: [], baselines: [] }) } : p) });
+  const r2 = E.periodReport(d2, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  assert.equal(r2.slipDays, n, r2.slipText);
+  void w11;
+});
+
+test('R14 (L2 asks): per-run documents are available; new information is the step role\'s; impossible threshold paths are pruned; a department with nobody is a gap', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  d.dataElement.push({ id: 'DW9', data: { id: 'DW9', name: 'W-9 form', avail: 'missing', perRun: true } });
+  assert.equal(E.effectiveAvail(d, 'DW9'), 'live');
+  assert.deepEqual(E.defaultDataOwner({ owner: 'ta', ownerRole: 'Credit analyst' }), { ownerRole: 'Credit analyst' });
+  // two amount choices: "under $50k?" Yes, then "above $250k?" Yes is impossible
+  const proc = { id: 'pt', name: 'Limits', owner: 'mc', asis: [], tobe: [
+    { id: 'g1', type: 'decision', title: 'Requested limit under $50k?', threshold: { subject: 'requested limit', op: '<', amount: 50000 }, branches: [
+      { label: 'Yes', nodes: [{ id: 'g2', type: 'decision', title: 'Requested limit above $250,000?', threshold: { subject: 'requested limit', op: '>', amount: 250000 }, branches: [
+        { label: 'Yes', nodes: [{ id: 'a', type: 'step', title: 'CFO approves', owner: 'mc' }] }, { label: 'No', nodes: [{ id: 'b', type: 'step', title: 'Auto-approve', owner: 'mc' }] }] }] },
+      { label: 'No', nodes: [{ id: 'c', type: 'step', title: 'Controller approves', owner: 'mc' }] }] }] };
+  d.process.push({ id: 'pt', data: proc });
+  d.project.push({ id: 'ppt', data: { id: 'ppt', name: 'Limits', owner: 'mc', processes: ['pt'], status: 'active', target: E.addBusinessDays(GOLD_DAY, 30) } });
+  const sc = E.generateScenarios(d, 'ppt');
+  assert.ok(sc.length >= 2, JSON.stringify(sc.map(x => x.title)));
+  assert.ok(!sc.some(x => JSON.stringify(x).includes('CFO approves') && /under \$50k\? = Yes/.test(JSON.stringify(x))), JSON.stringify(sc.map(x => x.title)));
+  // a department with no approvers and no members: a gap on the process page
+  const settings = d.workspace.find(w => w.id === 'settings').data;
+  settings.departments = settings.departments.concat([{ id: 'dept-ops', name: 'Operations', approvers: [] }]);
+  proc.teamDepartments = { Operations: 'Operations' };
+  proc.tobe[0].branches[1].nodes[0].touches = ['Operations'];
+  const tr = E.teamRouting(d, 'pt');
+  assert.ok(tr.noApprover.includes('Operations'), JSON.stringify(tr));
+  assert.match(tr.text, /nobody to approve/);
 });

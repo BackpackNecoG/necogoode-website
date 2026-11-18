@@ -183,6 +183,35 @@ async function api(method, path, body) {
   await page.waitForFunction(() => /replay refused/.test((document.querySelector('[data-cx-result]') || {}).textContent || ''), null, { timeout: 15000 });
   ok(/Signature doesn’t match/.test(await page.textContent('[data-cx-result]')), 'replayed and tampered intents are both refused');
 
+  console.log('4b. R14: a Jira due date past the deadline goes to Change the plan, never moves the plan');
+  {
+    const s0 = (await api('GET', `ws/${ws}/state`)).body.docs;
+    const prj = s0.project.find(d => d.id === 'vendor-modernization').data;
+    const c0 = (s0.connection || []).find(d => d.data.projectId === 'vendor-modernization').data;
+    const key = Object.keys(c0.sim.items).find(k => c0.sim.items[k].pmoId === 'W7');
+    const due0 = s0.workItem.find(d => d.id === 'W7').data.due;
+    const fin0 = E.projectTruth(s0, 'vendor-modernization', today()).forecastFinish;
+    /* a weekday two weeks after the deadline */
+    const d = new Date(prj.target + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 14);
+    while ([0, 6].includes(d.getUTCDay()) || E.holidays && (E.holidays(s0) || []).some(h => (h.date || h) === d.toISOString().slice(0, 10))) d.setUTCDate(d.getUTCDate() + 1);
+    const late = d.toISOString().slice(0, 10);
+    await page.fill(`[data-cx-simdue="${key}"]`, late);   /* fill fires input + change once */
+    await page.waitForSelector('[data-cx-pending-due="W7"]', { timeout: 20000 });
+    ok(/past the deadline/.test(await page.textContent('[data-cx-pending-due="W7"]')), 'the item says the date waits for approval');
+    ok(/approved by/.test(await page.textContent('[data-cx-pending-due="W7"]')), 'and names who approves it');
+    ok(/date change past the deadline sent to Change the plan/.test(await page.textContent('[data-cx-result]')), 'the sync result says it went to Change the plan');
+    ok(await page.locator('[data-cx-log] [data-cx-change]').count() >= 1, 'the sync log links to the plan change');
+    const s1 = (await api('GET', `ws/${ws}/state`)).body.docs;
+    ok(s1.workItem.find(x => x.id === 'W7').data.due === due0, 'the PMOFlow due date did not move');
+    ok(E.projectTruth(s1, 'vendor-modernization', today()).forecastFinish === fin0, 'the forecast did not move');
+    const pcs = (s1.planChange || []).map(x => x.data).filter(x => x.source === 'sync' && x.status === 'proposed');
+    ok(pcs.length === 1 && pcs[0].edits[0].to === late, 'one proposed plan change with the Jira date');
+    ok(pcs[0] && pcs[0].approvers.some(a => (a.roles || [a]).some(r => r.role === 'sponsor')), 'the sponsor approves it');
+    ok((await page.inputValue(`[data-cx-simdue="${key}"]`)) === due0, 'Jira shows PMOFlow’s date again until it is approved');
+    ok(await overflow(), 'no horizontal overflow at 1366 (date held)');
+    await shot('05b-date-held-1366');
+  }
+
   console.log('5. notifications');
   await page.click('[data-cx-notify="late"]');
   await page.waitForSelector('[data-cx-teams] .cx-card');

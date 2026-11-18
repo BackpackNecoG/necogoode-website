@@ -144,7 +144,9 @@ function applyTruth(facts, t, docs, today, engine, L) {
   /* R9 §1: one list of late tasks (past due, or will finish after its due date); days are business days */
   const row = id => { const w = wById[id] || {}; const f = fc[id] || {};
     const pastDue = w.status !== 'done' && w.due && String(w.due).slice(0, 10) < today;
-    return { title: w.title, owner: L.person(w.owner), due: w.due, forecast: f.forecast, sched: pastDue ? 'late' : 'slip', slipDays: f.slipDays,
+    /* R14 (PMO list 5): "late by N business days" is the Work tab's one number (projectTruth.lateness) */
+    const lateDays = t.lateness && t.lateness[id] ? t.lateness[id].days : (f.lateDays != null ? f.lateDays : null);
+    return { title: w.title, owner: L.person(w.owner), due: w.due, forecast: f.forecast, sched: pastDue ? 'late' : 'slip', slipDays: f.slipDays, lateDays,
       daysPastDue: pastDue ? (f.pastDueDays != null ? f.pastDueDays : businessDaysBetween(String(w.due).slice(0, 10), today)) : 0, waitingOn: waitingOnOf(w, f, wById) }; };
   const lateList = (t.late || []).concat((t.runningLate || []).filter(id => !lateIds.has(id)));
   facts.atRisk = [...new Set(lateList)].map(row);
@@ -306,7 +308,7 @@ function atRiskLine(w) {
   const wait = w.waitingOn ? `waiting on ${q(w.waitingOn)}` : '';
   if (w.daysPastDue > 0) {
     const exp = w.forecast ? `expected ${fd(w.forecast)}` : '';
-    return `${q(w.title)} (${w.owner}) is late by ${plural(w.daysPastDue, 'business day')} (was due ${fd(w.due)})` + [exp, wait].filter(Boolean).map(x => `; ${x}`).join('');
+    return `${q(w.title)} (${w.owner}) is late by ${plural(w.lateDays != null ? w.lateDays : w.daysPastDue, 'business day')} (was due ${fd(w.due)})` + [exp, wait].filter(Boolean).map(x => `; ${x}`).join('');
   }
   const exp = w.forecast ? `expected ${fd(w.forecast)}, after its ${fd(w.due)} due date` : `will finish after its ${fd(w.due)} due date`;
   return `${q(w.title)} (${w.owner}) is late: ${exp}` + (wait ? `; ${wait}` : '');
@@ -317,9 +319,10 @@ function lateLine(f) {
 }
 const notLiveN = f => (f.notLive || f.blockers || []).length;
 /* R5: email-draft recipients = project resources as first.last@northwind.example (fictional domain) */
-function recipientsOf(docs, project) {
+function recipientsOf(docs, project, extraIds) {
   const people = Object.fromEntries(list(docs, 'person').map(p => [p.id, p]));
-  return [...new Set(project.resources || [])].map(id => people[id]).filter(Boolean).map(p => ({ name: p.name,
+  /* R14 (Jordan E): everyone with an ask in the report is on the email list, not only the project team */
+  return [...new Set((project.resources || []).concat(extraIds || []))].map(id => people[id]).filter(Boolean).map(p => ({ name: p.name,
     email: p.name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s-]/g, '').trim().split(/\s+/).join('.') + '@northwind.example' }));
 }
 /* R7: the advanced appendix (earned value and testing terms) — only when the caller asks for it */
@@ -346,7 +349,9 @@ function costLineOf(f) {
   const c = f.cost;
   if (!c) return null;
   const hasBudget = c.planned != null && isFinite(+c.planned) && +c.planned > 0;
-  if (hasBudget && c.actual != null) return `${money(c.actual)} spent of the ${money(c.planned)} budget` + (c.forecast != null ? `; expected cost ${money(c.forecast)}` : '');
+  /* R14 (Karen 2): no expected cost from default rates */
+  if (hasBudget && c.actual != null) return `${money(c.actual)} spent of the ${money(c.planned)} budget` + (c.forecast != null ? `; expected cost ${money(c.forecast)}` : c.unknown ? `; ${c.unknownText || 'Cost unknown: set rates'}` : '');
+  if (c.unknown && hasBudget) return c.unknownText || 'Cost unknown: set rates';
   if (f.hasRates && c.forecast != null && +c.forecast > 0) return `Expected cost ${money(c.forecast)}`;
   return null;
 }
@@ -414,6 +419,8 @@ function rangeOf(body) {
   if (isDay(body.from)) r.from = body.from;
   if (isDay(body.to)) r.to = body.to;
   if ((r.from || r.to) && !r.preset) r.preset = 'custom';
+  /* R14 (PMO list 6): the viewer's time zone (Date#getTimezoneOffset minutes), so times read like History */
+  if (typeof body.tzOffsetMinutes === 'number' && isFinite(body.tzOffsetMinutes) && Math.abs(body.tzOffsetMinutes) <= 14 * 60) r.tzOffsetMinutes = body.tzOffsetMinutes;
   return r;
 }
 /* history events the page passes so undated facts can fall back to them: {at, ref, action} only, at most 1000 */
@@ -462,6 +469,7 @@ function overallSection(p) {
   const o = p.overall;
   return { name: o.name, description: o.description, purpose: o.purpose, needsPurpose: o.needsPurpose,
     purposeText: o.needsPurpose ? 'Add a one-line purpose' : null,
+    asOf: o.asOf ? o.asOf.label : 'as of today', lateOrBlocked: o.lateOrBlocked ? o.lateOrBlocked.text : null,
     label: o.label, rag: o.rag, sentence: o.sentence, lateText: o.lateText, schedule: o.schedule, behindSchedule: o.behindSchedule,
     budget: o.budget.text, higherBudgetNeed: o.budget.overBudget, concerns: o.concerns.map(c => c.text),
     who: o.who.map(w => `${w.name}: ${w.what}`) };
@@ -1060,7 +1068,10 @@ async function run(kind, body, docs, today) {
     const advanced = body.advanced === true;
     const facts = statusFacts(docs, projectId, today, engine);
     const L = labeler(docs);
-    const recipients = recipientsOf(docs, list(docs, 'project').find(p => p.id === projectId));
+    const prjDoc = list(docs, 'project').find(p => p.id === projectId);
+    let askIds = [];
+    try { const tt = engine && engine.projectTruth ? engine.projectTruth(docs, projectId, today) : null; askIds = tt ? tt.who.map(w => w.person).filter(Boolean) : []; } catch (e) { askIds = []; }
+    const recipients = recipientsOf(docs, prjDoc, askIds);
     /* R9 §11: Simple mode never says "Rules-based"; pages show sourceLabel as given */
     const rulesLabel = { source: 'rules', sourceLabel: advanced ? 'Rules-based' : 'Written from the project\'s facts' };
     const fallback = Object.assign(L.scrub(statusRules(facts, { advanced })), { recipients });
@@ -1073,6 +1084,8 @@ async function run(kind, body, docs, today) {
       const sections = periodSections(period, { showCost: !!costLineOf(facts) });
       Object.assign(fallback, L.scrub({ window: period.window, periodHeading: periodHeading(period), periodSummary: periodSummaryOf(period),
         sections, overall: overallSection(period) }), { period });
+      /* R14 (PMO-8): a past range's headline, risks and asks are today's state, and say so */
+      if (period.overall && period.overall.asOf && period.overall.asOf.past) Object.assign(fallback, { asOf: 'as of today', headline: fallback.headline + ' (as of today)' });
     }
     if (!configured()) return { status: 200, body: Object.assign(fallback, rulesLabel, { facts }) };
     try {
@@ -1132,6 +1145,7 @@ async function run(kind, body, docs, today) {
       if (!res.risks.length) res.risks = fallback.risks.slice();
       Object.assign(res, { rag: sum.rag, label: sum.label, sentence: sum.sentence, date: today, recipients, source: 'ai', sourceLabel: 'Generated by AI', facts });
       if (advanced) res.appendix = fallback.appendix;
+      if (fallback.asOf) Object.assign(res, { asOf: fallback.asOf, headline: res.headline.replace(/ \(as of today\)$/, '') + ' (as of today)' });
       if (period) {
         /* the period lists are the engine's, word for word; the model may only add the plain summary of the window */
         const ps = typeof out.periodSummary === 'string' ? plainWords(out.periodSummary.trim()).slice(0, 600) : '';

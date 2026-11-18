@@ -564,6 +564,10 @@ test('R13 departments: admin writes keep settings.departments; GET admin lists t
   assert.ok(Array.isArray(g.body.departments), 'GET admin carries the department list');
   assert.ok(names(g).includes('Credit') && names(g).includes('Treasury'));
   const credit = g.body.departments.find(d => d.name === 'Credit');
+  /* R14 rule 1 (Karen): a new department's first approver is immediate, stamped with server time (future work only) */
+  assert.ok(!g.body.pendingDepartments.length, 'nothing waits');
+  const setNow = (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings').data;
+  assert.ok(isFinite(Date.parse(setNow.departments.find(d => d.name === 'Credit').approverSince.ar)), 'approverSince recorded');
   assert.deepEqual(credit.approvers, ['ar']); assert.deepEqual(credit.approverNames, ['Ana Ruiz']);
   /* a role change, an invite, an export checkpoint: none of them wipe the departments */
   assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' })).status, 200);
@@ -599,4 +603,257 @@ test('R13 departments: an invite names a department (optional), checked against 
   await call('POST', `ws/${ws}/departments`, { op: { kind: 'rename', id: credit.id, name: 'Credit and Collections' }, actor: 'ta' });
   const g2 = await call('GET', `workspaces/${ws}/admin`);
   assert.equal(g2.body.settings.invites.find(i => i.email === 'sam.wu@northwind.example').department, 'Credit and Collections');
+});
+
+/* ---------- R14 L4 #2: the sponsor changes only through an Admin (never the PM, never self-appointed) ---------- */
+const PRJ14 = 'vendor-modernization';
+test('R14 sponsor: only an Admin who is not the project manager sets the sponsor; the PM can never be or pick the sponsor', async () => {
+  const ws = await newWs();
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const prj = st.project.find(d => d.id === PRJ14).data;
+  assert.equal(prj.owner, 'ta');
+  /* the PM is an Admin by default, but still can't pick the sponsor */
+  let r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'mc', actor: 'ta' });
+  assert.equal(r.status, 403); assert.match(r.body.error, /project manager/i);
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'ta', actor: 'ta' });
+  assert.equal(r.status, 403);
+  /* an Editor can't */
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'mc', actor: 'lp' });
+  assert.equal(r.status, 403); assert.match(r.body.error, /Admin/);
+  /* an Admin can't make the PM the sponsor, nor appoint themselves */
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'ta', actor: 'mc' });
+  assert.equal(r.status, 400); assert.match(r.body.error, /project manager/i);
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'mc', actor: 'mc' });
+  assert.equal(r.status, 403); assert.match(r.body.error, /another Admin/i);
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'nobody-here', actor: 'mc' });
+  assert.equal(r.status, 400);
+  /* an Admin (not the PM) sets it; the history sentence is server-written */
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: 'do', actor: 'mc', summary: 'Fixed typo' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const after = (await call('GET', `ws/${ws}/state`)).body.docs.project.find(d => d.id === PRJ14).data;
+  assert.equal(after.sponsor, 'do');
+  assert.equal(after.target, prj.target, 'nothing else changed');
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events.find(e => e.action === 'sponsor');
+  assert.ok(ev, 'a sponsor event');
+  assert.match(ev.summary, /sponsor of .*: .* → Dave Ortiz/);
+  assert.ok(!/Fixed typo/.test(ev.summary), 'the client cannot write the sentence');
+  /* GET admin lists each project's PM, explicit sponsor and the effective sponsor */
+  const v = (await call('GET', `workspaces/${ws}/admin`)).body;
+  const row = v.projects.find(p => p.id === PRJ14);
+  assert.equal(row.owner, 'ta'); assert.equal(row.sponsor, 'do'); assert.equal(row.effective, 'do'); assert.equal(row.sponsorName, 'Dave Ortiz');
+  /* the current sponsor may hand it over; the helper the doc API uses says the same */
+  assert.equal(admin.sponsorError((await call('GET', `ws/${ws}/state`)).body.docs, 'do', after, 'nb'), null);
+  assert.match(admin.sponsorError((await call('GET', `ws/${ws}/state`)).body.docs, 'ta', after, 'ta'), /project manager/i);
+  assert.match(admin.sponsorError((await call('GET', `ws/${ws}/state`)).body.docs, 'lp', after, 'nb'), /Admin/);
+  /* clearing goes back to the default approver */
+  r = await call('PUT', `workspaces/${ws}/admin/sponsor/${PRJ14}`, { sponsor: null, actor: 'mc' });
+  assert.equal(r.status, 200);
+  const v2 = (await call('GET', `workspaces/${ws}/admin`)).body.projects.find(p => p.id === PRJ14);
+  assert.equal(v2.sponsor, null);
+  assert.notEqual(v2.effective, 'ta', 'the default never falls back to the PM');
+});
+
+/* ---------- R14 L4 #2: the audit export verifies over server-written summaries; pre-R14 events still verify ---------- */
+test('R14 audit: server-written summaries (with a quoted client note) and old client-written events verify in JSON and CSV', async () => {
+  const ws = await newWs();
+  /* pre-R14 events: the client wrote the whole sentence (kept as stored) */
+  await store.appendEvent(ws, { actor: 'ta', action: 'update', ref: 'workItem:W7', summary: 'Fixed typo', at: '2026-11-10T15:00:00.000Z' });
+  await store.appendEvent(ws, { actor: 'dk', action: 'update', ref: 'workItem:W8', summary: 'Viewed', at: '2026-11-10T15:01:00.000Z' });
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const w = st.workItem.find(d => d.id === 'W12').data;
+  /* R14: the server writes the sentence from the diff; the client's text survives only as a quoted note, with quotes,
+     commas and a line break that must round-trip through CSV */
+  const put = await call('PUT', `ws/${ws}/doc/workItem/W12`, { actor: w.owner, summary: 'Comment added, "nothing" to see\nhere', data: Object.assign({}, w, { title: w.title + ' (v2)' }) });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+  assert.equal(j.verify.ok, true, j.verify.summary);
+  const mine = j.entries.find(e => e.ref === 'workItem:W12');
+  assert.match(mine.summary, /^Updated .*title .* → /, 'server-written sentence first');
+  assert.match(mine.summary, /\(note: “Comment added, "nothing" to see\nhere”\)$/);
+  assert.equal(mine.written, 'server', 'the export says who wrote the sentence');
+  assert.equal(mine.note, 'Comment added, "nothing" to see\nhere');
+  const old = j.entries.find(e => e.ref === 'workItem:W7');
+  assert.equal(old.summary, 'Fixed typo', 'old events are exported as stored');
+  assert.equal(old.written, 'client', 'old events say the client wrote them');
+  /* the saved JSON verifies (written/note are labels, not part of the hash; changing them changes nothing) */
+  let v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: j.entries, head: j.head })).body.verify;
+  assert.equal(v.ok, true, v.summary);
+  /* moving text between the server sentence and the note breaks the chain */
+  const forged = j.entries.map(e => Object.assign({}, e));
+  const fi = forged.findIndex(e => e.ref === 'workItem:W12');
+  forged[fi].summary = 'Comment added';
+  v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: forged, head: j.head })).body.verify;
+  assert.equal(v.ok, false); assert.equal(v.firstBreak.seq, fi + 1);
+  /* CSV round trip */
+  const csv = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv' })).body;
+  assert.match(csv, /^seq,at,actor,actorName,action,ref,summary,prevHash,hash\r\n/, 'the CSV columns stay the same, so old files still verify');
+  v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { csv })).body.verify;
+  assert.equal(v.ok, true, v.summary); assert.equal(v.signed, true);
+  /* the chain helper used by export and verify agrees with the stored rows */
+  assert.equal(admin.summaryParts('Updated task “X”: title “a” → “b” (note: “hi”)').note, 'hi');
+  assert.equal(admin.summaryParts('Fixed typo').written, 'client');
+  assert.equal(admin.summaryParts('Created risk “Vendor data late”').written, 'server');
+});
+
+/* ---------- R14 (Jordan re-test 1): department membership and approvers are a two-person, step-up change ---------- */
+const SU = () => ({ method: 'simulated-mfa', at: new Date().toISOString() });
+test('R14 departments: moving a person is proposed by one Admin and confirmed by another with the step-up check', async () => {
+  const ws = await newWs();
+  const pers = async id => (await call('GET', `ws/${ws}/state`)).body.docs.person.find(d => d.id === id).data;
+  /* Maya proposes moving Ana into Compliance: nothing changes yet */
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'ar', id: 'dept-compliance' }, actor: 'mc', summary: 'Viewed' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.pending && r.body.pending.status === 'pending', 'a pending change comes back');
+  assert.equal((await pers('ar')).bu, 'Accounts Payable', 'Ana is not moved yet');
+  assert.ok(!(await call('GET', `workspaces/${ws}/admin`)).body.departments.find(d => d.id === 'dept-compliance').people.some(p => p.id === 'ar'));
+  const pid = r.body.pending.id;
+  let g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  const pv = g.pendingDepartments.find(x => x.id === pid);
+  assert.match(pv.text, /Move Ana Ruiz from Accounts Payable to Compliance/);
+  assert.equal(pv.by, 'mc'); assert.deepEqual(pv.affected, ['ar']);
+  /* the proposer can't confirm; an Editor can't; the person being moved can't (even as an Admin); no step-up, no change */
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'mc', stepUp: SU() });
+  assert.equal(r.status, 403); assert.match(r.body.error, /second Admin/);
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'lp', stepUp: SU() });
+  assert.equal(r.status, 403); assert.match(r.body.error, /Admin/);
+  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ar`, { role: 'admin', actor: 'ta' })).status, 200);
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ar', stepUp: SU() });
+  assert.equal(r.status, 403); assert.match(r.body.error, /being moved|their own/);
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta' });
+  assert.equal(r.status, 403); assert.match(r.body.error, /extra sign-in check/);
+  assert.equal((await pers('ar')).bu, 'Accounts Payable', 'still not moved');
+  /* Tom confirms with the check: Ana moves, with the server's time on the membership */
+  const t0 = Date.now();
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta', stepUp: SU(), summary: 'Fixed typo' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const ar = await pers('ar');
+  assert.equal(ar.bu, 'Compliance');
+  assert.ok(Date.parse(ar.buSince) >= t0 - 1000 && Date.parse(ar.buSince) <= Date.now() + 1000, 'buSince is server time');
+  g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.ok(!g.pendingDepartments.some(x => x.id === pid), 'no longer pending');
+  /* the history sentences are server-written */
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '30' })).body.events;
+  assert.ok(evs.some(e => e.actor === 'mc' && /^Proposed moving Ana Ruiz from Accounts Payable to Compliance \(waits for a second Admin\)$/.test(e.summary)), 'proposal recorded');
+  assert.ok(evs.some(e => e.actor === 'ta' && /^Moved Ana Ruiz from Accounts Payable to Compliance \(proposed by Maya Chen, confirmed by Tom Alvarez with the extra sign-in check\)$/.test(e.summary)), 'confirmation recorded');
+  assert.ok(!evs.some(e => /Viewed|Fixed typo/.test(e.summary)), 'client text is never the sentence');
+  /* a confirmed change can't be confirmed twice */
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta', stepUp: SU() });
+  assert.equal(r.status, 404);
+});
+
+test('R14 departments: approver changes wait for a second Admin; since is stamped per approver; cancel changes nothing', async () => {
+  const ws = await newWs();
+  const dept = async id => (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings');
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-compliance', approvers: ['do', 'ar'] }, actor: 'mc' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const pid = r.body.pending.id;
+  assert.deepEqual(r.body.pending.affected, ['ar'], 'Ana is the one being given rights');
+  let g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-compliance').approvers, ['do'], 'unchanged until confirmed');
+  assert.match(g.pendingDepartments.find(x => x.id === pid).text, /Compliance approvers: add Ana Ruiz/);
+  /* a second proposal for the same department while one waits is refused */
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-compliance', approvers: ['ps'] }, actor: 'ta' });
+  assert.equal(r.status, 409);
+  const t0 = Date.now();
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta', stepUp: SU() });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const set = (await dept()).data;
+  const cd = set.departments.find(d => d.id === 'dept-compliance');
+  assert.deepEqual(cd.approvers.slice().sort(), ['ar', 'do']);
+  assert.ok(Date.parse(cd.approverSince.ar) >= t0 - 1000, 'the new approver carries server time');
+  assert.ok(!cd.approverSince.do, 'an approver from before keeps no since (older than any part in flight)');
+  /* a rename keeps each approver's since */
+  assert.equal((await call('POST', `ws/${ws}/departments`, { op: { kind: 'rename', id: 'dept-compliance', name: 'Compliance and Risk' }, actor: 'mc' })).status, 200);
+  const cd2 = (await dept()).data.departments.find(d => d.id === 'dept-compliance');
+  assert.equal(cd2.name, 'Compliance and Risk'); assert.equal(cd2.approverSince.ar, cd.approverSince.ar, 'since survives a rename');
+  /* cancel: the proposer withdraws; nothing changes */
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'lp', id: 'dept-it' }, actor: 'mc' });
+  const p2 = r.body.pending.id;
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${p2}/cancel`, { actor: 'lp' });
+  assert.equal(r.status, 403, 'an Editor cannot cancel');
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${p2}/cancel`, { actor: 'mc' });
+  assert.equal(r.status, 200);
+  const lp = (await call('GET', `ws/${ws}/state`)).body.docs.person.find(d => d.id === 'lp').data;
+  assert.equal(lp.bu, 'Treasury'); assert.ok(!lp.buSince);
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '30' })).body.events;
+  assert.ok(evs.some(e => /^Withdrew the proposal to move Leo Park from Treasury to IT$/.test(e.summary)));
+});
+
+test('R14 departments: no one-click bypass (generic person save, a lone Admin)', async () => {
+  const ws = await newWs();
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const ar = st.person.find(d => d.id === 'ar').data;
+  let r = await call('PUT', `ws/${ws}/doc/person/ar`, { actor: 'mc', data: Object.assign({}, ar, { bu: 'Compliance' }) });
+  assert.equal(r.status, 409); assert.match(r.body.error, /Departments/);
+  r = await call('PUT', `ws/${ws}/doc/person/ar`, { actor: 'mc', data: Object.assign({}, ar, { buSince: '2001-01-01T00:00:00.000Z' }) });
+  assert.equal(r.status, 409, 'nobody backdates a membership');
+  /* with Tom no longer an Admin, Maya is the only one: her proposal says it needs a second Admin */
+  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ta`, { role: 'editor', actor: 'mc' })).status, 200);
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'ar', id: 'dept-compliance' }, actor: 'mc' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!r.body.pending, 'a lone Admin is never stuck waiting');
+  const ar2 = (await call('GET', `ws/${ws}/state`)).body.docs.person.find(d => d.id === 'ar').data;
+  assert.equal(ar2.bu, 'Compliance'); assert.ok(isFinite(Date.parse(ar2.buSince)), 'stamped: applies to new work only');
+  /* changing an existing department's approvers applies at once too, stamped */
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-compliance', approvers: ['do', 'ar'] }, actor: 'mc' });
+  assert.equal(r.status, 200); assert.ok(!r.body.pending);
+  const cd = (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings').data.departments.find(d => d.id === 'dept-compliance');
+  assert.deepEqual(cd.approvers.slice().sort(), ['ar', 'do']); assert.ok(isFinite(Date.parse(cd.approverSince.ar)));
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes('Moved Ana Ruiz from Accounts Payable to Compliance (no second Admin in this workspace; applies to new work only)'), evs.join(' | '));
+  assert.ok(evs.includes('Changed Compliance approvers (add Ana Ruiz) (no second Admin in this workspace; applies to new work only)'), evs.join(' | '));
+});
+
+test('R14 departments rule 1: naming the first approver of a department with none is one Admin and immediate, even with two Admins', async () => {
+  const ws = await newWs();
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-pmo', approvers: ['mc'] }, actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!r.body.pending, 'applied at once');
+  const pmo = (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings').data.departments.find(d => d.id === 'dept-pmo');
+  assert.deepEqual(pmo.approvers, ['mc']); assert.ok(isFinite(Date.parse(pmo.approverSince.mc)));
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes('Named the first approver for PMO: Maya Chen (applies to new work only)'), evs.join(' | '));
+  /* now that PMO has an approver, changing them goes through a second Admin */
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-pmo', approvers: ['mc', 'ps'] }, actor: 'ta' });
+  assert.ok(r.body.pending, 'changing existing approvers waits for a second Admin');
+});
+
+/* ---------- R14 (Jordan B): refused writes are in History as action 'refused'; export and verify accept them ---------- */
+test('R14 audit: refused writes are exported, labelled and verified (JSON and CSV)', async () => {
+  const ws = await newWs();
+  /* a real refused write (a Viewer-free path: Dave is an Approver and may not edit a task) */
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const w = st.workItem.find(d => d.id === 'W12').data;
+  const bad = await call('PUT', `ws/${ws}/doc/workItem/W12`, { actor: 'do', summary: 'Fixed typo', data: Object.assign({}, w, { title: 'Hacked' }) });
+  assert.ok(bad.status >= 400, 'refused');
+  /* and one written the way index.js writes them, with commas, quotes and a dash */
+  await store.appendEvent(ws, { actor: 'ta', action: 'refused', ref: 'workItem:W7', summary: 'Refused: change to work item “Check, bank”, (due Nov 20 → Jan 5) — Use “Change the plan” to move it' });
+  const j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+  assert.equal(j.verify.ok, true, j.verify.summary);
+  const ref = j.entries.filter(e => e.action === 'refused');
+  assert.ok(ref.length >= 1, 'refused entries are in the export');
+  for (const e of ref) {
+    assert.match(e.summary, /^Refused: /);
+    assert.equal(e.written, 'server'); assert.equal(e.refused, true, 'labelled as refused');
+    assert.ok(!/Fixed typo/.test(e.summary), 'the client text never becomes a refused sentence');
+  }
+  let v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: j.entries, head: j.head })).body.verify;
+  assert.equal(v.ok, true, v.summary);
+  /* hiding a refusal (dropping it, or relabelling it as an update) breaks the chain */
+  const ri = j.entries.findIndex(e => e.action === 'refused');
+  const relabel = j.entries.map(e => Object.assign({}, e)); relabel[ri].action = 'update';
+  v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: relabel, head: j.head })).body.verify;
+  assert.equal(v.ok, false); assert.equal(v.firstBreak.seq, ri + 1);
+  const dropped = j.entries.filter((e, i) => i !== ri);
+  v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: dropped, head: j.head })).body.verify;
+  assert.equal(v.ok, false);
+  const csv = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv' })).body;
+  assert.match(csv, /,refused,workItem:W7,"Refused: change to work item “Check, bank”, \(due Nov 20 → Jan 5\) — Use “Change the plan” to move it",/);
+  v = (await call('POST', `workspaces/${ws}/admin/audit/verify`, { csv })).body.verify;
+  assert.equal(v.ok, true, v.summary);
+  const parsed = admin.fromCSV(csv);
+  assert.ok(parsed.entries.filter(e => e.action === 'refused').every(e => e.refused === true && e.written === 'server'));
+  /* the person filter keeps refusals (who tried) */
+  const f = (await call('GET', `workspaces/${ws}/admin/audit`, null, { person: 'ta', item: 'refused' })).body;
+  assert.ok(f.entries.some(e => e.action === 'refused'));
 });

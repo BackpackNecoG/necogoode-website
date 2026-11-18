@@ -4,6 +4,9 @@ import { E, esc, fmt, fmtTime, link, av, personChip, pname, LOCK, modal, toast, 
 import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName, UNCHECKED } from './process.js';
 
 const clone = o => JSON.parse(JSON.stringify(o));
+/* R14 (BPM): what the masked examples actually show (the engine's maskValue): every word becomes Xxxx, XXXX or xxxx and
+   every digit becomes 9, so no first or last letter and no word length is shown; separators and spaces are kept */
+export const MASK_NOTE = 'Statistics only; no real values are stored. In the examples every word becomes Xxxx (or XXXX, xxxx) and every digit becomes 9, so no letter is shown; separators such as - / . and spaces are kept.';
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
 /* R8 §1: availability choices come from process.js (a tick box in Simple, the detailed select in Advanced) */
 
@@ -186,11 +189,15 @@ export function render(params) {
 
   /* sample data check: plain summary in Simple; the full column statistics in Advanced */
   /* R8 §4: Simple shows one plain line per column, e.g. "Tax ID: 40 values, 1 has 8 digits" */
+  /* R14 (BPM-2): a multi-column sample is split per information item; say where its columns went, or where it came from */
+  const splitFrom = profile && profile.splitFrom ? store.get('dataElement', profile.splitFrom) : null;
+  const splitHTML = !profile ? '' : (Array.isArray(profile.split) && profile.split.length ? `<div class="hint d-split" data-profile-split>${profile.split.map(m => `${m.columns.length} column${m.columns.length === 1 ? '' : 's'} went to <a href="${link('/data/' + m.dataId)}" data-link>${esc(m.name)}</a> (${esc(m.columns.join(', '))})`).join('; ')}. The tests for them are made there.</div>` : '')
+    + (profile.splitFrom ? `<div class="hint d-split" data-profile-splitfrom>These columns came from a sample uploaded on <a href="${link('/data/' + profile.splitFrom)}" data-link>${esc(splitFrom ? splitFrom.name : 'other information')}</a>.</div>` : '');
   const simpleCols = profile ? profileLines(profile, drift, fields).map(l => `<div class="row d-profline" data-profline="${esc(l.name)}"><span class="${l.bad ? 'fail' : 'pass'}" aria-hidden="true">●</span><div style="min-width:0"><b>${esc(l.name)}</b>: ${esc(l.text)}</div></div>`).join('') : '';
   const prof = `<div class="card" style="margin-top:16px" data-profile-card><h3>Check sample data ${profile ? `<span class="n">${esc(profile.rows)} rows · ${esc(fmtTime(profile.at))}</span>` : ''}</h3>
-    ${profile ? (adv ? `<div class="hint" style="margin:-4px 0 8px">Statistics only. Examples are masked, so no real values are shown.</div>
+    ${profile ? (adv ? `<div class="hint d-mask-note" style="margin:-4px 0 8px" data-mask-note>${esc(MASK_NOTE)}</div>${splitHTML}
       <div class="tbl-wrap"><table class="d-prof"><tr><th>Column</th><th>Empty</th><th>Distinct</th><th>Length</th><th>Range</th><th>Top patterns</th><th>Masked examples</th></tr>${(profile.columns || []).map(c => `<tr><td><b>${esc(c.name)}</b>${(c.specials || []).length ? `<div class="hint">special characters ${esc(c.specials.join(' '))}</div>` : ''}</td><td>${esc(c.nulls)}</td><td>${esc(c.distinct)}</td><td>${esc(c.minLen)}–${esc(c.maxLen)}</td><td>${c.min != null ? esc(c.min) + ' – ' + esc(c.max) : '—'}</td>
-        <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${simpleCols}`)
+        <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${splitHTML}${simpleCols}`)
       + (!adv ? '' : `<h3 style="margin-top:14px">Differences from the rules <span class="n">${blockingDrift(drift).length}</span></h3>${noRule.length ? `<div class="s" data-norule="${noRule.length}">${noRule.length} column${noRule.length === 1 ? ' has' : 's have'} no rule yet: ${esc(noRule.map(d => d.field).join(', '))}.</div>` : ''}${blockingDrift(drift).length ? blockingDrift(drift).map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : fields.length ? '<div class="s pass">The sample matches the rules.</div>' : ''}`)
     /* R11 G2 §5: "Not checked yet" is an availability state; the sample card never reuses those words */
     : '<div class="s" data-no-sample>No sample looked at yet. A check reads a sample of the real data and shows what it looks like, so the rules and tests match reality.</div>'}
@@ -202,7 +209,7 @@ export function render(params) {
       ${d.resolved || !owner ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}">Mark fixed</button></div>`}</div>`).join('') + (open && !owner ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing yet. Anything testing finds that the rules missed lands here.</div>'}</div>`;
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a> › Information</div><h1>${esc(x.name)}</h1>${x.note ? `<p class="d-desc">${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${ownerHTML(x, users.concat(asisUsers))}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
+    <div class="res"><span class="lbl">Owner</span>${ownerHTML(x, users.concat(asisUsers))}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}${x.perRun ? `<span class="chip d-perrun" data-perrun title="${esc(x.note || 'Collected each time the process runs')}">↻ Collected each run</span>` : ''}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
     <div class="hdr-side">${owner ? '<div class="d-ownerrow d-right"><button class="btn" data-dedit>Edit</button></div>' : `<div class="d-ownerrow d-right"><span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span></div>`}<div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>Today steps</span></div>${adv ? `<div class="kpi"><b>${procCount}</b><span>Processes</span></div>` : ''}<div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work waiting for it</span></div></div></div></section>
   ${confirmAll}
   ${confirm}
@@ -525,10 +532,10 @@ export function bind(root, params) {
     if (d.avail !== 'live') { delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource; delete d.liveEvidence; } /* no longer live: the confirmation no longer stands */
     const parts = [];
     const lbl = k => isAdv() ? avOf(k).label : k === 'missing' || k === 'example' ? NOTYET : HAVE;
-    if (before !== d.avail && lbl(before) !== lbl(d.avail)) parts.push(`status ${lbl(before)} → ${lbl(d.avail)}`);
-    if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
+    if (before !== d.avail && lbl(before) !== lbl(d.avail)) parts.push(`status changed from ${lbl(before)} to ${lbl(d.avail)}`);
+    if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity changed from ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} to ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
     if (!d.owner) { delete d.owner; } else if (d.ownerRole && d.owner !== x.owner) delete d.ownerRole;
-    if ((x.owner || '') !== (d.owner || '')) parts.push(`owner → ${d.owner ? personName(d.owner) : dataOwnerName(x)}`);
+    if ((x.owner || '') !== (d.owner || '')) parts.push(`owner changed to ${d.owner ? personName(d.owner) : dataOwnerName(x)}`);
     await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited information '${d.name}'`);
     return;
     }

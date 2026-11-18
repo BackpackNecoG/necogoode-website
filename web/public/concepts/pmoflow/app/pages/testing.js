@@ -1,6 +1,7 @@
 /* Testing page (stream R): data profiling (statistics only), spec drift, generated test cases, process UAT scripts,
    step-level test runs with evidence and defects, discovered requirements. Route: /testing/:prj */
 import { store } from '../store.js';
+import { MASK_NOTE } from './data.js';
 import { E, esc, fmt as fmtDay, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues, stepUp } from '../ui.js';
 
 /* R8: timestamps render as the browser's LOCAL calendar date; plain YYYY-MM-DD dates stay as they are. */
@@ -206,7 +207,7 @@ function traceOf(prj, des) {
   const tt = (eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing;
   const cov = tt && tt.coverage, st = tt && Array.isArray(tt.stages) ? tt.stages.find(x => x && x.key === 'uat') : null;
   if (cov && st) return { uat: { done: +st.passed || 0, total: +st.total || 0 }, fields: { total: +cov.fieldsTotal || 0, covered: +cov.fieldsCovered || 0,
-    uncovered: (cov.uncoveredFields || []).map(x => ({ dataId: x.dataId || '', field: x.field || '' })) }, engine: true };
+    uncovered: (cov.uncoveredFields || []).map(x => ({ dataId: x.dataId || '', field: x.field || '' })), genericOnly: (cov.genericOnly || []).length }, engine: true };
   const e = E(); let tc = null;
   if (e && e.testCoverage) { try { tc = e.testCoverage(store.state.docs, prj.id, store.state.today); } catch (err) { tc = null; } }
   const by = latestBy(prj.id, 'uat'); const items = uatItems(prj);
@@ -226,7 +227,7 @@ function traceStrip(prj, des) {
   const byDe = new Map(); f.uncovered.forEach(x => { if (!byDe.has(x.dataId)) byDe.set(x.dataId, []); byDe.get(x.dataId).push(x.field); });
   const full = u.total && u.done === u.total;
   return `<div class="ts-trace" data-trace><div class="ts-trace-k"><span class="ts-trace-n ${full ? 'pass' : 'fail'}" data-trace-uat="${u.done}/${u.total}"><b>UAT ${u.done}/${u.total}</b><small title="User acceptance testing: data cases, UAT scripts and adopted end-to-end scenarios whose latest UAT result passed">cases, scripts and scenarios passed in UAT</small></span>
-      <span class="ts-trace-n ${f.uncovered.length ? 'fail' : 'pass'}" data-trace-fields="${f.uncovered.length}"><b>${f.uncovered.length ? `${f.uncovered.length} spec field${f.uncovered.length === 1 ? '' : 's'} without a case` : `All ${f.total} spec fields covered`}</b><small>${f.covered}/${f.total} fields have a spec- or profile-based case</small></span></div>
+      <span class="ts-trace-n ${f.uncovered.length ? 'fail' : 'pass'}" data-trace-fields="${f.uncovered.length}"><b>${f.uncovered.length ? `${f.uncovered.length} spec field${f.uncovered.length === 1 ? '' : 's'} without a case` : `All ${f.total} spec fields covered`}</b><small>${f.covered}/${f.total} fields have a spec- or profile-based case${f.genericOnly ? ` · ${f.genericOnly} piece${f.genericOnly === 1 ? '' : 's'} of information ${f.genericOnly === 1 ? 'has' : 'have'} no rules, only a basic test` : ''}</small></span></div>
     ${f.uncovered.length ? `<div class="ts-trace-l">${[...byDe.entries()].map(([did, fs]) => { const d = store.get('dataElement', did); return `<div class="ts-trace-r" data-trace-de="${esc(did)}"><span><b>${esc(d ? d.name : 'Data')}</b> · ${esc(fs.join(', '))}</span>${d ? `<button class="btn sm" data-gen-de="${esc(did)}">Generate</button>` : ''}</div>`; }).join('')}</div>` : ''}</div>`;
 }
 
@@ -261,7 +262,7 @@ function profileCard(de) {
       <button class="btn sm" data-paste-toggle>${ui.pasteOpen ? 'Hide paste box' : 'Paste CSV'}</button>
       <span class="hint">Read in your browser, sent to the in-tenant profiler, reduced to statistics.</span></div>
     ${ui.pasteOpen ? `<div class="field ts-paste"><textarea data-paste placeholder="Paste CSV with a header row">${esc(ui.paste)}</textarea><div><button class="btn sm primary" data-prof-paste>Profile pasted data</button></div></div>` : ''}
-    ${prof ? `<div class="ts-raw">🔒 Raw values were not stored. Examples are masked: digits → 9, letters → x/X, first and last character kept.</div>
+    ${prof ? `<div class="ts-raw" data-mask-note>🔒 ${esc(MASK_NOTE)}</div>
       ${unattached.length ? `<div class="ts-iss">${unattached.map(i => `⚠ ${esc(i.field)}: ${esc(fixU(i.issue, prof))}${i.detail ? ' — ' + esc(fixU(i.detail, prof)) : ''}`).join('<br>')}</div>` : ''}
       ${drift.length ? `<div class="ts-driftsum" data-drift-count="${drift.length}"><b>${drift.length} spec drift issue${drift.length === 1 ? '' : 's'}</b> — the real data does not match the documented spec. Generate tests to cover it, or update the spec on the <a href="${link('/data/' + de.id)}" data-link>data page</a>.</div>` : `<div class="ts-ok">Profile matches the documented spec.</div>`}
       <div class="tbl-wrap"><table class="ts-tbl"><thead><tr><th>Column</th><th>Nulls</th><th>Distinct</th><th>Length</th><th>Patterns</th><th>Masked examples</th></tr></thead><tbody>${cols}</tbody></table></div>`
@@ -432,7 +433,8 @@ function coverageCard(prj, des, runs, sc) {
   });
   const skipped = envs.reduce((n, env) => n + (last[env] && last[env]._skipped ? last[env]._skipped.size : 0), 0);
   const noEv = new Set(); envs.forEach(env => { if (last[env] && last[env]._noEv) last[env]._noEv.forEach(k => { if (!last[env][k]) noEv.add(k); }); });
-  return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n" data-cov-gaps="${tcov ? tcov.gaps : gaps}">${(tcov ? tcov.gaps : gaps) ? `${tcov ? tcov.gaps : gaps} coverage gap${(tcov ? tcov.gaps : gaps) === 1 ? '' : 's'}` : 'all covered'}</span></h3>
+  return `<div class="card" id="coverage"><h3>Coverage matrix<span class="n" data-cov-gaps="${tcov ? tcov.gaps : gaps}">${(tcov ? tcov.gaps : gaps) ? `${tcov ? tcov.gaps : gaps} coverage gap${(tcov ? tcov.gaps : gaps) === 1 ? '' : 's'}` : tcov && tcov.genericOnly && tcov.genericOnly.length ? `${tcov.genericOnly.length} with a basic test only` : 'all covered'}</span></h3>
+    ${tcov && tcov.genericText ? `<div class="hint" data-cov-generic="${tcov.genericOnly.length}" style="margin-bottom:6px">${esc(tcov.genericText)}. Add their rules on the information page to test them properly.</div>` : ''}
     <div class="hint" style="margin-bottom:8px">Rows are the project's data elements, to-be steps and adopted end-to-end scenarios. Red rows have a coverage gap: every spec field needs a case generated from the spec or profile (custom-only fields don't count), and every new or changed step needs a script. Each cell is the latest result per item across every run in that environment.</div>
     ${skipped || noEv.size ? `<div class="ts-warn" data-cov-notes>${skipped ? `<span data-skipped-count="${skipped}">${skipped} skipped (JUnit &lt;skipped/&gt;, counted as not run)</span>` : ''}${skipped && noEv.size ? ' · ' : ''}${noEv.size ? `<span data-noev-count="${noEv.size}">${noEv.size} script or scenario pass${noEv.size === 1 ? '' : 'es'} without evidence (don't count)</span>` : ''}</div>` : ''}
     <div class="tbl-wrap"><table class="ts-tbl ts-cov-tbl"><thead><tr><th>Data element / step / scenario</th><th>Cases / scripts</th>${envs.map(env => `<th title="${esc(ENV_TIP[env] || '')}">${esc(envTxt(env))} (latest)</th>`).join('')}<th>Open defects</th></tr></thead><tbody>${rows.join('')}</tbody></table></div></div>`;
@@ -487,7 +489,11 @@ function runsCard(prj, des, runs, caseIds, sc) {
   return `<div class="card" id="runs"><h3>Test runs<span class="n">${runs.length}</span></h3>
     <div class="ts-prof-tools"><button class="btn sm primary" data-record>Record test run</button>${retest}<button class="btn sm" data-ci>Import CI results (JUnit)</button><span class="hint">Every row starts as not run. A fail needs a note. Retests run only what failed; coverage keeps each item's latest result.</span></div>
     ${runs.length ? runs.map(r => {
-      const ids = scriptEnv(r.env) ? caseIds.concat(uatItems(prj).map(x => x.id)) : caseIds;
+      /* R14 (Jordan D): the run row counts the ONE ledger's tests (projectTruth.testing), never cases on information
+         this project doesn't change: "9/26", the same as the header */
+      const ledger = ledgerIds(prj);
+      const ids0 = scriptEnv(r.env) ? caseIds.concat(uatItems(prj).map(x => x.id)) : caseIds;
+      const ids = ledger ? ids0.filter(id => ledger.has(id)) : ids0;
       const cov = coverage(r, ids);
       const c = (r.results || []).reduce((a, x) => (a[x.outcome] = (a[x.outcome] || 0) + 1, a), {});
       const open = ui.runOpen.has(r.id);
@@ -579,12 +585,21 @@ function discoveredCard(de) {
    Check sample data -> Create tests -> Record results. Coverage matrix, cycles, JUnit, end-to-end tests,
    build testing and the defect lifecycle detail live under "Show advanced tools".
    ====================================================================================================== */
+/* R14: the ledger's test ids (projectTruth.testing.status), cached per docs snapshot */
+let ledgerMemo = { docs: null, prj: null, ids: null };
+function ledgerIds(prj) {
+  const d = store.state.docs, key = [(d.testCase || []).length, (d.testRun || []).length, JSON.stringify((store.get('project', prj.id) || {}).uatScripts || []).length, (d.dataElement || []).length, (d.process || []).map(x => x.data && x.data.updatedAt).join()].join('|');
+  if (ledgerMemo.docs === key && ledgerMemo.prj === prj.id) return ledgerMemo.ids;
+  const tl = (eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing;
+  ledgerMemo = { docs: key, prj: prj.id, ids: tl && tl.status ? new Set(Object.keys(tl.status)) : null };
+  return ledgerMemo.ids;
+}
 function eng(name, ...args) { const e = E(); if (!e || typeof e[name] !== 'function') return undefined; try { return e[name](...args); } catch (err) { return undefined; } }
 const TONE = { green: 'ok', amber: 'warn', red: 'bad' };
 function availOf(dataId) {
   const l = eng('availLabel', store.state.docs, dataId);
   if (l && l.label) return { label: l.label, tone: TONE[l.tone] || 'warn' };
-  return { live: { label: 'Connected', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[effAvail(dataId)] || { label: 'Not available yet', tone: 'bad' };
+  return { live: { label: 'Available', tone: 'ok' }, example: { label: 'Sample only', tone: 'warn' }, pending: { label: 'Waiting for confirmation', tone: 'warn' } }[effAvail(dataId)] || { label: 'Not available yet', tone: 'bad' };
 }
 /* R8 ONE TRUTH: the testing numbers come from E().projectTruth (the same values the project header, home and the status
    report show). Local fallbacks only keep the page usable while the engine is loading. */
@@ -709,7 +724,8 @@ function simpleRender(prj, focusDe) {
   /* R12 #5: "Try it out" shows its own stage (projectTruth.testing.stages[0]); Business check shows the one count */
   const t1 = f.try1 || { passed: 0, total: 0, failed: 0 };
   const t1NotRun = Math.max(0, t1.total - t1.passed - t1.failed);
-  const tryLine = `${t1.passed} of ${plural(t1.total, 'test')} passed${t1.failed ? ` · ${t1.failed} ${t1.failed === 1 ? 'needs' : 'need'} fixing` : ''}${t1NotRun ? ` · ${t1NotRun} not run yet` : ''}`;
+  /* R14 (BPM-1): Try it out runs the information checks only; its unit says so, so it never reads as a second total */
+  const tryLine = `${t1.passed} of ${plural(t1.total, 'information check')} passed${t1.failed ? ` · ${t1.failed} ${t1.failed === 1 ? 'needs' : 'need'} fixing` : ''}${t1NotRun ? ` · ${t1NotRun} not run yet` : ''}`;
   const countLine = `${f.passed} of ${plural(f.total, 'test')} passed${f.failed ? ` · ${f.failed} ${f.failed === 1 ? 'needs' : 'need'} fixing` : ''}${f.notRun ? ` · ${f.notRun} not run yet` : ''}`;
   const big = `<div class="ts-big" data-tests-number="${f.passed}/${f.total}"><b>${f.passed} of ${f.total}</b><span>tests passed</span></div>`;
   const done = f.stage === 'done' || f.sum.done;
@@ -725,7 +741,7 @@ function simpleRender(prj, focusDe) {
         ${!des.length ? '' : stepCard(2, 'Add tests', step2Done, `<p class="ts-help">${plural(f.needTests, 'piece', 'pieces')} of information ${f.needTests === 1 ? 'changes' : 'change'} in this project, so ${f.needTests === 1 ? 'it needs' : 'they need'} tests. One press makes them from the ${gt('rules to test', 'rules')} and the values in any sample data.</p>
           <div class="ts-step-a"><button class="btn ${cur === 2 ? 'primary' : ''} rs-big" data-s-create ${ui.creating ? 'disabled' : ''}>${ui.creating ? 'Adding the tests…' : 'Add tests'}</button><span class="hint" data-s2-count="${f.haveTests}/${f.needTests}">${f.haveTests} of ${f.needTests} ${f.needTests === 1 ? 'has' : 'have'} tests</span></div>
           ${fold(des.map(row2), `See the tests for each piece of information (${des.length})`, 's2')}`, cur === 2)}
-        ${stepCard(des.length ? 3 : 1, gt('Try it out', 'sit'), step3Done, `<p class="ts-help">Run the tests in the test system and mark each one passed or failed.</p>
+        ${stepCard(des.length ? 3 : 1, gt('Try it out', 'sit'), step3Done, `<p class="ts-help">Run the information checks in the test system and mark each one passed or failed. The business check then runs all ${esc(String(f.total))} tests.</p>
           <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record="sit">Record what happened</button><span class="hint" data-stage="try" data-stage-done="${step3Done ? 1 : 0}" data-try-count="${t1.passed}/${t1.total}">${tryLine}</span></div>`, cur === 3)}
         ${stepCard(des.length ? 4 : 2, gt('Business check', 'uat'), step4Done, `<p class="ts-help">The people who run the process try each test and mark it passed or failed. A failed test becomes a problem for the owner to fix.</p>
           <div class="ts-step-a"><button class="btn ${cur === 4 ? 'primary' : ''}" data-s-record="uat">Record what happened</button><span class="hint" data-stage="signoff" data-stage-done="${step4Done ? 1 : 0}" data-s-progress>${countLine}</span></div>`, cur === 4)}
@@ -947,14 +963,17 @@ async function editCase(de, c) {
 async function bulkAssign(de, tester) {
   if (!tester) { toast('Pick a tester first.'); return; }
   const list = casesFor(de.id).filter(c => !c.tester);
-  for (const c of list) await store.save('testCase', c.id, Object.assign({}, c, { tester }), `Assigned ${de.name}.${c.field} ${c.kind} test to ${pname(tester)}`);
+  /* R14 (Jordan r13 #2): a refused assignment shows its reason on screen, never a silent no-op */
+  try { for (const c of list) await store.save('testCase', c.id, Object.assign({}, c, { tester }), `Assigned ${de.name}.${c.field} ${c.kind} test to ${pname(tester)}`); }
+  catch (e) { toast((e && e.message) || 'The assignment was not saved.'); return false; }
   toast(`${list.length} case${list.length === 1 ? '' : 's'} assigned to ${pname(tester)}`);
 }
 async function assignScript(prj, sid, tester) {
   const cur = store.get('project', prj.id) || prj;
   const s = (cur.uatScripts || []).find(x => x.id === sid); if (!s) return;
   const next = cur.uatScripts.map(x => x.id === sid ? Object.assign({}, x, { tester: tester || undefined }) : x);
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), tester ? `Assigned UAT script “${s.title}” to ${pname(tester)}` : `Unassigned UAT script “${s.title}”`);
+  try { await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), tester ? `Assigned UAT script “${s.title}” to ${pname(tester)}` : `Unassigned UAT script “${s.title}”`); }
+  catch (e) { toast((e && e.message) || 'The assignment was not saved.'); return false; }
   toast(tester ? `Script assigned to ${pname(tester)}` : 'Script unassigned');
 }
 async function editCycle(prj, cid) {

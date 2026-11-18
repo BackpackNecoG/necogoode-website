@@ -34,46 +34,111 @@ export function routingRows(p) {
   return r ? { teams: r.teams || [], departments: (r.departments || []).map(d => d.name), text: r.text || '' } : { teams: [], departments: [], text: '' };
 }
 /* the card (process page) or panel (import draft): a select per team, or the plain mapping when read-only */
+/* R14 (Karen 3): who in a department can approve its part: its named approvers, else its members (the engine's rule in
+   sectionStatus). A chosen department with nobody is not "approving": the process page says so, as Launch does. */
+export function deptApprovers(name) {
+  const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase());
+  if (!d) return { dept: null, people: [], named: false };
+  const named = (d.approvers || []).length > 0;
+  return { dept: d, people: named ? d.approverNames || [] : (d.people || []).map(x => x.name), named };
+}
+/* open invites that name a department (Admin's invite list rides along in the workspace settings doc) */
+const invitedTo = name => { const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase()); const ws = store.get('workspace', 'settings'); return d && ws && Array.isArray(ws.invites) ? ws.invites.filter(i => i && i.departmentId === d.id).map(i => i.email) : []; };
+/* R14 (Jordan): approver changes wait for a second Admin; the proposal is shown, never taken as approving */
+const proposedFor = name => { const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase()); const ws = store.get('workspace', 'settings'); return d && ws && Array.isArray(ws.pendingDept) ? ws.pendingDept.filter(x => x && x.status === 'pending' && x.kind === 'approvers' && x.op && x.op.id === d.id).flatMap(x => (x.op.approvers || []).map(pname)) : []; };
 export function approversHTML(rt, opts) {
   opts = opts || {};
-  const gaps = rt.teams.filter(r => !r.department).length;
-  const row = r => `<div class="row d-apr ${r.department ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}">
-      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${r.department ? '' : `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`}</div>
+  /* R14: the engine marks a department with nobody to approve (teamRouting noApprover, Launch's rule) */
+  const nobody = r => !!r.department && (r.noApprover === true || (r.noApprover == null && !deptApprovers(r.department).people.length));
+  const gaps = rt.teams.filter(r => !r.department || nobody(r)).length;
+  const row = r => {
+    const empty = nobody(r), who = r.department ? deptApprovers(r.department) : null;
+    const sub = !r.department ? `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`
+      : empty ? `<div class="s d-apr-ask" data-apr-nobody="${esc(r.department)}">Nobody in ${esc(r.department)} can approve this part yet.${proposedFor(r.department).length ? ` <span data-apr-proposed>${esc(proposedFor(r.department).join(', '))} ${proposedFor(r.department).length === 1 ? 'is' : 'are'} proposed and wait${proposedFor(r.department).length === 1 ? 's' : ''} for a second Admin to confirm.</span>` : ''}${invitedTo(r.department).length ? ` Invited: ${esc(invitedTo(r.department).join(', '))} (they can approve once they join).` : ''}${opts.editable ? ` <button type="button" class="is-linkbtn d-apr-name" data-apr-name="${esc(r.department)}">Name an approver</button>` : ''}</div>`
+      : who && who.people.length ? `<div class="s d-apr-who" data-apr-who>${esc(who.named ? 'Approves: ' : 'Any of: ')}${esc(who.people.slice(0, 3).join(', '))}${who.people.length > 3 ? ` +${who.people.length - 3}` : ''}</div>` : '';
+    return `<div class="row d-apr ${r.department && !empty ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}" ${empty ? 'data-apr-empty' : ''}>
+      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${sub}</div>
       <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}<option value="${ADD_DEPT}">+ Add a department…</option></select>`
         : r.department ? `<span data-apr-shown>${esc(r.department)}</span>` : '<span class="hint">Not chosen</span>'}</div></div>`;
+  };
+  /* one sentence that agrees with Launch: a department nobody can approve for is a gap, never "has an approving department" */
+  const text = rt.text;
   return `<div class="${opts.inline ? 'is-apr' : 'card'}" data-approvers="${rt.teams.length}" data-apr-gaps="${gaps}">${opts.inline ? '<h4>Who approves each team’s part</h4>' : `<h3>Who approves each team’s part${gaps ? ` <span class="n d-apr-n">${gaps} to choose</span>` : ''}</h3>`}
     <div class="hint" style="margin:-2px 0 8px">Before launch, the department you pick signs off that team’s steps. Nothing is picked for you${opts.inline ? '; you can change it later on the process' : ''}.</div>
-    ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${rt.text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(rt.text)}</div>` : ''}
+    ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(text)}</div>` : ''}
     ${opts.editable ? `<div class="d-apr-add"><button type="button" class="btn sm" data-apr-adddept>+ Add a department</button><span class="hint">Missing one, such as Credit or Sales? Add it here.</span></div>` : ''}</div>`;
 }
 /* R13 #1: "Add a department" in the approver panel. Departments are workspace data (K1's engine API): the add goes
    through POST /ws/:ws/departments, then the workspace is reloaded so every pick list has it. Returns the new
-   department's name, or null when the visitor cancels. A team's own name is offered first ("Credit" for Credit). */
+   department's name, or null when the visitor cancels. A team's own name is offered first ("Credit" for Credit).
+   R14 (Karen 3): the same dialog names who approves for it: a person in the workspace, or an email to invite. */
 export const ADD_DEPT = '__add_department__';
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const approverFields = (pick, email) => `<div class="field"><label for="d-dept-apr">Who approves for it?</label><select id="d-dept-apr" name="approver" data-dept-approver><option value="">Choose a person…</option>${store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === pick ? 'selected' : ''}>${esc(x.name)}${x.role ? ' — ' + esc(x.role) : ''}</option>`).join('')}</select></div>
+      <div class="field"><label for="d-dept-email">Not in PMOFlow yet? Invite them by email</label><input id="d-dept-email" name="email" type="email" data-dept-email value="${esc(email || '')}" placeholder="name@northwind.example" autocomplete="off" maxlength="254" /></div>`;
+/* invite someone by email into a department, as an Approver (Admin routes). Returns '' or a plain error. */
+async function inviteApprover(email, deptId) {
+  try {
+    const r = await fetch(`/api/pmoflow/workspaces/${encodeURIComponent(store.state.ws)}/admin/invites`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: store.state.me, email, role: 'approver', departmentId: deptId || null }) });
+    if (r.ok) return '';
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    return (j && j.error) || (r.status === 403 ? 'Only an Admin can invite people.' : 'Could not send the invite.');
+  } catch (e) { return 'Could not send the invite.'; }
+}
 export async function addDepartmentFlow(team, err) {
   const known = (eng('departments', [docs()], []) || []).map(d => d.name);
   const suggest = team && !known.some(n => n.toLowerCase() === String(team).toLowerCase()) ? team : '';
   const r = await modal({
     title: 'Add a department',
     body: `${err ? `<div class="banner" style="margin:0 0 8px" data-dept-err>${esc(err.msg)}</div>` : ''}<div class="field"><label for="d-dept-name">Department name</label><input id="d-dept-name" name="name" data-dept-name value="${esc(err ? err.value : suggest)}" placeholder="e.g. Credit" autocomplete="off" maxlength="60" /></div>
-      <div class="hint">It is added for the whole workspace. Its people approve its part of a project; an Admin can name its approvers and add people to it.${team ? ` Once added, it approves <b>${esc(team)}</b>’s part here.` : ''}</div>`,
+      ${approverFields(err && err.approver, err && err.email)}
+      <div class="hint">It is added for the whole workspace, and the person you name approves its part of a project.${team ? ` Once added, it approves <b>${esc(team)}</b>’s part here.` : ''} You can leave the approver blank and name one later.</div>`,
     actions: [{ id: 'add', label: 'Add department', primary: true }],
   });
   if (r.action !== 'add') return null;
-  const name = String(r.form.name || '').trim();
-  const again = msg => addDepartmentFlow(team, { msg, value: name });
+  const name = String(r.form.name || '').trim(), approver = String(r.form.approver || ''), email = String(r.form.email || '').trim().toLowerCase();
+  const again = msg => addDepartmentFlow(team, { msg, value: name, approver, email });
   /* the same plain sentences the server uses, checked here first so a typo never costs a round trip */
   if (!name) return again('Name a department.');
   const dup = known.find(n => n.toLowerCase() === name.toLowerCase());
   if (dup) return again(`A department called ${dup} already exists.`);
+  if (email && !EMAIL_RE.test(email)) return again('Enter a work email address, like name@northwind.example.');
   let res;
-  try { res = await store.api('/departments', { op: { kind: 'add', name } }); }
+  try { res = await store.api('/departments', { op: { kind: 'add', name, approvers: approver ? [approver] : [] } }); }
   catch (e) { return again((e && e.message) || 'Could not add the department.'); }
   if (res && res.ok === false) return again(res.error || 'Could not add the department.');
+  const made = ((res && res.departments) || []).find(d => String(d.name).toLowerCase() === name.toLowerCase());
+  const inviteErr = email ? await inviteApprover(email, made && made.id) : '';
   await store.load();
-  const made = ((res && res.departments) || eng('departments', [docs()], []) || []).find(d => String(d.name).toLowerCase() === name.toLowerCase());
-  toast(`Added the ${made ? made.name : name} department`);
-  return made ? made.name : name;
+  const nm = made ? made.name : name;
+  const waits = approver && res && res.pending;
+  toast(inviteErr ? `Added the ${nm} department. ${inviteErr} Name an approver from the people list instead.` : `Added the ${nm} department${approver ? (waits ? `; ${pname(approver)} as its approver waits for a second Admin to confirm` : `; ${pname(approver)} approves for it`) : email ? `; invited ${email} to approve for it` : ''}`);
+  return nm;
+}
+/* R14 (Karen 3): "Name an approver" for a department nobody can approve for yet */
+export async function nameApproverFlow(deptName, err) {
+  const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(deptName || '').toLowerCase());
+  if (!d) { toast('That department no longer exists.'); return false; }
+  const r = await modal({
+    title: `Who approves for ${d.name}?`,
+    body: `${err ? `<div class="banner" style="margin:0 0 8px" data-dept-err>${esc(err.msg)}</div>` : ''}${approverFields(err && err.approver, err && err.email)}
+      <div class="hint">They sign off ${esc(d.name)}’s part of a change before launch.</div>`,
+    actions: [{ id: 'save', label: 'Save', primary: true }],
+  });
+  if (r.action !== 'save') return false;
+  const approver = String(r.form.approver || ''), email = String(r.form.email || '').trim().toLowerCase();
+  const again = msg => nameApproverFlow(deptName, { msg, approver, email });
+  if (!approver && !email) return again('Choose a person, or enter an email to invite.');
+  if (email && !EMAIL_RE.test(email)) return again('Enter a work email address, like name@northwind.example.');
+  let applied = true;
+  if (approver) {
+    try { const res = await store.api('/departments', { op: { kind: 'approvers', id: d.id, approvers: [...new Set((d.approvers || []).concat(approver))] } }); if (res && res.ok === false) return again(res.error || 'Could not save.'); applied = !(res && (res.applied === false || res.pending)); }
+    catch (e) { return again((e && e.message) || 'Could not save.'); }
+  }
+  if (email) { const ie = await inviteApprover(email, d.id); if (ie) return again(ie); }
+  await store.load();
+  toast(approver ? (applied ? `${pname(approver)} approves for ${d.name}` : `${pname(approver)} as ${d.name}’s approver waits for a second Admin to confirm`) : `Invited ${email} to approve for ${d.name}`);
+  return true;
 }
 /* {team: department|null} with the visitor's choices read back from the selects */
 export function readApproverSelects(root, map) {
@@ -482,7 +547,7 @@ const addStepBtn = (key, pos) => `<div class="d-addwrap"><button class="btn prim
 function canInsert(nodes, k) { if (k === 0 && nodes[0] && nodes[0].type === 'trigger') return false; if (k === nodes.length && nodes.length && nodes[nodes.length - 1].type === 'end') return false; return true; }
 
 function flowHTML(nodes, ctx, key, counter) {
-  counter = counter || { n: 0 };
+  counter = counter || { n: 0, order: allNodes(nodes).map(x => x.id) };
   const parts = [];
   if (ctx.edit && canInsert(nodes, 0)) parts.push(insBtn(key, 0));
   nodes.forEach((n, i) => {
@@ -492,7 +557,8 @@ function flowHTML(nodes, ctx, key, counter) {
       const bs = n.branches || [], par = n.type === 'parallel';
       const st = ctx.mode === 'diff' && ctx.diff ? (ctx.diff.nodes || {})[n.id] : null;
       const dchip = st === 'new' || st === 'changed' ? ` <span class="chip diff-${st}">${st === 'new' ? 'NEW' : 'CHANGED'}</span>` : '';
-      const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; return `<div class="d-goto" data-goto="${esc(b.goto)}">↩ Go back to ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
+      /* R14: a jump forward ("if under $50k, skip the review") reads "Skips to", never "Go back to" */
+      const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; const fwd = counter.order && counter.order.indexOf(b.goto) > counter.order.indexOf(n.id); return `<div class="d-goto" data-goto="${esc(b.goto)}" data-goto-dir="${fwd ? 'forward' : 'back'}">${fwd ? '↷ Skips to' : '↩ Go back to'} ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
       parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(n.title)}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
         <div class="branches" style="--bl:${100 / (Math.max(bs.length, 1) * 2)}%;--br:${100 / (Math.max(bs.length, 1) * 2)}%">${bs.map((b, bi) => `<div class="branch"><span class="blabel">${esc(b.label)}</span>
           ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, ctx, n.id + '#' + bi, counter)}${gotoLbl(b)}</div>`
@@ -597,7 +663,8 @@ function bindRaci(root, pid) {
     const k = sel.dataset.raciCol, L = sel.value;
     raciSet(node, k, L, p[ver]);
     const word = { A: 'Accountable', C: 'Consulted', I: 'Informed' }[L];
-    await saveProc(p, `RACI on '${node.title}': ${rName(k)} ${word ? '→ ' + word : 'removed'}`);
+    /* R14: the server writes the from → to; the note says it in words (a note with an arrow is dropped) */
+    await saveProc(p, `RACI on '${node.title}': ${rName(k)} ${word ? 'set to ' + word : 'removed'}`);
   });
 }
 function lanesHTML(nodes, ctx) {
@@ -834,6 +901,15 @@ function extOf(el) {
   return { a, raci, data: refs(kids), touches: kids.filter(c => c.localName === 'touch').map(c => (c.getAttribute('name') || c.textContent || '').trim()).filter(Boolean),
     subs: kids.filter(c => c.localName === 'sub').map(c => ({ title: (c.getAttribute('title') || '').trim(), data: refs([...c.children].filter(x => x.namespaceURI === PMO_NS)) })).filter(s => s.title) };
 }
+/* "Controller (Sam Wu)" -> {role: 'Controller', name: 'Sam Wu'}: the import module's roleAndName when it is loaded (one
+   rule for pasted text, Visio and BPMN), else the same pattern read here */
+export function laneRoleName(v) {
+  const t = String(v || '').replace(/\s+/g, ' ').trim();
+  const PI = typeof window !== 'undefined' ? window.PMOImport : null;
+  if (PI && PI.roleAndName) { const r = PI.roleAndName(t); return { role: r.role || '', name: r.name || '' }; }
+  const m = /^(.*?)\s*\(([A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*){1,2})\)$/.exec(t);
+  return m && m[1] ? { role: m[1].trim(), name: m[2].trim() } : { role: t, name: '' };
+}
 export function parseBpmn(text, people, me) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('This file is not well-formed XML.');
@@ -870,7 +946,8 @@ export function parseBpmn(text, people, me) {
   const laneRole = {}, laneMatched = {}; const unknownLanes = new Set(), laneRoles = [];
   [...proc.getElementsByTagNameNS('*', 'lane')].forEach(l => {
     const nm = (l.getAttribute('name') || '').trim();
-    if (nm && nm !== 'Unassigned' && !laneRoles.includes(nm)) laneRoles.push(nm);
+    const lr = nm && nm !== 'Unassigned' ? laneRoleName(nm) : null;
+    if (lr && !laneRoles.includes(lr.role || lr.name)) laneRoles.push(lr.role || lr.name);
     [...l.getElementsByTagNameNS('*', 'flowNodeRef')].forEach(r => { laneRole[r.textContent.trim()] = nm && nm !== 'Unassigned' ? nm : ''; });
   });
   /* owner: the person id PMOFlow's own export carries, if that person is in this workspace; otherwise nobody (the lane is the role) */
@@ -930,16 +1007,26 @@ export function parseBpmn(text, people, me) {
     const bd = te && te.getAttribute('businessDays');
     timerOn[att] = { after: (te && te.getAttribute('after')) || durationText(iso) || (b.getAttribute('name') || '').replace(/^not done in\s+/i, ''), iso, businessDays: bd != null && bd !== '' ? +bd : null, action: action || 'Escalate', to };
   });
-  const mark = (bid, nid) => { emitted[bid] = nid; pendingAlias.forEach(a => emitted[a] = nid); pendingAlias = []; };
+  const placed = new Set();
+  const mark = (bid, nid) => { emitted[bid] = nid; placed.add(bid); pendingAlias.forEach(a => emitted[a] = nid); pendingAlias = []; };
+  /* R14 (Jordan 7): a named question ("Documents complete?") is a choice even when only one path out was drawn; only an
+     unnamed merge gateway is passed through */
+  const question = id => { const n = nodes[id]; return !!n && n.tag !== 'parallelGateway' && !!GWS[n.tag] && /\?\s*$/.test(n.name || '') && (outs[id] || []).length === 1; };
   const taskLike = n => !!n && (TASKS.has(n.tag) || !!n.def);
-  const passThrough = id => { const n = nodes[id]; return n && ((GWS[n.tag] && (outs[id] || []).length <= 1) || (/Event$/.test(n.tag) && n.tag !== 'startEvent' && n.tag !== 'endEvent' && !n.def)); };
+  const passThrough = id => { const n = nodes[id]; return n && ((GWS[n.tag] && (outs[id] || []).length <= 1 && !question(id)) || (/Event$/.test(n.tag) && n.tag !== 'startEvent' && n.tag !== 'endEvent' && !n.def)); };
   let stepN = 0, gwN = 0, trigger = null, hasEnd = false; const laneHit = new Set();
   const procs = store.list('process');
   const mkStep = (id) => {
     const n = nodes[id]; const d = docText(n.el); const x = extOf(n.el); const a = x ? x.a : {};
     let type = a.nodeType === 'step' || NT[a.nodeType] ? a.nodeType : n.tag === 'callActivity' ? 'subprocess' : n.def === 'timer' ? 'wait' : n.def === 'message' ? 'message' : 'step';
     const out = { id: store.newId('n'), type, title: n.name, owner: ownerOf(id, a), data: [], touches: [], subs: [] };
-    if (!out.owner && !(a && a.ownerRole) && ((a && a.ownerName) || laneRole[id])) out.ownerRole = (a && a.ownerName) || laneRole[id];
+    if (!out.owner && !(a && a.ownerRole) && ((a && a.ownerName) || laneRole[id])) {
+      /* R14 (BPM-5): a lane "Controller (Sam Wu)" is the Controller role with Sam Wu named, as in pasted text: never a
+         team called "Controller (Sam Wu)" that no department approves */
+      const rn = laneRoleName((a && a.ownerName) || laneRole[id]);
+      out.ownerRole = rn.role || rn.name;
+      if (rn.role && rn.name) out.note = `Named in the procedure: ${rn.name}`;
+    }
     const pid0 = pmoIdOf(id, a); if (pid0) out.pmoId = pid0;
     if (laneMatched[id] || extOwner(a)) laneHit.add(out.id);
     if (type === 'wait') {
@@ -999,6 +1086,13 @@ export function parseBpmn(text, people, me) {
       }
       if (n.tag === 'endEvent') { const e = { id: store.newId('n'), type: 'end', title: n.name || 'Process complete' }; mark(cur, e.id); list.push(e); hasEnd = true; return { list }; }
       if (passThrough(cur)) { if (!GWS[n.tag]) dropped.push({ name: n.name || cur, type: n.tag.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(), reason: 'skipped; the flow continues through it' }); pendingAlias.push(cur); emitted[cur] = null; cur = o[0] && o[0].to; continue; }
+      if (question(cur)) {
+        const f = o[0];
+        const gw = { id: store.newId('d'), type: 'decision', title: n.name, branches: [{ label: f.name || 'Yes', nodes: [] }, { label: /^no$/i.test(f.name || '') ? 'Yes' : 'No', nodes: [] }] };
+        mark(cur, gw.id); gwN++; list.push(gw);
+        dropped.push({ name: n.name, type: 'choice path', reason: `only the “${f.name || 'Yes'}” path out was drawn; the other path carries on to the next step until you add it` });
+        cur = f.to; continue;
+      }
       let kind = GWS[n.tag];
       if (taskLike(n)) { const st = mkStep(cur); mark(cur, st.id); list.push(st); if (o.length <= 1) { cur = o[0] && o[0].to; continue; } kind = o.every(f => f.name) ? 'decision' : 'parallel'; }
       /* split: a gateway (or a task with several outgoing flows) */
@@ -1033,13 +1127,17 @@ export function parseBpmn(text, people, me) {
   const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
   /* only data a node still references after the walk is created */
   const usedIds = new Set(allNodes(list).flatMap(n => [...(n.data || []), ...(n.subs || []).flatMap(s => s.data || [])]));
-  return { name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, folded, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
+  return { placed, name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, folded, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
 }
 /* create the data elements an import references by name but this workspace does not have yet */
-export async function createImportedData(list, fileName) {
+/* R14 (BPM): its owner is whoever does the first step that uses it (the person, else the role), never the importer */
+export async function createImportedData(list, fileName, nodes) {
+  const steps = allNodes(nodes || []).filter(isStep);
   for (const d of list || []) {
     if (store.get('dataElement', d.id)) continue;
-    await store.save('dataElement', d.id, { id: d.id, name: d.name, owner: store.state.me, source: '', avail: 'missing', note: `Created by the import of ${fileName}.`, fields: [], samples: [], discovered: [] }, `Created information '${d.name}' from the import of ${fileName}`);
+    const st = steps.find(n => (n.data || []).includes(d.id) || (n.subs || []).some(x => (x.data || []).includes(d.id)));
+    const own = !st ? {} : String(st.ownerRole || '').trim() ? { ownerRole: st.ownerRole } : st.owner ? { owner: st.owner } : {};
+    await store.save('dataElement', d.id, Object.assign({ id: d.id, name: d.name }, own, { source: '', avail: 'missing', note: `Created by the import of ${fileName}.`, fields: [], samples: [], discovered: [] }), `Created information '${d.name}' from the import of ${fileName}`);
   }
 }
 
@@ -1208,7 +1306,7 @@ export function render(params) {
     const x = dataEl(d) || {}; const u = usage(d, pid);
     return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
       <div><div class="t">${esc(x.name || d)}</div><div class="s" data-side-owner>${adv ? esc(x.source || 'Source not set') + ' · ' : ''}${esc(dataOwnerName(x))}</div></div>
-      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(availInfo(d).key)}">${esc(avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
+      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(x.perRun && effAvail(d) === 'live' ? 'perrun' : availInfo(d).key)}">${esc(x.perRun && effAvail(d) === 'live' ? 'Collected each run' : avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
   }).join('');
   /* teams involved: the "what starts it" tags count too */
   /* R9 §13: "Teams involved" lists teams only; a system named as a team moves to "Systems touched" */
@@ -1525,8 +1623,12 @@ async function stepModal(p, ver, node, opts) {
   for (const d of created) {
     if (dupDataName(d.name)) { const hit = dupDataName(d.name); out.data = out.data.map(x => x === d.id ? hit.id : x); continue; }
     /* R8 §1: new information belongs to whoever does the step (a person, or the role with its accountable person) */
-    const doc = { id: d.id, name: d.name, owner: d.owner || out.owner || store.state.me, source: d.source || '', avail: d.avail, note: `Added from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
-    if (!d.owner && out.ownerRole) doc.ownerRole = out.ownerRole;
+    /* R14 (BPM): "whoever does the step", never the person mapping it: a role step's information belongs to the role (its
+       out.owner is only the "Who does it" fallback); a step nobody does yet leaves it with nobody until someone does */
+    const doc = { id: d.id, name: d.name, source: d.source || '', avail: d.avail, note: `Added from the step '${out.title}'.`, fields: [], samples: [], discovered: [] };
+    if (d.owner) doc.owner = d.owner;
+    else if (String(out.ownerRole || '').trim()) doc.ownerRole = out.ownerRole;
+    else if (out.owner) doc.owner = out.owner;
     try { await store.save('dataElement', d.id, doc, `Created information '${d.name}'`); }
     catch (e) { toast('Could not save: ' + e.message); out.data = out.data.filter(x => x !== d.id); }
   }
@@ -1620,9 +1722,13 @@ async function readDiagram(file) {
     /* R12: a shape the Visio reader already listed is not listed again by the diagram reader */
     const seenDrop = new Set();
     r.dropped = (v.dropped || []).concat(r.dropped || []).filter(d => { const k = String(d.name || '').trim().toLowerCase(); if (seenDrop.has(k)) return false; seenDrop.add(k); return true; });
+    /* R14 (Jordan 7): a Visio step or choice that did not become part of the map is listed, never silently lost */
+    const foldedNames = new Set((r.folded || []).map(x => String(x.name || '').toLowerCase()));
+    (v.flowIds || []).forEach(x => { if (!r.placed.has(x.id) && !foldedNames.has(String(x.name).toLowerCase()) && !r.dropped.some(d => String(d.name || '').trim().toLowerCase() === String(x.name).trim().toLowerCase())) r.dropped.push({ name: x.name, type: x.type, reason: 'could not be placed in the flow' }); });
     r.kind = 'vsdx'; r.desc = `Imported from the Visio file ${file.name}.`; r.pageName = v.name || '';
     return r;
   }
+  await loadImport().catch(() => null);
   const r = parseBpmn(await file.text(), store.state.people, store.state.me); r.kind = 'bpmn'; return r;
 }
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -1670,7 +1776,7 @@ async function importFile(file, pid, vis) {
     /* R12 #1: the teams in the file seed who approves each team's part (a department of the same name, else nobody) */
     p.teamDepartments = eng('seedTeamDepartments', [docs(), asis], {});
     try {
-      await createImportedData(r.newData, file.name);
+      await createImportedData(r.newData, file.name, r.nodes);
       const ic = importCounts(asis);
       await store.save('process', id, p, `Imported process '${name}' from ${r.kind === 'vsdx' ? 'Visio' : 'BPMN'} (${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''})`);
       toast(`Imported '${name}': ${plural(ic.steps, 'step')}, ${plural(ic.choices, 'choice')}${ic.together ? `, ${ic.together} at the same time` : ''}${r.dropped.length ? `, ${r.dropped.length} dropped` : ''}${r.newData.length ? `, ${plural(r.newData.length, 'new piece')} of information` : ''}`);
@@ -1734,7 +1840,7 @@ async function importVersion(pid, r, fileName) {
       ${m.renamed.length ? `<ul class="d-renamed" data-renamed-list>${m.renamed.slice(0, 12).map(x => { const wn = store.list('workItem', w => w.pid === pid && w.step === x.id).length; return `<li data-renamed="${esc(x.id)}">Renamed: “${esc(x.from)}” → “<b>${esc(x.to)}</b>”${wn ? ` <span class="hint">keeps ${plural(wn, 'work item')}</span>` : ''}</li>`; }).join('')}${m.renamed.length > 12 ? `<li class="hint">and ${m.renamed.length - 12} more</li>` : ''}</ul>` : ''}
       ${m.removed.length ? `<div class="hint">Leaving the Future map: ${m.removed.map(s => esc(s.title)).join(', ')}${removedWork.length ? `. <b class="fail">${plural(removedWork.length, 'work item')} on these steps will need a new step.</b>` : ''}</div>` : ''}
       ${foldedHTML(r.folded)}${droppedHTML(r.dropped)}
-      ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (you own it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
+      ${r.newData.length ?  `<div class="hint" data-imp-newdata="${r.newData.length}">New information created on import (whoever does its step looks after it): ${esc(r.newData.map(d => d.name).join(', '))}</div>` : ''}
       ${(r.roles || []).length ? `<div class="hint" data-imp-roles>Lanes become roles: ${esc(r.roles.join(', '))}</div>` : ''}
       ${room ? `<label class="d-check"><input type="checkbox" name="snap" value="yes" checked /> Save the current version as “Before import of ${esc(fileName)}” first</label>` : `<div class="hint">You have ${MAX_DRAFTS} saved versions, so the current one is not saved first. “Undo last change” still restores it in this session.</div>`}`,
     actions: [{ id: 'import', label: 'Import as new version', primary: true }],
@@ -1745,7 +1851,7 @@ async function importVersion(pid, r, fileName) {
   p.tobe = m.nodes;
   /* R6: the header's version label moves with the import: to-be revision n+1, from this file */
   p.tobeRev = (p.tobeRev || 1) + 1; p.tobeFrom = fileName;
-  try { await createImportedData(r.newData, fileName); } catch (e) { toast('Could not create the new data elements: ' + e.message); return; }
+  try { await createImportedData(r.newData, fileName, r.nodes); } catch (e) { toast('Could not create the new data elements: ' + e.message); return; }
   if (await saveProc(p, `Imported '${fileName}' as Future revision ${p.tobeRev} (${m.kept.length} matched, ${m.renamed.length} renamed, ${m.added.length} new, ${m.removed.length} removed, ${r.dropped.length} dropped)`)) go(`/process/${pid}?mode=diff`);
 }
 /* R7: one "New project" form everywhere (stream P's: name, which process, deadline; first plan suggested right after).
@@ -1929,6 +2035,7 @@ export function bind(root, params) {
     }
     await saveRoute(team, sel.value || null);
   });
+  root.querySelectorAll('[data-apr-name]').forEach(b => b.onclick = async () => { await nameApproverFlow(b.dataset.aprName); store.emit(); });
   const addB = root.querySelector('[data-apr-adddept]');
   if (addB) addB.onclick = async () => {
     /* the first team still without a department gets the new one */

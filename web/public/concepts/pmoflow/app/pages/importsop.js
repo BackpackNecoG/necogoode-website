@@ -6,7 +6,7 @@
    "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, ADD_DEPT } from './process.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, nameApproverFlow, ADD_DEPT } from './process.js';
 
 const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
@@ -131,8 +131,10 @@ function normalize(res) {
   const stepNames = allSteps(nodes, []).flatMap(st => (st.newData || []).map(nm => ({ name: nm, reason: 'Named in your procedure.', step: undefined, _src: st.src })));
   let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x).concat(stepNames)
     .filter(x => x && String(x.name || '').trim())
-    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: false }))
+    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: false, perRun: x.perRun === true || undefined, perRunText: x.perRun === true ? String(x.perRunText || 'Collected each time the process runs.') : undefined }))
     .filter(x => { const k = strip(x.name); if (seen.has(k)) return false; seen.add(k); return true; });
+  /* R14 (Karen 9): the reader can also work out per-run documents itself when the server did not say (AI drafts) */
+  if (ui.PI && ui.PI.perRunOf) newData.forEach(x => { if (x.perRun) return; const st = allSteps(nodes, []).find(y => (y.newData || []).some(n => strip(n) === strip(x.name))); const pr = ui.PI.perRunOf(x.name, st && st.ownerRole, st ? st.title : '', ui.text); if (pr) Object.assign(x, pr); });
   const skipped = newData.filter(x => !isDataNoun(x.name)).map(x => x.name);
   newData = newData.filter(x => isDataNoun(x.name)).map(x => Object.assign(x, { create: !x.exists }));
   let notes = res && (res.notes || res.note || res.warnings);
@@ -412,12 +414,15 @@ function kindBody(s, path) {
 }
 /* Loop-back (goto): the branch returns to an earlier node. Rendered as a return arrow with a picker. */
 /* R9 §9: steps are numbered 1..N in order; choices are not steps and take no number */
-const stepNo = n => { const tops = ui.draft.nodes.filter(x => x.type === 'step' || KINDS[x.type]); const k = tops.indexOf(n); return k >= 0 ? k + 1 : 0; };
+/* R14 (Karen 4): the preview numbers steps exactly as the saved map does (process.js flowHTML): in order, depth first,
+   steps on a choice's paths included, so "Step 6" here is "Step 6" on the map */
+export function numberedOrder(nodes) { const out = []; const w = ns => (ns || []).forEach(n => { if (!n) return; if (n.type === 'step' || KINDS[n.type]) out.push(n); else (n.branches || []).forEach(b => w(b.nodes)); }); w(nodes); return out; }
+const stepNo = n => { const k = numberedOrder(ui.draft.nodes).indexOf(n); return k >= 0 ? k + 1 : 0; };
 function gotoRow(g, b, bpath) {
   const all = targets(ui.draft.nodes).filter(n => n !== g && n.type !== 'end' && !b.nodes.includes(n));
   const t = b.goto && all.find(n => n.src === b.goto);
   const ends = b.nodes.some(n => n.type === 'end');
-  const num = n => stepNo(n) ? `Step ${stepNo(n)}` : ui.draft.nodes.includes(n) ? (KINDS[n.type] ? KINDS[n.type].label : 'Choice') : 'Branch step';
+  const num = n => stepNo(n) ? `Step ${stepNo(n)}` : 'Choice';
   /* "otherwise skip to step 4" jumps forward; "return to step 1" goes back */
   const fwd = t && ui.draft.nodes.indexOf(t) > ui.draft.nodes.indexOf(g);
   /* R9 §11: plain choices for where the path goes next: carry on, end here, or jump to a step */
@@ -440,7 +445,7 @@ function gateBody(g, path) {
     <textarea class="is-title" data-f="title" rows="2" aria-label="${g.type === 'parallel' ? 'Things done at the same time' : 'Choice question'}">${esc(g.title)}</textarea>
     <div class="is-branches">${g.branches.map((b, j) => `<div class="is-branch" data-branch="${esc(path + '.b' + j)}">
       <div class="is-branch-h"><input class="is-blabel" data-blabel="${esc(path + '.b' + j)}" value="${esc(b.label)}" aria-label="Path label"><span class="hint" data-branch-hint>${branchHint(g, b)}</span></div>
-      ${b.nodes.map((s, k) => s.type === 'end' ? endBody(s, `${path}.b${j}.${k}`) : `<div class="is-bstep">${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Branch step')}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
+      ${b.nodes.map((s, k) => s.type === 'end' ? endBody(s, `${path}.b${j}.${k}`) : `<div class="is-bstep"><span class="is-n is-bn" data-step-no="${stepNo(s)}">${stepNo(s)}</span>${KINDS[s.type] ? kindBody(s, `${path}.b${j}.${k}`) : stepBody(s, `${path}.b${j}.${k}`, 'Step ' + stepNo(s))}<button class="btn sm danger is-x" data-rm-path="${esc(`${path}.b${j}.${k}`)}" aria-label="Remove branch step">✕</button></div>`).join('')}
       ${g.type === 'decision' ? gotoRow(g, b, path + '.b' + j) : ''}
       <button class="btn sm is-link" data-add-bstep="${esc(path + '.b' + j)}">+ Step in “${esc(b.label)}”</button></div>`).join('')}</div></div>`;
 }
@@ -452,7 +457,7 @@ export function render() {
   const pars = d ? d.nodes.filter(x => x.type === 'parallel').length : 0;
   const newData = d ? d.newData : [];
   if (d) newData.forEach(x => { if (!x.target || !targets(d.nodes).some(n => n.src === x.target)) x.target = targetOf(d.nodes, x); });
-  const tgtTxt = src => { if (!d) return ''; const all = targets(d.nodes); const t = all.find(n => n.src === src); if (!t) return ''; return `${stepNo(t) ? 'Step ' + stepNo(t) : 'Branch step'}: ${t.title.slice(0, 60)}`; };
+  const tgtTxt = src => { if (!d) return ''; const all = targets(d.nodes); const t = all.find(n => n.src === src); if (!t) return ''; return `${stepNo(t) ? 'Step ' + stepNo(t) : 'Choice'}: ${t.title.slice(0, 60)}`; };
   /* R9 §8: new information is owned by whoever does its step (a person or a role), shown before saving */
   const ownTxt = src => { const t = d && targets(d.nodes).find(n => n.src === src); return t && t.owner ? pname(t.owner) : t && t.ownerRole ? t.ownerRole : 'whoever does the step'; };
   const kinds = d ? targets(d.nodes).filter(x => KINDS[x.type]).length : 0;
@@ -462,7 +467,7 @@ export function render() {
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>New information this procedure needs</h4>
       <p class="hint">We found information the procedure needs that isn't in your workspace yet. Each ticked one is added to the step shown, and whoever does that step looks after it.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
-        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small><small class="is-ndown" data-nd-owner="${esc(ownTxt(x.target))}">Owner: ${esc(ownTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
+        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.perRun && !x.exists ? `<small class="is-perrun" data-perrun>↻ ${esc(x.perRunText || 'Collected each time the process runs.')}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small><small class="is-ndown" data-nd-owner="${esc(ownTxt(x.target))}">Owner: ${esc(ownTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
 
   const draftHtml = d ? `<div class="card is-draft"><h3>Your process, ready to check${adv() ? `<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span>` : ''}<span class="n">${n} steps${gates ? ` · ${gates} choice${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} at the same time` : ''}${kinds ? ` · ${kinds} wait/message` : ''}</span></h3>
     ${found}
@@ -471,7 +476,7 @@ export function render() {
     ${loops ? `<div class="hint" data-loops>${loops} path${loops === 1 ? '' : 's'} that jump${loops === 1 ? 's' : ''} to another step (“return to step N”, “skip to step N”). They're drawn as arrows on the map.</div>` : ''}
     <div class="is-trig" data-trigger><span class="chip">What starts it</span> ${esc(d.trigger || 'Process starts')}</div>
     <ol class="is-steps">${d.nodes.map((s, i) => `<li class="is-step ${s.type !== 'step' ? 'gate' : ''}" data-i="${i}" data-type="${esc(s.type)}">
-      <span class="is-n" ${s.type === 'step' || KINDS[s.type] ? '' : 'aria-hidden="true"'}>${s.type === 'step' || KINDS[s.type] ? stepNo(s) : ''}</span>
+      <span class="is-n" ${s.type === 'step' || KINDS[s.type] ? `data-step-no="${stepNo(s)}"` : 'aria-hidden="true"'}>${s.type === 'step' || KINDS[s.type] ? stepNo(s) : ''}</span>
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + stepNo(s)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
@@ -573,6 +578,7 @@ export function bind(root) {
     if (el.value === ADD_DEPT) { const prev = el.closest('[data-apr-dept]').dataset.aprDept || ''; el.value = prev; readDraft(root); pickNew(el.dataset.aprSel); return; }
     readDraft(root); afterPointer(rerender);
   });
+  root.querySelectorAll('[data-apr-name]').forEach(b => b.onclick = async () => { readDraft(root); await nameApproverFlow(b.dataset.aprName); store.emit(); });
   const addD = root.querySelector('[data-apr-adddept]');
   if (addD) addD.onclick = () => { readDraft(root); const gap = draftRouting(ui.draft).rt.teams.find(t => !t.department); pickNew(gap ? gap.team : ''); };
   root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
@@ -656,7 +662,10 @@ async function createProcess() {
       const own = st.owner ? { owner: st.owner } : st.ownerRole ? { ownerRole: st.ownerRole } : {};
       /* information the procedure already uses today: "We have it" (R8 §1), described, not blocked */
       /* R10: "Not checked yet" until its owner confirms it (never "Connected" without a source) */
-      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, { source: '', avail: 'unchecked', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.`, fields: [], samples: [], discovered: [] }),
+      /* R14 (Karen 9): a document sent on every run (a W-9, a certificate of insurance) is collected by the process itself:
+         marked "collected each run", never "Not checked yet" (which would make a one-off "Make W-9 available" task) */
+      const run = x.perRun ? { avail: 'live', perRun: true, source: 'Collected each run', note: x.perRunText || 'Collected each time the process runs.' } : null;
+      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, run || { source: '', avail: 'unchecked', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.` }, { fields: [], samples: [], discovered: [] }),
         `Created information “${cleanTitle(x.name)}” from ${d.template ? 'a template' : 'a pasted procedure'}`);
       made.set(strip(x.name), id);
     }

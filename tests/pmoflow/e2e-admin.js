@@ -73,8 +73,26 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Invite removed/), 'invite removed');
   await settle(900);
   ok(!(await page.$('[data-invite]')), 'no pending invites left');
+  /* R14 L4 #2: project sponsors are set by an Admin who is not the project manager */
+  ok(await page.isVisible('[data-sponsors]'), 'People shows the project sponsors');
+  const spOpts = await page.$$eval('[data-sponsor="vendor-modernization"] option', os => os.map(o => o.value));
+  ok(!spOpts.includes('ta') && !spOpts.includes('mc'), 'the project manager and the Admin themself are not offered as sponsor');
+  ok(!(await page.$eval('[data-sponsor="vendor-modernization"]', el => el.disabled)), 'Maya (Admin, not the PM) can set the sponsor');
+  await page.selectOption('[data-sponsor="vendor-modernization"]', 'do');
+  ok(await toastSays(/Dave Ortiz is now the sponsor of Vendor Onboarding Modernization/), 'sponsor change confirmed');
+  await settle(900);
+  ok(/Dave Ortiz/.test(await page.textContent('[data-sponsor-row="vendor-modernization"] [data-sponsor-now]')), 'the sponsor shows as Dave Ortiz');
+  await setMe('ta'); await settle(900);
+  ok(await page.$eval('[data-sponsor="vendor-modernization"]', el => el.disabled) && /You manage this project/.test(await page.textContent('[data-sponsor-row="vendor-modernization"]')), 'the project manager (an Admin) cannot pick the sponsor, and is told why');
+  /* from outside the browser, so the expected 403 is not a console error */
+  const wsId = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.state.ws; });
+  const spDeny = (await fetch(`http://localhost:${PORT}/api/pmoflow/workspaces/${wsId}/admin/sponsor/vendor-modernization`, { method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': IP }, body: JSON.stringify({ actor: 'ta', sponsor: 'ta' }) })).status;
+  ok(spDeny === 403, 'the server refuses the project manager making himself sponsor');
+  await shotBoth('sponsors');
   /* a non-admin sees why they can't change roles */
   await setMe('lp'); await settle(900);
+  ok(await page.$eval('[data-sponsor="vendor-modernization"]', el => el.disabled), 'Editor: sponsor picker disabled');
   ok(await page.isVisible('[data-admin-only]') && await page.$eval('[data-role="ar"]', el => el.disabled), 'Editor: role pickers disabled with an explanation');
   ok(/ask (Maya Chen|Tom Alvarez)/.test(await page.textContent('[data-admin-only]')), 'explanation names the Admins');
   await setMe('mc'); await settle(900);
@@ -101,21 +119,60 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Renamed Credit to Credit and Collections/), 'department renamed');
   await page.waitForSelector('[data-dept-name="Credit and Collections"]', { timeout: 8000 }).catch(() => {});
   const cc = '[data-dept-name="Credit and Collections"]';
-  /* assign a person */
+  /* R14 (Jordan): moving a person and choosing approvers are proposed by one Admin and confirmed by another (step-up) */
+  const confirmAs = async (who, re) => {
+    await setMe(who); await settle(900);
+    const btn = `[data-pending-depts] [data-pending]:has-text("${re}") [data-pend-confirm]`;
+    await page.waitForSelector(btn, { timeout: 8000 });
+    await page.click(btn);
+    await page.waitForSelector('.modal [name=code]');
+    await page.fill('.modal [name=code]', '246810'); await page.click('.modal [data-act="verify"]');
+  };
   await page.selectOption(`${cc} [data-dept-assign-form] select`, 'ar');
   await page.click(`${cc} [data-dept-assign-form] button[type=submit]`);
-  ok(await toastSays(/Ana Ruiz is now in Credit and Collections/), 'person assigned');
+  ok(await toastSays(/Sent to a second Admin to confirm: Ana Ruiz to Credit and Collections/), 'moving a person is sent to a second Admin (two Admins here)');
+  await page.waitForSelector('[data-pending-depts] [data-pending]', { timeout: 8000 });
+  ok(/Move Ana Ruiz from Accounts Payable to Credit and Collections/.test(await page.textContent('[data-pending-depts]')), 'the pending move is listed on the Departments tab');
+  ok(await page.$eval('[data-pending-depts] [data-pend-confirm]', b => b.disabled) && /You proposed it/.test(await page.textContent('[data-pending-depts]')), 'the proposer cannot confirm it, and is told why');
+  ok(!/Ana Ruiz/.test(await page.textContent(`${cc} .adm-dppl`).catch(() => '')), 'nothing changes until it is confirmed');
+  ok((await engDepts()).find(d => d.name === 'Accounts Payable').people.includes('ar'), 'engine: Ana is still in Accounts Payable');
+  await shotBoth('departments-pending');
+  await confirmAs('ta', 'Move Ana Ruiz');
+  ok(await toastSays(/Confirmed: Move Ana Ruiz from Accounts Payable to Credit and Collections/), 'a second Admin confirms with the extra sign-in check');
   await page.waitForFunction(sel => /Ana Ruiz/.test((document.querySelector(sel + ' .adm-dppl') || {}).textContent || ''), cc, { timeout: 8000 }).catch(() => {});
-  ok(/Ana Ruiz/.test(await page.textContent(`${cc} .adm-dppl`).catch(() => '')), 'the department lists its person');
-  /* set approvers */
+  ok(/Ana Ruiz/.test(await page.textContent(`${cc} .adm-dppl`).catch(() => '')), 'the department lists its person once confirmed');
+  const since = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.get('person', 'ar').buSince; });
+  ok(!!since && Math.abs(Date.parse(since) - Date.now()) < 5 * 60000, 'the membership carries the server time it started');
+  await setMe('mc'); await settle(900);
+  /* set approvers: Credit and Collections has none yet, so its FIRST approver is one Admin and immediate (R14 rule 1) */
   await page.click(`${cc} [data-dept-approvers] summary`);
   await page.check(`${cc} [data-dept-approvers] input[value="ar"]`);
   await page.click(`${cc} [data-dept-approvers-save]`);
-  ok(await toastSays(/Credit and Collections approvers saved/), 'approvers saved');
+  ok(await toastSays(/Ana Ruiz now approves for Credit and Collections \(applies to new work only\)/), 'the first approver is named at once, for new work only');
   await page.waitForFunction(sel => /Ana Ruiz/.test((document.querySelector(sel + ' [data-dept-approvers-list]') || {}).textContent || ''), cc, { timeout: 8000 }).catch(() => {});
   ok(/Approves: Ana Ruiz/.test(await page.textContent(`${cc} .adm-dwho`)), 'the card names the approver');
+  /* changing an existing department's approvers waits for a second Admin */
+  await page.click(`${cc} [data-dept-approvers] summary`).catch(() => {});
+  if (!(await page.isVisible(`${cc} [data-dept-approvers] input[value="lp"]`))) await page.click(`${cc} [data-dept-approvers] summary`);
+  await page.check(`${cc} [data-dept-approvers] input[value="lp"]`);
+  await page.click(`${cc} [data-dept-approvers-save]`);
+  ok(await toastSays(/Sent to a second Admin to confirm: Credit and Collections approvers/), 'changing existing approvers is sent to a second Admin');
+  await settle(600);
+  ok(!/Leo Park/.test(await page.textContent(`${cc} [data-dept-approvers-list]`)), 'no change until confirmed');
+  await page.click('[data-pending-depts] [data-pending]:has-text("Credit and Collections approvers") [data-pend-cancel]');
+  ok(await toastSays(/Proposal withdrawn/), 'withdrawn');
+  await settle(700);
   const ccEng = (await engDepts()).find(d => d.name === 'Credit and Collections');
   ok(ccEng && ccEng.approvers.join() === 'ar' && ccEng.people.includes('ar'), 'engine: approvers and members match the screen');
+  await setMe('mc'); await settle(900);
+  /* withdraw: nothing changes */
+  await page.selectOption(`${cc} [data-dept-assign-form] select`, 'lp');
+  await page.click(`${cc} [data-dept-assign-form] button[type=submit]`);
+  await toastSays(/Sent to a second Admin/); await settle(700);
+  await page.click('[data-pending-depts] [data-pending]:has-text("Leo Park") [data-pend-cancel]');
+  ok(await toastSays(/Proposal withdrawn/), 'the proposer can withdraw it');
+  await settle(700);
+  ok(!(await page.$('[data-pending-depts]')) && (await engDepts()).find(d => d.name === 'Treasury').people.includes('lp'), 'withdrawn: Leo stays in Treasury');
   /* remove is blocked while people are in it, and says why */
   ok(await page.$eval(`${cc} [data-dept-remove]`, b => b.disabled) && /Move the 1 person in Credit and Collections/.test(await page.textContent(`${cc} .adm-dwhy`)), 'remove is blocked while people are in it, with the reason');
   await shotBoth('departments');
@@ -123,8 +180,15 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await open('/admin/people');
   ok(await page.$eval('[data-assign="ar"] option:checked', o => o.textContent) === 'Credit and Collections', 'People shows the department');
   await page.selectOption('[data-assign="ar"]', { label: 'Accounts Payable' });
-  ok(await toastSays(/Ana Ruiz is now in Accounts Payable/), 'moved back from the People tab');
+  ok(await toastSays(/Sent to a second Admin to confirm: Ana Ruiz to Accounts Payable/), 'a move from the People tab is proposed too');
   await settle(900);
+  ok(/Waiting: Move Ana Ruiz from Credit and Collections to Accounts Payable/.test(await page.textContent('[data-person-row="ar"]')), 'People shows the waiting move');
+  await open('/admin/departments');
+  await confirmAs('ta', 'Move Ana Ruiz from Credit');
+  ok(await toastSays(/Confirmed: Move Ana Ruiz from Credit and Collections to Accounts Payable/), 'moved back once a second Admin confirms');
+  await settle(900);
+  await setMe('mc'); await settle(900);
+  await open('/admin/people');
   /* invite with a department */
   await page.fill('#adm-email', 'sam.wu@northwind.example');
   await page.selectOption('#adm-irole', 'approver');
@@ -171,11 +235,31 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await page.$(`[data-holiday="${fed}"][data-kind="federal"]`) != null, 'restored to US federal');
 
   console.log('History');
+  /* R14: a save with the person's own text: the server writes the sentence, the text is shown apart as their note */
+  await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js');
+    const w = store.state.docs.workItem.find(d => d.id === 'W12').data;
+    await fetch(`/api/pmoflow/ws/${store.state.ws}/doc/workItem/W12`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ actor: w.owner, summary: 'Comment added', data: Object.assign({}, w, { title: w.title + ' (checked)' }) }) }); });
+  /* R14 (Jordan B): a refused write (Dave, an Approver, edits a task) is in History, labelled; sent from outside the browser */
+  {
+    const wsH = await page.evaluate(async () => (await import('/concepts/pmoflow/app/store.js')).store.state.ws);
+    const sth = await (await fetch(`http://localhost:${PORT}/api/pmoflow/ws/${wsH}/state`, { headers: { 'x-forwarded-for': IP } })).json();
+    const w7 = sth.docs.workItem.find(d => d.id === 'W7').data;
+    const rr = await fetch(`http://localhost:${PORT}/api/pmoflow/ws/${wsH}/doc/workItem/W7`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-forwarded-for': IP },
+      body: JSON.stringify({ actor: 'do', summary: 'Viewed', data: Object.assign({}, w7, { title: 'Changed by an approver' }) }) });
+    ok(rr.status >= 400, `the server refuses the write (${rr.status})`);
+  }
   await open('/admin/history');
   await page.waitForSelector('[data-verify]');
+  ok(await page.getAttribute('[data-verify]', 'data-verify') === 'ok', 'chain verifies with a refused entry in it');
+  const refusedTxt = await page.$$eval('[data-entry-refused]', els => els.map(e => e.textContent));
+  ok(refusedTxt.length >= 1 && refusedTxt.every(t => /^Refused: /.test(t)) && !refusedTxt.some(t => /Viewed/.test(t)), 'History labels the refused write "Refused: …" (server-written)');
   ok(await page.getAttribute('[data-verify]', 'data-verify') === 'ok', 'chain verified');
   const log = await page.textContent('.adm-log');
   ok(/Changed Priya Shah's role from Editor to Approver/.test(log) && /Added Christmas Eve/.test(log) && /Invited jordan/.test(log), 'history lists the admin changes');
+  ok(/Set the sponsor of “Vendor Onboarding Modernization”: .* → Dave Ortiz/.test(log), 'history lists the sponsor change (server-written)');
+  ok(await page.locator('[data-entry-note]', { hasText: 'Their note: “Comment added”' }).count() >= 1, 'a person’s own text shows apart, as their note');
+  ok(!(await page.$$eval('.adm-log tbody tr', els => els.map(e => e.textContent))).some(t => /^\S.*Comment added/.test(t) && !/Their note/.test(t)), 'their text is never the sentence');
   ok(/Added the Credit department/.test(log) && /Renamed the Credit department to Credit and Collections/.test(log) && /Removed the Credit and Collections department/.test(log), 'history lists the department changes');
   await page.fill('[data-f="item"]', 'Christmas'); await page.press('[data-f="item"]', 'Enter'); await settle(500);
   const rows = await page.$$eval('.adm-log tbody tr', els => els.map(e => e.textContent));
@@ -264,6 +348,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await page.$('a[href="/pmoflow/security"]') != null, 'links to /pmoflow/security');
   ok(/not obtained yet/i.test(await page.textContent('[data-sec="planned"]')), 'no certification claimed');
   const now = await page.textContent('[data-sec="now"]');
+  ok(now.includes('Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.') &&
+    /Naming the first approver of a department that has none takes one Admin/.test(now) && /In a workspace with one Admin, those changes apply at once and History says so/.test(now), 'Security tab states the department rules exactly as scoped');
   ok(/pass only tests assigned to you or to no one/.test(now) && /recorded any test result for it or own steps in it/.test(now) &&
     /launch owner don’t approve/.test(now) && /project manager and a sponsor or approver/.test(now) && /Admins follow every rule/.test(now), 'Security tab states each enforced separation-of-duties rule');
   ok(!/ON NOW/.test(now), 'no blanket "ON NOW" claim');

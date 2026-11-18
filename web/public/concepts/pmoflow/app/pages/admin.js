@@ -5,7 +5,7 @@
    and plain-language security settings. Server side: api/shared/pmoflow-routes-admin.js (/api/pmoflow/workspaces/:ws/admin...).
    Also exports authPrincipal / signInURL / signOutURL so the lead can show "Sign in with Microsoft" in the header menu. */
 import { store } from '../store.js';
-import { esc, link, av, fmtTime, toast, E, modal } from '../ui.js';
+import { esc, link, av, fmtTime, toast, E, modal, stepUp } from '../ui.js';
 import { refPath } from '../main.js';
 
 const TABS = [['people', 'People'], ['departments', 'Departments'], ['history', 'History'], ['calendar', 'Calendar'], ['security', 'Security']];
@@ -131,7 +131,7 @@ function peopleHTML() {
     const sel = `<select data-role="${esc(p.id)}" aria-label="Role for ${esc(p.name)}" ${admin ? '' : 'disabled'}>${Object.entries(ROLE_INFO).map(([k, r]) => `<option value="${k}" ${p.role === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>`;
     const dsel = `<select data-assign="${esc(p.id)}" aria-label="Department for ${esc(p.name)}" ${admin ? '' : 'disabled'}><option value="">No department</option>${depts().map(d => `<option value="${esc(d.id)}" ${d.name === p.department ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>`;
     return `<tr data-person-row="${esc(p.id)}"><td><span class="adm-pp">${av(p.id)}<span><b>${esc(p.name)}</b><span class="hint adm-title">${esc(p.title || '')}</span></span></span></td>
-      <td>${sel}</td><td>${dsel}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
+      <td>${sel}</td><td>${dsel}${(() => { const pp = pendings().find(x => x.kind === 'assign' && x.op && x.op.personId === p.id); return pp ? `<div class="hint" data-person-pending="${esc(p.id)}">Waiting: ${esc(pp.text)}</div>` : ''; })()}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
   }).join('');
   const inv = (S.view.settings.invites || []);
   return `${seatsHTML()}
@@ -140,6 +140,7 @@ function peopleHTML() {
       <div class="tbl-wrap"><table class="adm-table"><thead><tr><th>Person</th><th>Role</th><th>Department</th><th>Seat</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="adm-legend">${Object.values(ROLE_INFO).map(r => `<div><b>${r.label}</b> <span class="hint">${esc(r.what)}</span></div>`).join('')}</div>
     </div>
+    ${sponsorsHTML()}
     <div class="card" data-invites><h3>Invite someone <span class="n">${inv.length} pending</span></h3>
       <form class="adm-invite" data-invite-form>
         <div class="field"><label for="adm-email">Work email</label><input id="adm-email" name="email" type="email" autocomplete="off" placeholder="name@northwind.example" required ${admin ? '' : 'disabled'} /></div>
@@ -150,6 +151,40 @@ function peopleHTML() {
       <div class="hint">The invite is saved here. No email is sent from the demo.</div>
       ${inv.length ? `<div class="adm-list">${inv.map(i => `<div class="row" data-invite="${esc(i.id)}"><div><div class="t">${esc(i.email)}</div><div class="s">${esc((ROLE_INFO[i.role] || {}).label || i.role)}${i.department ? ` · <span data-invite-dept>${esc(i.department)}</span>` : ''} · invited by ${esc(pname(i.by))} · ${esc(fmtTime(i.at))}</div></div><div class="r"><button class="btn sm danger" data-uninvite="${esc(i.id)}" ${admin ? '' : 'disabled'}>Remove</button></div></div>`).join('')}</div>` : ''}
     </div>`;
+}
+
+/* R14: the server writes each sentence from the actual change; a person's own text is shown apart, as their note.
+   Entries from before R14 kept the person's own text as the sentence: they say so. */
+function summaryCell(e) {
+  const sm = String(e.summary || e.action || '');
+  const note = e.note != null ? String(e.note) : null;
+  const text = note != null ? sm.slice(0, Math.max(0, sm.length - note.length - 11)) : sm;
+  if (e.refused) return `<span class="adm-refused" data-entry-refused>${esc(text)}</span><div class="hint">The server refused this, so nothing changed.</div>`;
+  return `${esc(text)}${note != null ? `<div class="hint" data-entry-note>Their note: “${esc(note)}”</div>` : ''}${e.written === 'client' ? '<div class="hint" data-entry-client>Older entry: worded by the person, not written from the change.</div>' : ''}`;
+}
+
+/* ------------------------------------------------------------ project sponsors (R14 L4 #2) */
+/* An Admin who is not the project's manager sets its sponsor. The project manager is never the sponsor and never picks
+   one; nobody appoints themselves. Without a named sponsor, the default approver stands in (shown as "default"). */
+function sponsorsHTML() {
+  const rows = (S.view.projects || []).filter(p => p.status !== 'archived');
+  if (!rows.length) return '';
+  const me = store.state.me, admin = isAdmin();
+  const body = rows.map(p => {
+    const mineAsPm = me === p.owner;
+    const can = (admin || (p.sponsor && p.sponsor === me)) && !mineAsPm;
+    const opts = people().filter(x => x.id !== p.owner && (x.id !== me || x.id === p.sponsor));
+    const why = mineAsPm ? 'You manage this project, so another Admin sets its sponsor.' : !can ? `Only an Admin${adminNames().length ? ` (${adminNames().filter(n => n !== p.ownerName).join(', ')})` : ''} can change it.` : '';
+    const sel = `<select data-sponsor="${esc(p.id)}" aria-label="Sponsor of ${esc(p.name)}" ${can ? '' : 'disabled'}>
+      <option value="">${p.sponsor ? 'No named sponsor (use the default)' : `Default: ${esc(p.effectiveName || 'nobody yet')}`}</option>
+      ${opts.map(x => `<option value="${esc(x.id)}" ${x.id === p.sponsor ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
+    return `<div class="adm-spon" data-sponsor-row="${esc(p.id)}"><div><b>${esc(p.name)}</b><div class="hint">Project manager: ${esc(p.ownerName || 'nobody')}</div></div>
+      <div><label class="adm-spl" for="adm-sp-${esc(p.id)}">Sponsor</label>${sel.replace('<select ', `<select id="adm-sp-${esc(p.id)}" `)}${why ? `<div class="hint" data-sponsor-why>${esc(why)}</div>` : ''}</div>
+      <div><span class="adm-spl">Approves now</span><div data-sponsor-now>${p.sponsor ? esc(p.sponsorName) : p.effectiveName ? `${esc(p.effectiveName)} <span class="hint">(default)</span>` : '<span class="hint">Nobody yet</span>'}</div></div></div>`;
+  }).join('');
+  return `<div class="card" data-sponsors><h3>Project sponsors</h3>
+    <div class="hint adm-sphint">The sponsor approves plan changes that move the deadline or the budget. An Admin sets them; a project’s manager can’t be its sponsor or choose one.</div>
+    <div class="adm-spons">${body}</div></div>`;
 }
 
 /* ------------------------------------------------------------ departments (R13 #1) */
@@ -166,6 +201,7 @@ function deptCard(d) {
         <div class="adm-dacts"><button class="btn sm" data-dept-rename="${esc(d.id)}" ${admin ? '' : 'disabled'}>Rename</button>
         <button class="btn sm danger" data-dept-remove="${esc(d.id)}" ${admin && !n ? '' : 'disabled'} ${removeWhy ? `title="${esc(removeWhy)}"` : ''}>Remove</button></div></div>
       <div class="adm-dwho">${who}</div>
+      ${pendings().filter(p => p.departmentId === d.id || (p.kind === 'assign' && d.people.some(x => x.id === p.op.personId))).map(p => `<div class="hint adm-dpend" data-dept-pending="${esc(p.id)}">Waiting for a second Admin: ${esc(p.text)}</div>`).join('')}
       ${n ? `<div class="adm-dppl">${d.people.map(p => `<span class="adm-chip">${av(p.id)}${esc(p.name)}</span>`).join('')}</div>` : `<div class="hint">Nobody is in ${esc(d.name)} yet. Assign people on the People tab or below.</div>`}
       ${n && admin ? `<div class="hint adm-dwhy">${esc(removeWhy)}</div>` : ''}
       <details class="adm-dedit" data-dept-approvers="${esc(d.id)}"><summary>Choose who approves for ${esc(d.name)}</summary>
@@ -176,6 +212,22 @@ function deptCard(d) {
         <select name="personId" aria-label="Add a person to ${esc(d.name)}" ${admin ? '' : 'disabled'}><option value="">Add a person to ${esc(d.name)}…</option>${ppl.filter(p => p.department !== d.name).map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.department ? ` (now ${esc(p.department)})` : ''}</option>`).join('')}</select>
         <button class="btn sm" type="submit" ${admin ? '' : 'disabled'}>Add</button></form>
     </div>`;
+}
+/* R14 (Jordan): department moves and approver changes wait for a second Admin (step-up); nothing changes until then */
+const pendings = () => (S.view && S.view.pendingDepartments) || [];
+function pendingHTML() {
+  const list = pendings();
+  if (!list.length) return '';
+  const me = store.state.me, admin = isAdmin();
+  return `<div class="card adm-pend" data-pending-depts><h3>Waiting for a second Admin <span class="n">${list.length}</span></h3>
+    <p class="hint">Moving people between departments and changing a department’s existing approvers changes who can sign off, so one Admin proposes it and another confirms it with the extra sign-in check. Until then nothing changes.</p>
+    ${list.map(p => {
+      const mine = p.by === me, affected = (p.affected || []).includes(me);
+      const why = !admin ? 'Only an Admin can confirm.' : mine ? 'You proposed it, so another Admin confirms it.' : affected ? 'It moves you or changes your approval rights, so another Admin confirms it.' : '';
+      return `<div class="adm-pitem" data-pending="${esc(p.id)}"><div><b>${esc(p.text)}</b><div class="hint">Proposed by ${esc(p.byName || pname(p.by))} · ${esc(fmtTime(p.at))}${p.note ? ` · <span data-pending-note>${esc(p.note)}</span>` : ''}</div>${why ? `<div class="hint" data-pending-why>${esc(why)}</div>` : ''}</div>
+        <div class="adm-pacts"><button class="btn sm primary" data-pend-confirm="${esc(p.id)}" ${admin && !mine && !affected ? '' : 'disabled'}>Confirm</button>
+        <button class="btn sm" data-pend-cancel="${esc(p.id)}" ${admin ? '' : 'disabled'}>${mine ? 'Withdraw' : 'Turn down'}</button></div></div>`;
+    }).join('')}</div>`;
 }
 function departmentsHTML() {
   const list = depts();
@@ -189,6 +241,7 @@ function departmentsHTML() {
         <div class="field"><label for="adm-dn">New department</label><input id="adm-dn" name="name" maxlength="60" placeholder="e.g. Credit" autocomplete="off" ${canAddDept() ? '' : 'disabled'} /></div>
         <button class="btn primary" type="submit" ${canAddDept() ? '' : 'disabled'}>Add department</button>
       </form></div>
+    ${pendingHTML()}
     ${list.length ? list.map(deptCard).join('') : '<div class="card"><div class="empty">No departments yet. Add your first one above.</div></div>'}`;
 }
 
@@ -229,7 +282,7 @@ function historyHTML() {
         <div class="adm-factions">${anyF ? '<button class="btn sm adm-quiet" data-fclear>Clear</button>' : ''}<button class="btn sm" data-export="csv">Export CSV</button><button class="btn sm" data-export="json">Export JSON</button></div>
       </div>
       ${list.length ? `<div class="tbl-wrap"><table class="adm-table adm-log"><thead><tr><th>When</th><th>Who</th><th>What changed</th><th>Item</th></tr></thead><tbody>
-        ${list.slice(0, S.shown).map(e => `<tr data-entry="${e.seq}"><td class="adm-when">${esc(fmtTime(e.at))}</td><td class="adm-who">${av(e.actor)} ${esc(e.actorName || pname(e.actor))}</td><td>${esc(e.summary || e.action)}</td><td>${itemCell(e.ref)}</td></tr>`).join('')}
+        ${list.slice(0, S.shown).map(e => `<tr data-entry="${e.seq}"><td class="adm-when">${esc(fmtTime(e.at))}</td><td class="adm-who">${av(e.actor)} ${esc(e.actorName || pname(e.actor))}</td><td>${summaryCell(e)}</td><td>${itemCell(e.ref)}</td></tr>`).join('')}
       </tbody></table></div>${list.length > S.shown ? `<div style="text-align:center;margin-top:8px"><button class="btn sm" data-more>Show ${Math.min(PAGE, list.length - S.shown)} more</button></div>` : ''}`
       : `<div class="empty">${anyF ? 'No changes match these filters.' : 'No changes recorded yet.'}</div>`}
       <div class="hint" style="margin-top:8px" data-audit-claim>Exports use the filters above and carry each entry’s fingerprints. Each fingerprint covers who made the change (their name too), when, and what. An unfiltered export also carries a signed head (the entry count and last fingerprint, signed by the PMOFlow service; in a CSV it is the last row), so checking it catches an edited entry or name, entries removed from the end, and fingerprints recomputed after export. Fingerprints are worked out from the stored history when you view or export it, not as each change is saved. The demo keeps the latest ${S.audit.limit || 500} changes.</div>
@@ -283,6 +336,8 @@ function securityHTML() {
       ['Passing tests', 'You can pass only tests assigned to you or to no one. A test linked to an open problem can’t pass until the problem is fixed.'],
       ['Separate approvers', 'Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.'],
       ['Two people for launch overrides', 'Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.'],
+      ['Department changes', 'Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it. In a workspace with one Admin, those changes apply at once and History says so. Each membership and approver keeps the date it started.'],
+      ['Recent moves', 'Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.'],
       ['No Admin exemption', 'Admins follow every rule above. The server checks each one, not just the screen.'],
       ['Extra sign-in check', 'Approvals, going live and data-access grants ask for a second check. In the demo any 6 digits work.'],
       ['Time-boxed data access', 'Access to real data is approved by its owner, expires, and closes automatically at launch.'],
@@ -328,7 +383,7 @@ export function bind(root, params) {
   const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener(ev, e => fn(el, e)));
   const act = async (fn, ok) => {
     if (S.busy) return; S.busy = true;
-    try { await fn(); if (ok) toast(ok); await store.load(); }     /* store.load refreshes docs (calendar, settings) and re-renders */
+    try { await fn(); if (ok) toast(typeof ok === 'function' ? ok() : ok); await store.load(); }     /* store.load refreshes docs (calendar, settings) and re-renders */
     catch (e) { toast(e.message); S.viewStale = true; rerender(); }
     finally { S.busy = false; }
   };
@@ -343,12 +398,22 @@ export function bind(root, params) {
     const departmentId = (el.querySelector('[name=departmentId]') || {}).value || null;
     act(async () => { S.view = await api('POST', '/invites', { email, role, departmentId }); }, `Invited ${email}`);
   });
+  on('[data-sponsor]', 'change', el => {
+    const pid = el.dataset.sponsor, nm = ((S.view.projects || []).find(p => p.id === pid) || {}).name || 'the project';
+    act(async () => { await api('PUT', '/sponsor/' + encodeURIComponent(pid), { sponsor: el.value || null }); S.viewStale = true; S.auditStale = true; },
+      el.value ? `${pname(el.value)} is now the sponsor of ${nm}` : `${nm} uses its default sponsor`);
+  });
   on('[data-uninvite]', 'click', el => act(async () => { S.view = await api('DELETE', '/invites/' + encodeURIComponent(el.dataset.uninvite), {}); }, 'Invite removed'));
 
   /* departments (R13 #1) */
   const dname = id => (depts().find(d => d.id === id) || {}).name || 'the department';
-  on('[data-assign]', 'change', el => act(() => deptOp({ kind: 'assign', personId: el.dataset.assign, id: el.value || null }),
-    el.value ? `${pname(el.dataset.assign)} is now in ${dname(el.value)}` : `${pname(el.dataset.assign)} has no department`));
+  /* R14: a change either waits for a second Admin, or (first approver / one-Admin workspace) applies at once for new work */
+  let lastDept = null;
+  const dop = op => async () => { lastDept = await deptOp(op); };
+  const said = (wait, now) => () => (lastDept && lastDept.pending ? `Sent to a second Admin to confirm: ${wait}` : `${now} (applies to new work only)`);
+  on('[data-assign]', 'change', el => act(dop({ kind: 'assign', personId: el.dataset.assign, id: el.value || null }),
+    el.value ? said(`${pname(el.dataset.assign)} to ${dname(el.value)}`, `${pname(el.dataset.assign)} is now in ${dname(el.value)}`)
+      : said(`${pname(el.dataset.assign)} out of their department`, `${pname(el.dataset.assign)} has no department`)));
   on('[data-dept-add-form]', 'submit', (el, e) => {
     e.preventDefault();
     const name = el.querySelector('[name=name]').value.trim();
@@ -373,13 +438,25 @@ export function bind(root, params) {
   on('[data-dept-approvers-save]', 'click', el => {
     const id = el.dataset.deptApproversSave;
     const ids = [...root.querySelectorAll(`[data-dept-approvers="${CSS.escape(id)}"] input[type=checkbox]:checked`)].map(x => x.value);
-    act(() => deptOp({ kind: 'approvers', id, approvers: ids }), ids.length ? `${dname(id)} approvers saved` : `Anyone in ${dname(id)} can approve`);
+    act(dop({ kind: 'approvers', id, approvers: ids }), said(`${dname(id)} approvers`, ids.length ? `${ids.map(pname).join(', ')} now approve${ids.length === 1 ? 's' : ''} for ${dname(id)}` : `Anyone in ${dname(id)} can approve`));
   });
   on('[data-dept-assign-form]', 'submit', (el, e) => {
     e.preventDefault();
     const id = el.dataset.deptAssignForm, personId = el.querySelector('[name=personId]').value;
     if (!personId) { toast('Choose a person.'); return; }
-    act(() => deptOp({ kind: 'assign', personId, id }), `${pname(personId)} is now in ${dname(id)}`);
+    act(dop({ kind: 'assign', personId, id }), said(`${pname(personId)} to ${dname(id)}`, `${pname(personId)} is now in ${dname(id)}`));
+  });
+  /* R14 (Jordan): a second Admin confirms a pending move with the extra sign-in check, or anyone Admin cancels it */
+  on('[data-pend-confirm]', 'click', async el => {
+    const id = el.dataset.pendConfirm, p = pendings().find(x => x.id === id);
+    if (!(await stepUp('confirm this department change'))) { toast('Not confirmed: the extra sign-in check was not completed.'); return; }
+    act(async () => { await api('POST', '/departments/pending/' + encodeURIComponent(id) + '/confirm', { stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }); S.viewStale = true; },
+      `Confirmed: ${p ? p.text : 'the department change'}`);
+  });
+  on('[data-pend-cancel]', 'click', el => {
+    const id = el.dataset.pendCancel, p = pendings().find(x => x.id === id);
+    act(async () => { await api('POST', '/departments/pending/' + encodeURIComponent(id) + '/cancel', {}); S.viewStale = true; },
+      p && p.by === store.state.me ? 'Proposal withdrawn' : 'Proposal turned down');
   });
 
   /* calendar */

@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML, costKnown, costOver, costUnknownHTML } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -28,12 +28,12 @@ function projectRow(j) {
   const rel = store.list('release', x => x.projectId === j.id && x.kind !== 'rollback' && x.status !== 'failed').sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
   const rm = relMgr(j);
   return `<tr class="click" data-go="/project/${esc(j.id)}" data-prow="${esc(j.id)}">
-    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · launch owner ${esc(pname(rm))}` : ''}</div>${first ? `<div class="hint pmo-first">Next to act: <b data-t="who">${esc(whoName(first))}</b></div>` : ''}</td>
+    <td><b>${esc(j.name)}</b><div class="hint">${av(j.owner)} PM ${esc(pname(j.owner))}${rm !== j.owner ? ` · launch owner ${esc(pname(rm))}` : ''}</div>${first ? `<div class="hint pmo-first">${first.needsOwner ? `Next: ${esc(first.action)} · ` : 'Next to act: '}<b data-t="who" class="${first.needsOwner ? 'pmo-noowner' : ''}">${esc(whoName(first))}</b></div>` : ''}</td>
     <td>${summaryPill(summaryOf(j))}</td>
     <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
     <td class="pmo-nowrap" data-when>${when}</td>
-    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}" ${nb ? `title="${esc(blockingInfo(t).text)}"` : ''}><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && launchLeft(t).text ? ` · <span data-t="checks" data-n="${launchLeft(t).n}">${esc(launchLeft(t).text)}</span>` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
-    <td class="pmo-nowrap pmo-num">${t.cost.show ? `<span data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</span><div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div>` : '<span class="hint">No budget or rates</span>'}</td>
+    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}" ${nb ? `title="${esc(blockingInfo(t).text)}"` : ''}><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && launchLeft(t).text ? ` · ${t.stepsLeft ? `<span data-t="steps" data-n="${t.stepsLeft}">${t.stepsLeft} step${t.stepsLeft === 1 ? '' : 's'} to launch cover</span> ` : ''}<span data-t="checks" data-n="${launchLeft(t).n}">${esc(t.stepsLeft ? launchLeft(t).text.replace(/^./, c => c.toLowerCase()) : launchLeft(t).text)}</span>` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
+    <td class="pmo-nowrap pmo-num">${t.cost.show ? `${costKnown(j) ? `<span data-t="cost" class="${costOver(j) ? 'fail' : ''}">${esc(money(c.forecast))}</span>` : costUnknownHTML(j)}<div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div>` : '<span class="hint">No budget or rates</span>'}</td>
     <td>${j.status === 'live' ? `<span class="badge b-done">Launched</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not launched ›</a>`}</td></tr>`;
 }
 function projectsHTML(projects) {
@@ -41,9 +41,12 @@ function projectsHTML(projects) {
   const groups = byProgram(projects);
   const rows = groups.map(g => {
     const fin = g.projects.map(financials);
-    const planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
-    const rc = {}; g.projects.forEach(p => { const k = truthOf(p).k; rc[k] = (rc[k] || 0) + 1; });
-    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · expected cost ${esc(money(fc))}${rc.red ? ` · <span class="fail">${rc.red} will miss the deadline</span>` : ''}${rc.amber ? ` · <span class="warn">${rc.amber} with late tasks</span>` : ''}</span></td></tr>` + g.projects.map(projectRow).join('');
+    const planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + (f.known ? f.forecast : 0), 0), unk = fin.filter(f => !f.known).length;
+    /* R14 (Karen 6): the program line counts projects by the SAME label each row shows (projectTruth.label), so it never
+       says "1 with late tasks" next to a row with 0 late ("Behind on effort" is its own label) */
+    const byLbl = new Map(); g.projects.forEach(p => { const t = truthOf(p); if (p.status === 'live' || t.k === 'green' || t.k === 'none') return; const e = byLbl.get(t.label) || { k: t.k, n: 0 }; e.n++; byLbl.set(t.label, e); });
+    const lbls = [...byLbl.entries()].sort((a, b) => (a[1].k === 'red' ? 0 : 1) - (b[1].k === 'red' ? 0 : 1)).map(([l, e]) => ` · <span class="${e.k === 'red' ? 'fail' : 'warn'}" data-program-lbl="${esc(e.k)}">${e.n} ${esc(l.charAt(0).toLowerCase() + l.slice(1))}</span>`).join('');
+    return `<tr class="pmo-prog-h" data-program-row="${esc(g.program)}"><td colspan="7"><b>${esc(g.program)}</b> <span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}${planned ? ` · budget ${esc(money(planned))}` : ''} · expected cost ${esc(money(fc))}${unk ? ` <span data-cost-unknown-n>(${unk} without rates)</span>` : ''}${lbls}</span></td></tr>` + g.projects.map(projectRow).join('');
   }).join('');
   return `<div class="card"><h3 class="pmo-h3row">Projects <span class="n">${projects.length} in ${groups.length} program${groups.length === 1 ? '' : 's'}</span><span class="pmo-h3acts"><button class="btn sm" data-export-pf title="Download every project's status, schedule, cost and earned value as CSV">Export CSV</button><button class="btn sm primary" data-new-project>+ New project</button></span></h3>
     <div class="tbl-wrap"><table class="pmo-ptable"><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Expected / deadline</th><th>Schedule</th><th class="pmo-num">Expected cost</th><th>Launch</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -58,12 +61,12 @@ function financialsHTML(projects) {
   const max = Math.max(1, ...all.map(f => Math.max(f.planned || 0, f.forecast, f.actual)));
   const pct = n => (n / max * 100).toFixed(2);
   const row = j => {
-    const f = financials(j), over = f.planned && f.forecast > f.planned, v = f.planned ? f.forecast - f.planned : null;
+    const f = financials(j), over = costOver(j), v = f.planned && f.known ? f.forecast - f.planned : null;
     return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>${evFlagsHTML(j) ? `<div class="pmo-evflags">${evFlagsHTML(j)}</div>` : ''}
-        <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, expected ${money(f.forecast)}, actual ${money(f.actual)}`)}">
-          ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span><span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
+        <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, expected ${f.known ? money(f.forecast) : 'unknown (no rates)'}, actual ${money(f.actual)}`)}">
+          ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}${f.known ? `<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span>` : ''}<span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
       <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
-      <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${esc(money(f.forecast))}</td>
+      <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${f.known ? esc(money(f.forecast)) : costUnknownHTML(j)}</td>
       <td class="pmo-num" data-fin-actual>${esc(money(f.actual))}</td>
       <td class="pmo-num">${v == null ? '<span class="hint">—</span>' : `<span class="pmo-var ${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : v < 0 ? '−' : ''}${esc(money(Math.abs(v)))}</span>`}</td>
       ${evCells(earnedValue(j))}</tr>`;
@@ -90,7 +93,7 @@ export function portfolioCSVRows(projects) {
     const t = truthOf(j), ev = t.ev || {};
     const n = v => v == null ? '' : Math.round(v * 100) / 100;
     const first = whoActs(j, 1)[0];
-    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, j.status === 'live' ? 0 : blockingCount(t), first ? whoName(first) : '', j.status === 'live' ? 0 : (launchLeft(t).n == null ? '' : launchLeft(t).n), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
+    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, j.status === 'live' ? 0 : blockingCount(t), first ? whoName(first) : '', j.status === 'live' ? 0 : (launchLeft(t).n == null ? '' : launchLeft(t).n), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show && t.cost.known ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
   }));
   return [head, ...rows];
 }
@@ -138,7 +141,7 @@ function workloadHTML() {
   if (!rows.length) return '<div class="card"><h3>Workload</h3><div class="empty">No people in this workspace.</div></div>';
   const max = Math.max(1, ...rows.map(r => Math.max(r.effN, r.capN)));
   const over = rows.filter(r => r.overloaded).length;
-  return `<div class="card"><h3>Workload <span class="n">${over ? `<span class="fail">${over} overloaded</span>` : rows.length + ' people'}</span></h3><div class="hint" style="margin:-4px 0 10px">Planned effort in the next 14 days against each person’s capacity, across every project</div>
+  return `<div class="card" id="pmo-workload" data-workload><h3>Workload <span class="n">${over ? `<span class="fail">${over} overloaded</span>` : rows.length + ' people'}</span></h3><div class="hint" style="margin:-4px 0 10px">Planned effort in the next 14 days against each person’s capacity, across every project</div>
     <div class="pmo-wl">${rows.map(r => {
       const pct = n => (n / max * 100).toFixed(2);
       return `<div class="pmo-wl-row ${r.overloaded ? 'over' : ''}" data-wl="${esc(r.pid)}"><div class="pmo-wl-who">${av(r.pid)}<span>${esc(pname(r.pid))}</span></div>
@@ -373,7 +376,7 @@ async function generate(prj) {
   reports[prj] = { loading: true }; rerender();
   try {
     const range = pfRange();
-    const r = await store.api('/ai/status-report', Object.assign({ projectId: prj, today: today(), events: pfEvents.list }, range.preset === 'custom' ? range : { preset: range.preset }));
+    const r = await store.api('/ai/status-report', Object.assign({ projectId: prj, today: today(), events: pfEvents.list, tzOffsetMinutes: new Date().getTimezoneOffset() }, range.preset === 'custom' ? range : { preset: range.preset }));
     reports[prj] = { data: (r && (r.report || r)) || {} };
   } catch (e) { reports[prj] = { error: e.message || 'service unavailable' }; }
   rerender();

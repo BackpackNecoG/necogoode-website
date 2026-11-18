@@ -208,9 +208,11 @@ test('due dates are owned by PMOFlow: a Jira change is ignored and put back', ()
   const { docs, conn } = fresh('jira');
   sync(docs, conn);
   const k = S.keyOf(conn, 'W7'), due = wi(docs, 'W7').due;
-  S.simEdit(conn.sim, k, { due: '2030-01-01' }, clock());
+  /* R14: a date inside the deadline is put back; a date past the deadline becomes a plan change request (test below) */
+  S.simEdit(conn.sim, k, { due: '2026-11-25' }, clock());
   const { res, sent } = sync(docs, conn);
   assert.equal(res.ignored.length, 1);
+  assert.equal((res.planChanges || []).length, 0);
   assert.equal(wi(docs, 'W7').due, due);
   assert.ok(sent.some(i => i.op === 'update' && i.changed.includes('due')));
   assert.equal(conn.sim.items[k].due, due);
@@ -631,6 +633,103 @@ test('R13 #5 (route): held out-of-order Done is logged, named for its owner, and
     if (fin) assert.equal(JSON.stringify(E.forecastAll(docs, DAY)), JSON.stringify(E.forecastAll(byHand, DAY)), 'forecast equals the task in review by hand');
     const evs = (await call('GET', `ws/${ws}/events`)).body.events;
     assert.ok(evs.some(e => e.action === 'sync-held' && /^Jira: /.test(e.actor) && /Dev Kumar/.test(e.summary)), 'history says who confirms it');
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});
+
+/* ---------- R14 L4 #1: an inbound due date that breaches the deadline is held as a plan change request ---------- */
+test('R14 L4 #1: an inbound due date past the deadline is held as a plan change request, never applied', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  const k = S.keyOf(conn, 'W7'), due = wi(docs, 'W7').due;
+  const target = docs.project.find(d => d.id === PRJ).data.target;
+  S.simEdit(conn.sim, k, { due: '2027-01-15' }, clock(), 'dev.kumar@northwind.example');
+  const { res, sent } = sync(docs, conn);
+  assert.equal(res.ignored.length, 0, 'not silently put back');
+  assert.equal(res.planChanges.length, 1, 'one plan change request');
+  const pc = res.planChanges[0];
+  assert.equal(pc.workItemId, 'W7'); assert.equal(pc.field, 'due'); assert.equal(pc.from, due); assert.equal(pc.to, '2027-01-15');
+  assert.equal(pc.by, 'dev.kumar@northwind.example');
+  assert.match(pc.reason, /deadline/);
+  assert.ok(target < pc.to);
+  assert.equal(wi(docs, 'W7').due, due, 'the PMOFlow date never moves');
+  assert.ok(!res.updates.some(u => u.workItemId === 'W7' && u.changes.some(c => c.field === 'due')));
+  /* PMOFlow keeps owning the date: the tool shows PMOFlow's date until the change is approved */
+  assert.ok(sent.some(i => i.op === 'update' && i.changed.includes('due')));
+  assert.equal(conn.sim.items[k].due, due);
+});
+
+test('R14 L4 #1: the route can decide the breach with the engine (dueCheck); no breach means put back', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  const k = S.keyOf(conn, 'W7');
+  S.simEdit(conn.sim, k, { due: '2026-12-31' }, clock());
+  const pull = S.simExecute(conn, conn.sim, S.pullIntent(conn, { nonce }), clock());
+  const asked = [];
+  const res = S.applyInbound(conn, docs, pull.changes, { today: DAY, now: clock(),
+    dueCheck: (wid, to, from) => { asked.push([wid, to, from]); return { breach: false }; } });
+  assert.deepEqual(asked, [['W7', '2026-12-31', wi(docs, 'W7').due]]);
+  assert.equal(res.planChanges.length, 0); assert.equal(res.ignored.length, 1);
+  S.simEdit(conn.sim, k, { due: '2026-12-02' }, clock());
+  const pull2 = S.simExecute(conn, conn.sim, S.pullIntent(conn, { nonce }), clock());
+  const res2 = S.applyInbound(conn, docs, pull2.changes, { today: DAY, now: clock(),
+    dueCheck: () => ({ breach: true, reason: 'This moves the expected finish past the deadline.' }) });
+  assert.equal(res2.planChanges.length, 1);
+  assert.equal(res2.planChanges[0].reason, 'This moves the expected finish past the deadline.');
+});
+
+test('R14 L4 #1 (route): the tool date past the deadline becomes a proposed plan change for the sponsor; dates never move', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r14-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.6' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const st0 = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const prj = st0.project.find(d => d.id === PRJ).data, pm = prj.owner;
+    const r = await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: pm });
+    const c = r.body.connection, items = c.sim.items;
+    const keyOf = wid => Object.keys(items).find(k => items[k].pmoId === wid);
+    const pre = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const due0 = pre.workItem.find(d => d.id === 'W7').data.due;
+    const fin0 = E.projectTruth(pre, PRJ, DAY).forecastFinish;
+    const s = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: '2027-01-15', by: 'dev.kumar@northwind.example', actor: pm });
+    assert.equal(s.status, 200);
+    assert.match(s.body.sentence, /1 date change past the deadline sent to Change the plan/);
+    assert.equal(s.body.summary.planChanges, 1);
+    const row = s.body.connection.log.find(e => e.op === 'plan-change' && e.workItemId === 'W7');
+    assert.ok(row && row.result === 'held', 'a held plan-change row in the sync log');
+    assert.match(row.detail, /Change the plan/);
+    assert.match(row.detail, /approv/i);
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    assert.equal(docs.workItem.find(d => d.id === 'W7').data.due, due0, 'the due date did not move');
+    assert.equal(E.projectTruth(docs, PRJ, DAY).forecastFinish, fin0, 'the forecast did not move');
+    const pcs = (docs.planChange || []).map(d => d.data).filter(x => x.projectId === PRJ && x.source === 'sync');
+    assert.equal(pcs.length, 1, 'one proposed plan change');
+    const pc = pcs[0];
+    assert.equal(pc.status, 'proposed');
+    assert.deepEqual(pc.edits.map(e => [e.id, e.field, e.from, e.to]), [['W7', 'due', due0, '2027-01-15']]);
+    assert.ok(pc.approvers.some(a => a.role === 'sponsor' || (a.roles || []).some(x => x.role === 'sponsor')), 'the sponsor approves');
+    assert.ok(pc.approvers.every(a => a.person !== pc.requestedBy), 'the requester never approves');
+    assert.equal(pc.fromSync.key, keyOf('W7'));
+    assert.equal(pc.fromSync.by, 'dev.kumar@northwind.example');
+    assert.equal(pc.requestedBy, 'dk', 'requested by the person mapped from the tool email');
+    const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+    assert.ok(evs.some(e => e.action === 'sync-plan-change' && /^Jira: dev\.kumar@/.test(e.actor)), 'history credits the tool identity');
+    assert.ok((docs.notification || []).some(n => pc.approvers.some(a => a.person === n.data.to) && /plan change/.test(n.data.text)), 'approvers are told');
+    /* the tool shows PMOFlow's date again; the same date set again does not open a second request */
+    const s2 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: '2027-01-15', by: 'dev.kumar@northwind.example', actor: pm });
+    assert.equal(s2.status, 200);
+    const docs2 = (await call('GET', `ws/${ws}/state`)).body.docs;
+    assert.equal((docs2.planChange || []).filter(d => d.data.source === 'sync').length, 1, 'no duplicate request');
+    assert.match(s2.body.connection.log.find(e => e.op === 'plan-change').detail, /already waiting/);
+    /* a date inside the deadline is simply put back */
+    const s3 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: '2026-11-25', actor: pm });
+    assert.equal(s3.body.summary.ignored, 1);
+    assert.equal(s3.body.summary.planChanges || 0, 0);
   } finally {
     await store.deleteWorkspace(ws).catch(() => {});
     if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;

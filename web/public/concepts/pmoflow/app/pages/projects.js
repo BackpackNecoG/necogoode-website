@@ -12,7 +12,7 @@ function rowHTML(j) {
   return `<a class="card pmo-plist-row" href="${link('/project/' + encodeURIComponent(j.id))}" data-link data-plist="${esc(j.id)}">
     <div class="pmo-plist-h"><h3>${esc(j.name)}</h3><span class="pmo-chev" aria-hidden="true">›</span></div>
     ${summaryHTML(sm)}
-    <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}${factsHTML(j, { cost: !isSimple() })}<span>Deadline <b>${esc(fmt(j.target))}</b></span></div>
+    <div class="pmo-sline">${s.total ? `<span><b>${s.done} of ${s.total}</b> tasks done</span>` : ''}${factsHTML(j, { cost: !isSimple(), inLink: true })}<span>Deadline <b>${esc(fmt(j.target))}</b></span></div>
     ${whoLineHTML(j, 2, 'Who needs to act')}
     <div class="hint">Project manager ${esc(pname(j.owner))}</div></a>`;
 }

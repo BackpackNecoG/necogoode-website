@@ -130,6 +130,14 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   /* R12 #13: the knock-on into ERP is named, and ERP's project manager approves too */
   ok(/ERP Upgrade Readiness/.test(await page.textContent(`${wiz} [data-imp-cross]`)) && /approves too/.test(await page.textContent(`${wiz} [data-imp-cross]`)), 'preview: the other project the change moves is listed');
   ok(/project manager of ERP Upgrade Readiness/.test(await page.textContent('[data-chg-verdict]')) && /ERP Upgrade Readiness \(another project\)/.test(await page.textContent('[data-chg-verdict]')), 'verdict: ERP’s project manager approves too, and why');
+  /* R14 PMO list 4: the cross-project line names the approver the routing picked (Leo asked: ERP's own PM, Tom) */
+  ok(/^Tom Alvarez \(its project manager\) approves too/.test((await page.textContent(`${wiz} [data-imp-cross-who="${ERP}"]`)).trim()), 'R14: the other project’s approver is the routing’s: ' + (await page.textContent(`${wiz} [data-imp-cross-who="${ERP}"]`)).trim());
+  /* R14 PMO-9: the tasks that wait on W6 are re-dated with it, and the edits list says so */
+  ok(await page.$$eval(`${wiz} [data-imp-knock] [data-imp-redate]`, els => els.length) >= 3 && /Their due dates move with the change/.test(await page.textContent(`${wiz} [data-imp-knock]`)), 'R14 PMO-9: knock-on tasks show their due date moving with the change');
+  ok(await page.$$eval(`${wiz} [data-chg-edits] [data-chg-knock]`, els => els.length) >= 3 && /knock-on/.test(await page.textContent(`${wiz} [data-chg-edits] [data-chg-knock]`)), 'R14 PMO-9: the edits list shows the knock-on re-dating');
+  ok(!(await page.$(`${wiz} [data-imp-endslate]`)) || !/W7|test deposit/i.test(await page.textContent(`${wiz} [data-imp-endslate]`)), 'R14 PMO-9: no knocked-on task is warned as ending up late (it was re-dated)');
+  await page.screenshot({ path: `${SHOTS}/r14-knockon-1440.png` });
+  const d14 = await docs();
   await page.click(`${wiz} [data-w="submit"]`);
   ok(await toastSays(/Sent for approval: Tom Alvarez/), 'sent for approval');
   await page.waitForSelector('[data-chg-status="proposed"]', { timeout: 15000 }); await settle(500);
@@ -163,6 +171,10 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await settle(900);
   d = await docs();
   ok(d.workItem.find(x => x.id === 'W6').data.due === newDue, 'the new due date is in the plan');
+  /* R14 PMO-9: the tasks that wait on W6 were re-dated; none of them ends up later than it was */
+  const late14 = await page.evaluate(([a, b]) => ['W7', 'W8', 'W10'].map(id => { const fa = PMOEngine.forecastAll(a, PMOEngine.addBusinessDays(new Date().toISOString().slice(0, 10), 0)), fb = PMOEngine.forecastAll(b, PMOEngine.addBusinessDays(new Date().toISOString().slice(0, 10), 0));
+    const due = x => x.workItem.find(w => w.id === id).data.due; return { id, moved: due(a) > due(b), worse: (fa[id].late ? fa[id].lateDays : 0) > (fb[id].late ? fb[id].lateDays : 0) }; }), [d, d14]);
+  ok(late14.every(x => x.moved && !x.worse), 'R14 PMO-9: after the approved re-plan, W7, W8 and W10 were re-dated and are no later than before: ' + JSON.stringify(late14));
   ok(await page.$$eval('[data-chg-status="applied"]', els => els.length) === 2, 'both changes read Applied');
   ok(!(await page.$('[data-chg-mine]')), 'nothing waits for Tom any more');
   const notif = d.notification.map(n => n.data).filter(n => n.to === 'lp' && /Plan change on/.test(n.text));
@@ -255,6 +267,10 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await next();
   await page.check(`${wiz} input[name="dt_on"][value="W8"]`);
   await page.fill(`${wiz} input[name="du_W8"]`, '2026-12-25');
+  await page.dispatchEvent(`${wiz} input[name="du_W8"]`, 'change'); await settle(200);
+  /* R14 PMO-11: the picker says at once that it is a day off and offers a working day */
+  ok(/Christmas Day/.test(await page.textContent(`${wiz} input[name="du_W8"] + [data-dayoff-msg]`).catch(() => '')) && !!(await page.$(`${wiz} input[name="du_W8"] + [data-dayoff-msg] [data-dayoff-use]`)), 'R14 PMO-11: the date picker marks Dec 25 as a day off and offers a working day');
+  ok(!!(await page.$(`${wiz} [data-days-off-soon]`)), 'R14 PMO-11: the days off coming up are listed');
   await next();
   ok(/Christmas Day/.test(await page.textContent('[data-chg-errors]').catch(() => '')) && /day off/.test(await page.textContent('[data-chg-errors]').catch(() => '')), 'R13 #13: a Dec 25 due date is refused, naming the holiday');
   await page.setViewportSize({ width: 390, height: 844 }); await settle(300);
@@ -272,6 +288,10 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Sent for approval: Maya Chen/), 'sent to the sponsor');
   await page.waitForSelector('[data-chg-status="proposed"]'); await settle(400);
   ok(!(await page.$('[data-chg-approve]')) && !(await page.$('[data-chg-mine]')), 'the requester (Tom) has nothing to approve');
+  /* R14 PMO list 7: a waiting change shows its impact on today's plan (recomputed), not the one stored when it was sent */
+  const live14 = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); const c = store.list('planChange').find(x => x.status === 'proposed');
+    const im = PMOChange.liveImpact(store.state.docs, c, store.state.today, { engine: PMOEngine }); const el = document.querySelector(`[data-chg="${c.id}"] [data-chg-sentence]`); return { shown: el && el.textContent, live: im && im.sentence }; });
+  ok(live14.shown && live14.shown === live14.live, 'R14 PMO list 7: the waiting change’s sentence is today’s: ' + JSON.stringify(live14));
   const pend13 = (await docs()).planChange.map(x => x.data).find(c => c.status === 'proposed');
   const self13 = await page.evaluate(async id => { const { store } = await import('/concepts/pmoflow/app/store.js');
     const r = await fetch(`/api/pmoflow/workspaces/${store.state.ws}/changes/${id}/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'ta', decision: 'approve', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }) });

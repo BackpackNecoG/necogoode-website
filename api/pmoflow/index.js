@@ -197,7 +197,7 @@ function fmtVal(docs, k, v) {
 function changeText(docs, prevData, data) {
   const out = []; const a = prevData || {}, b = data || {};
   /* server timestamps (…At) are recorded on the event itself; they are not "changes" a person made */
-  const keys = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(k => !DIFF_SKIP.has(k) && !/At$/.test(k));
+  const keys = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(k => !DIFF_SKIP.has(k) && !/At$/.test(k) && !/Ts$/.test(k) && k !== 'doneBy');
   for (const k of keys) {
     const x = a[k], y = b[k];
     if (JSON.stringify(x === undefined ? null : x) === JSON.stringify(y === undefined ? null : y)) continue;
@@ -206,13 +206,25 @@ function changeText(docs, prevData, data) {
       sub.slice(0, 3).forEach(s => out.push(fieldLabel(k) + ' ' + fieldLabel(s) + ' ' + fmtVal(docs, s, x[s]) + ' → ' + fmtVal(docs, s, y[s])));
       continue;
     }
+    if (k === 'time' && Array.isArray(y)) {
+      /* R14 PMO-A3: hours entries are spelled out with the server's logging time and "backdated" */
+      const eng = engine(); const was = new Set((Array.isArray(x) ? x : []).map(t => JSON.stringify(t)));
+      const added = y.filter(t => !was.has(JSON.stringify(t)));
+      const removed = (Array.isArray(x) ? x : []).length - (y.length - added.length);
+      if (added.length) out.push('hours logged: ' + added.slice(0, 3).map(t => (eng && eng.timeEntryText ? eng.timeEntryText(t) : (t.hours + ' hours')) + (t.by ? ' by ' + personName(docs, t.by) : '')).join('; '));
+      if (removed > 0) out.push(removed + ' hours entr' + (removed === 1 ? 'y' : 'ies') + ' removed');
+      continue;
+    }
     if (Array.isArray(x) || Array.isArray(y)) { out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x || []) + ' → ' + fmtVal(docs, k, y || [])); continue; }
     out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x) + ' → ' + fmtVal(docs, k, y));
   }
   return out.length ? (out.length > 8 ? out.slice(0, 8).join('; ') + '; and ' + (out.length - 8) + ' more' : out.join('; ')) : 'no field changed';
 }
 function serverSummary(body, base, changes) {
-  const note = typeof body.summary === 'string' && body.summary.trim() ? body.summary.trim().slice(0, 200) : '';
+  let note = typeof body.summary === 'string' && body.summary.trim() ? body.summary.trim().slice(0, 200) : '';
+  /* R14 PMO-A2: the person's note is kept, quoted after the server's sentence, but neutralised so it can never look
+     like a server-written change ("$48,000 → $90,000" reads "$48,000 to $90,000" inside the quote) */
+  note = note.replace(/\s*(→|->|=>)\s*/g, ' to ');
   return base + (changes ? ': ' + changes : '') + (note && note !== base ? ' (note: “' + note.replace(/[“”]/g, '"') + '”)' : '');
 }
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
@@ -239,6 +251,120 @@ function permissionError(type, prev, next, actor, docs) {
       return `Only the project manager (${personName(docs, prev.owner)}) can change ${what} on ${describe('project', prev, docs)}.`;
     }
   }
+  return null;
+}
+
+/* R14 PMO-A1: task ownership, enforced on every workItem write. Only the owner, the project manager, the launch owner or
+   an Admin change a task's fields or hours. An unowned task may be picked up by anyone who can edit; a problem's
+   reporter may move it through its states; a process owner may move work between steps when a step is removed; a
+   confirmation of someone else's Done is the confirmer's own. */
+/* server stamps: the client's copy may not have them yet (it keeps what it sent), so they never count as a change */
+const WI_SERVER = new Set(['updatedAt', 'createdAt', 'doneBy', 'confirmedAt', 'createdTs', 'assignedTs', 'startedTs', 'doneTs']);
+const normWI = (k, v) => (k === 'time' && Array.isArray(v) ? v.map(t => (t && typeof t === 'object' ? Object.assign({}, t, { at: undefined, backdated: undefined }) : t)) : v);
+function changedKeys(a, b) {
+  return [...new Set(Object.keys(a || {}).concat(Object.keys(b || {})))].filter(k => !WI_SERVER.has(k) &&
+    JSON.stringify(normWI(k, (a || {})[k] === undefined ? null : a[k])) !== JSON.stringify(normWI(k, (b || {})[k] === undefined ? null : b[k])));
+}
+function workItemError(prev, next, actor, docs) {
+  if (!prev) return null;
+  const changed = changedKeys(prev, next);
+  if (!changed.length) return null;
+  const project = ((docs.project || []).find(d => d.id === (prev.projectId || next.projectId)) || {}).data || {};
+  const role = ADMIN_ROUTES && typeof ADMIN_ROUTES.roleOf === 'function' ? ADMIN_ROUTES.roleOf(docs, actor) : null;
+  const owned = prev.owner && (docs.person || []).some(d => d.id === prev.owner);
+  if (!owned || actor === prev.owner || actor === project.owner || actor === (project.releaseManager || project.owner) || role === 'admin') return null;
+  const only = keys => changed.every(k => keys.includes(k));
+  if (only(['confirmedBy']) && next.confirmedBy === actor) return null;
+  const reporter = Array.isArray(prev.stateLog) && prev.stateLog[0] ? prev.stateLog[0].by : null;
+  if (prev.kind === 'defect' && reporter === actor && only(['defectStatus', 'status', 'stateLog', 'doneAt'])) return null;
+  /* a passing retest the actor recorded verifies the problem (state fields only, and only to "verified") */
+  if (prev.kind === 'defect' && next.defectStatus === 'verified' && only(['defectStatus', 'status', 'stateLog', 'verifiedByRun']) &&
+    ((docs.testRun || []).find(d => d.id === next.verifiedByRun) || {}).data && ((docs.testRun || []).find(d => d.id === next.verifiedByRun).data.by === actor)) return null;
+  const proc = ((docs.process || []).find(d => d.id === prev.pid) || {}).data;
+  if (proc && only(['step', 'deps']) && [proc.owner].concat(proc.resources || []).includes(actor)) return null;
+  const title = prev.title || 'this task';
+  return `Only ${personName(docs, prev.owner)} (the task owner), ${personName(docs, project.owner)} (the project manager) or an Admin can change “${title}”${changed.includes('time') ? ' or log hours on it' : ''}.`;
+}
+/* R14 PMO-1/A3 server stamps on a task: the doer of a Done, the confirmer's time, the time each hours entry was logged */
+function stampWorkItem(prev, data, actor, today) {
+  const wasDone = !!(prev && prev.status === 'done');
+  /* R14 PMO-7: exact server times for the report's "since the last report" (the client's day fields stay as they are) */
+  const nowTs = new Date().toISOString();
+  const keep = k => { if (prev && prev[k]) data[k] = prev[k]; else delete data[k]; };
+  if (!prev) data.createdTs = nowTs; else keep('createdTs');
+  if (data.owner && (!prev || prev.owner !== data.owner)) data.assignedTs = nowTs; else if (data.owner) keep('assignedTs'); else delete data.assignedTs;
+  if (data.status && data.status !== 'idle' && (!prev || !prev.status || prev.status === 'idle') && !(prev && prev.startedTs)) data.startedTs = nowTs; else keep('startedTs');
+  if (data.status === 'done' && !wasDone) data.doneTs = nowTs; else if (data.status === 'done') keep('doneTs'); else delete data.doneTs;
+  if (data.status === 'done' && !wasDone) data.doneBy = actor;
+  else if (data.status === 'done' && wasDone) { if (prev.doneBy) data.doneBy = prev.doneBy; else delete data.doneBy; }
+  else { delete data.doneBy; delete data.confirmedBy; delete data.confirmedAt; }
+  if (data.status === 'done' && data.confirmedBy) {
+    if (!(prev && prev.confirmedBy === data.confirmedBy)) data.confirmedAt = new Date().toISOString();
+    else data.confirmedAt = prev.confirmedAt || new Date().toISOString();
+  } else delete data.confirmedAt;
+  if (Array.isArray(data.time)) {
+    const was = new Map(((prev && Array.isArray(prev.time)) ? prev.time : []).map(t => { const k = JSON.stringify(Object.assign({}, t, { at: undefined, backdated: undefined })); return [k, t]; }));
+    const now = new Date().toISOString();
+    data.time = data.time.filter(t => t && typeof t === 'object').map(t => {
+      const k = JSON.stringify(Object.assign({}, t, { at: undefined, backdated: undefined }));
+      if (was.has(k)) { const p = was.get(k); const o = Object.assign({}, t); if (p.at) o.at = p.at; else delete o.at; if (p.backdated) o.backdated = true; else delete o.backdated; return o; }
+      const o = Object.assign({}, t, { at: now });
+      if (isDay(o.date) && o.date < today) o.backdated = true; else delete o.backdated;
+      return o;
+    });
+  }
+  return data;
+}
+function confirmError(prev, data, actor, docs) {
+  if (!data.confirmedBy || (prev && prev.confirmedBy === data.confirmedBy)) return null;
+  if (data.status !== 'done') return 'Only a finished task can be confirmed as done.';
+  if (data.confirmedBy !== actor) return `Confirmations are given under your own name: ${personName(docs, actor)} can't confirm as ${personName(docs, data.confirmedBy)}.`;
+  const doer = data.doneBy || data.owner;
+  if (doer === actor) return `${personName(docs, actor)} marked “${data.title || 'this task'}” done, so someone else confirms it.`;
+  return null;
+}
+/* R14 PMO-S1/PMO-11: a task write that moves the project's finish past its deadline goes through Change the plan; a due
+   date is a working day. Status-only writes (Done, hours, problem states) are never refused for the deadline. */
+const SCHEDULE_KEYS = ['due', 'start', 'effortDays', 'deps', 'pid', 'step', 'resolves', 'projectId', 'status'];
+function scheduleError(prev, data, docs, today) {
+  const eng = engine();
+  if (!eng || typeof eng.deadlineBreach !== 'function') return null;
+  if ((!prev || prev.due !== data.due) && data.due && data.due !== today && typeof eng.dueDateProblem === 'function') {
+    const p = eng.dueDateProblem(data.due, docs);
+    if (p) return { status: 400, body: { error: p.text, day: p } };
+  }
+  if (data.kind === 'defect') return null;
+  const changed = changedKeys(prev, data).filter(k => SCHEDULE_KEYS.includes(k));
+  /* reopening or finishing work is never refused for the deadline; only plan moves are */
+  const statusOnly = changed.every(k => k === 'status');
+  if (prev && (!changed.length || statusOnly)) return null;
+  const projectId = data.projectId || (prev && prev.projectId);
+  const project = ((docs.project || []).find(d => d.id === projectId) || {}).data;
+  if (!project) return null;
+  /* a brand-new task in a project still being planned (no saved plan yet) is part of drafting the plan */
+  if (!prev && !(Array.isArray(project.baselines) && project.baselines.length)) return null;
+  const after = Object.assign({}, docs, { workItem: (docs.workItem || []).filter(d => d.id !== data.id).concat([{ id: data.id, data }]) });
+  const b = eng.deadlineBreach(docs, after, projectId, today);
+  if (!b) return null;
+  return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + b.text, reasons: [b.text], deadline: b } };
+}
+/* R14 PMO-S2/S3: the sponsor and the saved plan are the sponsor's controls */
+function projectGuardError(prev, next, actor, docs) {
+  if (!prev) return next.sponsor && next.sponsor === next.owner ? { status: 403, body: { error: `${personName(docs, next.owner)} is the project manager, so they can't also be the sponsor. Choose someone else.` } } : null;
+  if ((prev.sponsor || null) !== (next.sponsor || null)) {
+    /* R14 (L4): the one sponsor rule, shared with PUT /workspaces/:ws/admin/sponsor/:projectId */
+    if (ADMIN_ROUTES && typeof ADMIN_ROUTES.sponsorError === 'function') {
+      const t = ADMIN_ROUTES.sponsorError(docs, actor, prev, next.sponsor || null);
+      if (t) return { status: 403, body: { error: t } };
+    } else {
+    const role = ADMIN_ROUTES && typeof ADMIN_ROUTES.roleOf === 'function' ? ADMIN_ROUTES.roleOf(docs, actor) : null;
+    if (next.sponsor && next.sponsor === (next.owner || prev.owner)) return { status: 403, body: { error: `${personName(docs, next.sponsor)} is the project manager, so they can't also be the sponsor. Choose someone else.` } };
+    if (prev.sponsor && actor !== prev.sponsor && role !== 'admin') return { status: 403, body: { error: `Only an Admin or the current sponsor (${personName(docs, prev.sponsor)}) can change the sponsor.` } };
+    }
+  }
+  const bl = d => JSON.stringify(Array.isArray(d.baselines) ? d.baselines : []);
+  if (Array.isArray(prev.baselines) && prev.baselines.length && bl(prev) !== bl(next))
+    return { status: 409, body: { error: 'Use “Change the plan” to save a new plan, so the sponsor can approve it.' } };
   return null;
 }
 
@@ -461,9 +587,10 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
       { type: 'notify', target: team, status: 'simulated-ok', detail: `Go-live notice for ${project.name} sent to the project team and process owners.` }],
     /* R13 #11: a launch on a two-person override is an exception too (outside the window or with steps still open) */
-    exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')).concat(body && body._override ? [{ ref: 'release:' + relId,
-      summary: `Launched with a two-person override (${(body._override.signoffs || []).map(x => x.name).filter(Boolean).join(' and ') || 'two people'}): ${(body._override.guard || []).join('; ') || 'outside the launch window'}`,
-      by: pn(actor), at }] : []),
+    /* R14 (Jordan C): ONE exception per overridden condition, so the count says how many conditions were overridden */
+    exceptions: releaseExceptions(docs, gate.checks.find(c => c.id === 'exceptions')).concat(body && body._override ? ((body._override.guard || []).length ? body._override.guard : ['outside the launch window']).map((g, i) => ({ ref: 'release:' + relId + (i ? '#' + i : ''),
+      summary: `Launched with a two-person override (${(body._override.signoffs || []).map(x => x.name).filter(Boolean).join(' and ') || 'two people'}): ${g}`,
+      by: pn(actor), at, override: true })) : []),
     checks: JSON.parse(JSON.stringify(gate.checks)),
     snapshot,
   };
@@ -664,7 +791,8 @@ module.exports = async function (context, req) {
         const admins = ADMIN_ROUTES && typeof ADMIN_ROUTES.effectiveRoles === 'function' ? ADMIN_ROUTES.effectiveRoles(st.docs).filter(p => p.role === 'admin').map(p => p.name) : [];
         return fail(403, op.kind === 'add' ? `${nm} can't add a department: only an Admin or an Editor can.` : `Only an Admin can change departments${admins.length ? ` (Admins: ${admins.join(', ')})` : ''}.`);
       }
-      const r = eng.departmentEdit(st.docs, op);
+      /* R14 (Jordan A): the server dates every department change (a client can't backdate a move) */
+      const r = eng.departmentEdit(st.docs, Object.assign({}, op, { at: new Date().toISOString() }));
       if (!r.ok) return fail(400, r.error);
       const prevDepts = eng.departments(st.docs);
       const setDoc = ((st.docs.workspace || []).find(d => d.id === 'settings') || {}).data || {};
@@ -704,30 +832,52 @@ module.exports = async function (context, req) {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
         const exists = !!prev;
+        /* R14 (Jordan B): a refused write is recorded in History as "Refused: <what> — <reason>", written by the server, and
+           never as if it had happened */
+        const refuse = async (status, x) => {
+          const b0 = typeof x === 'string' ? { error: x } : x;
+          try {
+            const what = `${exists ? 'change to' : 'new'} ${describe(type, exists ? prev.data : data, st.docs)}` + (exists ? (() => { const t = changeText(st.docs, prev.data, data); return t && t !== 'no field changed' ? ' (' + t + ')' : ''; })() : '');
+            await store.appendEvent(wsId, { actor, action: 'refused', ref: `${type}:${id}`, summary: ai.labeler(st.docs).scrub(`Refused: ${what} — ${String(b0.error || 'not allowed').replace(/\s+/g, ' ')}`).slice(0, 300) });
+          } catch (e) { /* the refusal stands even if History can't be written */ }
+          return send(status, b0);
+        };
         /* R13: once a project has a plan, its deadline and planned budget move only through "Change the plan"
            (the change routes write directly, with sponsor approval); a plain doc save may not move them. */
         if (type === 'project' && prev && prev.data) {
           const hasPlan = (st.docs.workItem || []).some(w => w.data && w.data.projectId === id);
           const pb = d => (d && d.budget && d.budget.planned != null) ? Number(d.budget.planned) : null;
           if (hasPlan && ((prev.data.target || null) !== (data.target || null) || pb(prev.data) !== pb(data)))
-            return fail(409, 'Use “Change the plan” to move the deadline or budget, so the sponsor can approve it.');
+            return refuse(409, 'Use “Change the plan” to move the deadline or budget, so the sponsor can approve it.');
         }
         /* R10 S5: workspace roles (Viewer / Approver / admin-only settings) */
         const rd = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
-        if (rd) return fail(403, rd);
+        if (rd) return refuse(403, rd);
         /* R5 [S]: permissions */
         const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
-        if (denied) return fail(403, denied);
+        if (denied) return refuse(403, denied);
         if (type === 'project') {
           const bad = approversError(prev && prev.data, data, st.docs);
-          if (bad) return fail(400, bad);
+          if (bad) return refuse(400, bad);
+          const g = projectGuardError(prev && prev.data, data, actor, st.docs);
+          if (g) return refuse(g.status, g.body);
+        }
+        /* R14 PMO-A1/S1/PMO-11/PMO-1: task ownership, the deadline guard, working-day due dates, second-person confirmation */
+        if (type === 'workItem') {
+          const own = workItemError(prev && prev.data, data, actor, st.docs);
+          if (own) return refuse(403, own);
+          const cf = confirmError(prev && prev.data, data, actor, st.docs);
+          if (cf) return refuse(403, cf);
+          const sc = scheduleError(prev && prev.data, data, st.docs, today);
+          if (sc) return refuse(sc.status, sc.body);
+          stampWorkItem(prev && prev.data, data, actor, today);
         }
         /* R13 #3: only the PM or the test's own department assigns a test; the assigner is stamped (they can't pass it) */
         if (type === 'testCase' && (prev ? prev.data.tester || null : null) !== (data.tester || null)) {
           const eng = engine();
           if (data.tester) {
             const bad = eng && typeof eng.canAssignTest === 'function' ? eng.canAssignTest(st.docs, data.projectId || projectOfCase(st.docs, data.dataId), id, actor) : null;
-            if (bad && (data.projectId || projectOfCase(st.docs, data.dataId))) return fail(403, bad.text);
+            if (bad && (data.projectId || projectOfCase(st.docs, data.dataId))) return refuse(403, bad.text);
             data.assignedBy = actor;
           } else delete data.assignedBy;
         }
@@ -737,7 +887,7 @@ module.exports = async function (context, req) {
             if (!sc || !sc.id || ((was[sc.id] || {}).tester || null) === (sc.tester || null)) continue;
             if (sc.tester) {
               const bad = eng && typeof eng.canAssignTest === 'function' ? eng.canAssignTest(st.docs, prev.data, sc.id, actor) : null;
-              if (bad) return fail(403, bad.text);
+              if (bad) return refuse(403, bad.text);
               sc.assignedBy = actor;
             } else delete sc.assignedBy;
           }
@@ -745,16 +895,16 @@ module.exports = async function (context, req) {
         /* R11 §2: separation of duties */
         if (type === 'testRun') {
           const bad = testRunError(prev && prev.data, data, actor, st.docs);
-          if (bad) return fail(403, bad);
+          if (bad) return refuse(403, bad);
         }
         if (type === 'approval') {
           const bad = approvalError(prev && prev.data, data, actor, st.docs);
-          if (bad) return fail(403, bad);
+          if (bad) return refuse(403, bad);
         }
         /* R6: a grant's time box starts at approval: an approved or active grant expires within 30 days of it */
         if (type === 'grant') {
           const bad = grantExpiryError(data, prev && prev.data);
-          if (bad) return fail(400, bad);
+          if (bad) return refuse(400, bad);
         }
         /* R5: cutover edits are stamped so approvals taken before them go stale */
         if (type === 'project' && cutoverStructureChanged(prev && prev.data.cutover, data.cutover) &&
@@ -770,23 +920,33 @@ module.exports = async function (context, req) {
           if (!isDay(data.doneAt)) data.doneAt = prevDay || today;
           else if (data.doneAt > today && data.doneAt !== prevDay) data.doneAt = today;
         }
+        /* R14 PMO-A2: a save that changes no field writes nothing and logs nothing */
+        if (exists && (() => { const strip = o => JSON.stringify(Object.keys(o || {}).filter(k => k !== 'updatedAt' && !(type === 'workItem' && WI_SERVER.has(k)) && o[k] !== undefined).sort().map(k => [k, type === 'workItem' ? normWI(k, o[k]) : o[k]])); return strip(prev.data) === strip(data); })())
+          return send(200, { ok: true, doc: { type, id, data: prev.data }, event: null, unchanged: true });
+        /* R14 (Karen 7): new information is dated, so the report can say when a blocker was raised */
+        if (!exists && ['dataElement', 'risk'].includes(type) && !data.createdAt) data.createdAt = today;
         /* R2: stamp updatedAt when the client did not (missing, or echoed back unchanged) */
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
         const after = Object.assign({}, st.docs, { [type]: (st.docs[type] || []).filter(d => d.id !== id).concat([{ id, data }]) });
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,
-          summary: ai.labeler(after).scrub(serverSummary(body, `${exists ? 'Updated' : 'Created'} ${describe(type, data, after)}`, exists ? changeText(after, prev && prev.data, data) : '')) });
+          summary: ai.labeler(after).scrub(type === 'approval' && data.kind === 'launch-override' && !exists
+            /* the override sign-off in the server's own words (role from the engine, reason from the record) */
+            ? (() => { const eng = engine(); const role = eng && eng.overrideRoleLabel ? eng.overrideRoleLabel(after, data.projectId, actor) : (data.role === 'pm' ? 'project manager' : 'sponsor or approver');
+              return `Signed the launch override as ${role || 'a signer'}${Array.isArray(data.guard) && data.guard.length ? ' (' + data.guard.join('; ') + ')' : ''}: “${String(data.reason || '').slice(0, 120)}”`.slice(0, 300); })()
+            : serverSummary(body, `${exists ? 'Updated' : 'Created'} ${describe(type, data, after)}`, exists ? changeText(after, prev && prev.data, data) : '')) });
         return send(200, { ok: true, doc: { type, id, data }, event: ev });
       }
       if (method === 'DELETE') {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
         const rdel = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
-        if (prev && rdel) return fail(403, rdel);
+        const refuseDel = async msg => { await store.appendEvent(wsId, { actor, action: 'refused', ref: `${type}:${id}`, summary: ai.labeler(st.docs).scrub(`Refused: delete ${describe(type, prev.data, st.docs)} — ${msg}`).slice(0, 300) }).catch(() => {}); return fail(403, msg); };
+        if (prev && rdel) return refuseDel(rdel);
         if (prev && (type === 'process' || type === 'project')) {
           const denied = type === 'process' ? permissionError('process', prev.data, prev.data, actor, st.docs)
             : (actor !== prev.data.owner ? `Only the project manager (${personName(st.docs, prev.data.owner)}) can delete ${describe('project', prev.data, st.docs)}.` : null);
-          if (denied) return fail(403, denied);
+          if (denied) return refuseDel(denied);
         }
         await store.deleteDoc(wsId, type, id);
         const ev = await store.appendEvent(wsId, { actor, action: 'delete', ref: `${type}:${id}`,
@@ -812,14 +972,16 @@ module.exports = async function (context, req) {
       if (typeof body.csv !== 'string' || !body.csv.trim()) return fail(400, 'csv is required');
       if (Buffer.byteLength(body.csv, 'utf8') > MAX_CSV) return fail(413, 'csv exceeds 2 MB');
       const st = await store.getState(ws);
-      if (!(st.docs.dataElement || []).some(d => d.id === dataId)) return fail(404, 'unknown data element');
+      const deDoc = ((st.docs.dataElement || []).find(d => d.id === dataId) || {}).data;
+      if (!deDoc) return fail(404, 'unknown data element');
       const eng = engine();
       let rows, columns;
       if (eng && typeof eng.profileCsv === 'function') {
         const parsed = eng.parseCsv ? eng.parseCsv(body.csv) : null;
         rows = parsed ? Math.max(0, parsed.length - 1) : null;
         if (rows != null && rows > MAX_ROWS) return fail(413, `csv exceeds ${MAX_ROWS} rows`);
-        const out = eng.profileCsv(body.csv, { maxRows: MAX_ROWS });
+        /* R14 (BPM-2): the information's name is context for the shared-bank check (never a customer account) */
+        const out = eng.profileCsv(body.csv, { maxRows: MAX_ROWS, context: deDoc.name || '' });
         columns = Array.isArray(out) ? out : (out && out.columns) || [];
         if (rows == null) rows = (out && out.rows) || (columns[0] && columns[0].rows) || 0;
       } else {
@@ -836,6 +998,7 @@ module.exports = async function (context, req) {
         /* a count only (non-empty values repeating an earlier value), never the values: specDrift flags it against a
            field whose spec is unique (e.g. "Required, unique per vendor") */
         if (typeof c.duplicates === 'number' && isFinite(c.duplicates)) o.duplicates = Math.max(0, Math.floor(c.duplicates));
+        if (typeof c.duplicateRecords === 'number' && isFinite(c.duplicateRecords)) o.duplicateRecords = Math.max(0, Math.floor(c.duplicateRecords));
         /* R13 #7: the fraud and quality checks reach the page and the test generator (counts, row numbers and the engine's
            own sentence only; never a value): a bank account shared across records, near-duplicate names, extra spaces */
         const cnt = v => (typeof v === 'number' && isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
@@ -845,12 +1008,31 @@ module.exports = async function (context, req) {
         if (c.whitespace && typeof c.whitespace === 'object') o.whitespace = { count: cnt(c.whitespace.count), firstRow: cnt(c.whitespace.firstRow) };
         return o;
       });
+      /* R14 (BPM-2): a sample with columns for other information used by the same steps is split per piece, so the
+         tests land on the right information (never 30 cases under one piece) */
+      const at = new Date().toISOString();
+      const split = eng && typeof eng.splitSampleColumns === 'function' && columns.length > 1 ? eng.splitSampleColumns(st.docs, dataId, columns.map(c => c.name)) : { [dataId]: columns.map(c => c.name) };
+      const moved = [];
+      for (const [oid, names_] of Object.entries(split)) {
+        if (oid === dataId || !names_.length) continue;
+        const od = ((st.docs.dataElement || []).find(d => d.id === oid) || {}).data; if (!od) continue;
+        const ocols = columns.filter(c => names_.includes(c.name));
+        const odoc = { id: 'profile-' + oid, dataId: oid, at, rows, columns: ocols, splitFrom: dataId };
+        if (Buffer.byteLength(JSON.stringify(odoc), 'utf8') > MAX_DOC) continue;
+        await store.putDoc(wsId, 'profile', odoc.id, odoc);
+        await store.appendEvent(wsId, { actor: actorOf(body), action: 'profile', ref: 'dataElement:' + oid,
+          summary: `Profiled ${rows} row(s) × ${ocols.length} column(s) from a sample uploaded on ${deDoc.name || 'other information'}; statistics only` });
+        moved.push({ dataId: oid, name: od.name || 'information', columns: ocols.map(c => c.name) });
+      }
+      const keepNames = new Set(split[dataId] || []);
+      const own = moved.length ? columns.filter(c => keepNames.has(c.name)) : columns;
       const id = 'profile-' + dataId;
-      const doc = { id, dataId, at: new Date().toISOString(), rows, columns };
+      const doc = { id, dataId, at, rows, columns: own };
+      if (moved.length) doc.split = moved;
       if (Buffer.byteLength(JSON.stringify(doc), 'utf8') > MAX_DOC) return fail(413, 'profile exceeds 48 KB (too many columns)');
       await store.putDoc(wsId, 'profile', id, doc);
       await store.appendEvent(wsId, { actor: actorOf(body), action: 'profile', ref: 'dataElement:' + dataId,
-        summary: `Profiled ${rows} row(s) × ${columns.length} column(s); statistics only` });
+        summary: `Profiled ${rows} row(s) × ${own.length} column(s); statistics only` + (moved.length ? `; ${moved.map(m => m.columns.length + ' column' + (m.columns.length === 1 ? '' : 's') + ' went to ' + m.name).join(', ')}` : '') });
       return send(200, doc);
     }
 
@@ -918,4 +1100,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { testRunError, approvalError, localNowOf, RATE_LIMIT_MSG, dayInput, clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };
+module.exports._internal = { workItemError, stampWorkItem, scheduleError, projectGuardError, serverSummary, testRunError, approvalError, localNowOf, RATE_LIMIT_MSG, dayInput, clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };

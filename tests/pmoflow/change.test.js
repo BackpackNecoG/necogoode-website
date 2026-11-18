@@ -392,7 +392,8 @@ test('R12 #13: a knock-on into another project is listed per project, and that p
   assert.equal(x.finish.before, eb.forecastFinish);
   assert.match(im.sentence, /moves \d+ tasks? in ERP Upgrade Readiness\.$/);
   const need = C.needsApproval(change, im, docs);
-  assert.ok(need.reasons.some(r => /ERP Upgrade Readiness/.test(r) && /project manager approves too/.test(r)), need.reasons.join(' | '));
+  /* R14: the line names who approves for ERP (from the routing) */
+  assert.ok(need.reasons.some(r => /ERP Upgrade Readiness/.test(r) && /\(project manager of ERP Upgrade Readiness\) approves too/.test(r)), need.reasons.join(' | '));
   assert.ok(need.approvers.some(a => C.hasRole(a, 'linkedPm', ERP) && a.person === 'ta'));
   assert.equal(C.roleText({ role: 'linkedPm', person: 'ta', projectId: ERP }, docs), 'project manager of ERP Upgrade Readiness');
   assert.equal(C.roleText({ role: 'pm', person: 'ta' }, docs), 'project manager');
@@ -587,4 +588,114 @@ test('R13 #13: a refused holiday date is the only message (no "Nothing changes y
   const docs = seedDocs();
   const r = C.buildChange({ projectId: PRJ, reason: 'x', edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: '2026-12-25' }] }, docs);
   assert.equal(r.errors.length, 1, r.errors.join(' | '));
+});
+
+/* ================= R14 (stream L3) ================= */
+const ERP14 = 'erp-upgrade-readiness';
+const lateDaysOf = (docs, id) => { const f = E.forecastAll(docs, TODAY)[id]; return f && f.late ? f.lateDays : 0; };
+
+test('R14 PMO-9: knock-on tasks are re-dated with the change (due moves by the business days their expected finish moves)', () => {
+  const docs = seedDocs();
+  const { change } = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const ch = C.withKnockOn(change, docs, TODAY, { engine: E });
+  const knock = ch.edits.filter(e => e.knock);
+  ['W7', 'W8', 'W10'].forEach(id => assert.ok(knock.some(e => e.id === id && e.field === 'due' && e.auto), id + ' is re-dated: ' + JSON.stringify(knock.map(e => [e.id, e.field]))));
+  assert.ok(knock.every(e => e.to > e.from), 'knock-on dates only move later');
+  const after = C.applyToDocs(docs, ch, '2099-01-01T00:00:00.000Z');
+  /* nobody ends up later than before: the re-dated tasks keep their own slack (late only if they were late already) */
+  ['W7', 'W8', 'W10'].forEach(id => assert.ok(lateDaysOf(after, id) <= lateDaysOf(docs, id), `${id}: late ${lateDaysOf(docs, id)} → ${lateDaysOf(after, id)}`));
+  /* the knock-on edits are automatic: title and kinds come from the edit the person made */
+  assert.equal(C.buildChange({ projectId: PRJ, reason: 'x', edits: ch.edits }, docs).change.kinds.join(), 'dates');
+  assert.deepEqual(C.withKnockOn(ch, docs, TODAY, { engine: E }).edits, ch.edits, 'idempotent');
+  /* the impact still lists them as knock-ons, with their new due date */
+  const im = C.impact(docs, after, PRJ, TODAY, { change: ch, engine: E });
+  const w7 = im.knockOn.find(k => k.id === 'W7');
+  assert.ok(w7 && w7.due === task(after, 'W7').due && w7.dueFrom === task(docs, 'W7').due, JSON.stringify(w7));
+  assert.match(C.editText(knock[0], docs, E), /knock-on/);
+});
+
+test('R14 PMO-9: the impact warns about any task that would end up late', () => {
+  const docs = seedDocs();
+  /* without the knock-on re-dating, the tasks that wait on W6 end up (later) late, here and in ERP */
+  const { change, after } = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const raw = C.impact(docs, after, PRJ, TODAY, { change, engine: E });
+  ['W7', 'E1'].forEach(id => assert.ok(raw.endsLate.some(x => x.id === id), id + ': ' + JSON.stringify(raw.endsLate)));
+  /* with it, none of them does */
+  const ch = C.withKnockOn(change, docs, TODAY, { engine: E });
+  const im = C.impact(docs, C.applyToDocs(docs, ch, '2099-01-01T00:00:00.000Z'), PRJ, TODAY, { change: ch, engine: E });
+  assert.ok(!im.endsLate.some(x => ['W7', 'W8', 'W10', 'E1', 'E2'].includes(x.id)), JSON.stringify(im.endsLate));
+  /* a due date pulled in before the work can finish is flagged, with its owner and dates (ERP: E2 waits on E1) */
+  const e2 = task(docs, 'E2'), e1f = E.forecastAll(docs, TODAY).E1.forecast;
+  const b = C.buildChange({ projectId: ERP14, reason: 'Pull in', edits: [{ op: 'set', type: 'workItem', id: 'E2', field: 'start', to: e1f }, { op: 'set', type: 'workItem', id: 'E2', field: 'due', to: e1f }] }, docs);
+  assert.deepEqual(b.errors, []);
+  const r = { im: C.impact(docs, C.applyToDocs(docs, b.change, '2099-01-01T00:00:00.000Z'), ERP14, TODAY, { change: b.change, engine: E }) };
+  const hit = r.im.endsLate.find(x => x.id === 'E2');
+  assert.ok(e2 && hit && hit.due && hit.expected && hit.expected > hit.due, JSON.stringify(r.im.endsLate));
+  assert.match(r.im.warning || '', /end up late/);
+});
+
+test('R14 PMO-9 route: an applied plan change re-dates the knock-on tasks, and History says so', async () => {
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'Bank portal vendor delayed',
+    edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs0, 'W6').due, 25) }] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.change;
+  assert.ok(c.edits.some(e => e.knock && e.id === 'W7'), 'the stored change lists the knock-on re-dating');
+  for (const a of c.approvers) { const d = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: a.person, decision: 'approve', stepUp: STEP() }); assert.equal(d.status, 200, JSON.stringify(d.body)); }
+  const docs = await docsOf(ws.id);
+  assert.equal(C.changesOf(docs, PRJ).find(x => x.id === c.id).status, 'applied');
+  ['W7', 'W8', 'W10'].forEach(id => {
+    assert.ok(task(docs, id).due > task(docs0, id).due, id + ' due moved');
+    assert.ok(lateDaysOf(docs, id) <= lateDaysOf(docs0, id), `${id} is not later than before: ${lateDaysOf(docs0, id)} → ${lateDaysOf(docs, id)}`);
+  });
+  const evs = await store.listEvents(ws, { limit: 80 });
+  assert.ok(evs.some(e => e.ref === 'workItem:W7' && /knock-on/.test(e.summary)), 'History: the knock-on re-dating is recorded');
+});
+
+test('R14 PMO list 4: the reason names who actually approves for the other project (never "its project manager" when the PM asked)', () => {
+  const docs = seedDocs();
+  const { change, after } = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const im = C.impact(docs, after, PRJ, TODAY, { change, engine: E });
+  const need = C.needsApproval(change, im, docs, { requester: 'ta' });
+  const x = im.crossProjects.find(p => p.projectId === ERP14);
+  assert.ok(x, 'ERP is moved');
+  const a = C.crossApprover(x, need.approvers);
+  assert.ok(a && a.person === 'mc', JSON.stringify(need.approvers));
+  const line = need.reasons.find(rr => /ERP Upgrade Readiness/.test(rr));
+  assert.match(line, /Maya Chen \(sponsor of ERP Upgrade Readiness\) approves too/);
+  assert.ok(!need.reasons.some(rr => /its project manager approves/.test(rr)), need.reasons.join(' | '));
+  /* asked by someone else, ERP's own manager approves */
+  const need2 = C.needsApproval(change, im, docs, { requester: 'lp' });
+  assert.match(need2.reasons.find(rr => /ERP Upgrade Readiness/.test(rr)), /Tom Alvarez \(project manager of ERP Upgrade Readiness\) approves too/);
+});
+
+test('R14 PMO list 7: a pending change’s impact is recomputed on today’s plan ("finish stays …" refreshes)', async () => {
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'More budget', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'budget', to: 99000 }] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.change;
+  assert.equal(c.status, 'proposed');
+  /* the plan moves after the proposal: W11 slips 10 business days */
+  const w11 = task(docs0, 'W11');
+  await store.putDoc(ws.id, 'workItem', 'W11', Object.assign({}, w11, { due: addBiz(w11.due, 10) }));
+  const docs = await docsOf(ws.id);
+  const live = C.liveImpact(docs, C.changesOf(docs, PRJ).find(x => x.id === c.id), TODAY, { engine: E });
+  assert.equal(live.finish.before, E.projectTruth(docs, PRJ, TODAY).forecastFinish);
+  if (live.finish.before !== c.impact.finish.before) assert.notEqual(live.sentence, c.impact.sentence);
+  /* an applied change keeps the impact recorded when it was applied */
+  assert.equal(C.liveImpact(docs, Object.assign({}, c, { status: 'applied' }), TODAY, { engine: E }), c.impact);
+});
+
+test('R14 (L4): a sync-filed change names the tool and issue; a sponsor equal to the PM is ignored', () => {
+  const docs = seedDocs();
+  const c = { id: 'chg-s1', projectId: PRJ, status: 'proposed', requestedBy: null, fromSync: { tool: 'jira', key: 'VOM-7', by: 'ana@northwind.example' }, edits: [], approvers: [] };
+  assert.equal(C.requesterText(c, docs), 'Jira VOM-7 (ana@northwind.example)');
+  assert.equal(C.syncSourceText(c), 'Jira VOM-7');
+  assert.equal(C.requesterText({ requestedBy: 'lp' }, docs), 'Leo Park');
+  const rows = C.logRows([c], docs, E);
+  assert.ok(rows[1].includes('Jira VOM-7 (ana@northwind.example)'), JSON.stringify(rows[1]));
+  const d2 = JSON.parse(JSON.stringify(docs)); proj(d2).sponsor = proj(d2).owner;
+  assert.notEqual(C.sponsorOf(d2, PRJ), proj(d2).owner);
 });

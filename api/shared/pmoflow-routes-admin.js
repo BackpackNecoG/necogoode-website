@@ -6,6 +6,9 @@
      DELETE /workspaces/:ws/admin/invites/:id          {actor}                  Admin only
      POST   /workspaces/:ws/admin/holidays             {date, name, actor}      Admin only
      DELETE /workspaces/:ws/admin/holidays/:date       {actor}                  Admin only
+     POST   /ws/:ws/departments                        {op, actor}  R14: assign/approvers become proposals (two Admins, step-up)
+     POST   /workspaces/:ws/admin/departments/pending/:id/confirm|cancel  {actor, stepUp}  a second Admin confirms
+     PUT    /workspaces/:ws/admin/sponsor/:projectId   {sponsor, actor}         R14: an Admin who is not the PM (or the current sponsor)
      GET    /workspaces/:ws/admin/audit?format=json|csv&person=&item=&from=&to=   chained log + Verify result
      POST   /workspaces/:ws/admin/audit/anchor         {actor}                  records the current chain head
      POST   /workspaces/:ws/admin/audit/verify         {entries:[...], head}    re-checks a saved JSON export (links, signed head, checkpoints)
@@ -120,6 +123,40 @@ function adminError(docs, actor) {
   return `Only an Admin can change workspace settings${list.length ? ` (Admins: ${list.join(', ')})` : ''}.`;
 }
 
+/* ---------- R14 L4 #2: the project sponsor ---------- */
+/* Who may set a project's sponsor (also the hook for the generic doc API in index.js: ADMIN_ROUTES.sponsorError).
+   project: the project as stored; next: the new sponsor id (or null to clear). Returns an error message or null.
+   Rules: an Admin or the current (explicit) sponsor decides; the project manager never picks the sponsor, even as an
+   Admin; the project manager can never be the sponsor; nobody appoints themselves (another Admin does). */
+function sponsorError(docs, actor, project, next) {
+  if (!project) return 'Pick a project.';
+  const cur = project.sponsor || null;
+  next = next || null;
+  if (cur === next) return null;
+  const pmName = personName(docs, project.owner) || 'the project manager';
+  if (actor && actor === project.owner) return `${pmName} is the project manager of ${project.name || 'this project'}, so another Admin sets its sponsor.`;
+  if (next && next === project.owner) return `${pmName} is the project manager, so they can’t also be the sponsor. Pick someone else.`;
+  if (next && next === actor && actor !== cur) return 'Nobody makes themselves sponsor: another Admin sets it.';
+  if (actor && cur && actor === cur) return null;              /* the current sponsor hands it over */
+  if (roleOf(docs, actor) === 'admin') return null;
+  const list = admins(docs).filter(a => a.id !== project.owner).map(a => a.name);
+  return `Only an Admin can change the sponsor of ${project.name || 'a project'}${list.length ? ` (ask ${list.join(' or ')})` : ''}.`;
+}
+function changeMod() { try { return require('./pmoflow-change.js'); } catch (e) { return null; } }
+/* each project's manager, explicit sponsor and the sponsor that approves today (never the project manager) */
+function projectSponsors(docs) {
+  const C = changeMod();
+  return ((docs && docs.project) || []).map(d => {
+    const p = Object.assign({}, d.data, { id: d.id });
+    const explicit = p.sponsor && p.sponsor !== p.owner && personName(docs, p.sponsor) ? p.sponsor : null;
+    let effective = explicit;
+    if (!effective && C && typeof C.sponsorOf === 'function') { try { effective = C.sponsorOf(docs, Object.assign({}, p, { sponsor: null }), [p.owner]) || null; } catch (e) { effective = null; } }
+    if (effective === p.owner) effective = null;
+    return { id: p.id, name: p.name || p.id, status: p.status || null, owner: p.owner || null, ownerName: personName(docs, p.owner),
+      sponsor: explicit, sponsorName: explicit ? personName(docs, explicit) : null, effective, effectiveName: effective ? personName(docs, effective) : null };
+  });
+}
+
 /* ---------- audit chain ---------- */
 const sha256 = s => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 const genesis = wsId => sha256('pmoflow-audit-genesis|' + wsId);
@@ -157,6 +194,22 @@ const CHAIN_V = 2;
 const nameOf = e => String(e.actorName != null ? e.actorName : (e.actor || ''));
 /* The hashed content of an entry: position, the five stored fields and the actor's display name, in a fixed order. */
 const canonical = (seq, e) => JSON.stringify([seq, String(e.at || ''), String(e.actor || ''), nameOf(e), String(e.action || ''), String(e.ref || ''), String(e.summary || '')]);
+/* R14: who wrote an entry's sentence. Since R14 the server writes the sentence of every generic doc save from the actual
+   field diff ("Updated …: field a → b"), and keeps the person's own text only as a quoted note at the end
+   (" (note: “…”)"). Before R14 the doc API stored the person's text as the sentence. The routes (sync, plan changes, admin,
+   launch…) always wrote their own. R14 (Jordan B): refused writes are logged by the server as action 'refused'
+   ("Refused: … — reason") and exported with refused: true. This is a label for readers: the hash covers the stored summary exactly as it is, so
+   `written` and `note` are derived, never hashed, and moving text between the sentence and the note breaks the chain. */
+const DOC_ACTIONS = ['create', 'update', 'delete'];
+const NOTE_RE = /\s\(note: “([\s\S]*)”\)$/;
+function summaryParts(summary, action) {
+  const sm = String(summary == null ? '' : summary);
+  const m = sm.match(NOTE_RE);
+  const text = m ? sm.slice(0, m.index) : sm;
+  const docApi = action == null || DOC_ACTIONS.includes(String(action));
+  const written = !docApi || /^(Created|Updated|Deleted) /.test(text) ? 'server' : 'client';
+  return { written, text, note: m && written === 'server' ? m[1] : null };
+}
 const KEY_LABEL = { 'app-setting': 'production key', derived: 'development key', ephemeral: 'development key', missing: 'no key' };
 const keyLabel = () => KEY_LABEL[auditKeySource()] || 'development key';
 /* events: oldest first; names: {personId: name}. Returns entries with seq, actorName, prevHash, hash. Deterministic. */
@@ -168,6 +221,10 @@ function chainEvents(wsId, events, names) {
     const actorName = e.actorName != null ? String(e.actorName) : (names[e.actor] || String(e.actor || ''));
     const hash = sha256(prev + '\n' + canonical(seq, Object.assign({}, e, { actorName })));
     const out = { seq, at: e.at, actor: e.actor, actorName, action: e.action, ref: e.ref, summary: e.summary, prevHash: prev, hash };
+    /* R14: derived labels (not hashed): who wrote the sentence, and the person's own note when there is one */
+    const sp = summaryParts(e.summary, e.action);
+    out.written = sp.written; if (sp.note != null) out.note = sp.note;
+    if (String(e.action) === 'refused') out.refused = true;   /* R14 (Jordan B): a write the server refused, logged by the server */
     prev = hash;
     return out;
   });
@@ -261,6 +318,10 @@ function fromCSV(text) {
     if (r.length !== CSV_COLS.length) return { error: `Row ${i + 1} has ${r.length} cells instead of ${CSV_COLS.length}, so the file was changed or cut.` };
     const e = {}; CSV_COLS.forEach((c, k) => { e[c] = uncell(r[k]); });
     e.seq = Number(e.seq);
+    /* R14: the same derived labels as the JSON export (not columns, so files exported before R14 still parse) */
+    const sp = summaryParts(e.summary, e.action);
+    e.written = sp.written; if (sp.note != null) e.note = sp.note;
+    if (e.action === 'refused') e.refused = true;
     entries.push(e);
   }
   for (; i < rows.length; i++) {
@@ -318,9 +379,189 @@ function view(docs, s) {
   const settings = { id: s.id, roles: s.roles, anchors: s.anchors,
     invites: s.invites.map(i => Object.assign({}, i, { departmentId: i.departmentId || null, department: i.departmentId ? deptName(i.departmentId) : null })) };
   const bu = Object.fromEntries(((docs && docs.person) || []).map(d => [d.id, d.data && d.data.bu ? String(d.data.bu) : null]));
-  return { settings, calendar: calendarOf(docs).doc, departments: depts,
+  return { settings, calendar: calendarOf(docs).doc, departments: depts, projects: projectSponsors(docs), pendingDepartments: pendingView(docs),
     people: effectiveRoles(docs).map(p => Object.assign(p, { department: bu[p.id] || null })),
     seats: seats(docs), roles: ROLES.map(r => ({ id: r, label: ROLE_LABEL[r], paid: PAID.includes(r) })) };
+}
+
+/* ---------- R14 (Jordan re-test 1): two-person, step-up department changes ---------- */
+/* Moving a person between departments ('assign') and choosing a department's approvers ('approvers') give or take
+   sign-off rights, so one Admin proposes and a second Admin confirms with the extra sign-in check. Until then nothing
+   changes. The confirmer is never the proposer, nor a person the change moves or makes (or stops being) an approver.
+   Proposals live in settings.pendingDept [{id, kind, op, by, at, affected, text}]. On confirmation the server stamps:
+     person.buSince = server time (membership), department.approverSince[personId] = server time (each new approver),
+   so the engine can ignore memberships and approver rights newer than a part already in flight. Entries without a
+   since date predate R14 and count as old. Adding, renaming and removing a department stay one-Admin changes (they give
+   nobody rights). R14 rules 1-2 (Rule #1, Karen): naming the FIRST approver(s) of a department that has none (also when
+   adding it), and any change when no other Admin could confirm it (one-Admin workspace), apply at once, still stamped,
+   so they count for new work only. Every sentence is server-written. */
+const MAX_PENDING = 50;
+const stepUpOf = (body, at) => {
+  const su = body && isPlainObject(body.stepUp) ? body.stepUp : null;
+  if (!su || typeof su.method !== 'string' || !su.method) return null;
+  const t = typeof su.at === 'string' && isFinite(Date.parse(su.at)) && Math.abs(Date.parse(su.at) - Date.parse(at)) < 15 * 60000 ? new Date(Date.parse(su.at)).toISOString() : at;
+  return { at: t, method: 'simulated-mfa' };
+};
+const pendingOf = docs => { const r = settingsOf(docs).rest; return Array.isArray(r.pendingDept) ? r.pendingDept.filter(isPlainObject) : []; };
+function deptText(docs, op) {
+  const eng = engine(); const ds = eng ? eng.departments(docs) : [];
+  const d = ds.find(x => x.id === op.id) || null;
+  const nm = id => personName(docs, id) || 'someone';
+  if (op.kind === 'assign') {
+    const p = ((docs.person || []).find(x => x.id === op.personId) || {}).data || {};
+    const from = p.bu ? String(p.bu) : null, to = d ? d.name : null;
+    return { verb: to ? `moving ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `taking ${nm(op.personId)} out of ${from || 'their department'}`,
+      text: to ? `Move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Take ${nm(op.personId)} out of ${from || 'their department'}`,
+      done: to ? `Moved ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Took ${nm(op.personId)} out of ${from || 'their department'}`,
+      withdraw: to ? `move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `take ${nm(op.personId)} out of ${from || 'their department'}`, affected: [op.personId] };
+  }
+  const cur = d ? d.approvers : [], next = [...new Set((op.approvers || []).map(String))];
+  const add = next.filter(x => !cur.includes(x)), rm = cur.filter(x => !next.includes(x));
+  const parts = [add.length ? 'add ' + add.map(nm).join(', ') : '', rm.length ? 'remove ' + rm.map(nm).join(', ') : ''].filter(Boolean).join('; ') || 'no change';
+  const dn = d ? d.name : 'the department';
+  return { verb: `changing ${dn} approvers (${parts})`, text: `${dn} approvers: ${parts}`, done: `Changed ${dn} approvers (${parts})`, withdraw: `change ${dn} approvers (${parts})`, affected: add.concat(rm) };
+}
+/* Writes a department edit the engine returned, keeping every other settings field and each approver's since date. */
+async function writeDeptEdit(store, wsId, docs, r, opts) {
+  opts = opts || {};
+  const now = opts.at || new Date().toISOString();
+  const setDoc = settingsOf(docs).rest;
+  const prev = Array.isArray(setDoc.departments) ? setDoc.departments : [];
+  const departments = r.departments.map(d => {
+    const old = prev.find(x => x && x.id === d.id) || {};
+    const was = isPlainObject(old.approverSince) ? old.approverSince : {};
+    const since = {};
+    const eng = isPlainObject(d.approverSince) ? d.approverSince : {};   /* the engine's departmentEdit stamps new approvers too */
+    (d.approvers || []).forEach(id => { if (was[id]) since[id] = was[id]; else if (opts.stampApprovers && !(old.approvers || []).includes(id)) since[id] = now; else if (eng[id]) since[id] = eng[id]; });
+    const out = { id: d.id, name: d.name, approvers: d.approvers || [] };
+    if (Object.keys(since).length) out.approverSince = since;
+    return out;
+  });
+  const pend = opts.pending !== undefined ? opts.pending : pendingOf(docs);
+  await store.putDoc(wsId, 'workspace', SETTINGS_ID, Object.assign({}, setDoc, { id: SETTINGS_ID, departments, pendingDept: pend.slice(-MAX_PENDING) }));
+  const patch = async (type, list) => {
+    for (const x of list || []) {
+      const cur = ((docs[type] || []).find(d => d.id === x.id) || {}).data;
+      if (!cur) continue;
+      const data = Object.assign({}, cur, x, { id: x.id });
+      if (type === 'person') { if (data.bu == null) delete data.bu; if (opts.stampMember && (cur.bu || null) !== (x.bu || null)) data.buSince = now; }
+      await store.putDoc(wsId, type, x.id, data);
+    }
+  };
+  await patch('person', r.people); await patch('process', r.processes); await patch('project', r.projects);
+  return departments;
+}
+function pendingView(docs) {
+  return pendingOf(docs).map(p => Object.assign({}, p, { byName: personName(docs, p.by), departmentId: p.op && p.op.id || null,
+    note: null }));
+}
+async function handleDepartments({ method, wsId, ws, body, store, send, fail }) {
+  if (method !== 'POST') { fail(405, 'method not allowed'); return; }
+  const eng = engine();
+  const op = isPlainObject(body.op) ? body.op : null;
+  if (!eng || !op || typeof op.kind !== 'string') { fail(400, 'op is required'); return; }
+  const actor = actorOf(body);
+  const st = await store.getState(ws);
+  const docs = st.docs;
+  const role = roleOf(docs, actor);
+  const nm = personName(docs, actor) || 'This person';
+  if (op.kind === 'add' ? !(role === 'admin' || role === 'editor') : role !== 'admin') {
+    const list = admins(docs).map(a => a.name);
+    fail(403, op.kind === 'add' ? `${nm} can't add a department: only an Admin or an Editor can.` : `Only an Admin can change departments${list.length ? ` (Admins: ${list.join(', ')})` : ''}.`); return;
+  }
+  const at = new Date().toISOString();
+  const propose = async (pop, docsNow, extraSent) => {
+    const chk = eng.departmentEdit(docsNow, pop);
+    if (!chk.ok) return { error: chk.error };
+    const pend = pendingOf(docsNow);
+    const clash = pend.find(p => p.kind === pop.kind && (pop.kind === 'assign' ? p.op.personId === pop.personId : p.op.id === pop.id));
+    if (clash) return { conflict: `A change for ${pop.kind === 'assign' ? personName(docsNow, pop.personId) : 'this department'} is already waiting for a second Admin (${clash.text}). Confirm or cancel it first.` };
+    const t = deptText(docsNow, pop);
+    const entry = { id: 'dmv-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex'), kind: pop.kind, op: pop, by: actor, at, status: 'pending', affected: t.affected, text: t.text };
+    const sd = settingsOf(docsNow).rest;
+    await store.putDoc(wsId, 'workspace', SETTINGS_ID, Object.assign({}, sd, { id: SETTINGS_ID, pendingDept: pend.concat([entry]).slice(-MAX_PENDING) }));
+    await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings', summary: `Proposed ${t.verb} (waits for a second Admin)`.slice(0, 300) });
+    return { entry };
+  };
+  const fresh = async () => (await store.getState(ws)).docs;
+  if (op.kind === 'assign' || op.kind === 'approvers') {
+    const pop = { kind: op.kind, id: op.id == null ? null : String(op.id), personId: op.personId != null ? String(op.personId) : undefined, approvers: op.approvers };
+    /* R14 rules 1-2 (Karen, Rule #1): applied at once, stamped (the engine counts it for new work only), when
+       - it names the FIRST approver(s) of a department that has none, or
+       - no other Admin could confirm it (a one-Admin workspace, or the only other Admin is the person it moves). */
+    const t = deptText(docs, pop);
+    const curD = (eng.departments(docs).find(d => d.id === pop.id) || {});
+    const first = pop.kind === 'approvers' && !(curD.approvers || []).length && (pop.approvers || []).length > 0;
+    const others = admins(docs).filter(a => a.id !== actor && !t.affected.includes(a.id));
+    if (first || !others.length) {
+      const er = eng.departmentEdit(docs, pop);
+      if (!er.ok) { fail(400, er.error); return; }
+      if (pendingOf(docs).some(p => p.kind === pop.kind && (pop.kind === 'assign' ? p.op.personId === pop.personId : p.op.id === pop.id))) { fail(409, 'A change for this is already waiting for a second Admin. Confirm or cancel it first.'); return; }
+      await writeDeptEdit(store, wsId, docs, er, { at, stampMember: pop.kind === 'assign', stampApprovers: pop.kind === 'approvers' });
+      const nms = (pop.approvers || []).map(id => personName(docs, id) || 'someone');
+      const sentence = first ? `Named the first approver${nms.length === 1 ? '' : 's'} for ${curD.name || 'the department'}: ${nms.join(', ')} (applies to new work only)`
+        : `${t.done} (${admins(docs).length <= 1 ? 'no second Admin in this workspace' : 'no other Admin can confirm it'}; applies to new work only)`;
+      await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings', summary: sentence.slice(0, 300) });
+      send(200, { ok: true, applied: true, pending: null, departments: eng.departments(await fresh()) });
+      return;
+    }
+    const r = await propose({ kind: op.kind, id: op.id == null ? null : String(op.id), personId: op.personId != null ? String(op.personId) : undefined, approvers: op.approvers }, docs);
+    if (r.error) { fail(400, r.error); return; }
+    if (r.conflict) { fail(409, r.conflict); return; }
+    const d2 = await fresh();
+    send(200, { ok: true, applied: false, pending: pendingView(d2).find(p => p.id === r.entry.id), departments: eng.departments(d2) });
+    return;
+  }
+  /* add / rename / remove: one Admin (add: an Admin or Editor); a new department's approvers wait for a second Admin */
+  /* R14 rule 1: approvers named when adding a department are its first approvers: immediate, stamped */
+  const ap = op.kind === 'add' && Array.isArray(op.approvers) ? [...new Set(op.approvers.map(String).filter(Boolean))] : [];
+  const r = eng.departmentEdit(docs, op);
+  if (!r.ok) { fail(400, r.error); return; }
+  const prevDepts = eng.departments(docs);
+  await writeDeptEdit(store, wsId, docs, r, { at, stampApprovers: op.kind === 'add' });
+  const was = prevDepts.find(d => d.id === op.id), now = r.departments.find(d => d.id === op.id);
+  const added = op.kind === 'add' ? r.departments.find(d => !prevDepts.some(p => p.id === d.id)) : null;
+  const summary = op.kind === 'add' ? `Added the ${added ? added.name : 'new'} department`
+    : op.kind === 'rename' ? `Renamed the ${was ? was.name : ''} department to ${now ? now.name : ''}`
+    : op.kind === 'remove' ? `Removed the ${was ? was.name : ''} department` : 'Changed the departments';
+  await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings', summary });
+  if (added && ap.length) {
+    const nms = ap.map(id => personName(docs, id) || 'someone');
+    await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings',
+      summary: `Named the first approver${nms.length === 1 ? '' : 's'} for ${added.name}: ${nms.join(', ')} (applies to new work only)`.slice(0, 300) });
+  }
+  send(200, { ok: true, applied: true, departments: eng.departments(await fresh()), pending: null });
+}
+async function decidePending({ wsId, ws, body, store, send, fail, pid, decision }) {
+  const eng = engine();
+  const actor = actorOf(body);
+  const st = await store.getState(ws);
+  const docs = st.docs;
+  const pend = pendingOf(docs);
+  const p = pend.find(x => x.id === pid);
+  if (!p) { fail(404, 'That department change is no longer waiting (it was confirmed or cancelled).'); return; }
+  if (roleOf(docs, actor) !== 'admin') { fail(403, `Only an Admin can ${decision === 'confirm' ? 'confirm' : 'cancel'} a department change.`); return; }
+  const rest = pend.filter(x => x.id !== pid);
+  const t = deptText(docs, p.op);
+  if (decision === 'cancel') {
+    await store.putDoc(wsId, 'workspace', SETTINGS_ID, Object.assign({}, settingsOf(docs).rest, { id: SETTINGS_ID, pendingDept: rest }));
+    await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings',
+      summary: (actor === p.by ? `Withdrew the proposal to ${t.withdraw}` : `Turned down ${personName(docs, p.by) || 'an Admin'}’s proposal to ${t.withdraw}`).slice(0, 300) });
+    send(200, { ok: true, cancelled: true });
+    return;
+  }
+  if (actor === p.by) { fail(403, `You proposed this change, so a second Admin confirms it${admins(docs).filter(a => a.id !== actor && !(p.affected || []).includes(a.id)).length ? `: ${admins(docs).filter(a => a.id !== actor && !(p.affected || []).includes(a.id)).map(a => a.name).join(' or ')}` : ''}.`); return; }
+  if ((p.affected || []).includes(actor) || (t.affected || []).includes(actor)) { fail(403, `${personName(docs, actor)} is the person being moved or given approval rights here, so another Admin confirms their own change.`); return; }
+  const at = new Date().toISOString();
+  const su = stepUpOf(body, at);
+  if (!su) { fail(403, 'Confirming a department change needs the extra sign-in check. Confirm again and complete the check.'); return; }
+  const r = eng.departmentEdit(docs, p.op);
+  if (!r.ok) { fail(409, `This change can’t be applied any more: ${r.error} Cancel it and propose it again.`); return; }
+  await writeDeptEdit(store, wsId, docs, r, { at, pending: rest, stampMember: p.kind === 'assign', stampApprovers: p.kind === 'approvers' });
+  await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings',
+    summary: `${t.done} (proposed by ${personName(docs, p.by) || 'an Admin'}, confirmed by ${personName(docs, actor)} with the extra sign-in check)`.slice(0, 300) });
+  const d2 = (await store.getState(ws)).docs;
+  send(200, { ok: true, applied: true, departments: eng.departments(d2) });
 }
 
 /* ---------- sandbox creation (R11 §2) ---------- */
@@ -376,6 +617,25 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
   }
   /* Guard: the generic doc API must not write the settings doc directly (it would skip the Admin check). */
   if (seg[0] === 'ws' && seg[2] === 'doc' && seg[3] === 'workspace' && method !== 'GET') { fail(403, 'Workspace settings change only from Admin.'); return true; }
+  /* R14 (Jordan): department changes are owned here (the index.js handler stays as an unreachable fallback) */
+  if (seg[0] === 'ws' && seg.length === 3 && seg[2] === 'departments' && WS_RE.test(seg[1] || '')) {
+    const ws = await store.getWorkspace(seg[1]);
+    if (!ws || ws.expired) { fail(404, 'workspace not found or expired'); return true; }
+    await handleDepartments({ method, wsId: seg[1], ws, body: body || {}, store, send, fail });
+    return true;
+  }
+  /* R14: no one-click department move through the generic doc API, and nobody writes a membership date */
+  if (seg[0] === 'ws' && seg.length === 5 && seg[2] === 'doc' && seg[3] === 'person' && method === 'PUT' && WS_RE.test(seg[1] || '') && body && isPlainObject(body.data)) {
+    const ws = await store.getWorkspace(seg[1]);
+    if (ws && !ws.expired) {
+      const st = await store.getState(ws);
+      const prev = ((st.docs.person || []).find(d => d.id === seg[4]) || {}).data || null;
+      const nb = body.data.bu == null || body.data.bu === '' ? null : String(body.data.bu);
+      if ((prev && (prev.bu || null) !== nb) || (prev ? (prev.buSince || null) !== (body.data.buSince || null) : body.data.buSince != null)) {
+        fail(409, 'Move people between departments from Admin › Departments: one Admin proposes it and a second Admin confirms it.'); return true;
+      }
+    }
+  }
   if (seg[0] !== 'workspaces' || seg[2] !== 'admin') return false;
   const wsId = seg[1];
   if (!WS_RE.test(wsId || '')) { fail(400, 'invalid workspace id'); return true; }
@@ -390,6 +650,43 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
     if (method !== 'GET') { fail(405, 'method not allowed'); return true; }
     const st = await store.getState(ws);
     send(200, view(st.docs, settingsOf(st.docs)));
+    return true;
+  }
+
+  /* POST /workspaces/:ws/admin/departments/pending/:id/confirm|cancel   R14 (Jordan) */
+  if (rest[0] === 'departments' && rest[1] === 'pending' && rest.length === 4) {
+    if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
+    if (!ID_RE.test(rest[2] || '') || !['confirm', 'cancel'].includes(rest[3])) { fail(404, 'unknown route'); return true; }
+    await decidePending({ wsId, ws, body, store, send, fail, pid: rest[2], decision: rest[3] });
+    return true;
+  }
+  /* PUT /workspaces/:ws/admin/sponsor/:projectId {sponsor, actor}   R14 L4 #2 */
+  if (rest[0] === 'sponsor') {
+    if (rest.length !== 2 || method !== 'PUT') { fail(rest.length === 2 ? 405 : 404, rest.length === 2 ? 'method not allowed' : 'unknown route'); return true; }
+    const pid = rest[1];
+    if (!ID_RE.test(pid || '')) { fail(400, 'invalid project id'); return true; }
+    const actor = actorOf(body);
+    const st = await store.getState(ws);
+    const pd = (st.docs.project || []).find(d => d.id === pid);
+    if (!pd) { fail(404, 'That project was not found.'); return true; }
+    const project = Object.assign({}, pd.data, { id: pid });
+    const next = body.sponsor == null || body.sponsor === '' ? null : String(body.sponsor);
+    if (next && (!ID_RE.test(next) || !personName(st.docs, next))) { fail(400, 'Pick a person from the directory as sponsor.'); return true; }
+    if (next && next === project.owner && actor !== project.owner) { fail(400, sponsorError(st.docs, actor, project, next)); return true; }
+    const denied = sponsorError(st.docs, actor, project, next);
+    if (denied) { fail(403, denied); return true; }
+    const before = projectSponsors(st.docs).find(p => p.id === pid) || {};
+    if ((project.sponsor || null) === next) { send(200, { ok: true, project: before }); return true; }
+    const data = Object.assign({}, pd.data, { sponsor: next, updatedAt: new Date().toISOString() });
+    if (!next) delete data.sponsor;
+    await store.putDoc(wsId, 'project', pid, data);
+    const after = Object.assign({}, st.docs, { project: (st.docs.project || []).map(d => (d.id === pid ? { id: pid, data } : d)) });
+    const row = projectSponsors(after).find(p => p.id === pid);
+    const was = before.sponsor ? before.sponsorName : before.effectiveName ? `${before.effectiveName} (default)` : 'nobody';
+    const now = row.sponsor ? row.sponsorName : row.effectiveName ? `${row.effectiveName} (default)` : 'nobody';
+    /* server-written: the client's text is never the sentence */
+    await store.appendEvent(wsId, { actor, action: 'sponsor', ref: `project:${pid}`, summary: `Set the sponsor of “${project.name || pid}”: ${was} → ${now}`.slice(0, 300) });
+    send(200, { ok: true, project: row });
     return true;
   }
 
@@ -562,5 +859,5 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
   return true;
 }
 
-module.exports = { handle, readCookie, wsCookie, WS_COOKIE, signHead, headOf, auditKeySource, keyLabel, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, fromCSV, csvRows, filterEntries, genesis, canonical, CHAIN_V,
+module.exports = { sponsorError, projectSponsors, summaryParts, handle, readCookie, wsCookie, WS_COOKIE, signHead, headOf, auditKeySource, keyLabel, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, fromCSV, csvRows, filterEntries, genesis, canonical, CHAIN_V,
   ROLES, ROLE_LABEL, defaultRole };

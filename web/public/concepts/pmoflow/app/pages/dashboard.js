@@ -56,14 +56,16 @@ function rollupHTML() {
   const prog = L().program;
   return `<section class="pmo-dash-roll" data-rollup aria-label="Program roll-up">${groups.map(g => {
     const rc = {}; g.projects.forEach(p => { const k = truthOf(p).k; rc[k] = (rc[k] || 0) + 1; });
-    const fin = g.projects.map(financials), planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + f.forecast, 0);
+    const fin = g.projects.map(financials), planned = fin.reduce((a, f) => a + (f.planned || 0), 0), fc = fin.reduce((a, f) => a + (f.known ? f.forecast : 0), 0);
+    /* R14 (Karen 2): projects without day rates have no expected cost; they are named, never counted as $0 or as over */
+    const unk = fin.filter(f => !f.known).length, plannedKnown = fin.reduce((a, f) => a + (f.known ? f.planned || 0 : 0), 0);
     const ev = evSum(g.projects);
     const next = g.projects.filter(p => p.status !== 'live' && p.target).sort((a, b) => String(a.target).localeCompare(String(b.target)))[0];
     const on = prog === g.program;
     return `<button type="button" class="pmo-roll-card ${on ? 'on' : ''}" data-program="${esc(g.program)}" aria-pressed="${on}" title="${on ? 'Show every program' : 'Show only ' + esc(g.program)}">
       <span class="pmo-roll-h"><b>${esc(g.program)}</b><span class="hint">${g.projects.length} project${g.projects.length === 1 ? '' : 's'}</span></span>
       <span class="pmo-roll-rag">${['red', 'amber', 'green', 'none', 'live'].filter(k => rc[k]).map(k => `<span class="rag rag-${k}"><i></i>${rc[k]}</span>`).join('')}</span>
-      <span class="pmo-roll-n"><span>${planned ? `Budget <b>${esc(money(planned))}</b> · ` : ''}expected <b class="${planned && fc > planned ? 'fail' : ''}">${esc(money(fc))}</b></span>
+      <span class="pmo-roll-n"><span>${planned ? `Budget <b>${esc(money(planned))}</b> · ` : ''}expected <b class="${plannedKnown && fc > plannedKnown ? 'fail' : ''}">${esc(money(fc))}</b>${unk ? ` <span class="hint" data-cost-unknown-n>(${unk} without rates)</span>` : ''}</span>
         <span>SPI <b class="${idxCls(ev && ev.spi)}">${fmtIdx(ev && ev.spi)}</b> · CPI <b class="${idxCls(ev && ev.cpi)}">${fmtIdx(ev && ev.cpi)}</b></span>
         <span>${next ? `Next deadline <b>${esc(fmt(next.target))}</b> · ${esc(next.name)}` : 'No upcoming launch'}</span></span></button>`;
   }).join('')}</section>`;
@@ -90,7 +92,7 @@ function evW(projects) {
     const t = evSum(g.projects);
     return `<tr class="pmo-prog-h"><td colspan="6"><b>${esc(g.program)}</b> <span class="hint">SPI ${fmtIdx(t && t.spi)} · CPI ${fmtIdx(t && t.cpi)}</span></td></tr>` + g.projects.map(p => {
       const e = earnedValue(p);
-      return `<tr data-dash-ev="${esc(p.id)}"><td><a href="${link('/project/' + encodeURIComponent(p.id))}" data-link>${esc(p.name)}</a>${evFlagsHTML(p) ? `<div class="pmo-evflags">${evFlagsHTML(p)}</div>` : ''}</td>${e ? `<td class="pmo-num">${esc(money(e.pv))}</td><td class="pmo-num">${esc(money(e.ev))}</td><td class="pmo-num"><b class="${idxCls(e.spi)}">${fmtIdx(e.spi)}</b></td><td class="pmo-num"><b class="${idxCls(e.cpi)}">${fmtIdx(e.cpi)}</b></td><td class="pmo-num" data-t="cost">${esc(money(financials(p).forecast))}</td>` : '<td colspan="5" class="hint">No earned value yet</td>'}</tr>`;
+      return `<tr data-dash-ev="${esc(p.id)}"><td><a href="${link('/project/' + encodeURIComponent(p.id))}" data-link>${esc(p.name)}</a>${evFlagsHTML(p) ? `<div class="pmo-evflags">${evFlagsHTML(p)}</div>` : ''}</td>${e ? `<td class="pmo-num">${esc(money(e.pv))}</td><td class="pmo-num">${esc(money(e.ev))}</td><td class="pmo-num"><b class="${idxCls(e.spi)}">${fmtIdx(e.spi)}</b></td><td class="pmo-num"><b class="${idxCls(e.cpi)}">${fmtIdx(e.cpi)}</b></td><td class="pmo-num" data-t="cost">${financials(p).known ? esc(money(financials(p).forecast)) : '<span class="hint" data-cost-unknown>Cost unknown: set rates</span>'}</td>` : '<td colspan="5" class="hint">No earned value yet</td>'}</tr>`;
     }).join('');
   }).join('');
   return `<div class="tbl-wrap"><table class="pmo-fin"><thead><tr><th>Project</th><th class="pmo-num">Planned value</th><th class="pmo-num">Earned value</th><th class="pmo-num">SPI</th><th class="pmo-num">CPI</th><th class="pmo-num">Expected cost</th></tr></thead><tbody>${rows}</tbody></table></div>

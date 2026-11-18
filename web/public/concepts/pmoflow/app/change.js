@@ -76,7 +76,8 @@
     if (!project) return null;
     const no = new Set((exclude || []).filter(Boolean));
     const ok = id => id && !no.has(id) && get(docs, 'person', id);
-    if (ok(project.sponsor)) return project.sponsor;
+    /* R14 (L4): a sponsor equal to the project manager is ignored (as if unset): the PM is never the sponsor */
+    if (ok(project.sponsor) && project.sponsor !== project.owner) return project.sponsor;
     for (const pid of project.processes || []) {
       const p = get(docs, 'process', pid);
       if (p && p.owner !== project.owner && ok(p.owner)) return p.owner;
@@ -132,7 +133,7 @@
     if (e.op === 'remove') return 'Removed “' + (e.label || (e.from && e.from.title) || 'a task') + '”';
     if (e.type === 'project') return FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng);
     if (e.field === 'title') return 'Renamed ' + valueText('title', e.from) + ' → ' + valueText('title', e.to);
-    return '“' + (e.label || 'a task') + '”: ' + FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng);
+    return '“' + (e.label || 'a task') + '”: ' + FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng) + (e.knock ? ' (knock-on: it waits on the moved work)' : '');
   }
 
   /* ------------------------------------------------------------------ */
@@ -141,6 +142,7 @@
   function kindsOf(edits, source) {
     const k = new Set();
     edits.forEach(e => {
+      if (e.knock) return;
       if (e.op === 'set' && e.type === 'workItem' && (e.field === 'start' || e.field === 'due')) k.add('dates');
       if (e.op === 'set' && e.type === 'workItem' && e.field === 'owner') k.add('owner');
       if (e.op === 'set' && e.type === 'workItem' && (e.field === 'effortDays' || e.field === 'title')) k.add('work');
@@ -207,7 +209,7 @@
     const setKey = e => e.type + ':' + e.id + ':' + e.field;
     const removed = new Set(raw.filter(e => e && e.op === 'remove').map(e => String(e.id)));
     raw.forEach(e0 => {
-      if (!e0 || typeof e0 !== 'object') return;
+      if (!e0 || typeof e0 !== 'object' || e0.knock) return;   /* R14: knock-on re-dating is recomputed (withKnockOn), never taken from input */
       const e = clone(e0);
       if (e.op === 'set' && e.type === 'workItem') {
         const w = taskOf(e.id);
@@ -366,8 +368,9 @@
     edited.forEach(id => { if (get(docsAfter, 'workItem', id)) (eng.dependents(docsAfter, id) || []).forEach(x => dependents.add(x)); });
     edits.filter(e => e.op === 'remove').forEach(e => (eng.dependents(docsBefore, e.id) || []).forEach(x => dependents.add(x)));
     const knockOn = list(docsAfter, 'workItem').filter(w => w.status !== 'done' && !edited.has(w.id) && fb[w.id] && fa[w.id] && fb[w.id].forecast !== fa[w.id].forecast)
-      .map(w => ({ id: w.id, title: w.title || 'untitled task', owner: w.owner || null, projectId: w.projectId, from: fb[w.id].forecast, to: fa[w.id].forecast,
-        due: w.due || null, lateAfter: !!fa[w.id].late, dependent: dependents.has(w.id) }))
+      .map(w => { const wb = get(docsBefore, 'workItem', w.id) || {};
+        return { id: w.id, title: w.title || 'untitled task', owner: w.owner || null, projectId: w.projectId, from: fb[w.id].forecast, to: fa[w.id].forecast,
+          due: w.due || null, dueFrom: wb.due || null, lateAfter: !!fa[w.id].late, dependent: dependents.has(w.id) }; })
       .sort((a, b) => String(a.to || '').localeCompare(String(b.to || '')) || a.title.localeCompare(b.title));
     /* department approvals: approved before, not approved after */
     const apB = {}; (tb.approvals || []).forEach(a => { apB[a.bu] = a; });
@@ -436,8 +439,63 @@
       approvalsReopen: reopened,
       testsRerun: testsRerun.slice(0, MAX_LIST), testsRerunCount: testsRerun.length,
     };
+    /* R14 (PMO-9): any open task, here or in a project the change moves, that ends up late (or later than it already was) */
+    const touchedPrj = new Set([projectId].concat(crossProjects.map(x => x.projectId)));
+    const lateD = (f, id) => (f[id] && f[id].late ? (f[id].lateDays || 1) : 0);
+    out.endsLate = list(docsAfter, 'workItem').filter(w => w.status !== 'done' && touchedPrj.has(w.projectId) && lateD(fa, w.id) > lateD(fb, w.id))
+      .map(w => ({ id: w.id, title: w.title || 'untitled task', owner: w.owner || null, projectId: w.projectId, due: w.due || null, expected: fa[w.id].forecast || null,
+        days: fa[w.id].lateDays || 0, pastDue: fa[w.id].sched === 'late' }))
+      .sort((a, b) => String(a.due || '').localeCompare(String(b.due || '')) || a.title.localeCompare(b.title)).slice(0, MAX_LIST);
+    out.warning = out.endsLate.length ? (out.endsLate.length === 1 ? '1 task would end up late: “' + out.endsLate[0].title + '” (due ' + day(out.endsLate[0].due, eng) + ', expected ' + day(out.endsLate[0].expected, eng) + ').'
+      : plural(out.endsLate.length, 'task') + ' would end up late, first “' + out.endsLate[0].title + '” (due ' + day(out.endsLate[0].due, eng) + ', expected ' + day(out.endsLate[0].expected, eng) + ').') + ' Move ' + (out.endsLate.length === 1 ? 'its due date' : 'their due dates') + ' in this change, or accept that ' + (out.endsLate.length === 1 ? 'it is' : 'they are') + ' late.' : '';
     out.sentence = sentenceOf(out, eng);
     return out;
+  }
+
+  /* R14 (PMO-9) knock-on re-dating. The tasks whose expected finish the change pushes later (they wait on moved work)
+     get their start and due moved by the same number of business days, as automatic edits ({auto, knock}), so an
+     approved re-plan does not leave them "late by 22 business days". A task late before stays exactly as late; a task
+     on time stays on time. Earlier finishes never pull dates in. Recomputed from `docs` every time (idempotent): the
+     knock edits of the input are dropped first. */
+  function withKnockOn(change, docs, today, opts) {
+    opts = opts || {};
+    const eng = E(opts.engine);
+    const base = ((change && change.edits) || []).filter(e => !e.knock);
+    const c0 = Object.assign({}, change, { edits: base });
+    const after = applyToDocs(docs, c0, opts.at || null);
+    const fb = eng.forecastAll(docs, today), fa = eng.forecastAll(after, today);
+    const touched = new Set(base.filter(e => e.type === 'workItem').map(e => e.id));
+    const out = [];
+    list(after, 'workItem').forEach(w => {
+      if (w.status === 'done' || touched.has(w.id) || !fb[w.id] || !fa[w.id]) return;
+      const from = fb[w.id].forecast, to = fa[w.id].forecast;
+      if (!isDay(from) || !isDay(to) || !(to > from) || !isDay(w.due)) return;
+      const n = eng.businessDaysBetween(from, to);
+      if (!(n > 0)) return;
+      const label = w.title || 'untitled task';
+      if (isDay(w.start)) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'start', from: w.start, to: eng.addBusinessDays(w.start, n), label, auto: true, knock: true });
+      out.push({ op: 'set', type: 'workItem', id: w.id, field: 'due', from: w.due, to: eng.addBusinessDays(w.due, n), label, auto: true, knock: true });
+    });
+    return Object.assign({}, change, { edits: base.concat(out) });
+  }
+  /* R14 (PMO list 7): a change still waiting for a decision shows its impact on TODAY's plan (the stored impact is the
+     one at the time it was proposed); applied and rejected changes keep the impact they recorded. */
+  function liveImpact(docs, change, today, opts) {
+    if (!change || (change.status !== 'proposed' && change.status !== 'approved') || change.linkedFrom) return change ? change.impact || null : null;
+    opts = opts || {};
+    const eng = E(opts.engine);
+    if (!get(docs, 'project', change.projectId)) return change.impact || null;
+    const ch = withKnockOn(change, docs, today, { engine: eng });
+    try { return impact(docs, applyToDocs(docs, ch, opts.at || null), change.projectId, today, { change: ch, engine: eng }) || change.impact || null; }
+    catch (e) { return change.impact || null; }
+  }
+  /* R14 (PMO list 4): who decides for another project the change moves: the approver entry holding a role for it */
+  function crossApprover(x, approvers) {
+    const pid = x && (x.projectId || x);
+    return ((approvers || []).find(a => hasRole(a, 'linkedPm', pid)) || (approvers || []).find(a => hasRole(a, 'linkedSponsor', pid))) || null;
+  }
+  function crossRoleText(a, pid, docs) {
+    return joinAnd(rolesOf(a).filter(r => r.projectId === pid).map(r => oneRoleText(r, docs)));
   }
 
   function bufferPhrase(finish, deadline, bufferDays, still, eng) {
@@ -497,12 +555,15 @@
     if (im.approvalsReopen.length) reasons.push(joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval reopens' : 'approvals reopen') + '.');
     /* R12 #13: a knock-on into another project needs that project's manager too */
     const cross = (im.crossProjects || []);
-    cross.forEach(x => reasons.push('It moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name + ' (another project), so its project manager approves too.'));
+    /* R14: the approver for each other project is named after routing (below); this marks where its line goes */
+    const crossAt = cross.map(x => { reasons.push(''); return reasons.length - 1; });
+    const crossLine = (x, a) => 'It moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name + ' (another project), so ' +
+      (a ? personName(docs, a.person) + ' (' + crossRoleText(a, x.projectId, docs) + ') approves too.' : 'that project needs an approver too.');
     const within = !reasons.length;
     const project = get(docs, 'project', change.projectId);
     const requester = opts.requester || change.requestedBy || null;
     const breach = im.deadline.moved || pastDeadline;
-    if (within || !project) return { within, reasons, approvers: [], blocked: '' };
+    if (within || !project) { cross.forEach((x, i) => { reasons[crossAt[i]] = crossLine(x, null); }); return { within, reasons, approvers: [], blocked: '' }; }
     if (breach) reasons.push('A change past the deadline needs the sponsor’s approval.');
     const need = [];      /* [{role, person|null, projectId?}] before merging */
     const missing = [];
@@ -528,11 +589,28 @@
       if (hit) { if (!hit.roles.some(x => x.role === r.role && x.projectId === r.projectId)) hit.roles.push(r); return; }
       approvers.push(Object.assign({}, n, { roles: [r] }));
     });
+    cross.forEach((x, i) => { reasons[crossAt[i]] = crossLine(x, crossApprover(x, approvers)); });
     const blocked = !approvers.length || missing.length
       ? 'Nobody besides ' + (requester ? personName(docs, requester) : 'the requester') + ' can approve this change: ' + (project.name || 'the project') + ' needs ' + joinAnd([...new Set(missing.length ? missing : ['a sponsor'])]) +
         ' who did not ask for it. Set the sponsor in the project’s settings, then propose it again.'
       : '';
     return { within, reasons, approvers, blocked };
+  }
+  /* R14 (L4): who asked for a change in words. A change filed by sync has no PMOFlow requester: "Jira VOM-7 (ana@…)" */
+  const TOOL_NAME = { jira: 'Jira', ado: 'Azure DevOps', azuredevops: 'Azure DevOps' };
+  function syncSourceText(change) {
+    const f = change && change.fromSync;
+    if (!f) return '';
+    const tool = TOOL_NAME[String(f.tool || '').toLowerCase()] || String(f.tool || 'the connected tool');
+    return tool + (f.key ? ' ' + String(f.key) : '');
+  }
+  function requesterText(change, docs) {
+    if (!change) return 'someone';
+    const p = change.requestedBy && get(docs, 'person', change.requestedBy);
+    if (p) return p.name || 'someone';
+    const src = syncSourceText(change);
+    if (src) return src + (change.fromSync && change.fromSync.by ? ' (' + String(change.fromSync.by) + ')' : '');
+    return 'someone';
   }
   /* approvers still to decide */
   function pendingApprovers(change) { return ((change && change.approvers) || []).filter(a => !a.decision); }
@@ -635,7 +713,7 @@
       const decider = c.decidedBy ? personName(docs, c.decidedBy) : '';
       rows.push([
         c.requestedAt || '', p ? p.name : c.projectId, c.title || '', c.reason || '', cat(c.category), STATUS_LABEL[c.status] || c.status || '',
-        personName(docs, c.requestedBy), decider, c.decidedAt || '', c.appliedAt || '',
+        requesterText(c, docs), decider, c.decidedAt || '', c.appliedAt || '',
         (im.finish || {}).before || '', (im.finish || {}).after || '', (im.deadline || {}).before || '', (im.deadline || {}).after || '',
         (im.cost || {}).before != null ? im.cost.before : '', (im.cost || {}).after != null ? im.cost.after : '',
         (im.approvalsReopen || []).map(a => a.bu).join('; '), im.knockOnCount != null ? im.knockOnCount : '', im.testsRerunCount != null ? im.testsRerunCount : '',
@@ -717,7 +795,7 @@
 
   return {
     KINDS, CATEGORIES, STATUS_LABEL, ROLE_LABEL, COST_TOLERANCE_PCT, LOG_COLUMNS,
-    buildChange, applyToDocs, conflicts, impact, needsApproval, pendingApprovers, waitingText, sponsorOf, roleText, rolesOf, hasRole, offDayError, linkedEntry, pendingHere,
+    buildChange, applyToDocs, conflicts, impact, needsApproval, withKnockOn, liveImpact, crossApprover, requesterText, syncSourceText, pendingApprovers, waitingText, sponsorOf, roleText, rolesOf, hasRole, offDayError, linkedEntry, pendingHere,
     editText, changesOf, changesForTask, snapshot, baselineOf, queueFor, logRows, toCSV, processRef, processDrift, sentenceOf,
   };
 });

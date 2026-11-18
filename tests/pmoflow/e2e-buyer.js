@@ -187,6 +187,12 @@ async function browserChecks(browser) {
     const all = (await page.content()).replace(/<script[\s\S]*?<\/script>/g, '') + ' ' + (await page.textContent('body'));
     const banned = all.match(/overlay|on top of|add-on|\brequires?\b(?![^<]*>)|\breplac\w*|rip(ping)? out/gi);
     check(`${name}: no banned positioning words`, !banned, banned);
+    /* R14: nothing on any page may read as an obtained certification or a completed test; the only dates are targets */
+    const txt = (await page.textContent('body')).replace(/\s+/g, ' ');
+    const claimed = txt.match(/\b(SOC ?2|ISO ?27001|penetration test|pen test|Microsoft 365 Certification)\b[^.]{0,60}\b(obtained|achieved|completed|passed|certified|attested|audited)\b/gi);
+    check(`${name}: no certification or test claimed as obtained`, !(claimed || []).some(c => !/not (yet )?obtained|not obtained yet|yet to be/i.test(c)), claimed);
+    const dates = txt.match(/\b(Q[1-4] 20\d\d)\b/g) || [];
+    check(`${name}: certification dates appear only as founder-set targets`, dates.every(d => new RegExp('(Target ' + d + '|targeted for ' + d + '|for ' + d + ')').test(txt)), dates);
     check(`${name}: form fields labelled`, (await unlabelled(page)).length === 0, await unlabelled(page));
     (await page.$$eval('a[href^="/"]', as => as.map(a => a.getAttribute('href')))).forEach(h => internalLinks.add(h.split('#')[0]));
     await scrollAll(page);
@@ -202,6 +208,18 @@ async function browserChecks(browser) {
   check('index: two paths (starting fresh / already using)', /Starting fresh/.test(await page.innerText('[data-path="fresh"]')) &&
     (await page.innerText('[data-flow]')).trim() === 'map → plan → track → test → approve → launch' &&
     /Already using Jira or Azure DevOps\?/.test(await page.innerText('[data-path="existing"]')) && /syncs both ways/.test(await page.innerText('[data-path="existing"]')));
+  /* R14 L4 #3: the PMO buyer's path leads with keeping Jira / Azure DevOps (within the founder positioning) */
+  const LEAD = 'Already using Jira or Azure DevOps? Keep your workflow.';
+  check('index: hero leads the PMO buyer with "Keep your workflow"', (await page.innerText('[data-pmo-lead]')).replace(/\s+/g, ' ').trim().startsWith(LEAD) &&
+    await page.locator('[data-pmo-lead] a[href="#paths"]').count() === 1);
+  check('index: the existing-tools path comes first and is headed with the lead line',
+    (await page.getAttribute('[data-paths] > .card:first-child', 'data-path')) === 'existing' &&
+    (await page.innerText('[data-path="existing"] h3')).replace(/\s+/g, ' ').trim() === LEAD);
+  check('index: the hero keeps the founder line above the lead line', await page.evaluate(() => {
+    const h = document.querySelector('.hero h1'), l = document.querySelector('[data-pmo-lead]');
+    return !!(h && l && (h.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING));
+  }));
+  check('index: a Jira date past the deadline becomes a plan change, never a silent move', /past (the|its) (project )?deadline/i.test(body) && /plan change/i.test(body) && /sponsor/i.test(body));
   check('index: six differentiators', await page.locator('.diff-list > li.diff').count() === 6);
   const diffTitles = await page.$$eval('.diff h3', hs => hs.map(h => h.textContent.toLowerCase()));
   check('index: differentiators in contract order', ['what changed', 'information', 'plan', 'sign-off', 'test', 'undo'].every((w, i) => diffTitles[i].includes(w)), diffTitles);
@@ -270,6 +288,14 @@ async function browserChecks(browser) {
   check('security: escrow offered on request for Enterprise, customer pays the agent', /Source code escrow for Enterprise/.test(sec) && /paid by the customer/i.test(sec));
   check('security: SOC 2 / pen-test dates appear only as founder-set targets, never as achieved', /Target Q1 2027\s*Third-party penetration test/.test(sec) && /Target Q3 2027\s*SOC 2 Type I/.test(sec) && /Not yet obtained/.test(sec));
   check('security: audit claim is exact (signed head, and what it does not prove)', /signed head/.test(sec) && /not as each change is saved/.test(sec) && !/verified as complete/i.test(sec));
+  /* R14 L4 #3: the history sentence is written by the server from the actual change */
+  const audit = (await page.textContent('#audit')).replace(/\s+/g, ' ');
+  check('security: history text is written by the server from the actual change', /written by the server from the actual change/i.test(audit) && /note/i.test(audit), audit.slice(0, 300));
+  check('security: department rules state exactly the three cases and the recent-move rule', /Naming the first approver of a department that has none takes one Admin/.test(sec) &&
+    /With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check/.test(sec) &&
+    /In a workspace with one Admin, those changes apply at once and History says so/.test(sec) &&
+    sec.includes('Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.'));
+  check('security: pilot and escrow terms are not invented', !/escrow[^.]{0,80}\b(free|included|at no cost)\b/i.test(sec) && !/\bSLA\b[^.]{0,40}\b99\.\d+%/.test(sec));
   check('security: "Request our security packet" goes to the demo form with topic=security', await page.locator('a[href="/pmoflow/demo?topic=security"]').count() >= 1);
   await page.goto(ORIGIN + '/pmoflow/demo?topic=security');
   check('demo form: topic=security pre-fills the ask', (await page.textContent('#demo-title')) === 'Request our security packet' && /security packet/.test(await page.inputValue('#f-fix')));

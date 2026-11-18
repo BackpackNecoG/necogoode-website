@@ -187,7 +187,8 @@ test('Credit-limit SOP (BPM expert): else branch, reject ends, SLA is a timer, a
   assert.deepEqual(d.branches.map(b => b.nodes.map(n => [n.title, n.ownerRole])), [[['Review the request', 'Credit Manager']], [['Approve the request', 'Credit Analyst']]], 'line 5 is the No path');
   /* the 2-day escalation is a timer on the Credit Manager's step, not a choice */
   assert.deepEqual(d.branches[0].nodes[0].timer, { after: '2 business days', iso: 'P2D', businessDays: 2, action: 'Escalate to the CFO', to: 'CFO' });
-  assert.equal(walk(r.nodes).filter(n => n.type === 'decision').length, 2, 'two choices, no escalation choice');
+  /* R14: line 8 ("Limits above $250,000 also need sign-off…") is a third choice, never a step every request goes through */
+  assert.equal(walk(r.nodes).filter(n => n.type === 'decision').length, 3, 'three choices, no escalation choice');
   assert.ok(!walk(r.nodes).some(n => n.type === 'decision' && /within/i.test(n.title)));
   const rej = t[4];
   assert.equal(rej.title, 'Credit Manager rejects the request?');
@@ -196,7 +197,7 @@ test('Credit-limit SOP (BPM expert): else branch, reject ends, SLA is a timer, a
   assert.ok(steps(r).every(s => !/^(the|a|an)\s/i.test(s.ownerRole || '')), 'no leading article');
   assert.equal(t[0].ownerRole, 'Sales Rep');
   /* "Controller (Sam Wu)" mid-line */
-  const ctl = steps(r).find(s => /sign-off/i.test(s.title));
+  const ctl = steps(r).find(s => /^Also sign off/i.test(s.title));
   assert.deepEqual([ctl.ownerRole, ctl.note], ['Controller', 'Named in the procedure: Sam Wu']);
   assert.ok(!/Sam Wu/.test(ctl.title));
   /* systems, never information names */
@@ -502,10 +503,10 @@ test('R12 RACI phrases: sign-off, consulted and informed', () => {
   assert.deepEqual([t[0].title, t[0].raci], ['Draft the contract', { c: ['Legal'] }]);
   assert.deepEqual([t[1].title, t[1].ownerRole, t[1].raci], ['Approve the contract', 'Finance', { a: 'Controller (Sam Wu)' }]);
   assert.deepEqual([t[2].title, t[2].raci], ['Send the contract to the supplier', { i: ['Requester'] }]);
-  const ctl = steps(r).find(s => /sign-off/i.test(s.title));
+  const ctl = steps(r).find(s => /^Also sign off/i.test(s.title));
   assert.deepEqual([ctl.ownerRole, ctl.raci], ['Controller', { a: 'Controller (Sam Wu)' }]);
   /* the R11 credit-limit fixture keeps its sign-off as Accountable too */
-  const c = steps(I.parseSop(CREDIT)).find(s => /sign-off/i.test(s.title));
+  const c = steps(I.parseSop(CREDIT)).find(s => /^Also sign off/i.test(s.title));
   assert.deepEqual(c.raci, { a: 'Controller (Sam Wu)' });
 });
 
@@ -645,7 +646,7 @@ test('R13 #8 identity: "Controller (Sam Wu)" and "Sam Wu" are one actor; signs o
   /* line 8: "Sam Wu signs off" is the Controller (Sam Wu) */
   const upd = by(/^Update the credit limit/);
   assert.deepEqual(upd.raci, { a: 'Controller (Sam Wu)' });
-  const ctl = by(/sign-off/i);
+  const ctl = by(/^Also sign off/i);
   assert.deepEqual([ctl.ownerRole, ctl.raci], ['Controller', { a: 'Controller (Sam Wu)' }]);
   /* one actor key for all three ways of writing it */
   const al = I.actorAliases(r.nodes);
@@ -711,6 +712,117 @@ test('R13 #14 Jordan\'s Visio: the real page (not the background), its name, "Ro
   assert.ok(!v.dropped.some(d => /Northwind Benefits/.test(d.name)), 'the background page is not read');
   fs.mkdirSync('/tmp/pmo-design', { recursive: true });
   fs.writeFileSync('/tmp/pmo-design/r13-jordan-benefits.vsdx', vsdxJordan());
+});
+
+/* ---------- R14 L2: the R13 reviewers' repros (market-review/r13 expert-bpm.md, karen.md) ---------- */
+/* BPM expert (R13): "the auto-approve Yes branch flows into Controller approval (E2E 1 has 9 steps)". Line 7 ("Limits
+   above $250,000 also need sign-off from the Controller") was a plain step every path went through. It is a choice, and
+   the under-$50k path, which can never be above $250,000, carries on past it. */
+test('R14 BPM-5: "Limits above $250,000 also need sign-off" is a choice; the auto-approve path never reaches it', () => {
+  const r = I.parseSop(CREDIT13);
+  const t = tops(r);
+  const big = t.find(n => n.type === 'decision' && /250,000/.test(n.title));
+  assert.ok(big, 'line 7 is a choice: ' + t.map(n => n.type + ':' + n.title).join(' | '));
+  assert.equal(big.title, 'Limits above $250,000?');
+  const so = big.branches[0].nodes[0];
+  assert.deepEqual([big.branches[0].label, so.title, so.ownerRole, so.approval], ['Yes', 'Also sign off', 'Controller', true]);
+  assert.deepEqual(so.raci, { a: 'Controller (Sam Wu)' });
+  assert.equal(big.branches[1].nodes.length, 0, 'No carries on');
+  assert.deepEqual(big.threshold, { subject: 'limits', op: '>', amount: 250000 });
+  /* the under-$50k path skips the Credit Manager's review AND the above-$250k sign-off */
+  const small = t.find(n => n.type === 'decision' && /50k/.test(n.title));
+  assert.deepEqual(small.threshold, { subject: 'requested limit', op: '<', amount: 50000 });
+  const upd = t.find(n => /^Update the credit limit/.test(n.title));
+  const wait = t.find(n => n.type === 'wait');
+  /* the auto-approved request still waits for the customer to accept; nothing after the wait is an unconditional
+     sign-off: the Controller signs off only on the above-$250k path, which the threshold metadata marks as impossible
+     for the under-$50k path (business tests read decision.threshold) */
+  assert.equal(small.branches[0].goto, wait.id);
+  const after = t.slice(t.indexOf(wait) + 1);
+  assert.ok(!after.some(n => n.type === 'step' && /sign/i.test(n.title)), after.map(n => n.title).join(' | '));
+  assert.ok(after.includes(upd));
+  assert.equal(I.thresholdsDisjoint(small.threshold, big.threshold), true);
+  assert.equal(I.thresholdsDisjoint({ subject: 'spend', op: '>', amount: 25000 }, { subject: 'spend', op: '>', amount: 50000 }), false);
+  assert.equal(r.linesText, '9 lines → 9 steps, 2 choices');
+});
+
+/* BPM expert (R13): VSDX "(Sales rep)" is not extracted as the role; BPMN lanes "Controller (Sam Wu)" became a team */
+test('R14 BPM-5: "Role (Name)" and "(Role)" are read the same way in pasted text, Visio shape text and lane names', async () => {
+  assert.deepEqual(I.roleAndName('Controller (Sam Wu)'), { role: 'Controller', name: 'Sam Wu' });
+  assert.deepEqual(I.roleAndName('the credit manager'), { role: 'Credit manager', name: '' });
+  assert.deepEqual(I.roleAndName('Sam Wu'), { role: '', name: 'Sam Wu' });
+  assert.deepEqual(I.roleAndName('Operations'), { role: 'Operations', name: '' });
+  const NS = 'http://schemas.microsoft.com/office/visio/2012/main';
+  const sh = (id, master, text, y) => `<Shape ID='${id}' Type='Shape' Master='${master}'><Cell N='PinX' V='4'/><Cell N='PinY' V='${y}'/><Cell N='Width' V='2'/><Cell N='Height' V='0.75'/><Text>${text}</Text></Shape>`;
+  const con = id => `<Shape ID='${id}' Type='Shape' Master='9'><Cell N='BeginX' V='0'/><Cell N='EndX' V='1'/></Shape>`;
+  const c = (k, a, b) => `<Connect FromSheet='${k}' FromCell='BeginX' ToSheet='${a}'/><Connect FromSheet='${k}' FromCell='EndX' ToSheet='${b}'/>`;
+  const page = `<?xml version='1.0'?><PageContents xmlns='${NS}'><Shapes>${sh(1, 2, 'Start', 10)}${sh(2, 1, 'Submit the credit request (Sales rep)', 9)}${sh(3, 1, 'Controller (Sam Wu): Sign off the limit', 8)}${sh(4, 2, 'End', 7)}${con(20)}${con(21)}${con(22)}</Shapes><Connects>${c(20, 1, 2)}${c(21, 2, 3)}${c(22, 3, 4)}</Connects></PageContents>`;
+  const v = await I.parseVsdx(zipDD({
+    'visio/masters/masters.xml': `<?xml version='1.0'?><Masters xmlns='${NS}'><Master ID='1' NameU='Process'/><Master ID='2' NameU='Start/End'/><Master ID='9' NameU='Dynamic connector'/></Masters>`,
+    'visio/pages/page1.xml': page,
+  }));
+  const x = I.parseXml(v.bpmn);
+  assert.deepEqual(I._all(x, 'userTask').map(e => e.attrs.name), ['Submit the credit request', 'Sign off the limit']);
+  assert.deepEqual(I._all(x, 'lane').map(e => e.attrs.name).sort(), ['Controller (Sam Wu)', 'Sales rep']);
+});
+
+/* Karen (R13) #9: COI is listed twice ("Certificate of insurance" and "COI certificate of insurance"); W-9 and COI, which
+   the vendor sends on every run, became "Make W-9 available" project tasks owned by "Vendor" */
+test('R14 Karen 9: COI and "COI certificate of insurance" are one item; documents sent each run are marked per run', () => {
+  assert.deepEqual(I.infoPhrases('Vendor sends the W-9 and COI certificate of insurance.'), ['W-9', 'Certificate of insurance']);
+  assert.deepEqual(I.infoPhrases('Buyer files the SOW (statement of work).'), ['Statement of work']);
+  const r = I.parseSop(`Vendor Setup
+1. Buyer gets the vendor request from the requester.
+2. Vendor sends W-9 and COI certificate of insurance; Treasury calls to verify bank letter.
+3. Buyer checks the certificate of insurance.
+4. AP sets up the vendor master in the ERP.`);
+  const by = n => r.newData.find(x => x.name === n);
+  assert.deepEqual(r.newData.map(x => x.name).filter(n => /insurance/i.test(n)), ['Certificate of insurance']);
+  assert.equal(by('W-9').perRun, true, 'the vendor sends a W-9 each time the process runs');
+  assert.equal(by('Certificate of insurance').perRun, true);
+  assert.match(by('W-9').perRunText, /^Collected from the vendor each time the process runs/);
+  assert.ok(!by('Vendor master').perRun, 'the vendor master is set up once, not collected each run');
+  /* a template's W-9 and certificate of insurance are per run too */
+  const t = I.templateDraft('vendor-onboarding');
+  assert.equal(t.newData.find(x => x.name === 'W-9').perRun, true);
+  assert.ok(!t.newData.find(x => x.name === 'Vendor master record').perRun);
+});
+
+/* Jordan (R13) disagreement 7: a Visio decision "Documents complete?" disappeared (3 steps, 0 choices) while the import
+   said "Dropped elements 0". A decision drawn as a group (its words and connection points on a sub-shape), and a
+   decision whose "No" connector goes to an off-page reference, are both choices; anything not imported is listed. */
+function vsdxJordanDecision() {
+  const NS = 'http://schemas.microsoft.com/office/visio/2012/main';
+  const sh = (id, master, text, y) => `<Shape ID='${id}' Type='Shape' Master='${master}'><Cell N='PinX' V='4'/><Cell N='PinY' V='${y}'/><Cell N='Width' V='2'/><Cell N='Height' V='0.75'/><Text>${text}</Text></Shape>`;
+  const grp = (id, master, text, y) => `<Shape ID='${id}' Type='Group' Master='${master}'><Cell N='PinX' V='4'/><Cell N='PinY' V='${y}'/><Cell N='Width' V='2'/><Cell N='Height' V='1'/><Shapes><Shape ID='${id}1' Type='Shape'><Text>${text}</Text></Shape></Shapes></Shape>`;
+  const con = (id, text) => `<Shape ID='${id}' Type='Shape' Master='9'><Cell N='BeginX' V='0'/><Cell N='EndX' V='1'/>${text ? `<Text>${text}</Text>` : ''}</Shape>`;
+  const c = (k, a, b) => `<Connect FromSheet='${k}' FromCell='BeginX' ToSheet='${a}'/><Connect FromSheet='${k}' FromCell='EndX' ToSheet='${b}'/>`;
+  const shapes = [sh(1, 2, 'Start', 10), sh(2, 1, 'Collect the documents', 9), grp(3, 3, 'Documents complete?', 8), sh(4, 1, 'Review the file', 7), sh(5, 1, 'Ask for the missing documents', 7), sh(6, 2, 'End', 6),
+    sh(7, 1, 'Open the account', 5), grp(8, 3, 'Signed?', 4), sh(9, 4, 'Page 2', 3), sh(10, 2, 'Finish', 2),
+    con(20), con(21), con(22, 'Yes'), con(23, 'No'), con(24), con(25), con(26), con(27, 'Yes'), con(28, 'No'), con(29)].join('');
+  /* connectors 21-23 are glued to the decision's sub-shape (ID 31), as Visio does for a grouped shape */
+  const connects = [c(20, 1, 2), c(21, 2, 31), c(22, 31, 4), c(23, 31, 5), c(24, 5, 2), c(25, 4, 7), c(26, 7, 8), c(27, 8, 10), c(28, 8, 9)].join('');
+  return zipDD({
+    'visio/masters/masters.xml': `<?xml version='1.0'?><Masters xmlns='${NS}'><Master ID='1' NameU='Process'/><Master ID='2' NameU='Start/End'/><Master ID='3' NameU='Decision'/><Master ID='4' NameU='Off-page reference'/><Master ID='9' NameU='Dynamic connector'/></Masters>`,
+    'visio/pages/page1.xml': `<?xml version='1.0'?><PageContents xmlns='${NS}'><Shapes>${shapes}</Shapes><Connects>${connects}</Connects></PageContents>`,
+  });
+}
+test('R14 Jordan 7: Visio decisions are choices (grouped shapes included); nothing is lost without being listed', async () => {
+  const v = await I.parseVsdx(vsdxJordanDecision());
+  assert.equal(v.decisions, 2, 'both decisions are choices');
+  const x = I.parseXml(v.bpmn);
+  const gws = I._all(x, 'exclusiveGateway');
+  assert.deepEqual(gws.map(g => g.attrs.name).sort(), ['Documents complete?', 'Signed?']);
+  const flows = I._all(x, 'sequenceFlow');
+  const out = id => flows.filter(f => f.attrs.sourceRef === id);
+  const dc = gws.find(g => g.attrs.name === 'Documents complete?');
+  assert.deepEqual(out(dc.attrs.id).map(f => f.attrs.name).sort(), ['No', 'Yes'], 'connectors glued to the sub-shape count');
+  /* the off-page reference is not a flow shape: listed as dropped, and "Signed?" keeps its one drawn path */
+  assert.ok(v.dropped.some(d => d.name === 'Page 2'), JSON.stringify(v.dropped));
+  assert.equal(out(gws.find(g => g.attrs.name === 'Signed?').attrs.id).length, 1);
+  assert.ok(v.flowIds.some(f => f.name === 'Documents complete?' && f.type === 'choice'));
+  fs.mkdirSync('/tmp/pmo-design', { recursive: true });
+  fs.writeFileSync('/tmp/pmo-design/r14-jordan-decision.vsdx', vsdxJordanDecision());
 });
 
 test('the web copy is byte-identical', () => {
