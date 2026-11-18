@@ -179,6 +179,42 @@ function projectOfCase(docs, dataId) {
   const p = (docs.project || []).find(d => d.data && d.data.status !== 'live' && (eng.changedInformation(docs, d.id) || []).some(x => x.dataId === dataId));
   return p ? p.id : null;
 }
+/* R13 (PMO expert r13, audit forgery): the history sentence is written by the SERVER from the actual change. The client's
+   summary is kept only as a quoted note after it, so "Comment added" can no longer stand in for a status change. */
+const DIFF_SKIP = new Set(['id', 'updatedAt', 'createdAt', 'snapshotAt', 'fingerprint', 'cutoverUpdatedAt']);
+const PERSON_FIELDS = new Set(['owner', 'sponsor', 'releaseManager', 'testLead', 'approver', 'tester', 'assignedBy', 'requestedBy', 'by']);
+function fieldLabel(k) { return String(k).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(); }
+const STATUS_WORD = { idle: 'Not started', prog: 'In progress', done: 'Done', blocked: 'Blocked', requested: 'Requested', approved: 'Approved',
+  active: 'Active', expired: 'Expired', revoked: 'Revoked', rejected: 'Changes asked for', pass: 'Passed', fail: 'Failed', missing: 'Not available', pending: 'Pending' };
+function fmtVal(docs, k, v) {
+  if (v == null || v === '') return 'none';
+  if ((PERSON_FIELDS.has(k) || /By$/.test(k)) && typeof v === 'string') return personName(docs, v);
+  if ((k === 'status' || k === 'decision' || k === 'avail' || k === 'outcome') && STATUS_WORD[v]) return STATUS_WORD[v];
+  if (Array.isArray(v)) return v.length + ' item' + (v.length === 1 ? '' : 's');
+  if (typeof v === 'object') return 'set';
+  const t = String(v); return t.length > 40 ? '“' + t.slice(0, 37) + '…”' : typeof v === 'string' ? '“' + t + '”' : t;
+}
+function changeText(docs, prevData, data) {
+  const out = []; const a = prevData || {}, b = data || {};
+  /* server timestamps (…At) are recorded on the event itself; they are not "changes" a person made */
+  const keys = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(k => !DIFF_SKIP.has(k) && !/At$/.test(k));
+  for (const k of keys) {
+    const x = a[k], y = b[k];
+    if (JSON.stringify(x === undefined ? null : x) === JSON.stringify(y === undefined ? null : y)) continue;
+    if (x && y && typeof x === 'object' && typeof y === 'object' && !Array.isArray(x) && !Array.isArray(y)) {
+      const sub = [...new Set(Object.keys(x).concat(Object.keys(y)))].filter(s => JSON.stringify(x[s] == null ? null : x[s]) !== JSON.stringify(y[s] == null ? null : y[s]));
+      sub.slice(0, 3).forEach(s => out.push(fieldLabel(k) + ' ' + fieldLabel(s) + ' ' + fmtVal(docs, s, x[s]) + ' → ' + fmtVal(docs, s, y[s])));
+      continue;
+    }
+    if (Array.isArray(x) || Array.isArray(y)) { out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x || []) + ' → ' + fmtVal(docs, k, y || [])); continue; }
+    out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x) + ' → ' + fmtVal(docs, k, y));
+  }
+  return out.length ? (out.length > 8 ? out.slice(0, 8).join('; ') + '; and ' + (out.length - 8) + ' more' : out.join('; ')) : 'no field changed';
+}
+function serverSummary(body, base, changes) {
+  const note = typeof body.summary === 'string' && body.summary.trim() ? body.summary.trim().slice(0, 200) : '';
+  return base + (changes ? ': ' + changes : '') + (note && note !== base ? ' (note: “' + note.replace(/[“”]/g, '"') + '”)' : '');
+}
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
 
 /* R5 [S] permission rules for PUT. Returns an error message or null. Server promotions bypass this (they write via the store). */
@@ -739,7 +775,7 @@ module.exports = async function (context, req) {
         await store.putDoc(wsId, type, id, data);
         const after = Object.assign({}, st.docs, { [type]: (st.docs[type] || []).filter(d => d.id !== id).concat([{ id, data }]) });
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,
-          summary: ai.labeler(after).scrub(summaryOf(body, `${exists ? 'Updated' : 'Created'} ${describe(type, data, after)}`)) });
+          summary: ai.labeler(after).scrub(serverSummary(body, `${exists ? 'Updated' : 'Created'} ${describe(type, data, after)}`, exists ? changeText(after, prev && prev.data, data) : '')) });
         return send(200, { ok: true, doc: { type, id, data }, event: ev });
       }
       if (method === 'DELETE') {
@@ -754,7 +790,7 @@ module.exports = async function (context, req) {
         }
         await store.deleteDoc(wsId, type, id);
         const ev = await store.appendEvent(wsId, { actor, action: 'delete', ref: `${type}:${id}`,
-          summary: ai.labeler(st.docs).scrub(summaryOf(body, `Deleted ${prev ? describe(type, prev.data, st.docs) : type}`)) });
+          summary: ai.labeler(st.docs).scrub(serverSummary(body, `Deleted ${prev ? describe(type, prev.data, st.docs) : type}`, '')) });
         return send(200, { ok: true, event: ev });
       }
       return fail(405, 'method not allowed');

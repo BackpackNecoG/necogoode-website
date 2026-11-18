@@ -114,8 +114,9 @@ test('PUT/DELETE doc persist and append events (newest first)', async () => {
   assert.equal(r.status, 200);
   assert.equal(r.body.events.length, 2);
   /* R3: ids in client summaries are replaced by names */
-  assert.equal(r.body.events[0].summary, 'Started Link contract to vendor ID');
-  assert.equal(r.body.events[1].summary, 'Added Link contract to vendor ID');
+  /* R13: the server writes what changed; the client's sentence is only a quoted note after it */
+  assert.equal(r.body.events[0].summary, 'Updated work item "Link contract to vendor ID": status Not started → In progress (note: “Started Link contract to vendor ID”)');
+  assert.equal(r.body.events[1].summary, 'Created work item "Link contract to vendor ID" (note: “Added Link contract to vendor ID”)');
   r = await call('GET', `ws/${ws}/events`, null, { limit: '200' });
   assert.ok(r.body.events.length >= 14, 'seeded history plus new events');
   for (let i = 1; i < r.body.events.length; i++) assert.ok(r.body.events[i - 1].at >= r.body.events[i].at, 'newest first');
@@ -633,9 +634,10 @@ test('R3 event summaries use names, never ids', async () => {
   await call('DELETE', `ws/${ws}/doc/risk/R3`, { actor: 'ta' });
   const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '500' })).body.events;
   const s = ref => ev.find(e => e.ref === ref).summary;
-  assert.equal(s('grant:G2'), 'Updated UAT read access to Bank remittance details');
+  assert.match(s('grant:G2'), /^Updated UAT read access to Bank remittance details: status Requested → Approved; approved by none → [A-Z][a-z]+ [A-Z]/);
+  assert.ok(!/\blp\b|approved at/.test(s('grant:G2')), 'names, never ids; no server timestamps as changes');
   assert.equal(s('testRun:TR7'), 'Created UAT run, Nov 4');
-  assert.equal(s('workItem:W5'), 'Moved Make the extra-checks list and sign-off form after Write down the risk tier rules and Vendor risk tier review');
+  assert.match(s('workItem:W5'), /: no field changed \(note: “Moved Make the extra-checks list and sign-off form after Write down the risk tier rules and Vendor risk tier review”\)$/);
   assert.equal(s('risk:R3'), 'Deleted risk "Business testing overlaps the quarter-end close"');
   st = await state(ws);
   assertNoIds(ev.map(e => e.summary), st.docs, 'event summaries (incl. seeded)');
@@ -2020,4 +2022,18 @@ test('R13: deadline/budget on a planned project move only through Change the pla
   const fresh = { id: 'PNEW' + rnd(), name: 'Fresh project ' + rnd(), owner: base.owner, target: '2027-03-01', processIds: [] };
   assert.equal((await call('PUT', `ws/${ws}/doc/project/${fresh.id}`, { data: fresh, actor: base.owner })).status, 200);
   assert.equal((await call('PUT', `ws/${ws}/doc/project/${fresh.id}`, { data: Object.assign({}, fresh, { target: '2027-04-01' }), actor: base.owner })).status, 200);
+});
+
+
+/* R13 (PMO expert r13, audit forgery): a client cannot make the history say something other than what changed */
+test('R13: the history sentence is server-written; a forged client summary is only a quoted note', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const wd = st.docs.workItem.find(d => d.data.status !== 'done' && d.data.owner); const w = wd.data;
+  const put = await call('PUT', `ws/${ws}/doc/workItem/${wd.id}`, { actor: w.owner, summary: 'Comment added', data: Object.assign({}, w, { status: 'done' }) });
+  assert.equal(put.status, 200);
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '50' })).body.events.find(e => e.ref === 'workItem:' + wd.id);
+  assert.match(ev.summary, /status .* → Done/);
+  assert.match(ev.summary, /\(note: “Comment added”\)$/);
+  assert.ok(!/^Comment added/.test(ev.summary));
 });

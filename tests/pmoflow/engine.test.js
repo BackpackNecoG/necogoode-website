@@ -3421,3 +3421,20 @@ test('R13 #11/#13 re-approvals counted per team; the launch-day card reads the g
   assert.equal(st.label, 'Not ready');
   assert.ok(st.steps.find(x => x.taskId === tasks[0].id).problem, JSON.stringify(st.steps[0]));
 });
+
+/* R13 lead fix (Karen r13 repro): an unowned task that resolves a blocker is never shown under the PM (or the data owner) */
+test('R13: who never attributes unowned work to the PM; it reads "Needs an owner: <role>"', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const T0 = E.projectTruth(d, PRJ, GOLD_DAY);
+  const pm = d.project.find(p => p.id === PRJ).data.owner;
+  const row = T0.who.find(x => x.why === 'blocker' && x.workId);
+  assert.ok(row, 'a planned blocker with its resolver task');
+  const w = d.workItem.find(x => x.id === row.workId).data;
+  delete w.owner; w.ownerRole = 'Vendor';
+  const T = E.projectTruth(d, PRJ, GOLD_DAY);
+  const r2 = T.who.find(x => x.ref === row.ref);
+  assert.equal(r2.person, null);
+  assert.equal(r2.name, 'Needs an owner: Vendor');
+  assert.ok(!T.who.some(x => x.workId === row.workId && x.person === pm), 'never the PM');
+  assert.ok(!E.personQueue(d, pm, GOLD_DAY).some(q => q.id === row.workId), 'not in the PM\'s Waiting for you');
+});

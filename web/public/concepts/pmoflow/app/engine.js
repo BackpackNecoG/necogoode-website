@@ -3470,11 +3470,13 @@
   function whoOf(docs, project, c, extra) {
     extra = extra || {};
     const out = [], seen = new Set();
-    const add = (person, what, why, href, ref) => {
+    const add = (person, what, why, href, ref, unownedName) => {
       const key = ref || (why + ':' + person + ':' + what);
       if (seen.has(key)) return; seen.add(key);
-      out.push({ person: person || null, name: person ? nameOf(docs, person) : 'Nobody', what, why, href: href || '/project/' + project.id, ref: ref || null, rank: WHO_RANK[why] || 99, action: what });
+      out.push({ person: person || null, name: person ? nameOf(docs, person) : (unownedName || 'Nobody'), what, why, href: href || '/project/' + project.id, ref: ref || null, rank: WHO_RANK[why] || 99, action: what });
     };
+    /* R13 (Karen r13): unowned work is NEVER attributed to someone else (not the PM, not the data owner) */
+    const needsOwner = w => 'Needs an owner' + (w && w.ownerRole ? ': ' + w.ownerRole : '');
     if (c.rag === 'grey') { add(project.owner, 'Add the work or accept a suggested plan', 'plan', '/project/' + project.id, 'plan:' + project.id); return out; }
     const fc = c.fc;
     const openIds = new Set(c.open.map(w => w.id));
@@ -3490,22 +3492,22 @@
     c.blockers.filter(b => b.held > 0).forEach(b => {
       if (!b.planned) return add(b.owner, 'Plan work to get ' + b.name, 'blocker', '/data/' + b.dataId, 'data:' + b.dataId);
       const rw = b.resolver && workIdx[b.resolver];
-      add(rw ? rw.owner || b.resolverOwner || b.owner : b.resolverOwner || b.owner, rw ? resolverWhat(rw) : 'Get ' + b.name + ' ready', 'blocker', '/data/' + b.dataId, 'data:' + b.dataId);
+      add(rw ? (rw.owner || null) : b.resolverOwner || b.owner, rw ? resolverWhat(rw) : 'Get ' + b.name + ' ready', 'blocker', '/data/' + b.dataId, 'data:' + b.dataId, rw ? needsOwner(rw) : null);
       if (rw) { seen.add('work:' + rw.id); const row = out[out.length - 1]; if (row && row.ref === 'data:' + b.dataId) row.workId = rw.id; }
     });
     c.blockers.filter(b => !b.planned && !(b.held > 0)).forEach(b => add(b.owner, 'Plan work to get ' + b.name, 'info', '/data/' + b.dataId, 'data:' + b.dataId));
     const byHold = arr => arr.map(w => ({ w, n: holding(w) })).sort((x, y) => y.n - x.n || String(x.w.due || '').localeCompare(String(y.w.due || '')));
     byHold(c.open.filter(w => c.pastDue.includes(w.id))).forEach(({ w }) =>
-      add(w.owner, verb(w) + (isDate(w.due) && isDate(c.today) && w.due < c.today ? ' (was due ' + fmtDay(w.due) + ')' : isDate(w.due) ? ' (due ' + fmtDay(w.due) + ')' : ''), 'past-due', taskHref(project, w), 'work:' + w.id));
+      add(w.owner || null, verb(w) + (isDate(w.due) && isDate(c.today) && w.due < c.today ? ' (was due ' + fmtDay(w.due) + ')' : isDate(w.due) ? ' (due ' + fmtDay(w.due) + ')' : ''), 'past-due', taskHref(project, w), 'work:' + w.id, needsOwner(w)));
     if (c.finish && c.target && c.finish > c.target && !c.late.length) add(project.owner, 'Review the plan: the work finishes after the deadline', 'deadline', '/project/' + project.id, 'deadline:' + project.id);
     const fad = byHold(c.open.filter(w => c.finishAfterDue.includes(w.id)));
-    fad.filter(x => x.n > 0 || (fc[x.w.id] && fc[x.w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id));
+    fad.filter(x => x.n > 0 || (fc[x.w.id] && fc[x.w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id, needsOwner(w)));
     // not late itself, but the reason another task finishes after its due date
-    byHold(c.open.filter(w => !c.late.includes(w.id) && fc[w.id] && fc[w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id));
-    fad.forEach(({ w }) => add(w.owner, (w.kind === 'defect' ? 'Fix the problem: ' + q(problemTitle(w)) : 'Get ' + q(w.title) + ' back on schedule'), 'late', taskHref(project, w), 'work:' + w.id));
+    byHold(c.open.filter(w => !c.late.includes(w.id) && fc[w.id] && fc[w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id, needsOwner(w)));
+    fad.forEach(({ w }) => add(w.owner, (w.kind === 'defect' ? 'Fix the problem: ' + q(problemTitle(w)) : 'Get ' + q(w.title) + ' back on schedule'), 'late', taskHref(project, w), 'work:' + w.id, needsOwner(w)));
     // a planned blocker whose fix task is already listed above is not listed twice
     c.blockers.filter(b => b.planned && !(b.resolver && seen.has('work:' + b.resolver))).forEach(b => add(b.resolverOwner || b.owner, 'Get ' + b.name + ' ready', 'info', '/data/' + b.dataId, 'data:' + b.dataId));
-    c.open.filter(w => w.kind === 'defect').forEach(w => add(w.owner, 'Fix the problem: ' + q(problemTitle(w)), 'problem', taskHref(project, w), 'work:' + w.id));
+    c.open.filter(w => w.kind === 'defect').forEach(w => add(w.owner, 'Fix the problem: ' + q(problemTitle(w)), 'problem', taskHref(project, w), 'work:' + w.id, needsOwner(w)));
     (extra.approvals || []).forEach(a => {
       if (!a.needed || a.approved || !a.ready) return;
       if (a.blockedBy) add(project.owner, a.blockedBy.fix, 'approval', '/release/' + project.id + '?bu=' + encodeURIComponent(a.bu), 'approval:' + a.bu);

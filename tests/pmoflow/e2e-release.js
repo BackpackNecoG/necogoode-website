@@ -471,7 +471,11 @@ The process starts when an employee asks to buy something.
     console.log('No sign-off lock; project manager excluded');
     ok(!(await rd(AR)).pass && !(await page.$('[data-signoff-locked]')), 'gate failing, yet there is no sign-off lock');
     await setMe('do');   /* R11 §2: Priya does Compliance's steps; Dave Ortiz approves it */
-    ok(await page.$('[data-bu="Compliance"] [data-signoff=approved]') && !(await page.$('[data-bu="Compliance"] [data-locked]')), 'Compliance person has an active Approve button while other checks fail (the A9 change made the Simple-mode approval stale)');
+    /* R13 (BPM r13 #6): ONE readiness rule. Compliance's own information (D7) is pending, so its part is not ready:
+       the button is disabled with the reason BEFORE anyone types a code (the server refuses it anyway) */
+    const cWhy = await page.$('[data-bu="Compliance"] [data-why=notready]') ? await txt('[data-bu="Compliance"] [data-why=notready]') : '';
+    ok(await page.$('[data-bu="Compliance"] [data-locked]') && !(await page.$('[data-bu="Compliance"] [data-signoff=approved]')) && /Not ready for your approval yet/.test(cWhy),
+      'Compliance part waiting on its own information: Approve is disabled with the reason, never failing after the code: ' + cWhy.trim().slice(0, 100));
     ok(/Sam Keller approved/.test(await txt('[data-bu="IT"] .rl-signed')), 'existing IT approval (Sam Keller, Head of IT) still shows');
     await setMe('ta');
     ok(/Project managers can't approve their own project/.test(await txt('[data-bu="Compliance"] [data-why=owner]')), 'project manager: "Project managers can\'t approve their own project."');

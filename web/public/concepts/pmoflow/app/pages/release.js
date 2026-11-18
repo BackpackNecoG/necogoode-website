@@ -504,7 +504,9 @@ function signoffCard(prj, rd) {
     } else if (!live && state !== 'approved') {
       /* a signed, current section needs no action: no stale "Switch 'Viewing as'" hint after sign-off */
       const label = a && a.decision === 'approved' && !byOwner && !byRm ? 'Approve again' : 'Approve this part';
-      const why = signoffWhy(prj, s.bu, true);
+      /* R13 (BPM r13 #6): the list view uses the same readiness rule as Simple and the section view; never fail after the code */
+      const rdy = buReadyOf(prj, s.bu);
+      const why = signoffWhy(prj, s.bu, true) || (!rdy.ready ? `<span class="hint" data-why="notready">${esc(waitingTxt(rdy))}</span>` : '');
       act = `<div class="rl-bu-act">${why ? `<button class="btn sm" disabled data-locked>${label}</button>${why}`
         : `<button class="btn sm primary" data-signoff="approved" data-bu="${esc(s.bu)}">${label}</button><button class="btn sm danger" data-signoff="rejected" data-bu="${esc(s.bu)}">Ask for changes</button>`}</div>`;
     } else if (!live && mine && !isOwner && !isRm) {
@@ -1055,13 +1057,22 @@ function canDecide(prj, bu, decision) {
 async function decide(prj, bu, decision, note) {
   const attestation = String(note || '').trim();
   if (!attestation) { toast('Write what you checked first.'); return false; }
+  /* R13 (BPM r13 #6): check readiness BEFORE asking for the 6-digit code, and never fail silently afterwards */
+  if (decision === 'approved') { const rdy = buReadyOf(prj, bu); if (!rdy.ready) { toast(waitingTxt(rdy)); return false; } }
   if (!(await signIn(`${decision === 'approved' ? 'approve' : 'ask for changes to'} the ${bu} part`))) { toast('Extra sign-in check not completed. Nothing was saved.'); return false; }
   const prev = latestApproval(prj.id, bu);
   const re = decision === 'approved' && prev && prev.decision === 'approved';
   const id = store.newId('apr'); const at = new Date().toISOString();
   const fp = eng('sectionFingerprint', prj.id, bu);
-  await store.save('approval', id, Object.assign({ id, projectId: prj.id, bu, approver: store.state.me, decision, at, snapshotAt: at, stepUp: true, attestation, note: attestation }, fp ? { fingerprint: fp } : {}),
-    `${decision === 'approved' ? (re ? 'Approved again' : 'Approved') : 'Asked for changes to'} the ${bu} part of ${prj.name} (extra sign-in check): “${attestation.slice(0, 120)}”`);
+  try {
+    await store.save('approval', id, Object.assign({ id, projectId: prj.id, bu, approver: store.state.me, decision, at, snapshotAt: at, stepUp: true, attestation, note: attestation }, fp ? { fingerprint: fp } : {}),
+      `${decision === 'approved' ? (re ? 'Approved again' : 'Approved') : 'Asked for changes to'} the ${bu} part of ${prj.name} (extra sign-in check): “${attestation.slice(0, 120)}”`);
+  } catch (e) {
+    const msg = (e && (e.message || e.error)) || 'The approval was not saved.';
+    toast(msg + ' Nothing was saved.');
+    const err = document.querySelector('[data-attest-err]'); if (err) { err.hidden = false; err.textContent = msg; }
+    return false;
+  }
   await store.notify([prj.owner], `${pname(store.state.me)} ${decision === 'approved' ? 'approved' : 'asked for changes to'} the ${bu} part of ${prj.name}`, 'approval:' + id);
   delete ui.attest[prj.id + '|' + bu];
   if (decision === 'approved') ui.justApproved = prj.id + '|' + bu;
