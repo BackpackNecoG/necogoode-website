@@ -178,3 +178,85 @@ New findings go to `R12-BACKLOG.md`.
   - your e2e suites.
 - **Look at screenshots at 1366 and 390.**
 - **Don't commit.** Report in ≤300 words, including exact asks for the lead.
+
+## Appendix: R11 engine API (G1, published; shapes are stable)
+
+`E` = `api/shared/pmoflow-engine.js` (web copy `app/engine.js`, byte-identical). Everything below is also on `projectTruth(docs, prj, today)`. **Render these; never count locally.**
+
+### Testing: `testingTruth(docs, prj, today)` = `projectTruth(...).testing`
+- `{ passed, total, failed, waitingForFix, failedOnly, blocked, notRun, count: "9 of 26 tests passed", next, sentence, stage, done, needTests, haveTests, stages, perBU, coverage, status, phases, heldBy }`
+- **Each phase keeps its own latest result.** `stages[0]` is Try it out: dev/sit/system runs, cases only. `stages[1]` is Business sign-off: uat runs, all tests. Each stage has `{ key, label, total, passed, failed, blocked, notRun, run, done }`. Recording one phase never changes the other phase.
+- **A test counts as passed** when its latest business check passed, it has no Try-it-out fail, and it isn't held. It is **held** while an open problem linked to it (`workItem.testRef`) isn't fixed: defect state new, triaged or in progress. A held test is never passed, in any phase. It counts in `failed` ("needs fixing"), and `waitingForFix` gives the number. `failed` = `failedOnly` + `waitingForFix`. `notRun` = `total − passed − failed`, so blocked tests count as not run.
+- **`coverage`** = `{ denominator: 'information this project changes', needTests, haveTests, gaps, notCovered: [dataId], elements: [{ dataId, name, cases, fields, fieldsCovered, uncoveredFields, covered, state: 'covered' | 'no-cases' | 'fields-missing' }], scriptGaps: [{ pid, step, title }], notChanged: [{ dataId, name, cases }], text }`.
+  - An element with 0 cases is not covered.
+  - `gaps` = elements not covered + changed steps without a script. The matrix header shows "N not covered" = `gaps`.
+  - `notChanged` lists information that needs no tests. Show it, but never count it.
+- **`perBU[bu]`** = `{ total, passed, failed, blocked, notRun, gaps, gapCount, checks, text, notChanged, notChangedText }`.
+  - `text` is the approver page's line, with coverage gaps included, e.g. "0 of 12 checks done: 0 of 11 tests passed, and 1 piece of information has no tests yet (Bank remittance details: Bank name and Account number)". With no gaps it reads "9 of 9 tests passed". The words "passed together" must never repeat "passed".
+  - `notChangedText` reads "Not tested because this project does not change them: …".
+- **`status[testId]`** is `'passed' | 'failed' | 'fix' | 'blocked' | 'notRun'`. **`phases.system[testId]`** and **`phases.uat[testId]`** give the raw latest outcome.
+- **`runAuditText(docs, prj, runDoc)`** gives the audit line for a recorded run, e.g. "Recorded the business check for X: 13 results (12 passed, 1 failed). Business check now 21 of 26 tests passed."
+- The gate check `tests-passed` is built from the same facts: `passed`, `total` and `coverage` match exactly, plus `held` and `scriptGaps`.
+
+### Separation of duties
+- **`approvalBar(docs, prj, bu, personId)`** returns `null`, or `{ rule: 'project-manager' | 'launch-owner' | 'step-owner' | 'recorded-tests', text }`.
+  - Nobody approves a part they do steps in, or recorded **any** test result for.
+  - The Admin role is no exemption.
+- `approvals[i].blockedBy` = `{ rule: 'separation-of-duties', reason, person, people, text, fix, suggestion }`.
+- `bu-signoff.sectionStatus[i]` gains `stepOwners`, `recorders` and `barred: [{ person, rule, text }]`.
+- **Launch overrides:**
+  - `launchGuard(docs, prj, now)` takes `now` as the person's local wall time, "YYYY-MM-DDTHH:MM". It returns `{ ok, why, codes: ['window', 'tasks'], windowOpens, openTasks, text: "Ready except: the launch window opens Tue Dec 29, 7:30 AM; …" }`.
+  - `launchOverrideStatus(docs, prj, now)` returns `{ needed, ok, overridden, signoffs: [{ role, by, name, at, reason }], missing: ['pm', 'sponsor'], text }`.
+  - `overrideSignerRole(docs, prj, personId)` returns `'pm' | 'sponsor' | null`. A sponsor is `project.sponsor`, else anyone eligible to approve a part. It is never the PM or the launch owner.
+  - A sign-off is an `approval` doc: `{ kind: 'launch-override', projectId, role, approver, decision: 'approved', stepUp: true, reason, at }`. It has no `bu`, and it never counts as a team's approval.
+
+### Launch, access and status
+- **`grantCounts(docs, prj, today)`** returns `{ waiting, open, closed, blocking, ids, text }`.
+  - Waiting means requested. Only waiting requests block the gate.
+  - Open means approved or active. Open grants close at launch.
+  - `projectTruth.grants` is the same object.
+- **`grantView(grant, today, tzOffsetMinutes)`** returns `{ state, label, from, to, days, maxDays: 30, overMax, closedOn, text }`. Dates are local.
+- **`projectTruth.launchFlag`**: a launch window on a weekend, holiday or workspace day off. It reads "Launch day Tue Dec 29, … is a day off: pick a business day". It is the first reason, and the label is never "On track".
+- **`projectTruth.blocking`** = `{ count, holdsUp, unplanned, items: [{ dataId, name, planned, held, text }], text: "1 blocking (holds up 5 tasks)" }`.
+  - **The one definition:** information the Future steps need that isn't available yet AND holds up at least one open task.
+  - Use it in the header, the report and the risk register.
+- **`projectTruth.lateness[workId]`** = `lateInfo(...)` = `{ late, days, text: "Late by 6 business days", dueText: "was due Nov 16" | "due Nov 23", due, forecast, pastDue }`.
+  - `days` is business days from the due date to the expected finish. It is the ONE lateness number.
+  - "was due" is used only for past dates.
+
+### Earned value (`projectTruth.ev`, `evFlags`, `cost.method`)
+- With spent > 0 and EV = 0, SPI and CPI are **0** (not null), and `flags` includes `{ key: 'spent-nothing-finished', text: 'Spent with nothing finished' }`.
+- **One EAC method:**
+  - `BAC / CPI` when CPI > 0 (`eacMethod: 'cpi'`);
+  - otherwise `max(bottom-up, spent + remaining estimate)` (`eacMethod: 'bottom-up'`).
+  - It is never below spent.
+- `doneNoHours: [workId]` and the flag `{ key: 'done-no-hours', items, text }` cover work marked Done (including via Jira) with 0 hours.
+
+### Plans and sprints
+- **`suggestWorkFromDiff`:**
+  - No task spans more than 10 business days. A later forecast moves the start; it never stretches the task. Longer effort is split into "(part k of n)".
+  - Role-only steps go to the one person whose title equals the role. Otherwise `owner: null`, `ownerRole`, note "Needs an owner: Credit Analyst.". The task is never given to the PM.
+  - The "tell" task has `teams: [...]`, taken from the changed steps' owners' teams, roles and known `touches`.
+- **`planFit(...)`** adds:
+  - `warning: null | { key: 'late-on-arrival', daysLate, text: "This needs until Mar 4, past your Jan 19 deadline (N business days late).", options: [{ key: 'accept', label: 'Accept anyway' }, { key: 'adjust', label: 'Adjust' }] }`;
+  - `unassigned: [{ key, title, role, text }]`;
+  - `longestTaskDays`, `maxTaskDays`.
+- **`sprintCalendar(docs, prj, today)`** returns `[{ id, name, start, end, workingDays, daysOff: [{ date, name }], capacity: { total, people: [{ id, name, days }] }, text: "Nov 16 – Nov 27 · 9 working days (Thanksgiving Day off)" }]`. Capacity is `person.capacity × workingDays / 5`.
+
+### Jira dependency flag and change counts
+- **`doneBeforeDeps(docs, workId)`** returns `{ flag, open: [{ id, title }], text: "Finished before the work it depends on (… is still open)" }`.
+  - Call it after an inbound Done. Log `text` in the sync log, and show it on the task.
+  - G4 renders it on Connections. G3 renders it on the task.
+- **`changeSummary`** counts steps only (steps, waits, messages, subprocesses), never choices. It adds `steps`. The seeded Vendor Onboarding is now "4 new · 6 changed · 1 removed" (10 steps).
+
+### Server-side rules (`api/pmoflow/index.js`, all unit-tested in `api.test.js`)
+- **PUT `testRun`:**
+  - `by` must be the actor.
+  - A **pass** is refused with 403 for a test assigned to someone else, or for a test held by an open problem.
+- **PUT `approval` (team part):**
+  - `approver` must be the actor, and the decision needs `stepUp: true`.
+  - It is refused with 403 when `approvalBar` names a rule.
+- **PUT `approval` with `kind: 'launch-override'`:** refused unless the actor is the signer and holds that `role`, with step-up.
+- **POST `golive`:**
+  - When `launchGuard(now = body.localNow)` isn't ok, it needs `launchOverrideStatus.ok`. That means two different people, both with step-up.
+  - The Admin role is never an exemption.

@@ -191,7 +191,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(await page.$('[data-no-section]') && !(await page.$('[data-bu-decide]')), `${unchanged[0]}'s approver view says there is nothing to approve`);
 
     console.log('Approvals happen once: only when the part is ready');
-    await setMe('ps');
+    /* R11 §2: Priya does Compliance's steps and records its tests, so she can never approve it; Dave Ortiz (Head of
+       Compliance, an Approver on a free seat) is the eligible approver */
+    await setMe('do');
     const r0 = await st(`return window.PMOEngine.buReady(store.state.docs, a, 'Compliance');`, AR);
     ok(!r0.ready && r0.waiting.length, 'Compliance is not ready yet: ' + r0.sentence);
     await open('/release/' + AR + '?bu=Compliance');
@@ -205,11 +207,15 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await open('/release/' + AR + '?bu=Compliance');
     ok(await page.$('[data-early-warning]') && await page.$('[data-bu-decide=approved]'), 'Advanced: approving early is possible, with a warning that it may need redoing');
     await setAdv(false);
+    /* the team's own member (Priya) does the work and records the tests; Dave stays clear of both */
+    await setMe('ps');
     /* a bulk pass with one shared note, for the evidence summary */
     const cIds = await st(`return store.list('testCase', c => c.dataId === 'D7').map(c => c.id);`);
     if (cIds.length) await st(`const id = 'run-e2e-bulk'; await store.save('testRun', id, { id, projectId: a.p, env: 'uat', at: new Date().toISOString(), by: 'ps', cycle: 1, results: a.ids.map(caseId => ({ caseId, outcome: 'pass', note: '', evidence: 'Checked every row with the access team' })) }, 'Recorded business testing run (e2e)');`, { p: AR, ids: cIds });
     const r1 = await makeReady(AR, 'Compliance');
     ok(r1.ready, 'once its work, information and tests are complete, Compliance is ready: ' + r1.sentence);
+    await setMe('do');
+    ok(!(await st(`return window.PMOEngine.approvalBar(store.state.docs, a, 'Compliance', 'do');`, AR)) && !!(await st(`return window.PMOEngine.approvalBar(store.state.docs, a, 'Compliance', 'ps');`, AR)), 'separation of duties: Priya (does the steps, recorded the tests) is barred; Dave Ortiz may approve');
     console.log('Approve my part from home in 3 actions, while other checks fail');
     await open('/');
     actions.n = 0;
@@ -221,8 +227,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.waitForSelector('[data-simple-approver]'); await settle(500);
     ok(await page.$('[data-bu-step]') && (!(await page.$('[data-bu-data]')) || /We have it|Not available yet|Connected|Sample only|Waiting/.test(await txt('[data-bu-data]'))), 'approver view: what changed in plain words and information status');
     const evl = await txt('[data-evidence-line]');
-    const pbC = (await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).testing.perBU;`, AR)).Compliance || { passed: 0, total: 0 };
-    ok(new RegExp(`^${pbC.passed} of ${pbC.total} tests? passed`).test(evl.trim()) && await page.getAttribute('[data-evidence-line]', 'data-part-tests') === `${pbC.passed}/${pbC.total}`, 'tests for this part use perBU: ' + evl.trim().slice(0, 100));
+    const pbC = (await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).testing.perBU;`, AR)).Compliance || { passed: 0, total: 0, checks: 0, text: '' };
+    ok(evl.trim().startsWith(pbC.text) && await page.getAttribute('[data-evidence-line]', 'data-part-tests') === `${pbC.passed}/${pbC.checks}`, 'tests for this part use perBU (coverage gaps included): ' + evl.trim().slice(0, 100));
     ok(await page.$('[data-passed-together]'), 'a bulk pass with one shared note is flagged "passed together"');
     const facts = await st(`return window.PMOEngine.approvalNoteFacts(store.state.docs, a, 'Compliance').text;`, AR);
     ok(facts && await page.inputValue('[data-attest]') === facts && /changed steps? reviewed/.test(facts) && /tests? passed/.test(facts), '"What you checked" is prefilled from facts: ' + facts);
@@ -236,12 +242,12 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     ok(actions.n <= 4, `approved from home in ${actions.n} actions (open, [my part], approve, sign-in check)`);
     await page.waitForSelector('[data-part-approved]', { timeout: 10000 }); await settle(500);
     const apr = await st(`return store.list('approval', x => x.projectId === a && x.bu === 'Compliance').sort((x, y) => y.at.localeCompare(x.at))[0];`, AR);
-    ok(apr && apr.approver === 'ps' && apr.decision === 'approved' && apr.stepUp && /changed steps? reviewed/.test(apr.attestation) && apr.fingerprint, 'approval saved with what was checked, the sign-in check and a fingerprint');
+    ok(apr && apr.approver === 'do' && apr.decision === 'approved' && apr.stepUp && /changed steps? reviewed/.test(apr.attestation) && apr.fingerprint, 'approval saved with what was checked, the sign-in check and a fingerprint');
     const bu0 = await check(AR, 'bu-signoff');
     ok(!(bu0.unsigned || []).includes('Compliance') && !(await rd(AR)).pass, 'the engine counts it even though the gate still fails');
     ok(/Your part is approved/.test(await txt('[data-part-approved]')) && (await page.$$('[data-still-needs] li')).length >= 1, '"Your part is approved. The launch still needs: ' + (await page.$$eval('[data-still-needs] li', l => l.map(x => x.firstChild.textContent).join(', '))) + '"');
     await page.reload(); await page.waitForSelector('[data-simple-approver]'); await settle(500);
-    ok(/Approved by Priya Shah/.test(await txt('.rs-sub')), 'approval persists after reload');
+    ok(/Approved by Dave Ortiz/.test(await txt('.rs-sub')), 'approval persists after reload');
     await open('/release/' + AR);
     ok(await page.$('[data-my-approved]') && await page.$('[data-part="Compliance"][data-state="approved"]'), 'launch page shows your part approved');
     await page.click('details[data-sec=audit] summary');
@@ -342,11 +348,11 @@ The process starts when an employee asks to buy something.
       const shown = await page.getAttribute(`[data-part="${nr.bu}"] [data-part-waiting]`, 'data-part-waiting');
       ok(+shown === nr.waitingOn, `"${nr.bu}" waiting on ${shown} = approvals.waitingOn ${nr.waitingOn}`);
       const pt = await page.getAttribute(`[data-part="${nr.bu}"] [data-part-tests]`, 'data-part-tests').catch(() => null);
-      ok(!pb.total || pt === `${pb.passed}/${pb.total}`, `part card tests = perBU (${pt} vs ${pb.passed}/${pb.total})`);
+      ok(!pb.total || pt === `${pb.passed}/${pb.checks}`, `part card tests = perBU, coverage gaps included (${pt} vs ${pb.passed}/${pb.checks})`);
       await page.click(`a[data-part-open="${nr.bu}"]`); await page.waitForSelector('[data-simple-approver]'); await settle(400);
       const w = (await txt('[data-bu-notready] b')).trim();
       ok(w === nr.sentence && /^Not ready for your approval yet: waiting on /.test(w), 'part page: "' + w + '"');
-      ok(!pb.total || await page.getAttribute('[data-evidence-line]', 'data-part-tests') === `${pb.passed}/${pb.total}`, '"Tests for this part" uses the same perBU numbers');
+      ok(!pb.total || await page.getAttribute('[data-evidence-line]', 'data-part-tests') === `${pb.passed}/${pb.checks}`, '"Tests for this part" uses the same perBU numbers');
       ok(!/\bOwner [a-z]{2} →|\b(dk|ps|mc|ta|lp|ar)\b →/.test(await txt('[data-simple-approver]')), 'no raw person ids in what changed');
       const ts = await page.$('[data-teams-involved]');
       if (ts) { const people = await st(`return store.state.people.map(p => p.bu);`); const teams = (await txt('[data-teams-involved]')).replace(/^.*?:\s*/, '').split(/,\s*/); ok(teams.every(x => people.includes(x.trim())), '"Teams involved" lists teams only: ' + teams.join(', ')); }
@@ -463,9 +469,9 @@ The process starts when an employee asks to buy something.
     /* ---------- 2. R7: no sign-off lock; owner excluded ---------- */
     console.log('No sign-off lock; project manager excluded');
     ok(!(await rd(AR)).pass && !(await page.$('[data-signoff-locked]')), 'gate failing, yet there is no sign-off lock');
-    await setMe('ps');
+    await setMe('do');   /* R11 §2: Priya does Compliance's steps; Dave Ortiz approves it */
     ok(await page.$('[data-bu="Compliance"] [data-signoff=approved]') && !(await page.$('[data-bu="Compliance"] [data-locked]')), 'Compliance person has an active Approve button while other checks fail (the A9 change made the Simple-mode approval stale)');
-    ok(/Dev Kumar approved/.test(await txt('[data-bu="IT"] .rl-signed')), 'existing IT approval still shows');
+    ok(/Sam Keller approved/.test(await txt('[data-bu="IT"] .rl-signed')), 'existing IT approval (Sam Keller, Head of IT) still shows');
     await setMe('ta');
     ok(/Project managers can't approve their own project/.test(await txt('[data-bu="Compliance"] [data-why=owner]')), 'project manager: "Project managers can\'t approve their own project."');
     await shot('01-ar-locked-pending');
@@ -550,14 +556,20 @@ The process starts when an employee asks to buy something.
     await setMe('ta');
     await st(`const p = store.get('project', a); await store.save('project', a, Object.assign({}, p, { releaseManager: 'ps' }), 'Release manager set to Priya Shah (e2e)');`, AR); await settle(700);
     await setMe('ps');
-    /* R9 §13 separation of duties, set up explicitly: Priya is the launch owner and Dave Ortiz recorded every Compliance test,
-       so nobody left in Compliance may approve. The block is said plainly, with a person picker. */
+    /* R9 §13 / R11 §2 separation of duties, set up explicitly: Priya is the launch owner and does Compliance's steps, and
+       Dave Ortiz records a Compliance test result himself (an Admin makes him an Editor first; results are always
+       recorded under the recorder's own name), so nobody left in Compliance may approve. The block is said plainly,
+       with a person picker. */
+    const roleApi = (who, role) => st(`const r = await fetch('/api/pmoflow/workspaces/' + encodeURIComponent(store.state.ws) + '/admin/roles/' + a.who, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: a.role, actor: store.state.me }) }); return r.status;`, { who, role });
     await setMe('ta');
-    const runBy = await st(`const out = {}; for (const r of store.list('testRun', x => x.projectId === a)) { out[r.id] = r.by; await store.save('testRun', r.id, Object.assign({}, r, { by: 'do' }), 'Run recorded by Dave Ortiz (e2e)'); } return out;`, AR);
-    await settle(900);
+    ok(await roleApi('do', 'editor') === 200, 'an Admin makes Dave Ortiz an Editor (so he can record a test result)');
+    await setMe('do');
+    const sodRun = 'run-e2e-sod-dave';
+    await st(`const c = store.list('testCase', x => x.dataId === 'D7')[0]; await store.save('testRun', a.r, { id: a.r, projectId: a.p, env: 'uat', at: new Date().toISOString(), by: 'do', cycle: 1, results: [{ caseId: c.id, outcome: 'pass', note: '', evidence: 'Re-checked one row (e2e)' }] }, 'Recorded business testing run (e2e)');`, { r: sodRun, p: AR });
+    await setMe('ta'); await open('/release/' + AR); await settle(900);
     const apC = (await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).approvals;`, AR)).find(x => x.bu === 'Compliance');
-    ok(apC && apC.blockedBy && apC.blockedBy.rule === 'separation-of-duties' && apC.blockedBy.person === 'do', 'engine: Compliance is blocked by separation of duties (Dave recorded every test)');
-    const sodRe = /Dave Ortiz recorded these tests, so someone else in Compliance must approve/;
+    ok(apC && apC.blockedBy && apC.blockedBy.rule === 'separation-of-duties' && (apC.blockedBy.people || [apC.blockedBy.person]).includes('do') && apC.eligible.length === 0, 'engine: Compliance is blocked by separation of duties (Priya is the launch owner, Dave recorded a test): ' + JSON.stringify(apC && apC.blockedBy && apC.blockedBy.people));
+    const sodRe = /Dave Ortiz recorded test results for Compliance’s part, so someone else must approve it/;
     ok(sodRe.test(await txt('[data-bu="Compliance"] [data-sod-block]')) && await page.$('[data-bu="Compliance"] [data-sod-block] [data-choose-sel="Compliance"]'), 'Advanced card: the block is said plainly, with “Choose who:” and a person picker');
     const sodOpts = await page.$$eval('[data-sod-block] [data-choose-sel="Compliance"] option', o => o.map(x => x.value));
     ok(!sodOpts.includes('do') && !sodOpts.includes('ta') && !sodOpts.includes('ps') && sodOpts.length > 0, 'the picker leaves out the recorder, the PM and the launch owner: ' + sodOpts.join(','));
@@ -569,7 +581,9 @@ The process starts when an employee asks to buy something.
     await page.selectOption('[data-choose-sel="Compliance"]', 'lp'); await page.click('[data-choose-save="Compliance"]'); await settle(900);
     const apC2 = (await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).approvals;`, AR)).find(x => x.bu === 'Compliance');
     ok(await st(`return store.get('project', a).approvers.Compliance;`, AR) === 'lp' && !apC2.blockedBy && apC2.eligible.includes('lp'), 'choosing Leo Park lifts the block: he can approve the Compliance part');
-    await st(`for (const [id, by] of Object.entries(a.m)) { const r = store.get('testRun', id); await store.save('testRun', id, Object.assign({}, r, { by }), 'Recorder restored (e2e)'); } const p = store.get('project', a.p); const ap = Object.assign({}, p.approvers); delete ap.Compliance; await store.save('project', a.p, Object.assign({}, p, { approvers: ap }), 'Chosen approver cleared (e2e)');`, { m: runBy, p: AR });
+    /* undo: Dave's own run is removed, he is an Approver again, and the chosen approver is cleared */
+    await st(`await store.remove('testRun', a.r, 'Run removed (e2e)'); const p = store.get('project', a.p); const ap = Object.assign({}, p.approvers); delete ap.Compliance; await store.save('project', a.p, Object.assign({}, p, { approvers: ap }), 'Chosen approver cleared (e2e)');`, { r: sodRun, p: AR });
+    ok(await roleApi('do', 'approver') === 200, 'Dave Ortiz is an Approver again');
     await setAdv(true); await open('/release/' + AR);
     await setMe('ta');
     await st(`const p = store.get('project', a); await store.save('project', a, Object.assign({}, p, { releaseManager: 'mc' }), 'Release manager set to Maya Chen (e2e)');`, AR); await settle(700);
@@ -578,13 +592,13 @@ The process starts when an employee asks to buy something.
       for (let k = 0; k < 3; k++) {
         const need = await page.$$eval('.rl-bu.stale, .rl-bu.pending', els => els.map(e => e.dataset.bu));
         if (!need.length) break;
-        for (const bu of need) { await setMe(bu === 'IT' ? 'dk' : 'ps'); await page.click(`[data-bu="${bu}"] [data-signoff=approved]`);
+        for (const bu of need) { await setMe(bu === 'IT' ? 'sk' : 'do'); await page.click(`[data-bu="${bu}"] [data-signoff=approved]`);
           await page.waitForSelector('.overlay [data-attest-modal]'); await page.fill('.overlay [data-attest-modal]', `I reviewed the ${bu} steps, data evidence and UAT results (e2e).`);
           await page.click('.overlay [data-act=go]'); await stepUpOk(); }
       }
     };
-    /* R6 approver view: one screen for one BU, attestation required */
-    await setMe('ps');
+    /* R6 approver view: one screen for one BU, attestation required (Dave Ortiz: Priya does Compliance's steps) */
+    await setMe('do');
     ok(await page.$('[data-review-mine="Compliance"]'), '"Review my section" shows for the persona\'s BU (Compliance)');
     ok(await page.$('[data-bu="IT"] [data-bu-review="IT"]') && await page.$('[data-bu="Compliance"] [data-bu-review]'), 'each BU card links to its review screen');
     await page.click('[data-review-mine]'); await page.waitForSelector('[data-bu-view="Compliance"]'); await settle(500);
@@ -618,7 +632,7 @@ The process starts when an employee asks to buy something.
     await signAll();
     r2 = await rd(AR);
     ok(r2.pass && await page.$('[data-gate=pass]'), 'gate passes again after re-approval');
-    ok(/2 different approvers/.test(await txt('.rl-two')), 'two different people: Dev Kumar and Priya Shah');
+    ok(/2 different approvers/.test(await txt('.rl-two')), 'two different people: Sam Keller and Dave Ortiz');
     await shot('02-ar-pass');
 
     /* ---------- 6. dialogs keep input ---------- */
@@ -662,14 +676,28 @@ The process starts when an employee asks to buy something.
     /* R9 §13 launch guard: before the window opens and with launch-day steps not done, "Launch now" is disabled */
     ok((await rd(AR)).pass && await page.$eval('[data-golive]', b => b.disabled) && (await txt('[data-golive]')).trim() === 'Launch now' && /launch window opens|launch-day steps? (is|are) not done/.test(await txt('[data-why=guard]')), 'gate passes, but "Launch now" is disabled: ' + (await txt('[data-why=guard]')).trim().slice(0, 120));
     ok(/^(Mon|Tue|Wed|Thu|Fri) [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}( AM| PM)?–\d{1,2}:\d{2} (AM|PM)/.test((await txt('.rl-golive [data-launch-window] b')).trim()), 'launch window shown as "Mon Nov 16, 8:00–10:00 AM": ' + (await txt('.rl-golive [data-launch-window] b')).trim());
+    /* R11 §2: a launch override needs two different people, both with the extra sign-in check: the project manager and a
+       sponsor or approver. The launch owner (Maya) can't sign it, and nobody overrides alone. */
+    ok(await page.$('[data-override-panel]') && !(await page.$('[data-override]')), 'the launch owner sees the two-person override but cannot sign it alone');
+    await setMe('ta'); await settle(700);
     await page.click('[data-override]'); await page.waitForSelector('.overlay [data-override-reason]');
     await page.click('.overlay [data-act=go]'); await settle(300);
     ok(await page.$('.overlay [data-override-reason]') && /logged/.test(await txt('.overlay [data-err]')), 'Override with reason: an empty reason is refused inline');
     await page.fill('.overlay [data-override-reason]', 'Steering group moved the launch up a week (e2e)');
-    await page.click('.overlay [data-act=go]');
+    await page.click('.overlay [data-act=go]'); await stepUpOk(); await settle(900);
+    const ov1 = await st(`return window.PMOEngine.launchOverrideStatus(store.state.docs, a, store.state.today + 'T08:00');`, AR);
+    ok(!ov1.ok && ov1.signoffs.length === 1 && ov1.signoffs[0].role === 'pm' && (ov1.missing || []).includes('sponsor'), 'the project manager signed; one more person (a sponsor or approver) must sign: ' + ov1.text);
+    ok(await page.$eval('[data-golive]', b => b.disabled), 'one signature is not enough: Launch stays locked');
+    await setMe('do'); await settle(700);
+    await page.click('[data-override]'); await page.waitForSelector('.overlay [data-override-reason]');
+    await page.fill('.overlay [data-override-reason]', 'Agreed with the steering group (e2e)');
+    await page.click('.overlay [data-act=go]'); await stepUpOk(); await settle(900);
+    const ovs = await st(`return store.list('approval', x => x.projectId === a && x.kind === 'launch-override').map(x => [x.role, x.approver, x.stepUp, !!x.reason, x.bu || null]);`, AR);
+    ok(JSON.stringify(ovs.sort()) === JSON.stringify([['pm', 'ta', true, true, null], ['sponsor', 'do', true, true, null]]), 'override saved as two sign-offs (PM and sponsor), each with who, why and the sign-in check, never a team approval: ' + JSON.stringify(ovs));
+    await setMe('mc'); await settle(700);
+    ok(!(await page.$eval('[data-golive]', b => b.disabled)) && /override/.test(await txt('[data-golive]')), 'signed by two people: the launch owner can launch with the override');
+    await page.click('[data-golive]');
     await page.waitForSelector('.overlay [data-golive-runbook]');
-    const ovr = await st(`return store.get('project', a).launchOverride;`, AR);
-    ok(ovr && ovr.by === 'mc' && /Steering group/.test(ovr.reason), 'override saved on the project with who and why');
     ok((await page.$$('.overlay [data-gl-task]')).length === 3, 'go-live dialog lists the 3 runbook tasks');
     ok(await page.$('.overlay [data-gl-owner=ps]') && /Priya Shah/.test(await txt(`.overlay [data-gl-task="${gngId}"]`)) && /Confirmed by Priya Shah/.test(await txt(`.overlay [data-gl-task="${gngId}"]`)), 'runbook task owner kept in the go-live dialog (Priya Shah, confirmed)');
     await page.check('.overlay [data-simfail]');
@@ -690,7 +718,7 @@ The process starts when an employee asks to buy something.
     ok(await st(`return JSON.stringify(store.list('grant', g => g.projectId === a).map(g => g.status));`, AR) === grants0, 'no grant expiry');
     ok(await page.$('.rl-latest [data-failed] [data-no-side-effects]'), 'release record says nothing was promoted or published');
     await shot('05-pipeline-failed');
-    ok(au.some(e => /Overrode the launch guard .*Steering group/.test(e.t)), 'the override is logged in History');
+    ok(au.some(e => /Signed the launch override as project manager .*Steering group/.test(e.t)) && au.some(e => /Signed the launch override as sponsor/.test(e.t)), 'both override sign-offs are logged in History');
     console.log('Retry succeeds');
     ok(await page.$eval('[data-retry]', b => b.disabled), 'retry stays locked by the launch guard');
     /* open the window now and finish the launch-day steps (the PM edits the plan): the guard lifts */
@@ -893,6 +921,9 @@ The process starts when an employee asks to buy something.
     ok(sc0b.title === 'Happy path: vendor approved first time' && sc0b.steps.length === sc0.steps.length + 1, 'scenario edited: new title and an extra step');
     ok(await page.$(`[data-cov-row="scenario:${sc0.id}"]`), 'scenarios appear in the coverage matrix');
     ok((await check(VM, 'tests-passed')).scripts.includes(sc0.id), 'engine counts the adopted scenario in UAT coverage');
+    /* R11 §2: only a test's own tester (or anyone, when unassigned) passes it: Priya runs this scenario below */
+    if (await page.$(`[data-scn-tester="${sc0.id}"]`)) { await page.selectOption(`[data-scn-tester="${sc0.id}"]`, 'ps'); await settle(900); }
+    ok(await st(`return (store.get('project', a).uatScenarios.find(x => x.id === ${JSON.stringify(sc0.id)}) || {}).tester;`, VM) === 'ps', 'scenario tester assigned (Priya)');
 
     console.log('Planned test cycle: only its testers record');
     await page.click('[data-add-cycle]');
@@ -933,8 +964,11 @@ The process starts when an employee asks to buy something.
     ok(/one evidence note/.test(await txt('.overlay [data-bulk-hint]')), '"Mark selected as passed" needs an evidence note');
     await page.fill('.overlay [data-bulk-ev]', 'UAT evidence pack, folder VO-UAT-1');
     await page.click('.overlay [data-bulk-pass]'); await settle(200);
-    const evAll = await page.$$eval('.overlay .ts-case', rows => rows.filter(r => !r.closest('[hidden]')).every(r => { const e = r.querySelector('input[name^="e_"]'); return [...r.querySelectorAll('select')].every(s => s.value === 'pass') && e && e.value === 'UAT evidence pack, folder VO-UAT-1'; }));
+    const evAll = await page.$$eval('.overlay .ts-case', rows => rows.filter(r => !r.closest('[hidden]') && !r.hasAttribute('data-pass-locked')).every(r => { const e = r.querySelector('input[name^="e_"]'); return [...r.querySelectorAll('select')].every(s => s.value === 'pass') && e && e.value === 'UAT evidence pack, folder VO-UAT-1'; }));
     ok(evAll, 'every selected row passed with the one evidence note');
+    /* R11 §2: "All" never selects a test assigned to someone else or held by an open problem; those rows say why */
+    const locked = await page.$$eval('.overlay .ts-case[data-pass-locked]', rows => rows.filter(r => !r.closest('[hidden]')).map(r => ({ pick: !!r.querySelector('[data-pick]'), passed: [...r.querySelectorAll('select')].some(s => s.value === 'pass'), hint: (r.querySelector('[data-lock-hint]') || {}).textContent || '' })));
+    ok(locked.length > 0 && locked.every(x => !x.pick && !x.passed && /Assigned to|problem to be fixed/.test(x.hint)), `bulk pass leaves the ${locked.length} tests assigned to others (or held) alone, and says why`);
     /* the multi-step script fails on its last step */
     await page.evaluate(sid => {
       const row = document.querySelector(`.overlay [data-row="s:${sid}"]`); const sels = row.querySelectorAll('[data-step-row] select'); sels[sels.length - 1].value = 'fail';
@@ -1131,7 +1165,9 @@ The process starts when an employee submits an expense claim.
       return { n: des.length, linked: des.every(d => ids.has(d.id)), owners: des.map(d => d.owner || d.ownerRole || ''), names: des.map(d => d.name), kinds: p.asis.map(n => n.type), titles: p.asis.map(n => n.title), wait: (p.asis.find(n => n.type === 'wait') || {}).wait, msg: p.asis.find(n => n.type === 'message') };`, pid2);
     /* R10: the injected step "logs the dispute" is owned by mc, so its new information is mc's (the step owner), not because mc imported it */
     const stepOwners = await st(`const p = store.get('process', a); const out = {}; const walk = ns => (ns || []).forEach(n => { (n.data || []).forEach(d => { (out[d] = out[d] || []).push(n.owner || n.ownerRole || ''); }); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(p.asis);
-      return store.list('dataElement', d => out[d.id] && /Dispute/.test(d.name)).map(d => out[d.id].includes(d.owner) || (d.ownerRole && out[d.id].includes(d.ownerRole)) || (!out[d.id].some(Boolean) && !!d.owner));`, pid2);
+      return store.list('dataElement', d => out[d.id] && /Dispute/.test(d.name)).map(d => out[d.id].includes(d.owner) || (d.ownerRole && out[d.id].includes(d.ownerRole)) || (!out[d.id].some(Boolean) && !d.owner && !d.ownerRole));`, pid2);
+    /* R11 G2: the information owner defaults to the step's owner or role, never the importer; a step nobody does yet
+       leaves its information unowned too (both are flagged before launch) */
     /* R10 (S2 isolation): demo names in a paste are not linked, so the step keeps the name as a role; its new information then
        carries that role, held by a named person (S2's rule). Either way it follows the step, never a guessed demo person. */
     ok(stepOwners.length === 2 && stepOwners.every(Boolean), 'new information follows whoever does its step: ' + made.owners.join(', '));

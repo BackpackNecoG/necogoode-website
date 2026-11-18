@@ -57,13 +57,14 @@
           "planned": true
         },
         "Data residency in your own tenant's region",
-        "Dedicated support"
+        "Dedicated support",
+        "Source code escrow on request"
       ]
     }
   ],
   "pilot": {
-    "price": 7500,
+    "price": 2500,
     "days": 90,
-    "note": "credited to your first year"
+    "note": "for one real process, credited to your first year"
   }
 }

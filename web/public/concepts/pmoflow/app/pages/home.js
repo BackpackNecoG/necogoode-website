@@ -29,7 +29,9 @@ function waitHTML() {
   const pn = id => (store.get('project', id) || {}).name || '';
   const rows = list.map((x, i) => {
     const kind = String(x.kind || 'action'), cls = KIND_CLS[kind] || 'mention';
-    const due = x.due ? (x.late ? `<b class="fail">Late · was due ${esc(fmt(x.due))}</b>` : `due ${esc(fmt(x.due))}`) : (x.late ? '<b class="fail">Late</b>' : '');
+    /* R11 G1 §5: lateness words come from the engine (lateInfo): "Late by N business days · was due X" only for a past date */
+    const li = x.late && x.id && (x.kind === 'work' || x.kind === 'fix' || x.kind === 'practice') ? eng('lateInfo', null, docs(), x.id, today()) : null;
+    const due = x.late ? `<b class="fail" data-late-text>${esc(li && li.text ? li.text : 'Late')}${li && li.dueText ? ' · ' + esc(li.dueText) : x.due ? ' · due ' + esc(fmt(x.due)) : ''}</b>` : x.due ? `due ${esc(fmt(x.due))}` : '';
     const sub = [pn(x.projectId) ? esc(pn(x.projectId)) : '', due].filter(Boolean).join(' · ');
     const one = x.oneTap && x.oneTap.action;
     const title = esc(x.title || x.what || '');

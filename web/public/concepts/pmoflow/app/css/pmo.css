@@ -896,3 +896,15 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-pf-period table{width:100%}
 @media (max-width:700px){.pmo-rep-period{columns:1}}
 @media print{.pmo-rep-picker{display:none !important}.pmo-rep-period{columns:1}.pmo-rep-psec{break-inside:avoid}}
+/* R11 G3: suggested-plan draft banner, late-on-arrival warning, adaptive timeline axis */
+.pmo-draft{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;background:var(--accent-soft);border:1px solid #c7d2fe;border-radius:10px;padding:9px 12px;font-size:13px}
+.pmo-draft.hint{display:block;background:#f8fafc;border-color:var(--line)}
+.pmo-draft-acts{display:flex;gap:6px;flex-wrap:wrap}
+.pmo-fp-late{margin:8px 0;display:flex;flex-direction:column;gap:4px;background:var(--late-soft);border:1px solid #fecaca;color:#7f1d1d;border-radius:10px;padding:10px 12px}
+.pmo-fp-late span{font-size:13px;color:#7f1d1d}
+.pmo-fp-warn{margin:4px 0;color:#92400e}
+.tl .lane[data-axis] .tick[hidden]{display:none}
+.pmo-evflag{display:inline-flex;align-items:center;gap:4px;margin:2px 0 0 8px;padding:1px 8px;border-radius:999px;background:var(--soon-soft);border:1px solid #fde68a;color:#92400e;font-size:11.5px;font-weight:600}
+.pmo-evflags .pmo-evflag{margin-left:0}
+.pmo-tflags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.pmo-tflags .pmo-evflag{margin-left:0}

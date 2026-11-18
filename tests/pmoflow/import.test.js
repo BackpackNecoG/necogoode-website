@@ -106,6 +106,153 @@ test('co-approve keeps its hyphen; "return to step 1" loops back', () => {
   assert.equal(I.verbBase('verifies'), 'verify');
 });
 
+
+/* ---------- R11 G2: import fidelity on the R10 reviewers' own procedures ---------- */
+/* Karen (R10 karen.md): 9 lines, step 6 numbered "6 - …" was dropped; roles at the start of a sentence; "Known number" */
+const KAREN = `Vendor Setup Procedure
+Owner: Purchasing
+1. Buyer gets the vendor's W-9, certificate of insurance and bank details.
+2. Buyer enters the request on the new vendor form.
+3. Credit/Finance reviews the vendor's credit application and payment terms.
+4. If Credit/Finance rejects the vendor, the Buyer tells the requester.
+5) Purchasing manager approves the new vendor in Coupa.
+6 - AP enters vendor in the ERP (vendor master)
+7. AP calls the vendor's known number to confirm the bank details.
+8. Finance releases the vendor for payment.
+9. Purchasing emails the vendor a welcome letter.`;
+const CREDIT = `Credit Limit Increase SOP
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit limit request in Salesforce.
+2. The Credit Analyst pulls the Dun & Bradstreet report for the customer.
+3. The Credit Analyst reviews the customer's payment history in NetSuite.
+4. If the requested limit exceeds $50,000, the Credit Manager reviews the request.
+5. Otherwise, the Credit Analyst approves the request.
+6. If the Credit Manager does not approve within 2 business days, escalate to the CFO.
+7. If the Credit Manager rejects the request, the Sales Rep tells the customer.
+8. Limits above $250,000 also need sign-off from the Controller (Sam Wu).
+9. The Credit Analyst updates the credit limit in NetSuite.
+10. The Credit Analyst records the decision in Workiva.
+11. The Sales Rep notifies the customer of the new limit.
+12. The Credit Analyst files the approval letter in SharePoint.`;
+const JORDAN = `Benefits Enrollment Change
+Step 1: The member services rep logs the life-event request in Salesforce.
+2) Benefits Analyst checks the member's eligibility and the plan rules.
+(3) If the request is complete, the Benefits Analyst updates the election in Workday.
+Otherwise, the member services rep asks the member for the missing documents.
+4 – Benefits Supervisor (Dana Ortiz) approves changes over $500 a month.
+5 - Payroll updates the deduction before the next pay run.
+Step 6 The Benefits Analyst sends the member a confirmation letter through DocuSign.
+7. Notes: file the confirmation in SharePoint.`;
+
+const everyLineKept = r => { const ids = new Set(walk(r.nodes).map(n => n.id)); return r.lines.every(l => l.nodes.length && l.nodes.every(i => ids.has(i))); };
+
+test('Karen: 9 lines → 9 steps; "6 - …" and "5)" are steps; roles at the start of a sentence', () => {
+  const r = I.parseSop(KAREN);
+  assert.equal(r.lines.length, 9, 'nine lines read');
+  assert.deepEqual(r.lines.map(l => l.num), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.ok(everyLineKept(r), 'every line maps to a node on the map');
+  assert.equal(r.linesText, '9 lines → 9 steps, 1 choice');
+  const st = steps(r);
+  const six = st.find(s => /^Enter vendor in the ERP/.test(s.title));
+  assert.ok(six, 'line 6 ("6 - AP enters vendor in the ERP") is a step');
+  assert.deepEqual([six.ownerRole, six.system], ['AP', 'ERP']);
+  const t = tops(r);
+  assert.deepEqual([t[0].title, t[0].ownerRole], ["Get the vendor's W-9, certificate of insurance and bank details", 'Buyer'], '"Buyer gets…" is Buyer');
+  assert.equal(t[2].ownerRole, 'Credit/Finance', '"Credit/Finance reviews…"');
+  assert.equal(t[4].ownerRole, 'Purchasing manager');
+  assert.equal(t[4].system, 'Coupa');
+  /* the reject path ends */
+  const d = t[3];
+  assert.equal(d.type, 'decision');
+  assert.deepEqual(d.branches[0].nodes.map(n => n.type === 'end' ? 'END' : n.title), ['Tell the requester', 'END']);
+  assert.equal(d.branches[0].nodes[1].title, 'Stop: request rejected');
+  assert.deepEqual(d.branches[1].nodes, []);
+  /* information: never "Known number"; bank details found */
+  const names = r.newData.map(x => x.name);
+  assert.ok(!names.some(n => /known/i.test(n)), 'no "Known number": ' + names.join(', '));
+  assert.ok(names.includes('Vendor phone number'), names.join(', '));
+  assert.ok(names.includes('Bank details'));
+  for (const team of ['Purchasing', 'AP', 'Credit', 'Finance']) assert.ok(r.teams.includes(team), team);
+});
+
+test('Credit-limit SOP (BPM expert): else branch, reject ends, SLA is a timer, articles stripped, Role (Name) mid-line, systems', () => {
+  const r = I.parseSop(CREDIT);
+  assert.equal(r.lines.length, 12);
+  assert.ok(everyLineKept(r));
+  assert.deepEqual(r.lines.map(l => l.as), ['step', 'step', 'step', 'step', 'else', 'timer', 'step', 'step', 'step', 'step', 'step', 'step']);
+  assert.ok(!steps(r).some(s => /^otherwise/i.test(s.title)), 'no step called "Otherwise…"');
+  const t = tops(r);
+  const d = t[3];
+  assert.equal(d.title, 'Requested limit exceeds $50,000?');
+  assert.deepEqual(d.branches.map(b => b.nodes.map(n => [n.title, n.ownerRole])), [[['Review the request', 'Credit Manager']], [['Approve the request', 'Credit Analyst']]], 'line 5 is the No path');
+  /* the 2-day escalation is a timer on the Credit Manager's step, not a choice */
+  assert.deepEqual(d.branches[0].nodes[0].timer, { after: '2 business days', iso: 'P2D', businessDays: 2, action: 'Escalate to the CFO', to: 'CFO' });
+  assert.equal(walk(r.nodes).filter(n => n.type === 'decision').length, 2, 'two choices, no escalation choice');
+  assert.ok(!walk(r.nodes).some(n => n.type === 'decision' && /within/i.test(n.title)));
+  const rej = t[4];
+  assert.equal(rej.title, 'Credit Manager rejects the request?');
+  assert.equal(rej.branches[0].nodes[rej.branches[0].nodes.length - 1].type, 'end', 'reject path ends');
+  /* articles stripped from every role */
+  assert.ok(steps(r).every(s => !/^(the|a|an)\s/i.test(s.ownerRole || '')), 'no leading article');
+  assert.equal(t[0].ownerRole, 'Sales Rep');
+  /* "Controller (Sam Wu)" mid-line */
+  const ctl = steps(r).find(s => /sign-off/i.test(s.title));
+  assert.deepEqual([ctl.ownerRole, ctl.note], ['Controller', 'Named in the procedure: Sam Wu']);
+  assert.ok(!/Sam Wu/.test(ctl.title));
+  /* systems, never information names */
+  const sys = steps(r).map(s => s.system).filter(Boolean);
+  for (const x of ['Salesforce', 'Dun & Bradstreet', 'NetSuite', 'Workiva', 'SharePoint']) assert.ok(sys.includes(x), x);
+  const names = r.newData.map(x => x.name);
+  assert.ok(!names.some(n => /bradstreet|workiva|netsuite|salesforce|sharepoint/i.test(n)), names.join(', '));
+  assert.ok(names.includes('Approval letter'));
+});
+
+test('Jordan: "Step 1:", "2)", "(3)", "4 –", "Step 6", an unnumbered "Otherwise" line and a "Notes:" line', () => {
+  const r = I.parseSop(JORDAN);
+  assert.equal(r.lines.length, 7);
+  assert.ok(everyLineKept(r));
+  assert.equal(r.linesText, '7 lines → 8 steps, 1 choice');
+  const t = tops(r);
+  assert.equal(t[0].ownerRole, 'Member services rep');
+  assert.equal(t[2].type, 'decision');
+  assert.deepEqual(t[2].branches[1].nodes.map(n => [n.title, n.ownerRole]), [['Ask the member for the missing documents', 'Member services rep']], 'the unnumbered Otherwise line is the No path');
+  assert.ok(!t[2].branches[1].nodes[0].system, 'a path step does not borrow the other path\'s system');
+  assert.deepEqual([t[3].ownerRole, t[3].note], ['Benefits Supervisor', 'Named in the procedure: Dana Ortiz']);
+  assert.equal(t[4].ownerRole, 'Payroll');
+  assert.equal(t[5].system, 'DocuSign');
+  assert.equal(t[6].title, 'File the confirmation in SharePoint');
+});
+
+test('systems dictionary: about 60 names; a system is never a role, team or information', () => {
+  assert.ok(I.SYSTEMS.length >= 60, String(I.SYSTEMS.length));
+  for (const x of ['Workiva', 'Dun & Bradstreet', 'Coupa', 'Ariba', 'Concur', 'Workday', 'NetSuite', 'SAP', 'Oracle', 'Dynamics', 'QuickBooks', 'Salesforce', 'HubSpot', 'ServiceNow', 'Zendesk', 'DocuSign', 'Adobe Sign', 'SharePoint', 'Outlook', 'Excel']) assert.equal(I.systemIn(`The clerk files it in ${x} today.`), x, x);
+  assert.equal(I.systemIn('Post the update in Teams'), 'Microsoft Teams');
+  assert.equal(I.systemIn('Teams review the request'), '', '"Teams" as a word is not the app');
+  assert.equal(I.systemIn('Run it through SAP Ariba'), 'SAP Ariba');
+  const r = I.parseSop('1. The analyst exports the Workday report.\n2. The analyst attaches the Concur expense report.');
+  assert.ok(!r.newData.some(x => /workday|concur/i.test(x.name)), r.newData.map(x => x.name).join(', '));
+});
+
+test('SLA escalation forms; "if not returned … notify Legal" stays a choice', () => {
+  assert.equal(I.escalationOf('if not approved within 2 business days, escalate to the CFO').timer.to, 'CFO');
+  assert.equal(I.escalationOf('If no response within 3 days, remind the vendor').timer.after, '3 business days');
+  assert.equal(I.escalationOf('if not returned within 5 days, notify Legal'), null);
+  const r = I.parseSop('1. The Finance Manager approves the invoice; if not approved within 2 business days, escalate to the Controller.\n2. AP pays the invoice.');
+  assert.equal(tops(r).length, 2);
+  assert.equal(tops(r)[0].timer.to, 'Controller');
+  assert.equal(r.linesText, '2 lines → 2 steps');
+});
+
+test('never drops a line: metadata words, headings and 200+ numbered lines', () => {
+  const r = I.parseSop('1. Process: the clerk logs the claim.\n2. Owner reviews it.\n3) Name: the adjuster checks the policy.');
+  assert.equal(r.lines.length, 3);
+  assert.ok(everyLineKept(r));
+  const many = Array.from({ length: 75 }, (_, i) => `${i + 1}. The clerk checks item ${i + 1}.`).join('\n');
+  const m = I.parseSop(many);
+  assert.equal(m.lines.length, 75);
+  assert.equal(steps(m).length, 75);
+});
+
 test('demo-data isolation: "bank details" never attaches Bank remittance details / Leo Park', async () => {
   const docs = seed('2026-11-04').docs;
   const bank = docs.dataElement.map(d => d.data).find(d => d.name === 'Bank remittance details');
@@ -183,7 +330,7 @@ function zip(files, deflate) {
   return Buffer.concat([...locals, cd, end]);
 }
 /* shapes: 2 swimlanes (Requester left, Purchasing right), Start, 3 Process, 1 Decision, End, a Document attached to a step */
-function vsdxFixture(deflate) {
+function vsdxFixture(deflate, pageName) {
   const sh = (id, master, text, x, y, w, h) => `<Shape ID="${id}" Type="Shape" Master="${master}"><Cell N="PinX" V="${x}"/><Cell N="PinY" V="${y}"/><Cell N="Width" V="${w}"/><Cell N="Height" V="${h}"/><Text>${text}</Text></Shape>`;
   const con = (id, text) => `<Shape ID="${id}" Type="Shape" Master="9">${text ? `<Text>${text}</Text>` : ''}</Shape>`;
   const shapes = [
@@ -203,7 +350,9 @@ function vsdxFixture(deflate) {
   const NS = 'http://schemas.microsoft.com/office/visio/2012/main';
   return zip({
     '[Content_Types].xml': '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
-    'docProps/core.xml': '<?xml version="1.0"?><cp:coreProperties xmlns:cp="x" xmlns:dc="y"><dc:title>Purchase request</dc:title></cp:coreProperties>',
+    'docProps/core.xml': '<?xml version="1.0"?><cp:coreProperties xmlns:cp="x" xmlns:dc="y"><dc:title>Purchasing diagrams v2</dc:title></cp:coreProperties>',
+    /* R11 G2 (Jordan): the page name, not the file or document name, names the process */
+    'visio/pages/pages.xml': `<?xml version="1.0"?><Pages xmlns="${NS}"><Page ID="0" NameU="${pageName || 'Purchase request'}" Name="${pageName || 'Purchase request'}"/></Pages>`,
     'visio/masters/masters.xml': `<?xml version="1.0"?><Masters xmlns="${NS}"><Master ID="1" NameU="Process"/><Master ID="2" NameU="Start/End"/><Master ID="3" NameU="Decision"/><Master ID="4" NameU="Document"/><Master ID="5" NameU="Swimlane"/><Master ID="9" NameU="Dynamic connector"/></Masters>`,
     'visio/pages/page1.xml': `<?xml version="1.0" encoding="utf-8"?><PageContents xmlns="${NS}"><Shapes>${shapes}</Shapes><Connects>${connects}</Connects></PageContents>`,
   }, deflate);
@@ -238,6 +387,9 @@ test('Visio .vsdx: shapes, connectors and swimlanes become steps, links and role
     assert.deepEqual(v.dropped, []);
   }
   await assert.rejects(() => I.parseVsdx(Buffer.from('not a zip')), /not a Visio/);
+  /* a default page name ("Page-1") falls back to the document title */
+  const v2 = await I.parseVsdx(vsdxFixture(true, 'Page-1'));
+  assert.equal(v2.name, 'Purchasing diagrams v2');
   /* the fixture is also written for the browser test */
   fs.mkdirSync('/tmp/pmo-design', { recursive: true });
   fs.writeFileSync('/tmp/pmo-design/purchase-request.vsdx', vsdxFixture(true));

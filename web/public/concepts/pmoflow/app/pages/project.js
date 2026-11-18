@@ -3,7 +3,7 @@
    Also exports small PMO helpers reused by home.js and portfolio.js. */
 import { store } from '../store.js';
 import { renderChangesSection, bindChangesSection, taskChangesHTML } from './changes.js';
-import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, commentsPanel, historyPanel } from '../ui.js';
+import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, bindComments, bindHistory, commentsPanel, historyPanel } from '../ui.js';
 
 /* ---------------------------------------------------------------- shared helpers */
 export const STATUS_LBL = { done: 'Done', prog: 'In progress', idle: 'Not started', none: 'No change' };
@@ -44,7 +44,27 @@ export function planNodes(pid) {
   walk(p.tobe);
   return out;
 }
-export const stepTitle = (pid, sid) => (stepOf(pid, sid) || nodeOf(pid, sid) || {}).title || 'Unknown step';
+/* A Today (as-is) node by id: the step a "Retire the old step" task removes lives only in the as-is map. */
+export function asisNodeOf(pid, id) {
+  const p = store.get('process', pid); if (!p || !id) return null;
+  const walk = nodes => { for (const n of nodes || []) { if (n.id === id) return n; for (const b of n.branches || []) { const x = walk(b.nodes); if (x) return x; } } return null; };
+  return walk(p.asis);
+}
+export const stepTitle = (pid, sid) => (stepOf(pid, sid) || nodeOf(pid, sid) || {}).title || ((asisNodeOf(pid, sid) || {}).title ? asisNodeOf(pid, sid).title + ' (old step)' : 'Unknown step');
+/* R11 G3 §3: what a task is "on". Retire tasks name the removed step (w.retires, Today map); Train/Tell are whole-project. */
+export function workStepTitle(w) {
+  if (!w) return '';
+  if (w.retires) { const n = asisNodeOf(w.pid, w.retires); return n && n.title ? `Old step: ${n.title}` : 'A step the new way drops'; }
+  if (!w.step) return w.tag === 'train' || w.tag === 'tell' || !w.pid ? 'Whole project' : 'Process-wide';
+  return stepTitle(w.pid, w.step);
+}
+/* Where a task row links: its step, else its process (retire tasks), else the project's work list (train/tell). */
+export function workHref(w) {
+  if (w && w.pid && w.step) return `/process/${w.pid}/step/${w.step}`;
+  if (w && w.pid) return `/process/${w.pid}`;
+  return w && w.projectId ? `/project/${w.projectId}?mode=work` : '/projects';
+}
+const stepGroupKey = w => w.step || (w.retires ? 'retire:' + w.retires : 'whole:' + (w.tag || ''));
 /* R4 dependencies: a string (FS, lag 0) or {id, type: FS|SS|FF, lag}. */
 export const depId = d => (d && typeof d === 'object') ? d.id : d;
 export const depNorm = d => (d && typeof d === 'object') ? { id: d.id, type: ['FS', 'SS', 'FF'].includes(d.type) ? d.type : 'FS', lag: Number(d.lag) || 0 } : { id: d, type: 'FS', lag: 0 };
@@ -269,7 +289,28 @@ export function availText(dataId) {
 export const blockerWho = t => (t.who || []).filter(x => x.why === 'blocker');
 /* How many of these tasks are in projectTruth's one late list (never a local rule). */
 export const lateIn = (j, items) => { const ids = new Set(truthOf(j).lateIds); return items.filter(w => ids.has(w.id)).length; };
-export function blockingOf(j) { return !j || j.status === 'live' ? [] : blockerWho(truthOf(j)); }
+/* R11 G1 §5: ONE definition of blocking (projectTruth.blocking): information the Future steps need that is not available
+   yet AND holds up at least one open task, planned or not. Header, facts line, report, portfolio, dashboard and the
+   "What's blocking" box all read it. {count, holdsUp, unplanned, items: [{dataId, name, planned, held, owner, text}], text} */
+export function blockingInfo(t) {
+  const b = t && t.raw && t.raw.blocking;
+  if (b && typeof b === 'object' && Array.isArray(b.items)) return b;
+  const bl = t ? blockerWho(t) : [];   /* older engine: the unplanned-blocker view of who */
+  return { count: bl.length, holdsUp: 0, unplanned: bl.length, items: bl.map(x => ({ dataId: String(x.ref || '').replace(/^data:/, ''), name: x.action, planned: false, held: 0, owner: x.person, text: x.action })), text: bl.length ? bl.length + ' blocking' : 'Nothing blocking' };
+}
+export const blockingCount = t => blockingInfo(t).count;
+export function blockingOf(j) { return !j || j.status === 'live' ? [] : blockingInfo(truthOf(j)).items; }
+/* R11 G1 §5: ONE lateness per task (projectTruth.lateness / E().lateInfo): {late, days, text: "Late by 6 business days",
+   dueText: "was due Nov 16" (past dates only) | "due Dec 3"}. */
+export function lateOf(w) {
+  if (!w || w.status === 'done') return null;
+  const j = store.get('project', w.projectId);
+  const t = j ? truthOf(j) : null;
+  const m = t && t.raw && t.raw.lateness;
+  if (m && typeof m === 'object' && !Array.isArray(m)) return m[w.id] || null;
+  const r = eng('lateInfo', null, docs(), w.id, today());
+  return r && r.late ? r : null;
+}
 /* "Are we on track?" in one sentence + a label that agrees with it (projectTruth). */
 export function summaryOf(j) {
   const t = truthOf(j);
@@ -325,16 +366,38 @@ export function launchHTML(j) {
       <span><span class="t">${esc(x.label)}${i === next ? ' <span class="pmo-next">Next</span>' : ''}</span>${!x.done && x.detail ? `<span class="s">${esc(x.detail)}</span>` : ''}${!x.done && x.who.length ? `<span class="s pmo-ls-who">${x.who.slice(0, 3).map(id => `${av(id)} ${esc(pname(id))}`).join(', ')}${x.who.length > 3 ? ` +${x.who.length - 3}` : ''}</span>` : ''}</span></li>`).join('')}</ol>
     <a class="pmo-more-link" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Open the launch page ›</a></div>`;
 }
-/* R9 §1: "Who needs to act" is projectTruth.who (top 5). Its first rows, the ones whose why is 'blocker', are the
-   "What's blocking" box: a filtered view of the same list, never a separate count. */
+/* R9 §1: "Who needs to act" is projectTruth.who (top 5), rendered exactly: every row is one `who` entry and carries its
+   index in `who` (data-who-row), so row 0 is always who[0]. Nothing is added to it.
+   R11: the "What's blocking" box is projectTruth.blocking (one definition): its count and "holds up N" come from there.
+   A blocker that has a `who` entry ("Plan work to get …") is shown inside the box as that who row; a blocker with no
+   `who` entry (for example one that already has a plan) is listed in the box as information, never as a person row. */
 export function blockingHTML(j) {
   if (j.status === 'live') return '';
-  const t = truthOf(j), who = t.who, bl = blockerWho(t), rest = who.filter(x => x.why !== 'blocker');
-  const restTop = rest.slice(0, Math.max(0, 5 - Math.min(bl.length, 3)));
+  const t = truthOf(j), who = t.who, B = blockingInfo(t), bl = B.items;
+  const boxRef = new Set(bl.map(b => 'data:' + b.dataId));
+  const idx = who.map((x, i) => ({ x, i }));
+  const inBox = idx.filter(o => o.x.why === 'blocker' && boxRef.has(o.x.ref));
+  const rest = idx.filter(o => !(o.x.why === 'blocker' && boxRef.has(o.x.ref)));
+  const byRef = new Map(inBox.map(o => [o.x.ref, o]));
+  /* the box lists blocking.items in the engine's order; each is its who row when it has one, else an information line */
+  const boxLines = bl.slice(0, 3).map(b => {
+    const o = byRef.get('data:' + b.dataId);
+    const tag = `<span class="pmo-why-tag why-blocker">${esc(b.planned ? 'Blocking · planned' : 'Blocking')}</span>`;
+    if (o) return `<a class="pmo-who-row" href="${link(o.x.href || '/data/' + encodeURIComponent(b.dataId))}" data-link data-who-row="${o.i}" data-who-why="blocker" data-blocking-item="${esc(b.dataId)}">${o.x.person ? av(o.x.person) : '<span class="av pmo-av-none" aria-hidden="true">?</span>'}
+      <span class="pmo-who-b"><b data-who-name>${esc(whoName(o.x))}</b><span class="s">${esc(o.x.action + (b.text ? ' · ' + b.text : ''))}</span></span>${tag}<span class="pmo-chev" aria-hidden="true">›</span></a>`;
+    return `<a class="pmo-who-row pmo-bl-info" href="${link('/data/' + encodeURIComponent(b.dataId))}" data-link data-blocking-item="${esc(b.dataId)}" data-blocking-info>
+      <span class="av pmo-av-none" aria-hidden="true">i</span><span class="pmo-who-b"><b>${esc(b.name || b.dataId)}</b><span class="s">${esc(b.text || '')}</span></span>${tag}<span class="pmo-chev" aria-hidden="true">›</span></a>`;
+  });
+  const shownInBox = bl.slice(0, 3).filter(b => byRef.has('data:' + b.dataId)).length;
+  /* box who rows beyond the first 3 blocking items still belong to `who`: they go to the list, in who order */
+  const overflow = inBox.filter(o => !bl.slice(0, 3).some(b => 'data:' + b.dataId === o.x.ref));
+  const listed = rest.concat(overflow).sort((p, q) => p.i - q.i);
+  const restTop = listed.slice(0, Math.max(0, 5 - shownInBox));
+  const row = o => whoRowHTML(o.x, o.i);
   return `<section class="card pmo-blocking ${bl.length || t.late ? 'has' : who.length ? 'calm' : 'clear'}" data-who-acts><h3>Who needs to act${who.length ? ` <span class="n" data-who-count>${who.length}</span>` : ''}</h3>
-    ${bl.length ? `<div class="pmo-bl-box" data-whats-blocking><div class="pmo-bl-h">What’s blocking <span class="n" data-blocking-count>${bl.length}</span></div>${bl.slice(0, 3).map((x, i) => whoRowHTML(x, i)).join('')}${bl.length > 3 ? `<div class="hint">+${bl.length - 3} more</div>` : ''}</div>` : ''}
-    ${restTop.length ? `<div class="pmo-who-list">${restTop.map((x, i) => whoRowHTML(x, bl.length + i)).join('')}</div>` : ''}
-    ${!who.length ? '<div class="pmo-bl-none">✓ Nobody needs to act right now.</div>' : rest.length > restTop.length ? `<details class="pmo-who-more" data-who-more><summary>+${rest.length - restTop.length} more</summary><div class="pmo-who-list">${rest.slice(restTop.length).map((x, i) => whoRowHTML(x, bl.length + restTop.length + i)).join('')}</div></details>` : ''}
+    ${bl.length ? `<div class="pmo-bl-box" data-whats-blocking><div class="pmo-bl-h">What’s blocking <span class="n" data-blocking-count>${B.count}</span>${B.holdsUp ? ` <span class="hint" data-holds-up="${B.holdsUp}">holds up ${plural(B.holdsUp, 'task')}</span>` : ''}</div>${boxLines.join('')}${bl.length > 3 ? `<div class="hint">+${bl.length - 3} more</div>` : ''}</div>` : ''}
+    ${restTop.length ? `<div class="pmo-who-list">${restTop.map(row).join('')}</div>` : ''}
+    ${!who.length ? '<div class="pmo-bl-none">✓ Nobody needs to act right now.</div>' : listed.length > restTop.length ? `<details class="pmo-who-more" data-who-more><summary>+${listed.length - restTop.length} more</summary><div class="pmo-who-list">${listed.slice(restTop.length).map(row).join('')}</div></details>` : ''}
     ${!t.total && who[0] && who[0].why === 'plan' ? `<div class="s" data-nowork>No tasks planned yet${isPM(j) ? ' — <button class="btn sm primary" data-suggest>✦ Suggest a plan</button>' : '.'}</div>` : ''}</section>`;
 }
 /* My open tasks on a project, each with a big one-tap ✓. */
@@ -349,15 +412,26 @@ export function taskRowHTML(w, j, fc, compact) {
   const f = (fc || {})[w.id] || {};
   const can = canEditWork(w, j), done = w.status === 'done';
   const k = schedKey(w, fc);
-  const when = done ? `Done ${fmt(doneDate(w))}` : `Due ${fmt(w.due)}${f.forecast && f.forecast > w.due ? ` · expected ${fmt(f.forecast)}` : ''}`;
+  const li = done ? null : lateOf(w);   /* R11: the engine's one lateness ("Late by 6 business days", "was due" only when past) */
+  const when = done ? `Done ${fmt(doneDate(w))}` : li ? `${li.dueText ? li.dueText.charAt(0).toUpperCase() + li.dueText.slice(1) + ' · ' : ''}expected ${fmt(f.forecast || w.due)} · ${li.text.charAt(0).toLowerCase() + li.text.slice(1)}` : `Due ${fmt(w.due)}${f.forecast && f.forecast > w.due ? ` · expected ${fmt(f.forecast)}` : ''}`;
   const tick = done ? '<span class="pmo-tick on" aria-hidden="true">✓</span>'
     : can ? `<button type="button" class="pmo-tick" data-done="${esc(w.id)}" aria-label="Mark “${esc(w.title)}” done" title="Mark done">✓</button>`
     : '<span class="pmo-tick off" aria-hidden="true"></span>';
   return `<div class="pmo-task ${done ? 'is-done' : ''}" data-wid="${esc(w.id)}" id="task-${esc(w.id)}">${tick}
     <div class="pmo-task-b"><div class="t">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</div>
-      <div class="s">${compact ? '' : `${av(w.owner)} ${esc(pname(w.owner))} · `}${esc(stepTitle(w.pid, w.step))}</div>
-      <div class="s">${done ? '' : wBadge(w, f, fc) + ' '}${esc(when)}</div></div>
+      <div class="s">${compact ? '' : `${av(w.owner)} ${esc(pname(w.owner))} · `}${esc(workStepTitle(w))}</div>
+      <div class="s">${done ? '' : wBadge(w, f, fc) + ' '}${esc(when)}</div>${taskFlagsHTML(w, j)}</div>
     ${can && !compact ? `<button class="btn sm" data-edit-work="${esc(w.id)}" aria-label="Edit ${esc(w.title)}">Edit</button>` : ''}</div>`;
+}
+/* R11 G1 §6/§9 per-task flags from the engine: "Finished before the work it depends on" (E().doneBeforeDeps, e.g. a Jira
+   "Done" while its predecessors are open) and "Done with no hours logged" (projectTruth.evFlags done-no-hours items). */
+export function taskFlagsHTML(w, j) {
+  if (!w || w.status !== 'done') return '';
+  const out = [];
+  if ((w.deps || []).length) { const r = eng('doneBeforeDeps', null, docs(), w.id); if (r && r.flag) out.push(`<span class="pmo-evflag" data-done-early="${esc(w.id)}" title="${esc(r.text)}">⚠ Finished before the work it depends on</span>`); }
+  const fl = j ? ((truthOf(j).raw || {}).evFlags || []).find(f => f && f.key === 'done-no-hours') : null;
+  if (fl && (fl.items || []).includes(w.id)) out.push(`<span class="pmo-evflag" data-done-no-hours="${esc(w.id)}" title="${esc(fl.text)}">⚠ Done with no hours logged</span>`);
+  return out.length ? `<div class="pmo-tflags">${out.join('')}</div>` : '';
 }
 /* One-tap done, used on home and on the project. Sets status done and doneAt (applyDone). */
 export async function markDone(id) {
@@ -397,6 +471,13 @@ export function evChips(ev) {
   return `<span class="pmo-ev" data-ev-spi title="Schedule performance index: earned value ÷ planned value. Below 1 means behind schedule."><small>SPI</small><b class="${idxCls(ev.spi)}">${r2(ev.spi)}</b></span><span class="pmo-ev" data-ev-cpi title="Cost performance index: earned value ÷ actual cost. Below 1 means over cost."><small>CPI</small><b class="${idxCls(ev.cpi)}">${r2(ev.cpi)}</b></span>`;
 }
 export const fmtIdx = r2;
+/* R11 G1 §6: earned-value warnings from projectTruth.evFlags ("Spent with nothing finished", "N tasks marked Done with
+   no hours logged …"). Words only; the engine decides. */
+export const evFlagTexts = t => ((t && t.raw && Array.isArray(t.raw.evFlags) ? t.raw.evFlags : []).map(f => typeof f === 'string' ? f : f && f.text).filter(Boolean));
+export function evFlagsHTML(j) {
+  const fl = j && j.status !== 'live' ? ((truthOf(j).raw || {}).evFlags || []).filter(f => f && (f.text || typeof f === 'string')) : [];
+  return fl.map(f => `<span class="pmo-evflag" data-ev-flag="${esc(f.key || '')}" role="note">⚠ ${esc(f.text || f)}</span>`).join('');
+}
 /* R6 default target: the next business day on or after today + 60 calendar days (engine defaultTarget). */
 export function defaultTarget() {
   const t = eng('defaultTarget', null, today());
@@ -515,10 +596,17 @@ export function wBadge(w, f, fc) {
 }
 export function dueLine(w, f) {
   f = f || {};
-  const n = slipOf(w, f);
-  const bd = n ? ` (${n} business day${n === 1 ? '' : 's'} late)` : '';
-  if (w.status === 'done') return `Due ${fmt(w.due)} · done ${fmt(doneDate(w))}${bd}`;
-  return `Due ${fmt(w.due)} · expected ${fmt(f.forecast || w.due)}${bd}`;
+  if (w.status === 'done') { const n = slipOf(w, f); return `Due ${fmt(w.due)} · done ${fmt(doneDate(w))}${n ? ` (${n} business day${n === 1 ? '' : 's'} late)` : ''}`; }
+  /* R11 G1 §5: ONE lateness per open task: the engine's lateDays (= projectTruth.lateness / lateInfo), the same number
+     the status report uses. "was due" only for a date in the past (lateInfo.dueText). */
+  const li = w.projectId ? lateOf(w) : null;   /* projectTruth.lateness[workId] (only late tasks have one) */
+  /* a what-if copy passes its own engine forecast: then its lateDays (the engine's number for that forecast) is shown */
+  const whatIf = f.forecast && li && li.forecast && f.forecast !== li.forecast;
+  const n = whatIf || !w.projectId ? (Number(f.lateDays) || 0) : li && li.late ? li.days || 0 : 0;
+  /* "Was due" only for a past date: the engine's dueText. An open task past its due date is always late, so a task
+     without a lateness entry is due today or later. */
+  const dueTxt = li && li.dueText ? li.dueText.charAt(0).toUpperCase() + li.dueText.slice(1) : `Due ${fmt(w.due)}`;
+  return `${dueTxt} · expected ${fmt(f.forecast || w.due)}${n ? ` (${n} business day${n === 1 ? '' : 's'} late)` : ''}`;
 }
 export const schedHTML = (w, f) => `${wBadge(w, f)}${whyBtn(w)} <span class="pmo-dl">${esc(dueLine(w, f))}</span>`;
 /* "Why this date?" sits next to every forecast badge of an open item. */
@@ -569,7 +657,7 @@ export function factsHTML(j, opts) {
   const when = !t.total && !live ? `<span>Expected <b data-t="forecast">Not planned</b></span>`
     : `<span>${live || t.finished ? 'Finished' : 'Expected'} <b data-t="forecast" class="${!t.finished && t.buffer != null && t.buffer < 0 ? 'fail' : ''}">${esc(fmt(t.forecast))}</b></span>`;
   /* R9 §1: one late count (lateCount) and the blocking count of the "What's blocking" view of `who` */
-  const nb = blockerWho(t).length;
+  const nb = live ? 0 : blockingCount(t);   /* R11: projectTruth.blocking */
   /* R10 §5: Simple shows the split too ("5 late (1 past due, 4 will finish after their due date)"), from projectTruth.lateText */
   const brk = t.late && lateSplitText(t) ? ` <span class="hint" data-late-breakdown>(${esc(lateSplitText(t))})</span>` : '';
   return `${when}<span><b data-t="late" class="${t.late ? 'fail' : ''}">${t.late}</b> late${brk}</span><span><b data-t="blockers" class="${nb ? 'fail' : ''}">${nb}</b> blocking</span>${!isSimple() && t.advancedNote && !live ? `<span class="pmo-advnote" data-adv-note>${esc(t.advancedNote)}</span>` : ''}${opts.cost ? costHTML(j) : ''}`;
@@ -816,6 +904,51 @@ function scenarioBarHTML(j, sc, list) {
     ${c.notes.length ? `<div class="hint">${c.notes.map(esc).join(' · ')}</div>` : ''}
     <div class="pmo-scen-acts"><button class="btn sm primary" data-scen-apply ${pm && n ? '' : `disabled title="${esc(pm ? 'Move something first' : pmOnly(j, 'apply a scenario'))}"`}>Apply to plan${n ? ` (${n})` : ''}</button><button class="btn sm danger" data-scen-discard ${pm ? '' : 'disabled'}>Discard</button><button class="btn sm" data-scen-exit>Back to the plan</button></div></div>`;
 }
+/* R11 G3 §3: adaptive axis ticks. The lane is at least ~570 px wide (table min-width 820 px minus the label column), and a
+   date label needs ~60 px, so at most ~9 fit (12 short month labels). Pick the finest unit that fits: weeks → 2 weeks →
+   months → quarters → years.
+   Month-and-coarser ticks sit on the 1st and show the year when it changes. bindTimeline also hides any label that would
+   still touch its neighbour at the real rendered width (narrow phones, long labels). */
+const AXIS_MAX = 9;
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export function axisTicks(start, end) {
+  const span = Math.max(1, dayDiff(end, start));
+  const out = [];
+  const monthly = every => {
+    const y0 = Number(start.slice(0, 4)), m0 = Number(start.slice(5, 7)) - 1;
+    let y = y0, m = m0 + 1; if (m > 11) { m = 0; y++; }          /* first 1st-of-month after the start */
+    while (m % every) { m++; if (m > 11) { m = 0; y++; } }
+    let lastY = null;
+    for (;;) {
+      const d = `${y}-${String(m + 1).padStart(2, '0')}-01`; if (d > end) break;
+      out.push({ d, label: every === 12 ? String(y) : (lastY !== null && lastY !== y) || (lastY === null && (m === 0 || y !== Number(today().slice(0, 4)))) ? `${MON[m]} ${y}` : MON[m] });
+      lastY = y; m += every; while (m > 11) { m -= 12; y++; }
+    }
+  };
+  let unit;
+  if (span / 7 <= AXIS_MAX) unit = 'week';
+  else if (span / 14 <= AXIS_MAX) unit = '2weeks';
+  else if (span / 30.4 <= AXIS_MAX + 3) unit = 'month';   /* "Mar" is short: up to 12 month labels fit */
+  else if (span / 91 <= AXIS_MAX) unit = 'quarter';
+  else unit = 'year';
+  if (unit === 'week' || unit === '2weeks') { const n = unit === 'week' ? 7 : 14; for (let d = start; d <= end; d = addDays(d, n)) out.push({ d, label: fmt(d) }); }
+  else monthly(unit === 'month' ? 1 : unit === 'quarter' ? 3 : 12);
+  out.unit = unit;
+  return out;
+}
+/* Hide axis labels that would overlap their visible neighbour at the rendered width (never two labels touching). */
+export function declutterAxis(box) {
+  if (!box) return;
+  box.querySelectorAll('[data-axis]').forEach(lane => {
+    let lastRight = -Infinity;
+    lane.querySelectorAll('.tick').forEach(t => {
+      t.hidden = false;
+      const r = t.getBoundingClientRect();
+      if (r.left < lastRight + 6) { t.hidden = true; return; }
+      lastRight = r.right;
+    });
+  });
+}
 function timelineHTML(j, fc, list, D, sc) {
   const groups = groupedItems(j, list);
   const all = groups.flatMap(g => g.items);
@@ -829,14 +962,14 @@ function timelineHTML(j, fc, list, D, sc) {
   const end = addDays(maxDate([...all.map(w => (fc[w.id] || {}).forecast || w.due), ...all.map(w => w.due), ...all.map(w => w.doneAt ? doneDate(w) : null), j.target, today(), ...Object.values(blItems).map(x => x && x.due)]), 4);
   const span = Math.max(1, dayDiff(end, start));
   const pos = s => (dayDiff(s, start) / span * 100);
-  const ticks = []; for (let d = start; d <= end; d = addDays(d, 7)) ticks.push(d);
+  const ticks = axisTicks(start, end);
   const marks = `<span class="tday" style="left:${pos(today())}%"></span>${j.target ? `<span class="tgt" style="left:${pos(j.target)}%"></span>` : ''}`;
   const crit = new Set(showCrit && !simple ? criticalIds(j, fc, D) : []);
   const confs = simple ? [] : schedConflicts(j.id, D);
   const confBy = {}; confs.forEach(c => { (confBy[c.workId] = confBy[c.workId] || []).push(c); });
   const itemOf = id => all.find(x => x.id === id) || store.get('workItem', id);
   const canMove = w => w.status !== 'done' && (sc ? isPM(j) : canEditWork(w, j));
-  let rows = `<tr class="thead"><td class="lab"><span class="hint">${all.length} task${all.length === 1 ? '' : 's'}</span></td><td class="lane">${ticks.map(t => `<span class="tick" style="left:${pos(t)}%">${fmt(t)}</span>`).join('')}${marks}</td></tr>`;
+  let rows = `<tr class="thead"><td class="lab"><span class="hint">${all.length} task${all.length === 1 ? '' : 's'}</span></td><td class="lane" data-axis="${esc(ticks.unit)}">${ticks.map(t => `<span class="tick" data-tick="${esc(t.d)}" style="left:${pos(t.d)}%">${esc(t.label)}</span>`).join('')}${marks}</td></tr>`;
   groups.forEach(g => {
     rows += `<tr class="grp"><td class="lab">${esc(g.name)}</td><td class="lane"></td></tr>`;
     g.items.forEach(w => {
@@ -847,7 +980,7 @@ function timelineHTML(j, fc, list, D, sc) {
       const wc = confBy[w.id] || [];
       const sid = shortId(w.id);
       const barTxt = wd < 6 ? '' : `${sid && wd >= 11 ? esc(sid) + ' · ' : ''}${esc(fmt(s0))} – ${esc(fmt(w.due))}`;
-      const sub = [stepTitle(w.pid, w.step), pname(w.owner)];
+      const sub = [workStepTitle(w), pname(w.owner)];
       if (w.resolves) sub.push('unblocks ' + dataName(w.resolves));
       if (deps.length) sub.push('after ' + deps.join(', '));
       const actual = w.status === 'done' && w.doneAt ? doneDate(w) : null;
@@ -861,7 +994,7 @@ function timelineHTML(j, fc, list, D, sc) {
         ? `<button type="button" class="${barCls}" data-bar="${esc(w.id)}" style="left:${l}%;width:${wd}%" title="${esc(barTitle)}. Drag to move, drag the right edge to change the due date." aria-label="${esc(`${w.title}: ${fmt(s0)} to ${fmt(w.due)}${isCrit ? ', critical path' : ''}. Arrow keys move one business day, Shift plus arrow keys change the due date, Enter edits.`)}">${barTxt}<span class="pmo-rsz" data-rsz aria-hidden="true"></span></button>`
         : `<span class="${barCls}" data-bar="${esc(w.id)}" style="left:${l}%;width:${wd}%" title="${esc(barTitle)}${w.status === 'done' ? '' : '. ' + esc(sc ? pmOnly(j, 'change a scenario') : lockTitle(w, j))}">${barTxt}</span>`;
       const k = schedKey(w, fc);
-      rows += `<tr class="click ${isCrit ? 'pmo-crit-row' : ''}" data-go="/process/${esc(w.pid)}/step/${esc(w.step)}"><td class="lab"><div class="t" title="${esc(w.title)}">${isCrit ? '<span class="pmo-crit-tag" title="On the critical path">CP</span> ' : ''}${wc.length ? `<span class="pmo-conf-tag" data-conf-mark="${esc(w.id)}" title="${esc(wc.map(confText).join('; '))}" aria-label="Scheduling conflict: ${esc(wc.map(confText).join('; '))}">⚠</span> ` : ''}${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</div>${k !== 'ok' && k !== 'done' ? `<div class="pmo-tl-badges">${wBadge(w, f, fc)}</div>` : ''}<div class="s" title="${esc(sub.join(' · '))}">${esc(sub.join(' · '))}</div></td>
+      rows += `<tr class="click ${isCrit ? 'pmo-crit-row' : ''}" data-go="${esc(workHref(w))}"><td class="lab"><div class="t" title="${esc(w.title)}">${isCrit ? '<span class="pmo-crit-tag" title="On the critical path">CP</span> ' : ''}${wc.length ? `<span class="pmo-conf-tag" data-conf-mark="${esc(w.id)}" title="${esc(wc.map(confText).join('; '))}" aria-label="Scheduling conflict: ${esc(wc.map(confText).join('; '))}">⚠</span> ` : ''}${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</div>${k !== 'ok' && k !== 'done' ? `<div class="pmo-tl-badges">${wBadge(w, f, fc)}</div>` : ''}<div class="s" title="${esc(sub.join(' · '))}">${esc(sub.join(' · '))}</div></td>
         <td class="lane">${marks}
         ${b && b.due ? `<span class="pmo-blbar" style="left:${pos(b.start || b.due)}%;width:${Math.max(0.6, pos(b.due) - pos(b.start || b.due))}%"></span><span class="pmo-blmark" style="left:${pos(b.due)}%" title="Saved plan due ${esc(fmt(b.due))}"></span>` : ''}
         ${bar}
@@ -1017,8 +1150,8 @@ function bindTimeline(root, j, sc, D) {
   const box = root.querySelector('#pmoTl'); if (!box) return;
   const span = Number(box.dataset.span) || 1;
   const itemOf = id => (D ? scItems(D, j.id).find(x => x.id === id) : null) || store.get('workItem', id);
-  requestAnimationFrame(() => drawArrows(box));
-  if (!arrowsResize) { arrowsResize = true; window.addEventListener('resize', () => drawArrows(document.querySelector('#pmoTl'))); }
+  requestAnimationFrame(() => { drawArrows(box); declutterAxis(box); });
+  if (!arrowsResize) { arrowsResize = true; window.addEventListener('resize', () => { const b = document.querySelector('#pmoTl'); drawArrows(b); declutterAxis(b); }); }
   box.querySelectorAll('button.tbar[data-bar]').forEach(bar => {
     let suppress = false;
     bar.addEventListener('pointerdown', e => {
@@ -1092,8 +1225,8 @@ function workRowHTML(w, j, fc) {
   const risks = risksFor(w.id);
   const run = w.testRef && w.testRef.runId;
   return `<tr data-wid="${esc(w.id)}" class="${can ? '' : 'pmo-ro'} ${w.kind === 'defect' ? 'pmo-defect' : ''}">
-    <td><b class="pmo-wt">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</b><div class="pmo-wsub">${w.kind ? `<span class="chip ${w.kind === 'defect' ? 'pmo-chip-defect' : ''}">${esc(KIND_LBL[w.kind] || w.kind)}</span>` : ''}${w.resolves ? `<span class="chip">${WAIT_IC} gets ${esc(dataName(w.resolves))}</span>` : ''}${fieldsOf(j).map(fd => fieldVal(w, fd) ? `<span class="chip pmo-ftag" data-ftag="${esc(fd.key)}"><small>${esc(fd.label)}</small> ${esc(fieldVal(w, fd))}</span>` : '').join('')}${risks.length ? `<span class="pmo-riskb" title="${esc(risks.map(r => r.title).join(' · '))}">⚠ ${risks.length} risk${risks.length > 1 ? 's' : ''}</span>` : ''}${w.kind === 'defect' ? `<a class="pmo-runlink" href="${link('/testing/' + encodeURIComponent(j.id) + (run ? '?run=' + encodeURIComponent(run) : ''))}" data-link>${run ? 'View test run ›' : 'Testing ›'}</a>` : ''}</div></td>
-    <td class="pmo-c-step"><div class="pmo-wstep">${esc(stepTitle(w.pid, w.step))}</div><div class="hint">${esc(procName(w.pid))}</div></td>
+    <td><b class="pmo-wt">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</b><div class="pmo-wsub">${w.kind ? `<span class="chip ${w.kind === 'defect' ? 'pmo-chip-defect' : ''}">${esc(KIND_LBL[w.kind] || w.kind)}</span>` : ''}${w.resolves ? `<span class="chip">${WAIT_IC} gets ${esc(dataName(w.resolves))}</span>` : ''}${fieldsOf(j).map(fd => fieldVal(w, fd) ? `<span class="chip pmo-ftag" data-ftag="${esc(fd.key)}"><small>${esc(fd.label)}</small> ${esc(fieldVal(w, fd))}</span>` : '').join('')}${risks.length ? `<span class="pmo-riskb" title="${esc(risks.map(r => r.title).join(' · '))}">⚠ ${risks.length} risk${risks.length > 1 ? 's' : ''}</span>` : ''}${w.kind === 'defect' ? `<a class="pmo-runlink" href="${link('/testing/' + encodeURIComponent(j.id) + (run ? '?run=' + encodeURIComponent(run) : ''))}" data-link>${run ? 'View test run ›' : 'Testing ›'}</a>` : ''}</div>${taskFlagsHTML(w, j)}</td>
+    <td class="pmo-c-step"><div class="pmo-wstep">${esc(workStepTitle(w))}</div><div class="hint">${esc(procName(w.pid))}</div></td>
     <td class="pmo-nowrap pmo-c-owner">${av(w.owner)} ${esc(pname(w.owner).split(' ')[0])}</td>
     <td>${statusSelect(w, j, lt)}</td>
     <td class="pmo-nowrap pmo-c-dates">${esc(fmt(w.start))} → ${esc(fmt(w.due))}</td>
@@ -1120,11 +1253,11 @@ function workHTML(j, fc, list) {
       const pk = 'p:' + g.pid, pOpen = !folded.has(pk);
       let out = `<tr class="pmo-gh p" data-tg="${esc(pk)}"><td colspan="${COLS}"><button class="pmo-gh-btn" aria-expanded="${pOpen}">${pOpen ? '▾' : '▸'} ${esc(g.name)}</button>${rollup(g.items)}</td></tr>`;
       if (!pOpen) return out;
-      const steps = [...new Set(g.items.map(w => w.step))];
+      const steps = [...new Set(g.items.map(stepGroupKey))];
       steps.forEach(sid => {
-        const sItems = g.items.filter(w => w.step === sid);
+        const sItems = g.items.filter(w => stepGroupKey(w) === sid);
         const sk = 's:' + g.pid + ':' + sid, sOpen = !folded.has(sk);
-        out += `<tr class="pmo-gh s" data-tg="${esc(sk)}"><td colspan="${COLS}"><button class="pmo-gh-btn" aria-expanded="${sOpen}">${sOpen ? '▾' : '▸'} ${esc(stepTitle(g.pid, sid))}</button>${rollup(sItems)}</td></tr>`;
+        out += `<tr class="pmo-gh s" data-tg="${esc(sk)}"><td colspan="${COLS}"><button class="pmo-gh-btn" aria-expanded="${sOpen}">${sOpen ? '▾' : '▸'} ${esc(workStepTitle(sItems[0]))}</button>${rollup(sItems)}</td></tr>`;
         if (sOpen) out += sItems.map(w => workRowHTML(w, j, fc)).join('');
       });
       return out;
@@ -1159,13 +1292,15 @@ function sprintStatsHTML(j, fc) {
   const t = today();
   const sp = sps.find(x => t >= x.start && t <= x.end) || sps.find(x => x.start > t) || sps[sps.length - 1];
   const items = projectItems(j.id).filter(w => sprintIdOf(j, w, sps) === sp.id);
-  const ld = sprintLoad(sp, items);
+  const cal = sprintCal(j), c = cal.get(String(sp.id));
+  const ld = sprintLoad(sp, items, cal);
   const done = items.filter(w => w.status === 'done').length;
   const late = lateIn(j, items);
-  const left = t > sp.end ? 0 : bizDays(t > sp.start ? t : sp.start, sp.end);
+  const from = t > sp.start ? t : sp.start;
+  const left = t > sp.end ? 0 : bizDays(from, sp.end) - (c ? (c.daysOff || []).filter(d => d.date >= from).length : 0);
   const cur = t >= sp.start && t <= sp.end;
   return `<div class="card" data-sprint-stats><h3>${esc(sp.name)} ${cur ? '<span class="badge b-ok">Current</span>' : t < sp.start ? '<span class="badge b-idle">Next</span>' : '<span class="badge b-idle">Last</span>'}</h3>
-    <div class="hint" style="margin:-4px 0 8px">${esc(fmt(sp.start))} – ${esc(fmt(sp.end))} · ${left} working day${left === 1 ? '' : 's'} left</div>
+    <div class="hint" style="margin:-4px 0 8px" data-sprint-days>${esc(fmt(sp.start))} – ${esc(fmt(sp.end))} · ${left} working day${left === 1 ? '' : 's'} left${c && (c.daysOff || []).length ? ` · ${esc(c.daysOff.map(d => d.name).join(', '))} off` : ''}</div>
     <div class="pmo-sstats"><div><b>${done}/${items.length}</b><span>done</span></div><div><b class="${ld.over ? 'fail' : ''}">${fmtEffort(ld.effort)}</b><span>effort / ${fmtEffort(ld.cap)} capacity</span></div><div><b class="${late ? 'fail' : ''}">${late}</b><span>late</span></div></div>
     ${ld.over ? `<div class="pmo-spr-over" data-over>Over capacity by ${fmtEffort(Math.round((ld.effort - ld.cap) * 10) / 10)}</div>` : ''}
     <div class="pmo-spr-who" style="margin-top:6px">${ld.owners.map(av).join('')}</div></div>`;
@@ -1236,7 +1371,7 @@ export function filterItems(items, f, fc) {
     if (f.step) { const [pid, sid] = f.step.split('::'); if (w.pid !== pid || (sid && w.step !== sid)) return false; }
     if (f.data && w.resolves !== f.data && !nodeData(w.pid, w.step).includes(f.data)) return false;
     if (f.late && (w.status === 'done' || !(fc[w.id] || {}).late)) return false; /* the engine's one "late" flag */
-    if (q && ![w.title, stepTitle(w.pid, w.step), pname(w.owner), procName(w.pid), w.resolves ? dataName(w.resolves) : '', ...Object.values(w.custom || {})].join(' ').toLowerCase().includes(q)) return false;
+    if (q && ![w.title, workStepTitle(w), pname(w.owner), procName(w.pid), w.resolves ? dataName(w.resolves) : '', ...Object.values(w.custom || {})].join(' ').toLowerCase().includes(q)) return false;
     for (const k of Object.keys(f).filter(isCF)) { const v = w.custom ? w.custom[k.slice(3)] : undefined; if (v == null || String(v) !== f[k]) return false; }
     return true;
   });
@@ -1362,7 +1497,7 @@ function cardHTML(w, j, fc, extra) {
       aria-label="${esc(`${w.title}. ${statusName(w, j)}. Owner ${pname(w.owner)}. ${shortDue(w, f)}.${can ? ' Drag to move, or use the select inside the card.' : ' ' + lockTitle(w, j) + '.'}`)}" title="${esc(can ? 'Drag to move · click to edit' : lockTitle(w, j))}">
     <div class="pmo-card-h">${av(w.owner)}<b class="pmo-card-t">${esc(w.title)}</b>${can ? '' : `<span class="pmo-card-lock" data-card-lock title="${esc(lockTitle(w, j))}"><span aria-hidden="true">${LOCK}</span><span class="sr-only">${esc(lockTitle(w, j))}</span></span>`}</div>
     ${extra || ''}
-    <div class="pmo-card-s">${esc(stepTitle(w.pid, w.step))} <span class="pmo-card-eff">· ${fmtEffort(effortOf(w))}</span></div>
+    <div class="pmo-card-s">${esc(workStepTitle(w))} <span class="pmo-card-eff">· ${fmtEffort(effortOf(w))}</span></div>
     <div class="pmo-card-b">${wBadge(w, f, fc)}${whyBtn(w)}<span class="pmo-card-due">${esc(shortDue(w, f))}</span></div>
     ${chips ? `<div class="pmo-card-c">${chips}</div>` : ''}</article>`;
 }
@@ -1409,7 +1544,7 @@ function bindCards(root, j) {
       if (e.target.closest('select,button,a,label')) return;
       const w = store.get('workItem', c.dataset.card); if (!w) return;
       const p = store.get('project', j.id);
-      if (canEditWork(w, p)) editWork(p, w); else go(`/process/${w.pid}/step/${w.step}`);
+      if (canEditWork(w, p)) editWork(p, w); else go(workHref(w));
     });
     c.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === c) { e.preventDefault(); c.click(); } });
   });
@@ -1448,11 +1583,20 @@ function sprintIdOf(j, w, list) {
     || list.find(s => w.due > s.end && dayDiff(w.due, s.end) <= 2 && isWeekend(w.due));
   return hit ? hit.id : null;
 }
-/* Capacity: each assigned person's days per week (default 4), pro-rated to the sprint's business days. */
-function sprintLoad(sp, items) {
+/* R11 G1 §7: the holiday-aware sprint calendar (E().sprintCalendar): working days, the days off inside each sprint and
+   each person's capacity pro-rated to those working days. Keyed by sprint id. */
+function sprintCal(j) {
+  const c = eng('sprintCalendar', null, docs(), j.id, today());
+  return new Map((Array.isArray(c) ? c : []).filter(x => x && x.id != null).map(x => [String(x.id), x]));
+}
+/* Capacity: each assigned person's days per week (default 4), pro-rated to the sprint's WORKING days (holidays and
+   workspace days off excluded, from the engine's calendar). */
+function sprintLoad(sp, items, cal) {
   const owners = [...new Set(items.map(w => w.owner))];
-  const wd = bizDays(sp.start, sp.end);
-  const cap = owners.reduce((a, id) => a + ((store.person(id) || {}).capacity > 0 ? store.person(id).capacity : 4) * wd / 5, 0);
+  const c = cal && cal.get(String(sp.id));
+  const wd = c ? c.workingDays : bizDays(sp.start, sp.end);
+  const pcap = id => { const x = c && c.capacity && (c.capacity.people || []).find(y => y.id === id); return x ? x.days : ((store.person(id) || {}).capacity > 0 ? store.person(id).capacity : 4) * wd / 5; };
+  const cap = owners.reduce((a, id) => a + pcap(id), 0);
   const effort = items.reduce((a, w) => a + effortOf(w), 0);
   return { owners, cap: Math.round(cap * 10) / 10, effort: Math.round(effort * 10) / 10, over: effort > cap + 1e-9 };
 }
@@ -1464,15 +1608,16 @@ function sprintsHTML(j, fc, list) {
   const shown = new Set(list.map(w => w.id));
   const cfg = sprintCfg(j);
   const isPM = store.state.me === j.owner;
+  const cal = sprintCal(j);
   const opts = (w, cur) => sps.map(s => `<option value="${esc(s.id)}" ${cur === s.id ? 'selected' : ''}>${esc(s.name)} · ${esc(fmt(s.start))}–${esc(fmt(s.end))}</option>`).join('');
   const col = (sp, items) => {
-    const ld = sp ? sprintLoad(sp, items) : null;
+    const ld = sp ? sprintLoad(sp, items, cal) : null, c = sp && cal.get(String(sp.id));
     const vis = items.filter(w => shown.has(w.id)).sort((a, b) => String(a.due).localeCompare(String(b.due)));
     const cur = sp && today() >= sp.start && today() <= sp.end;
     const pct = ld && ld.cap ? Math.min(100, ld.effort / ld.cap * 100) : (ld && ld.effort ? 100 : 0);
     return `<section class="pmo-spr ${ld && ld.over ? 'over' : ''} ${cur ? 'cur' : ''} ${sp ? '' : 'none'}" ${sp ? `data-sprint="${esc(sp.id)}"` : 'data-sprint-none'} aria-label="${esc(sp ? sp.name : 'Not in a sprint')}">
       <header class="pmo-spr-h"><div><b>${esc(sp ? sp.name : 'Not in a sprint')}</b>${cur ? ' <span class="badge b-ok">Current</span>' : ''}</div>
-        ${sp ? `<div class="hint">${esc(fmt(sp.start))} – ${esc(fmt(sp.end))} · ${bizDays(sp.start, sp.end)} working days</div>` : '<div class="hint">Due outside every sprint</div>'}
+        ${sp ? `<div class="hint" data-sprint-days="${c ? c.workingDays : bizDays(sp.start, sp.end)}">${esc(c && c.text ? c.text : `${fmt(sp.start)} – ${fmt(sp.end)} · ${bizDays(sp.start, sp.end)} working days`)}</div>` : '<div class="hint">Due outside every sprint</div>'}
         ${ld ? `<div class="pmo-spr-cap" data-cap-line><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div><span><b>${fmtEffort(ld.effort)}</b> effort / ${fmtEffort(ld.cap)} capacity</span></div>
           ${ld.over ? `<div class="pmo-spr-over" data-over>Over capacity by ${fmtEffort(Math.round((ld.effort - ld.cap) * 10) / 10)}</div>` : ''}
           <div class="pmo-spr-who">${ld.owners.map(av).join('')}</div>` : ''}
@@ -1480,7 +1625,7 @@ function sprintsHTML(j, fc, list) {
       <div class="pmo-spr-b">${vis.map(w => cardHTML(w, j, fc, `<label class="pmo-card-kb">Sprint <select class="pmo-sel" data-sprint-pick="${esc(w.id)}" aria-label="Sprint for ${esc(w.title)}" ${canEditWork(w, j) && w.status !== 'done' ? '' : 'disabled'}>${sp ? '' : '<option value="" selected>Not in a sprint</option>'}${opts(w, sp && sp.id)}</select></label>`)).join('') || `<div class="pmo-col-empty">${sp ? 'Drop work here' : ''}</div>`}</div></section>`;
   };
   const cols = sps.map(sp => col(sp, by[sp.id] || [])).join('') + ((by._none || []).length ? col(null, by._none) : '');
-  return `<div class="pmo-tlbar pmo-spr-bar"><span class="hint">${esc((j.sprints || []).length ? `Planned cadence: ${cfg.length}-day sprints from ${fmt(cfg.start)}` : 'Automatic: two-week sprints from the week of the earliest work')} · effort counts this project’s work; capacity is each assigned person’s days per week, pro-rated to the sprint.</span>
+  return `<div class="pmo-tlbar pmo-spr-bar"><span class="hint">${esc((j.sprints || []).length ? `Planned cadence: ${cfg.length}-day sprints from ${fmt(cfg.start)}` : 'Automatic: two-week sprints from the week of the earliest work')} · effort counts this project’s work; capacity is each assigned person’s days per week, pro-rated to the sprint’s working days (holidays and days off don’t count).</span>
       <button class="btn sm" data-plan-sprints ${isPM ? '' : `disabled title="${esc(`Only ${pname(j.owner)} (project manager) can change the sprint cadence`)}"`}>Plan sprints</button></div>
     <div class="hint pmo-draghint">Drag a card into a sprint to plan it there: its due date moves inside the sprint and its duration is kept. Keyboard: focus a card, Tab to its sprint select.</div>
     ${list.length ? `<div class="pmo-sprints" data-sprints>${cols}</div>` : noMatchHTML()}`;
@@ -1586,8 +1731,9 @@ export function windowWords(w) { return w ? `${w.label}${w.partial ? ' (so far)'
 export function reportText(j, d) {
   const sec = (h, arr) => (arr && arr.length) ? `\n${h}\n` + arr.map(x => '- ' + txt(x)).join('\n') + '\n' : '';
   const t = truthOf(j), c = t.cost;
-  const nb = blockerWho(t).length;
-  const facts = `Status: ${t.label}. ${t.finished || j.status === 'live' ? 'Finished' : 'Expected'} ${t.total || j.status === 'live' ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${nb} blocking.${t.stepsLeft ? ` ${plural(t.stepsLeft, 'step')} left to launch.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}`;
+  const B = blockingInfo(t), live = j.status === 'live';   /* R11: one blocking definition, its own words */
+  const flags = [!live && t.raw && t.raw.launchFlag, ...evFlagTexts(t)].filter(Boolean);
+  const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${t.stepsLeft ? ` ${plural(t.stepsLeft, 'step')} left to launch.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
   const o = d.overall;
   const overall = o ? `\nOVERALL\n${o.needsPurpose ? 'Purpose: not written yet (add a one-line purpose in the project settings).' : `Purpose: ${o.purpose || o.description}`}\n` +
     [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
@@ -1731,6 +1877,7 @@ function bindWhyGlobal() {
 /* ---------------------------------------------------------------- render */
 export function render(params) {
   const prj = params.prj;
+  if (bulk && bulk.projectId === prj) return `<section class="card pmo-bulk" role="status" aria-live="polite" data-plan-adding="${bulk.total}"><h3>Adding the plan</h3><p class="s">Saving ${plural(bulk.total, 'task')} (${bulk.done} done). The project opens again as soon as they are all saved.</p></section>`;
   const j = store.get('project', prj);
   if (!j) {
     const all = store.list('project');
@@ -1772,11 +1919,11 @@ export function render(params) {
       <h1>${esc(j.name)}</h1>${summaryHTML(summaryOf(j), 'pmo-hrag')}${j.desc ? `<p>${esc(j.desc)}</p>` : ''}
       <div class="res pmo-roles"><span class="pmo-role" data-role-pm><span class="lbl">Project manager</span>${personChip(j.owner)}</span><span class="pmo-role" data-role-rm><span class="lbl">Launch owner</span>${personChip(rm)}${rm === j.owner ? '<small class="hint"> (also PM)</small>' : ''}</span>${team.length ? `<span class="pmo-role"><span class="lbl">Team</span>${team.map(av).join('')}</span>` : ''}</div>
       <div class="pmo-hfin" data-hfin>${j.program ? `<span class="chip" data-program-chip>Program: ${esc(j.program)}</span>` : ''}${costHTML(j)}</div>
-      ${s.total ? `<div class="pmo-hev" data-hev><span class="lbl">Earned value</span>${evChips(earnedValue(j))}</div>` : ''}</div>
+      ${s.total ? `<div class="pmo-hev" data-hev><span class="lbl">Earned value</span>${evChips(earnedValue(j))}${evFlagsHTML(j)}</div>` : ''}</div>
     <div class="hdr-side"><div class="kpis">
       <div class="kpi" data-kpi-pct="${s.pct}"><b data-t="pct">${s.pct}%</b><span>of the budgeted work done · ${s.done}/${s.total} tasks</span><div class="bar pmo-kbar"><i style="width:${s.pct}%"></i></div></div>
       <div class="kpi"><b style="color:${T.late ? 'var(--late)' : 'inherit'}" data-t="late">${T.late}</b><span>Late</span>${T.late && lateSplitText(T) ? `<span class="hint" data-late-breakdown>${esc(lateSplitText(T))}</span>` : ''}</div>
-      <div class="kpi"><b style="color:${blockerWho(T).length ? 'var(--late)' : 'inherit'}" data-t="blockers">${blockerWho(T).length}</b><span>Blocking</span></div>
+      <div class="kpi"><b style="color:${blockingCount(T) && j.status !== 'live' ? 'var(--late)' : 'inherit'}" data-t="blockers">${j.status === 'live' ? 0 : blockingCount(T)}</b><span>Blocking</span>${blockingInfo(T).holdsUp && j.status !== 'live' ? `<span class="hint" data-holds-up="${blockingInfo(T).holdsUp}">holds up ${plural(blockingInfo(T).holdsUp, 'task')}</span>` : ''}</div>
       ${finishKpi}</div></div></section>
     <div class="pmo-toolbar"><nav class="seg pmo-tabs" role="tablist" aria-label="Project views">${tab('map', 'Plan')}${tab('timeline', 'Timeline')}${tab('board', 'Board')}${tab('sprints', 'Sprints')}${tab('work', 'Work')}</nav>
       <div class="pmo-actions"><button class="btn sm primary" data-report>Status report</button>${isOwner ? `<button class="btn sm" data-settings>Settings</button><button class="btn sm" data-link-proc>Link a process</button><button class="btn sm" data-suggest title="Propose tasks for new and changed steps and for information that isn’t available yet">✦ Suggest a plan</button><button class="btn sm" data-baseline>Save plan</button>` : ''}<button class="btn sm" data-chg-open="${esc(j.id)}">Change the plan</button>
@@ -1788,7 +1935,7 @@ export function render(params) {
     : mode === 'sprints' ? `<section class="pmo-main pmo-wide-main">${fbar}${sprintsHTML(j, fc, list)}</section>`
     : `<section class="canvas pm" id="canvas">${mapHTML(j)}</section>`;
   const wide = mode === 'board' || mode === 'sprints';
-  return hdr + conflictHTML(j) + reportPanelHTML(j, r) + `<div class="grid pmo-grid ${wide ? 'pmo-grid-wide' : ''}">${main}<aside class="side">${sideHTML(j, fc, mode, { D, fc: fcT, f, list })}${renderChangesSection(j.id)}</aside></div>`;
+  return hdr + draftHTML(j) + conflictHTML(j) + reportPanelHTML(j, r) + `<div class="grid pmo-grid ${wide ? 'pmo-grid-wide' : ''}">${main}<aside class="side">${sideHTML(j, fc, mode, { D, fc: fcT, f, list })}${renderChangesSection(j.id)}</aside></div>`;
 }
 
 /* R7: Simple shows Plan · Timeline · Work; Board and Sprints are Advanced views of the same tasks. */
@@ -1834,7 +1981,7 @@ function simpleRender(j, mode, fc, params) {
     : `<section class="canvas pm" id="canvas">${mapHTML(j)}</section>`;
   const side = mode === 'map' ? myTasksHTML(j, fc) + launchHTML(j) + simpleLegend()
     : mode === 'timeline' ? myTasksHTML(j, fc) : launchHTML(j);
-  return hdr + conflictHTML(j) + reportPanelHTML(j, rag(j)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${renderChangesSection(j.id)}${activityToggle(j)}</aside></div>`;
+  return hdr + draftHTML(j) + conflictHTML(j) + reportPanelHTML(j, rag(j)) + `<div class="grid pmo-grid pmo-simple-grid">${main}<aside class="side">${side}${renderChangesSection(j.id)}${activityToggle(j)}</aside></div>`;
 }
 
 /* ---------------------------------------------------------------- actions */
@@ -2126,7 +2273,7 @@ function suggestBody(j, items, meta, ro, err) {
     return `<div class="pmo-sg" data-sg="${i}">
       <div class="pmo-sg-h">${ro ? `<span class="pmo-sg-n">${i + 1}</span>` : `<input type="checkbox" name="pick" value="${i}" ${x.picked === false ? '' : 'checked'} aria-label="Create suggestion ${i + 1}"/>`}
         <div class="pmo-sg-main"><input class="pmo-sg-t" name="t_${i}" value="${esc(x.title)}" maxlength="140" aria-label="Title of suggestion ${i + 1}" ${dis}/>
-        <div class="hint">${x.tag === 'train' || x.tag === 'tell' ? 'Whole project' : x.tag === 'retire' ? `${esc(procName(x.pid))} › a step the new way drops` : `${esc(procName(x.pid))} › ${x.gateway ? '<span class="pmo-gw" data-sg-gateway>◆ gateway</span> ' : ''}${esc(stepTitle(x.pid, x.step))}`} · ${esc(KIND_LBL[x.kind] || x.kind)}${x.resolves ? ' · resolves ' + esc(dataName(x.resolves)) + ' (' + EFF_LBL[effAvail(x.resolves)] + ')' : ''}</div>${x.note ? `<div class="hint" data-sg-note>${esc(x.note)}</div>` : ''}</div></div>
+        <div class="hint">${x.tag === 'train' || x.tag === 'tell' ? 'Whole project' : x.tag === 'retire' ? `${esc(procName(x.pid))} › ${esc(workStepTitle(x))} (the new way drops it)` : `${esc(procName(x.pid))} › ${x.gateway ? '<span class="pmo-gw" data-sg-gateway>◆ gateway</span> ' : ''}${esc(stepTitle(x.pid, x.step))}`} · ${esc(KIND_LBL[x.kind] || x.kind)}${x.resolves ? ' · resolves ' + esc(dataName(x.resolves)) + ' (' + EFF_LBL[effAvail(x.resolves)] + ')' : ''}</div>${x.note ? `<div class="hint" data-sg-note>${esc(x.note)}</div>` : ''}</div></div>
       <div class="pmo-sg-f">
         <label>Owner<select name="o_${i}" ${dis}>${people.map(p => `<option value="${esc(p.id)}" ${p.id === x.owner ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
         <label>Effort (days)<input type="number" name="e_${i}" min="0.5" max="200" step="0.5" value="${esc(x.effortDays)}" ${dis}/></label>
@@ -2183,7 +2330,9 @@ async function suggestWork(j, btn) {
 }
 async function suggestModal(j, items, meta, err) {
   const ro = store.state.me !== j.owner;
-  const pending = modal({ title: 'Adjust the plan', body: suggestBody(j, items, meta, ro, err), actions: ro ? [] : [{ id: 'create', label: 'Create selected', primary: true }] });
+  if (!ro) await keepDraft(j, { mode: 'adjust', source: meta.source, note: meta.note, items });
+  const pending = modal({ title: 'Adjust the plan', body: suggestBody(j, items, meta, ro, err), actions: ro ? [] : [{ id: 'dismiss', label: 'Dismiss' }, { id: 'create', label: 'Create selected', primary: true }] });
+  closeOnRoute();
   const ov = [...document.querySelectorAll('.overlay')].pop();
   if (ov) {
     ov.querySelector('.modal').classList.add('pmo-wide');
@@ -2198,14 +2347,16 @@ async function suggestModal(j, items, meta, err) {
     });
   }
   const r = await pending;
-  if (r.action !== 'create' || ro) return;
-  if (store.state.me !== j.owner) { toast(`Only ${pname(j.owner)} (project manager) can create work from suggestions`); return; }
+  if (ro) return;
+  if (r.action === 'dismiss') return dropDraft(j, 'Dismissed the suggested plan');
   const f = r.form;
   const picked = new Set((f.pick || []).map(Number));
-  items.forEach((x, i) => Object.assign(x, {
-    picked: picked.has(i), title: String(f['t_' + i] || '').trim(), owner: f['o_' + i] || x.owner, effortDays: Number(f['e_' + i]),
-    start: f['s_' + i], due: f['d_' + i], deps: f['dep_' + i] || [],
+  if (f.pick) items.forEach((x, i) => Object.assign(x, {
+    picked: picked.has(i), title: String(f['t_' + i] != null ? f['t_' + i] : x.title).trim(), owner: f['o_' + i] || x.owner, effortDays: f['e_' + i] != null ? Number(f['e_' + i]) : x.effortDays,
+    start: f['s_' + i] || x.start, due: f['d_' + i] || x.due, deps: f['dep_' + i] || [],
   }));
+  if (r.action !== 'create') { await keepDraft(j, { mode: 'adjust', source: meta.source, note: meta.note, items }); return; } /* Cancel/Back keeps the edits */
+  if (store.state.me !== j.owner) { toast(`Only ${pname(j.owner)} (project manager) can create work from suggestions`); return; }
   if (!picked.size) return;
   for (const i of picked) {
     const x = items[i], n = `Suggestion ${i + 1}`;
@@ -2215,7 +2366,8 @@ async function suggestModal(j, items, meta, err) {
     if (!(x.effortDays > 0) || x.effortDays > 200) return suggestModal(j, items, meta, `“${x.title}”: effort must be between 0.5 and 200 days.`);
   }
   if (hasCycle(items, picked)) return suggestModal(j, items, meta, 'The selected items depend on each other in a loop. Untick one of the “After” links.');
-  return createSuggestions(j, items, picked, meta);
+  await createSuggestions(j, items, picked, meta);
+  return dropDraft(j);
 }
 async function createSuggestions(j, items, picked, meta) {
   const ids = {}; picked.forEach(i => { ids[i] = store.newId('wi'); });
@@ -2231,14 +2383,22 @@ async function createSuggestions(j, items, picked, meta) {
   }
   toast(`Added ${n} task${n > 1 ? 's' : ''} to the plan`);
 }
+/* Set while a plan is being added (acceptExact); render() and bind() show a progress card meanwhile. */
+let bulk = null;
 /* R9 §4 Accept: store E().planToWork(...) as-is (only the ids become workspace ids; dependencies follow). */
 async function acceptExact(j, sugs) {
   const work = eng('planToWork', [], j.id, sugs) || [];
   const ids = {}; work.forEach(w => { ids[w.id] = store.newId('wi'); });
-  for (const w0 of work) {
-    const w = Object.assign({}, w0, { id: ids[w0.id], deps: (w0.deps || []).map(d => ids[d] || d), updatedAt: stamp() });
-    await psave('workItem', w.id, w, `Added suggested work “${w.title}” for ${w.owner ? pname(w.owner) : w.ownerRole || 'the step’s role'}, ${fmt(w.start)} – ${fmt(w.due)}, ${fmtEffort(w.effortDays || 1)} effort`);
-  }
+  /* The ids are all known up front, so the tasks are saved a few at a time (each is its own document and history
+     event); one save at a time made a 14-task plan take over 30 seconds on a busy workspace. Order is kept per lane. */
+  const save = w0 => { const w = Object.assign({}, w0, { id: ids[w0.id], deps: (w0.deps || []).map(d => ids[d] || d), updatedAt: stamp() });
+    return psave('workItem', w.id, w, `Added suggested work “${w.title}” for ${w.owner ? pname(w.owner) : w.ownerRole || 'the step’s role'}, ${fmt(w.start)} – ${fmt(w.due)}, ${fmtEffort(w.effortDays || 1)} effort`); };
+  const LANES = 4, queue = work.slice();
+  /* while the tasks are saved the page shows one light "Adding the plan" card instead of re-drawing the whole project
+     (map, forecasts, overlaps) twice per save; it is drawn once at the end */
+  bulk = { projectId: j.id, total: work.length, done: 0 };
+  try { await Promise.all(Array.from({ length: Math.min(LANES, queue.length) }, async () => { while (queue.length) { await save(queue.shift()); if (bulk) bulk.done++; } })); }
+  finally { bulk = null; window.dispatchEvent(new Event('pmo:route')); }
   toast(`Added ${plural(work.length, 'task')} to the plan`);
 }
 /* R7: right after creating a project, show "Here's a first plan: N tasks. Accept · Adjust". */
@@ -2250,8 +2410,9 @@ async function firstPlan(j) {
 }
 /* "Here's a first plan: N tasks. Accept · Adjust". Tasks only for changed or new steps and for information that's
    Not available yet (engine suggestWorkFromDiff). Adjust opens the detailed editor. Only the PM can accept. */
-async function planCard(j) {
-  const { list, source, note } = await fetchSuggestions(j);
+async function planCard(j, opts) {
+  opts = opts || {};
+  const { list, source, note } = opts.draft ? { list: opts.draft.items || [], source: opts.draft.source || 'rules', note: opts.draft.note || '' } : await fetchSuggestions(j);
   const has = projectItems(j.id).length > 0, pm = isPM(j);
   if (!list.length) {
     await modal({ title: has ? 'Nothing new to plan' : 'Nothing to plan yet', body: `<p style="margin:0" data-plan-none>${has ? 'Every new or changed step already has a task, and everything that isn’t available yet has a task to get it.' : 'The linked process has no new or changed steps, and no information is marked “Not available yet”. Change the future version of the process first.'}</p>`, actions: [{ id: 'ok', label: 'OK', primary: true }] });
@@ -2264,19 +2425,76 @@ async function planCard(j) {
   const fit = exact ? eng('planFit', null, docs(), j.id, today(), items) : null;
   const end = fit ? fit.forecastFinish : maxDate(items.map(x => x.due));
   const people = [...new Set(items.map(x => x.owner || 'role:' + (x.ownerRole || '')))];
-  const ownerTxt = x => x.owner ? pname(x.owner) : (x.ownerRole || 'Nobody yet');
-  const r = await modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b> for ${plural(people.length, 'person', 'people')}.</p>
-    <p class="pmo-fp-fit ${fit && !fit.fits ? 'fail' : ''}" data-plan-fit data-plan-finish="${esc(end || '')}">${fit ? esc(fit.message) : `Done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).`}</p>
+  const ownerTxt = x => x.owner ? pname(x.owner) : (x.ownerRole ? `Needs an owner: ${x.ownerRole}` : 'Needs an owner');
+  /* R11 G3 §2: the suggestion is kept on the project as a draft the moment it is shown, so leaving (Cancel, Back, reload,
+     another page) never loses it. Accept or Dismiss clears it. */
+  if (pm) await keepDraft(j, { mode: 'card', source, note, items });
+  const late = lateWarning(fit, end, j);
+  const pending = modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b> for ${plural(people.length, 'person', 'people')}.</p>
+    ${late ? late.html : `<p class="pmo-fp-fit" data-plan-fit data-plan-finish="${esc(end || '')}">${fit ? esc(fit.message) : `Done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).`}</p>`}
+    ${fit && Array.isArray(fit.unassigned) && fit.unassigned.length ? `<p class="hint pmo-fp-warn" data-plan-unassigned="${fit.unassigned.length}">${plural(fit.unassigned.length, 'task')} ${fit.unassigned.length === 1 ? 'needs' : 'need'} an owner. Pick one with Adjust, or after adding the plan.</p>` : ''}
     <ol class="pmo-fp">${items.map(x => `<li data-fp-item data-fp-owner="${esc(x.owner || '')}"><b>${esc(x.title)}</b><span class="hint">${esc(ownerTxt(x))} · ${esc(fmt(x.start))} – ${esc(fmt(x.due))}</span>${x.note ? `<span class="hint pmo-fp-note">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>
     <div class="hint">Every new or changed step gets a task, and so does information you don’t have yet, each step the new way drops, training the people who do the changed steps, and telling the teams. Each task starts after the tasks it waits for.${pm ? ' Accept adds them all. Adjust lets you change names, people and dates first.' : ''}</div>
-    ${pm ? '' : `<div class="banner pmo-ro-note" style="margin:0">Only <b>${esc(pname(j.owner))}</b> (project manager) can add this plan.</div>`}`,
-    actions: pm ? [{ id: 'adjust', label: 'Adjust' }, { id: 'accept', label: 'Accept', primary: true }] : [] });
+    ${pm ? '<div class="hint" data-draft-hint>Not ready to decide? Cancel keeps this plan as a draft on the project. Dismiss throws it away.</div>' : `<div class="banner pmo-ro-note" style="margin:0">Only <b>${esc(pname(j.owner))}</b> (project manager) can add this plan.</div>`}`,
+    actions: pm ? [{ id: 'dismiss', label: 'Dismiss' }, { id: 'adjust', label: late ? late.adjust : 'Adjust' }, { id: 'accept', label: late ? late.accept : 'Accept', primary: true }] : [] });
+  closeOnRoute();
+  const r = await pending;
   if (!pm) return;
   const all = new Set(items.map((x, i) => i));
-  if (r.action === 'accept' && exact) return acceptExact(j, items);
+  if (r.action === 'dismiss') return dropDraft(j, 'Dismissed the suggested plan');
+  if (r.action === 'accept' && exact) { await acceptExact(j, items); return dropDraft(j); }
   if (r.action === 'adjust' && exact) return suggestModal(j, normalizeSuggestions(j, items), { source, note });
-  if (r.action === 'accept') { if (hasCycle(items, all)) return suggestModal(j, items, { source, note }, 'Some tasks wait for each other in a loop. Untick one of the “After” links.'); return createSuggestions(j, items, all, { source }); }
+  if (r.action === 'accept') { if (hasCycle(items, all)) return suggestModal(j, items, { source, note }, 'Some tasks wait for each other in a loop. Untick one of the “After” links.'); await createSuggestions(j, items, all, { source }); return dropDraft(j); }
   if (r.action === 'adjust') return suggestModal(j, items, { source, note });
+}
+/* R11 G3 §2: late-on-arrival warning. G1's planFit says whether the plan fits (fits/lateOnArrival, forecastFinish, deadline);
+   this only words it: "This needs until Mar 4, past your Jan 19 deadline." with Accept anyway / Adjust as the options. */
+function lateWarning(fit, end, j) {
+  if (!fit) return null;
+  const wn = fit.warning && typeof fit.warning === 'object' ? fit.warning : null;
+  if (!wn && fit.fits !== false) return null;
+  const fin = fit.forecastFinish || end, dl = fit.deadline || j.target;
+  const txt = (wn && wn.text) || `This needs until ${fmt(fin)}, past your ${fmt(dl)} deadline.`;
+  const opt = k => ((wn && wn.options) || []).find(o => o && o.key === k);
+  return { accept: (opt('accept') || {}).label || 'Accept anyway', adjust: (opt('adjust') || {}).label || 'Adjust',
+    html: `<div class="banner pmo-fp-late" role="alert" data-plan-fit data-plan-late data-plan-finish="${esc(fin || '')}"><b>${esc(txt)}</b><span>Choose “${esc((opt('accept') || {}).label || 'Accept anyway')}” to add it as it is, or “${esc((opt('adjust') || {}).label || 'Adjust')}” to change people, dates or what’s included. You can also move the deadline in Settings.</span></div>` };
+}
+/* The draft lives on the project doc (planDraft) so it survives navigation, reloads and other devices. PM only. */
+async function keepDraft(j, d) {
+  const cur = store.get('project', j.id) || j;
+  const items = (d.items || []).map(x => Object.assign({}, x));
+  const next = { mode: d.mode, source: d.source || 'rules', note: d.note || '', items, by: store.state.me, at: (cur.planDraft && cur.planDraft.at) || stamp() };
+  const same = cur.planDraft && cur.planDraft.mode === next.mode && JSON.stringify(cur.planDraft.items) === JSON.stringify(items);
+  if (same) return;
+  next.at = stamp();
+  try { await store.save('project', j.id, Object.assign({}, cur, { planDraft: next }), `Kept a suggested plan as a draft (${plural(items.length, 'task')})`); }
+  catch (e) { console.warn('plan draft not kept', e); }
+}
+async function dropDraft(j, summary) {
+  const cur = store.get('project', j.id); if (!cur || !cur.planDraft) return;
+  const next = Object.assign({}, cur); delete next.planDraft;
+  try { await store.save('project', j.id, next, summary || 'Added the suggested plan (draft cleared)'); }
+  catch (e) { console.warn('plan draft not cleared', e); }
+  if (summary) toast('Suggested plan dismissed');
+}
+/* Leaving the page with a plan dialog open (Back, a link) closes the dialog; the draft is already kept. */
+function closeOnRoute() {
+  const ov = [...document.querySelectorAll('.overlay')].pop(); if (!ov) return;
+  const path = location.pathname + location.search;
+  const off = () => { window.removeEventListener('popstate', h); window.removeEventListener('pmo:route', h); };
+  const h = () => { if (!ov.isConnected) return off(); if (location.pathname + location.search === path) return; off(); if (ov._close) ov._close('cancel'); };
+  window.addEventListener('popstate', h); window.addEventListener('pmo:route', h);
+}
+export function draftHTML(j) {
+  const d = j && j.planDraft; if (!d || !Array.isArray(d.items) || !d.items.length || j.status === 'live') return '';
+  if (!isPM(j)) return `<div class="pmo-draft hint" data-plan-draft-ro>${esc(pname(j.owner))} has a suggested plan (${plural(d.items.length, 'task')}) that isn’t added yet.</div>`;
+  return `<div class="pmo-draft" role="status" data-plan-draft="${d.items.length}"><span><b>Suggested plan not added yet</b> · ${plural(d.items.length, 'task')} · kept ${esc(fmt(String(d.at || '').slice(0, 10)))}</span>
+    <span class="pmo-draft-acts"><button class="btn sm primary" data-draft-open>Review plan</button><button class="btn sm" data-draft-dismiss>Dismiss</button></span></div>`;
+}
+async function openDraft(j) {
+  const d = j.planDraft; if (!d) return;
+  if (d.mode === 'adjust') return suggestModal(j, d.items.map(x => Object.assign({}, x, { deps: (x.deps || []).slice() })), { source: d.source, note: d.note });
+  return planCard(j, { draft: d });
 }
 
 /* Shared bits of the project modals (R5 roles + PMO fields). */
@@ -2549,7 +2767,7 @@ export function workCSVRows(j, list) {
   const head = ['ID', 'Title', 'Process', 'Step', 'Owner', 'Status', 'Kind', 'Start', 'Due', 'Forecast', 'Schedule', 'Done on', 'Effort (days)', 'Hours logged', 'Resolves', 'Depends on', ...flds.map(f => f.label)];
   const rows = (list || projectItems(j.id)).slice().sort((a, b) => String(a.due).localeCompare(String(b.due))).map(w => {
     const f = fc[w.id] || {};
-    return [w.id, w.title, procName(w.pid), stepTitle(w.pid, w.step), pname(w.owner), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? doneDate(w) : (f.forecast || w.due || ''),
+    return [w.id, w.title, procName(w.pid), workStepTitle(w), pname(w.owner), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? doneDate(w) : (f.forecast || w.due || ''),
       (BADGE[schedKey(w, fc)] || BADGE.ok)[1], w.doneAt ? doneDate(w) : '', effortOf(w), Math.round(hoursOf(w) * 100) / 100, w.resolves ? dataName(w.resolves) : '',
       (w.deps || []).map(d => (store.get('workItem', depId(d)) || {}).title).filter(Boolean).join('; '), ...flds.map(fd => fieldVal(w, fd))];
   });
@@ -2558,6 +2776,7 @@ export function workCSVRows(j, list) {
 
 /* ---------------------------------------------------------------- bind */
 export function bind(root, params) {
+  if (bulk && bulk.projectId === params.prj) return;
   const j = store.get('project', params.prj);
   if (!j) return;
   const cur = () => store.get('project', j.id);
@@ -2566,6 +2785,8 @@ export function bind(root, params) {
   on('[data-link-proc]', () => linkProcess(cur()));
   on('[data-baseline]', () => saveBaseline(cur()));
   on('[data-suggest]', el => suggestWork(cur(), el));
+  on('[data-draft-open]', () => openDraft(cur()));
+  on('[data-draft-dismiss]', () => dropDraft(cur(), 'Dismissed the suggested plan'));
   on('[data-add-work]', () => editWork(cur(), null));
   on('[data-edit-work]', el => editWork(cur(), store.get('workItem', el.dataset.editWork)));
   on('[data-del-work]', el => { const w = store.get('workItem', el.dataset.delWork); if (w) deleteWork(cur(), w); });
@@ -2641,8 +2862,13 @@ export function bind(root, params) {
   /* timeline: start scrolled so "today" is in view on narrow screens */
   const tl = root.querySelector('#pmoTl .tday');
   if (tl) { const box = root.querySelector('#pmoTl'); const lane = tl.parentElement; requestAnimationFrame(() => { const x = lane.offsetLeft + tl.offsetLeft - box.clientWidth / 2; if (x > 0 && box.scrollWidth > box.clientWidth) box.scrollLeft = x; }); }
-  bindActivity(root);
   bindChangesSection(root, j.id);
+  /* History and the work feed are read from the server only while the Activity panel is open: every save re-draws
+     the page, and fetching both on each re-draw kept the browser's connections busy (saves queued behind them). */
   const ids = new Set(projectItems(j.id).map(w => w.id));
-  bindFeed(root, 'prj-work', e => { const [t, id] = String(e.ref || '').split(':'); return t === 'workItem' && (ids.has(id) || String(e.summary || '').includes(j.name)); });
+  const loadActivity = el => { bindActivity(el); bindFeed(el, 'prj-work', e => { const [t, id] = String(e.ref || '').split(':'); return t === 'workItem' && (ids.has(id) || String(e.summary || '').includes(j.name)); }); };
+  const actP = root.querySelector('[data-activity]');
+  if (!actP) loadActivity(root);
+  else if (actP.open) loadActivity(actP);
+  else { bindComments(actP); actP.addEventListener('toggle', () => { if (actP.open && !actP.dataset.loaded) { actP.dataset.loaded = '1'; bindHistory(actP); bindFeed(actP, 'prj-work', e => { const [t, id] = String(e.ref || '').split(':'); return t === 'workItem' && (ids.has(id) || String(e.summary || '').includes(j.name)); }); } }); }
 }

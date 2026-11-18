@@ -215,7 +215,10 @@ function engineSectionBus(prj) {
   return [...out].filter(bu => bu !== 'PMO' || store.state.people.some(p => p.bu === bu));
 }
 /* Approvals that count: approved, step-up, not by the project owner (R4) and not by the release manager (R5). */
-const counts = (prj, a) => !!a && a.decision === 'approved' && a.stepUp && a.approver !== prj.owner && a.approver !== rmOf(prj);
+/* R11 §2: an approval counts only when its approver is not barred by separation of duties (engine approvalBar: PM,
+   launch owner, does steps in the part, recorded its tests). The local PM / launch-owner rule is the older-engine fallback. */
+const barOf = (prj, a) => { const b = eng('approvalBar', prj.id, a.bu, a.approver); return b === undefined ? (a.approver === prj.owner || a.approver === rmOf(prj) ? { rule: 'owner' } : null) : b; };
+const counts = (prj, a) => !!a && a.decision === 'approved' && !!a.stepUp && !barOf(prj, a);
 function signoffOpenOf(rd) {
   if (typeof rd.signoffOpen === 'boolean') return rd.signoffOpen;
   return (rd.checks || []).filter(c => !['bu-signoff', 'two-person', 'exceptions'].includes(c.id)).every(c => checkState(c) !== 'fail');
@@ -244,7 +247,9 @@ function staleChanges(prj, section, a, rd) {
   const chk = rd && (rd.checks || []).find(c => c.id === 'bu-signoff');
   if (chk && Array.isArray(chk.stale)) {
     const x = chk.stale.find(y => y.bu === section.bu); if (!x) return [];
-    const v = (x.changed || []).map(r => refView(r, prj.id));
+    /* R11: a step-level reason comes with its own words from the engine ("“Capture banking details” owner changed") */
+    const lbl = {}; (x.details || []).forEach(d => { lbl[d.ref] = d.label; });
+    const v = (x.changed || []).map(r => { const w = refView(r, prj.id); return /^section:[^#]+#s:/.test(r) && lbl[r] ? Object.assign(w, { text: lbl[r].charAt(0).toUpperCase() + lbl[r].slice(1), href: w.href || null }) : w; });
     return v.some(y => y.cutover) ? v : co.concat(v);
   }
   if (co.length) return co.concat(staleFallback(prj, section, at));
@@ -280,6 +285,10 @@ function grantStatus(g) {
   if ((g.status === 'active' || g.status === 'approved') && g.expires && g.expires < store.state.today) return 'expired';
   return g.status;
 }
+/* R11 §3 one set of words (waiting for approval / open / closed) and local dates, from the engine */
+const tzOff = () => new Date().getTimezoneOffset();
+function grantViewOf(g) { const v = eng('grantView', g, store.state.today, tzOff()); return v && v.state ? v : null; }
+function grantCountsOf(prj) { const c = eng('grantCounts', prj.id, store.state.today); return c && typeof c.waiting === 'number' ? c : null; }
 const GRANT_CLS = { requested: 'b-soon', approved: 'b-prog', active: 'b-done', expired: 'b-idle', revoked: 'b-idle', denied: 'b-late' };
 const GRANT_TXT = { requested: 'waiting for approval', approved: 'approved', active: 'open', expired: 'closed', revoked: 'closed early', denied: 'declined' };
 /* R7 plain names for the test environments; the professional term stays in a tooltip. */
@@ -379,8 +388,10 @@ export function render(params) {
 
   const relFailed = !!failedRel;
   const gateCls = live ? 'live' : rd.pass ? 'pass' : 'blocked';
-  const sLeft = stepsLeftOf(prj, truthSteps(prj));
-  const gateTitle = live ? 'Launched' : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready to launch: ${sLeft} step${sLeft === 1 ? '' : 's'} left`;
+  /* R11 §3: the count is the FAIL/WARN rows below; "Ready to launch" only when the launch button is enabled */
+  const sLeft = failing + warns;
+  const g0 = launchGuard(prj);
+  const gateTitle = live ? 'Launched' : rd.pass && !g0.ok ? g0.text : rd.pass ? (relFailed ? 'Ready: the last launch failed, try again when ready' : 'Ready to launch') : `Not ready to launch: ${sLeft} check${sLeft === 1 ? '' : 's'} not passed`;
   const gateSub = live ? `Live since ${fmt(lastGo && lastGo.at)}. Temporary data access closed at launch.`
     : rd.unavailable ? 'Readiness engine is still loading.'
     : rd.pass ? (warns ? `Everything required is done. ${warns} warning to review.` : 'Everything required is done. The launch owner can launch.')
@@ -478,7 +489,8 @@ function signoffCard(prj, rd) {
     const stale = staleBy[s.bu] || [];
     const byOwner = a && a.decision === 'approved' && a.approver === prj.owner;
     const byRm = a && a.decision === 'approved' && !byOwner && a.approver === rm;
-    const state = !a ? 'pending' : byOwner ? 'owner' : byRm ? 'rm' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
+    /* an approval by someone the rules now bar (e.g. they recorded a test since) no longer counts: the part waits again */
+    const state = !a ? 'pending' : byOwner ? 'owner' : byRm ? 'rm' : a.decision === 'approved' && barOf(prj, a) ? 'pending' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
     const stCls = state === 'approved' ? 'b-done' : state === 'rejected' || state === 'stale' ? 'b-late' : 'b-soon';
     const stTxt = { pending: nobody ? 'Nobody can approve yet' : 'Waiting for approval', approved: 'Approved', rejected: 'Changes asked for', stale: 'Changed: approve again', owner: 'Needs an independent approver', rm: 'Needs an independent approver' }[state];
     const tagged = s.steps.filter(x => x.via !== 'owner');
@@ -523,7 +535,8 @@ export function eligibleFor(prj, bu) {
   const ids = store.state.people.filter(p => p.bu && String(p.bu).toLowerCase() === low && !ex.has(p.id)).map(p => p.id);
   const pick = Object.entries(prj.approvers || {}).find(([k]) => String(k).toLowerCase() === low);
   if (pick && pick[1] && !ex.has(pick[1]) && store.person(pick[1]) && !ids.includes(pick[1])) ids.unshift(pick[1]);
-  return ids;
+  /* R11 §2: never list someone separation of duties bars (does steps in the part, recorded its tests) */
+  return ids.filter(id => !eng('approvalBar', prj.id, bu, id));
 }
 /* Default suggestion: if the only member is the PM, the owner of the first linked process. */
 function suggestApprover(prj, bu) {
@@ -534,7 +547,10 @@ function suggestApprover(prj, bu) {
 const canChoose = prj => store.state.me === prj.owner || store.state.me === rmOf(prj);
 function choosePicker(prj, bu, opts) {
   opts = opts || {};
-  const ex = new Set([prj.owner, rmOf(prj)].concat(opts.exclude || []).filter(Boolean));
+  /* R11 §2: never offer someone the rules bar (does steps in this part, recorded its tests, PM, launch owner) */
+  const e = E();
+  const barred = e && e.approvalBar ? store.state.people.filter(p => { try { return !!e.approvalBar(store.state.docs, prj.id, bu, p.id); } catch (err) { return false; } }).map(p => p.id) : [];
+  const ex = new Set([prj.owner, rmOf(prj)].concat(opts.exclude || [], barred).filter(Boolean));
   if (!canChoose(prj)) return `<div class="hint" data-choose-who>${esc(pname(prj.owner))} (project manager) chooses who approves this part.</div>`;
   const sug = ex.has(suggestApprover(prj, bu)) ? (store.state.people.find(p => !ex.has(p.id) && p.bu === bu) || store.state.people.find(p => !ex.has(p.id)) || {}).id : suggestApprover(prj, bu);
   return `<div class="rs-choose" data-choose="${esc(bu)}"><label for="rs-ch-${esc(bu)}">${esc(opts.label || 'Choose who approves this part')}</label>
@@ -551,6 +567,8 @@ async function chooseApprover(prj, bu, pid) {
   const cur = store.get('project', prj.id) || prj;
   if (!canChoose(cur)) { toast(`Only ${pname(cur.owner)} (project manager) can choose who approves.`); return; }
   if (!pid || pid === cur.owner || pid === rmOf(cur)) { toast("Pick someone other than the project manager or the launch owner."); return; }
+  const bar = E() && E().approvalBar ? E().approvalBar(store.state.docs, prj.id, bu, pid) : null;
+  if (bar) { toast(bar.text); return; }
   await store.save('project', prj.id, Object.assign({}, cur, { approvers: Object.assign({}, cur.approvers || {}, { [bu]: pid }) }), `Chose ${pname(pid)} to approve the ${bu} part of ${cur.name}`);
   /* R10 §6: nobody is asked to approve before the part's work is done; they are told when it is ready */
   const br = E() && E().buReady ? E().buReady(store.state.docs, prj.id, bu) : null;
@@ -749,13 +767,20 @@ function grantsCard(prj) {
     return `<tr data-grant="${esc(g.id)}"><td><a href="${link('/data/' + g.dataId)}" data-link class="rl-de">${esc(de.name)}</a><div class="hint">Owner ${esc(pname(de.owner))}</div></td>
       <td><span class="chip" title="${esc(String(g.env || '').toUpperCase())}">${esc(envPlain(g.env))}</span></td><td>${esc(g.access)}</td>
       <td>${av(g.requestedBy)} <span class="rl-nm">${esc(pname(g.requestedBy))}</span>${g.reason ? `<div class="hint rl-reason" data-user-text>${esc(g.reason)}</div>` : ''}</td>
-      <td>${badge(GRANT_TXT[st] || st, GRANT_CLS[st] || 'b-idle')}</td>
-      <td data-expiry>${st === 'requested' ? `<span data-from-approval data-asked="${esc(askedDays(g))}">${esc(askedDays(g) || grantDays(g) + ' days')} from approval</span>` : st === 'denied' ? '—' : `${esc(fmt(g.expires))}${askedDays(g) ? ` <small data-asked="${esc(askedDays(g))}">· ${esc(askedDays(g))}</small>` : ''}${left != null && (st === 'active' || st === 'approved') ? `<div class="hint">${left >= 0 ? left + ' days left' : 'past'}</div>` : ''}`}</td>
+      <td>${(() => { const v = grantViewOf(g); return v ? badge(v.label, v.state === 'waiting' ? 'b-soon' : v.state === 'open' ? 'b-done' : 'b-idle') + `<span hidden data-grant-state="${esc(v.state)}"></span>` : badge(GRANT_TXT[st] || st, GRANT_CLS[st] || 'b-idle'); })()}</td>
+      <td data-expiry>${(() => { const v = grantViewOf(g);
+        if (st === 'requested') return `<span data-from-approval data-asked="${esc(askedDays(g))}">${esc(askedDays(g) || grantDays(g) + ' days')} from approval</span>`;   /* R9: the card shows the duration asked for, never the maximum (the dialog enforces 1–30) */
+        if (st === 'denied') return '—';
+        /* R11 §3: local dates; the duration is counted from the local approval day and never shown above the maximum */
+        const dur = v && v.days != null ? `${v.days} day${v.days === 1 ? '' : 's'}` : askedDays(g);
+        return `${v && v.state === 'closed' && v.closedOn ? 'Closed ' + esc(fmt(v.closedOn)) : esc(fmt(g.expires))}${dur ? ` <small data-asked="${esc(dur)}" data-grant-days="${v && v.days != null ? v.days : ''}">· ${esc(dur)}${v && v.overMax ? ' (over the 30-day limit)' : ''}</small>` : ''}${left != null && (st === 'active' || st === 'approved') ? `<div class="hint">${left >= 0 ? left + ' days left' : 'past'}</div>` : ''}`; })()}</td>
       <td class="rl-acts">${acts}<button class="btn sm rl-linkbtn" data-glog="${esc(g.id)}">${logOpen ? 'Hide history' : 'History'} (${(g.log || []).length})</button></td></tr>
       ${logOpen ? `<tr class="rl-logrow"><td colspan="7">${(g.log || []).map(l => `<div class="ev"><time>${esc(fmtTime(l.at))}</time><span>${av(l.by)} <b>${esc(store.person(l.by) ? pname(l.by) : l.by)}</b> ${esc(l.action)}</span></div>`).join('') || '<div class="hint">No entries.</div>'}</td></tr>` : ''}`;
   }).join('');
-  const open = grants.filter(g => ['active', 'approved', 'requested'].includes(grantStatus(g))).length;
-  return `<div class="card" id="grants"><h3>Temporary data access<span class="n">${open} open</span></h3>
+  const gc = grantCountsOf(prj);
+  const head = gc ? [gc.open ? `${gc.open} open` : '', gc.waiting ? `${gc.waiting} waiting for approval` : ''].filter(Boolean).join(' · ') || 'none open'
+    : `${grants.filter(g => ['active', 'approved', 'requested'].includes(grantStatus(g))).length} open`;
+  return `<div class="card" id="grants"><h3>Temporary data access<span class="n" data-grant-counts="${gc ? gc.open + '/' + gc.waiting : ''}">${esc(head)}</span></h3>
     <div class="rl-gtools"><span class="hint">Short-term access to real information for build testing and business testing, for this project only. It closes automatically at launch.</span>
       <button class="btn sm primary" data-request ${prj.status === 'live' ? 'disabled' : ''}>Request access</button></div>
     ${grants.length ? `<div class="tbl-wrap"><table class="rl-gt"><thead><tr><th>Information</th><th>For</th><th>Access</th><th>Asked by</th><th>Status</th><th>Ends</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
@@ -778,10 +803,9 @@ function goLiveCard(prj, rd, live) {
     <div class="rl-procs">${procs.map(p => `<div><a href="${link('/process/' + p.id)}" data-link>${esc(p.name)}</a><span class="chip">v${esc(p.version || 1)}${live ? '' : ` → v${esc((p.version || 1) + 1)}`}</span></div>`).join('')}</div>
     ${!live && gngOf(prj).length ? `<div class="rl-gngsum ${open.length ? 'fail' : 'pass'}" data-gng-summary><span class="rl-ic ${open.length ? 'fail' : 'pass'}">${open.length ? ICON.fail : ICON.pass}</span> Final checks: ${gngOf(prj).length - open.length} of ${gngOf(prj).length} confirmed by their owners</div>` : ''}
     ${!live && fmtWindow(prj.cutover) ? `<div class="rl-window" data-launch-window data-launch-date="${esc(((E() && E().launchDate ? E().launchDate(store.state.docs, prj.id) : null) || {}).date || '')}"><span class="lbl">Launch window</span> <b>${esc(fmtWindow(prj.cutover))}</b></div>` : ''}
-    <button class="btn primary rl-gobtn" data-golive ${ready && isRm ? '' : 'disabled'}>${live ? 'Launched' : 'Launch now'}</button>
+    <button class="btn primary rl-gobtn" data-golive ${(ready || (gateOk && guard.override && guard.override.ok)) && isRm ? '' : 'disabled'}>${live ? 'Launched' : gateOk && !guard.ok && guard.override && guard.override.ok ? 'Launch with the override' : 'Launch now'}</button>
     ${why}
-    ${!live && gateOk && !guard.ok ? `<div class="hint rl-why" data-why="guard">Launch now is locked: ${esc(joinAnd(guard.why))}.</div>
-      ${isRm ? '<button class="btn sm danger" data-override>Override with reason…</button>' : ''}` : ''}
+    ${!live && gateOk && !guard.ok ? `<div class="hint rl-why" data-why="guard">${esc(guard.text)}.</div>${overridePanel(prj, guard)}` : ''}
     ${!rd.pass && !live ? `<div class="hint" style="margin-top:6px">${rd.checks.filter(c => checkState(c) === 'fail').map(c => esc(plainOf(c))).join(' · ')}</div>` : ''}
     ${live ? '<div class="hint" style="margin-top:6px">To undo the launch, use the launch summary.</div>' : ''}</div>`;
 }
@@ -1077,7 +1101,11 @@ function perBuOf(prj, bu, t) {
   const tt = testingTruth(prj, t); const m = tt && tt.perBU; if (!m) return null;
   const k = Object.keys(m).find(x => x.toLowerCase() === String(bu).toLowerCase());
   const v = k ? m[k] : null;
-  return v ? { total: +v.total || 0, passed: +v.passed || 0, failed: +v.failed || 0, notRun: +v.notRun || 0 } : { total: 0, passed: 0, failed: 0, notRun: 0 };
+  /* R11 §1: the engine's own line, coverage gaps included ("0 of 12 checks done: …"), and what needs no tests */
+  const txt = (x, tot, pas) => x && x.text ? String(x.text) : tot ? `${pas} of ${tot} test${tot === 1 ? '' : 's'} passed` : '';
+  return v ? { total: +v.total || 0, passed: +v.passed || 0, failed: +v.failed || 0, notRun: +v.notRun || 0, gapCount: +v.gapCount || 0, checks: +v.checks || +v.total || 0,
+      text: txt(v, +v.total || 0, +v.passed || 0), notChangedText: v.notChangedText || '' }
+    : { total: 0, passed: 0, failed: 0, notRun: 0, gapCount: 0, checks: 0, text: '', notChangedText: '' };
 }
 /* "Not ready to launch: N steps left" = projectTruth.stepsLeft (the checklist's undone count). */
 function stepsLeftOf(prj, steps, t) {
@@ -1130,13 +1158,20 @@ function windowOpen(prj) {
   return { open: Date.now() >= start.getTime(), text: fmtWindow(prj.cutover) };
 }
 /* Launch guard: before the window or with launch-day steps not done, "Launch now" is disabled. */
+/* R11 §3: the person's local wall time; the engine's launch guard and the two-person override read it */
+function localNow() { const d = new Date(); const z = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`; }
 function launchGuard(prj) {
+  const g = eng('launchGuard', prj.id, localNow());
+  if (g && Array.isArray(g.why)) {
+    const ov = eng('launchOverrideStatus', prj.id, localNow()) || {};
+    return { ok: g.ok, why: g.why, windowOpen: !(g.codes || []).includes('window'), stepsLeft: (g.openTasks || []).length, text: g.text, override: ov };
+  }
   const w = windowOpen(prj);
-  const left = tasksOf(prj.cutover).filter(t => !t.done);
+  const left = tasksOf(prj.cutover).filter(t => !t.done && !t.gonogo);
   const why = [];
   if (!w.open) why.push(`the launch window opens ${w.text}`);
   if (left.length) why.push(`${left.length} launch-day step${left.length === 1 ? ' is' : 's are'} not done yet: ${left.slice(0, 3).map(t => `“${t.task}”`).join(', ')}${left.length > 3 ? '…' : ''}`);
-  return { ok: !why.length, why, windowOpen: w.open, stepsLeft: left.length };
+  return { ok: !why.length, why, windowOpen: w.open, stepsLeft: left.length, text: why.length ? 'Ready except: ' + why.join('; ') : 'Ready to launch', override: {} };
 }
 /* R9: "Teams involved" lists teams only; systems get their own "Systems touched" line. */
 function teamsSystems(sec) {
@@ -1297,6 +1332,7 @@ function simpleRender(prj, rd, params) {
   const status = live ? { cls: 'live', icon: '✓', title: `Launched on ${fmt(lastGo && lastGo.at)}`, sub: `${prj.name} is live. The new way of working is now how it works today.` }
     : running ? { cls: 'busy', icon: '…', title: 'Launching now', sub: 'The delivery step is running. This takes a few seconds.' }
     : ready ? { cls: 'ready', icon: '✓', title: 'Ready to launch', sub: failedRel ? 'The last launch did not go through. Nothing changed, so it is safe to try again.' : rm === me ? 'Everything is done. You can launch now.' : `Everything is done. ${pname(rm)} (launch owner) can launch.` }
+    : gateOk && !guard.ok ? { cls: 'notready', icon: '…', title: guard.text, sub: guard.override && guard.override.ok ? 'The override is signed by two people: the launch owner can launch.' : 'Launching earlier needs an override signed by the project manager and a sponsor or approver.' }
     : left ? { cls: 'notready', icon: String(left), title: `Not ready to launch: ${left} step${left === 1 ? '' : 's'} left`, sub: 'Here is what is left and who does it.' }
     : { cls: 'notready', icon: '…', title: 'Not ready to launch yet', sub: `Launch is possible once ${joinAnd(guard.why.concat(gOpen.length ? ['the final checks are confirmed'] : []))}.` };
   const myPart = !live && parts.find(p => p.state !== 'approved' && p.state !== 'notready' && p.eligible.includes(me));
@@ -1320,7 +1356,7 @@ function simpleRender(prj, rd, params) {
     const by = p.a && (p.state === 'approved' || p.state === 'stale' || p.state === 'rejected') ? `${av(p.a.approver)} ${esc(pname(p.a.approver))}, ${esc(fmt(p.a.at))}` : p.eligible.length ? `Who can approve: ${p.eligible.map(id => esc(pname(id))).join(', ')}` : '';
     /* R9 §7: one count per part, from perBU; the card opens the part page */
     const waitLine = p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting="${p.waitN == null ? '' : p.waitN}">${p.waitN != null ? `Waiting on ${p.waitN}: ` : 'Waiting on '}${esc(joinAnd(p.waiting))}</div>` : '';
-    const testLine = p.perBU && p.perBU.total ? `<div class="rs-part-s" data-part-tests="${p.perBU.passed}/${p.perBU.total}">Tests for this part: ${p.perBU.passed} of ${p.perBU.total} passed${p.perBU.failed ? `, ${p.perBU.failed} failed` : ''}${p.perBU.notRun ? `, ${p.perBU.notRun} not run` : ''}</div>` : '';
+    const testLine = p.perBU && (p.perBU.total || p.perBU.gapCount) ? `<div class="rs-part-s" data-part-tests="${p.perBU.passed}/${p.perBU.checks}" data-part-gaps="${p.perBU.gapCount}">Tests for this part: ${esc(p.perBU.text)}${p.perBU.failed ? `, ${p.perBU.failed} failed` : ''}</div>` : '';
     if (!live && (p.state === 'nobody' || p.state === 'blocked')) {
       return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><a href="${href}" data-link data-part-open="${esc(p.bu)}"><b>${esc(p.bu)}</b></a>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
         ${p.state === 'blocked' ? sodBlock(prj, p) : choosePicker(prj, p.bu)}${testLine}</div>`;
@@ -1422,7 +1458,8 @@ function simpleBuView(prj, buRaw, rd) {
   const info = des.map(de => { const l0 = availOf(de.id); const l = hasOpenProblem(prj, de.id) ? { label: 'Has a problem', tone: 'warn' } : l0; return `<li data-bu-data="${esc(de.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(de.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span></li>`; }).join('');
   /* R9 §7: "Tests for this part" uses the same perBU numbers as the part card */
   const pb = p.perBU;
-  const ev = pb ? { text: pb.total ? `${pb.passed} of ${pb.total} test${pb.total === 1 ? '' : 's'} passed${pb.failed ? ` · ${pb.failed} failed` : ''}${pb.notRun ? ` · ${pb.notRun} not run yet` : ''}` : 'No tests cover this part yet.', tone: pb.failed ? 'bad' : pb.notRun || !pb.total ? 'warn' : 'ok', together: evidenceLine(prj, s).together } : evidenceLine(prj, s);
+  /* R11 §1: "N of N" includes coverage gaps and says so plainly; information the project does not change is named */
+  const ev = pb ? { text: pb.total || pb.gapCount ? `${pb.text}${pb.failed ? ` · ${pb.failed} failed` : ''}${pb.notRun ? ` · ${pb.notRun} not run yet` : ''}` : 'No tests cover this part yet.', tone: pb.failed ? 'bad' : pb.notRun || pb.gapCount || !pb.total ? 'warn' : 'ok', together: evidenceLine(prj, s).together } : evidenceLine(prj, s);
   const titles = (changed.length ? changed : s.steps).slice(0, 3).map(x => x.step.title);
   const key = prj.id + '|' + p.bu;
   const dflt = noteFactsOf(prj, p.bu, s) || `I reviewed the changes to ${titles.join(', ')}.`;
@@ -1454,7 +1491,8 @@ function simpleBuView(prj, buRaw, rd) {
       ${doneMsg}
       <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li>No steps.</li>'}</ul>${teamsSystems(s)}</div>
       <div class="card rs-card"><h3>Information your part uses</h3>${info ? `<ul class="rs-list rs-info">${info}</ul>` : '<div class="hint">Your part uses no information.</div>'}</div>
-      <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.total}"` : ''}>${esc(ev.text)}${ev.together ? ' <span class="rs-together" data-passed-together title="Many tests were marked passed at once with one shared note">passed together</span>' : ''}</div>
+      <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.checks}" data-part-gaps="${pb.gapCount}"` : ''}>${esc(ev.text)}${ev.together ? ' <span class="rs-together" data-passed-together title="Many tests were marked passed at once with one shared note">marked at once with one note</span>' : ''}</div>
+        ${pb && pb.notChangedText ? `<div class="hint rs-notchanged" data-not-changed>${esc(pb.notChangedText)}</div>` : ''}
         <a class="rl-go" href="${link('/testing/' + prj.id)}" data-link>See the tests ›</a></div>
       ${actHtml ? `<div class="card rs-card rs-sign">${actHtml}</div>` : ''}
       ${back}
@@ -1502,7 +1540,7 @@ export function bind(root, params) {
   /* Go-live */
   const gl = root.querySelector('[data-golive]');
   if (gl) gl.onclick = () => goLive(prj);
-  const ovb = root.querySelector('[data-override]'); if (ovb) ovb.onclick = () => overrideLaunch(prj);
+  const ovb = root.querySelector('[data-override]'); if (ovb) ovb.onclick = () => overrideLaunch(prj, ovb.dataset.overrideRole);
   root.querySelectorAll('[data-rollback],[data-rollback-hc]').forEach(b => b.onclick = () => rollBack(prj));
   const ia = root.querySelector('[data-inc-add]'); if (ia) ia.onclick = () => addIncident(prj, root);
   const it = root.querySelector('[data-inc-title]'); if (it) it.oninput = () => { ui.incident[prj.id] = Object.assign({}, ui.incident[prj.id], { title: it.value }); };
@@ -1701,22 +1739,33 @@ function newestRelease(prj, res) {
 }
 const SIMFAIL = (what, after) => `<label class="rl-simfail"><input type="checkbox" name="simfail" value="1" data-simfail> <span><b>Simulate failure</b><small>The simulated delivery step fails. The failed ${what} is recorded${after ? `, and ${after}` : ''}. Nothing else changes.</small></span></label>`;
 
-/* R9 §13: Advanced keeps "Override with reason": the reason is required and logged in History before launching. */
-async function overrideLaunch(prj) {
-  const rm = rmOf(prj);
-  if (store.state.me !== rm) { toast(`Only the launch owner (${pname(rm)}) can override.`); return; }
+/* R11 §2: a launch override needs TWO different people, both with the extra sign-in check: the project manager and
+   a sponsor or approver. Nobody overrides alone (the launch owner and Admins included). The API enforces the same. */
+function overridePanel(prj, guard) {
+  const ov = guard.override || {};
+  const me = store.state.me;
+  const role = eng('overrideSignerRole', prj.id, me);
+  const signed = (ov.signoffs || []).map(x => `<li data-override-signed="${esc(x.role)}">${av(x.by)} ${esc(x.name)} signed as ${x.role === 'pm' ? 'project manager' : 'sponsor'}${x.reason ? `: “${esc(x.reason)}”` : ''}</li>`).join('');
+  const mine = role && (ov.missing || []).includes(role);
+  return `<div class="rl-override" data-override-panel data-override-ok="${ov.ok ? 1 : 0}"><b>Launch early with a two-person override</b>
+    <span class="hint">${esc(ov.text || '')}</span>${signed ? `<ul class="rl-ov-l">${signed}</ul>` : ''}
+    ${mine ? `<button class="btn sm danger" data-override data-override-role="${esc(role)}">Sign the override as ${role === 'pm' ? 'project manager' : 'sponsor'}…</button>` : ''}</div>`;
+}
+async function overrideLaunch(prj, role) {
   const g = launchGuard(prj);
-  const p = modal({ title: 'Override the launch guard', body: `<p style="margin:0 0 8px">Launch now is locked: ${esc(joinAnd(g.why))}.</p>
+  const p = modal({ title: 'Sign the launch override', body: `<p style="margin:0 0 8px">Launch now is locked: ${esc(joinAnd(g.why))}.</p>
       <div class="field"><label>Why launch anyway? <span class="rl-req">required</span></label><textarea name="reason" data-override-reason placeholder="e.g. The window was moved up by the steering group on Nov 3"></textarea></div>
-      <div class="hint">Your reason is saved in the project's History with your name and the time.</div>`,
-    actions: [{ id: 'go', label: 'Override and continue', danger: true }] });
+      <div class="hint">It needs the project manager and a sponsor or approver, both with an extra sign-in check. Your reason is saved in History with your name and the time.</div>`,
+    actions: [{ id: 'go', label: 'Sign', danger: true }] });
   guardModal(f => !String(f.reason || '').trim() ? { msg: 'Say why you are overriding: it is logged.', field: 'reason' } : null);
   const r = await p; if (r.action !== 'go') return;
+  if (!(await signIn('sign the launch override for ' + prj.name))) { toast('Extra sign-in check not completed. Nothing was signed.'); return; }
   const reason = String(r.form.reason || '').trim();
-  const cur = store.get('project', prj.id) || prj;
-  const ov = { by: store.state.me, at: new Date().toISOString(), reason, guard: g.why };
-  await store.save('project', prj.id, Object.assign({}, cur, { launchOverride: ov, launchOverrides: (cur.launchOverrides || []).concat([ov]) }), `Overrode the launch guard (${g.why.join('; ')}): “${reason}”`);
-  await goLive(store.get('project', prj.id) || cur, false, ov);
+  const id = store.newId('ovr'); const at = new Date().toISOString();
+  await store.save('approval', id, { id, projectId: prj.id, kind: 'launch-override', role, approver: store.state.me, decision: 'approved', stepUp: true, at, reason, guard: g.why },
+    `Signed the launch override as ${role === 'pm' ? 'project manager' : 'sponsor'} (${g.why.join('; ')}): “${reason}”`);
+  const ov = eng('launchOverrideStatus', prj.id, localNow()) || {};
+  toast(ov.ok ? 'Override signed by two people' : 'Signed. One more person has to sign.');
 }
 
 async function goLive(prj, retry, override) {
@@ -1725,7 +1774,7 @@ async function goLive(prj, retry, override) {
   const rd = readiness(prj.id);
   if (!rd.pass) { toast('Not ready to launch yet.'); return; }
   const lg = launchGuard(prj);
-  if (!lg.ok && !override) { toast(`Not yet: ${joinAnd(lg.why)}.`); return; }
+  if (!lg.ok && !(lg.override && lg.override.ok)) { toast(`Not yet: ${joinAnd(lg.why)}.`); return; }
   const procs = projectProcesses(prj);
   const sections = buSections(prj);
   const approvers = [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a)).map(a => a.approver))];
@@ -1766,7 +1815,7 @@ async function goLive(prj, retry, override) {
   if (!(await signIn('launch ' + prj.name))) { toast('Extra sign-in check not completed. Nothing was launched.'); return; }
   ui.pipeStart = prj.id;
   try {
-    const res = await store.api('/golive/' + prj.id, Object.assign({ simulateFailure: fail, stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }, override ? { override } : {}));
+    const res = await store.api('/golive/' + prj.id, { simulateFailure: fail, localNow: localNow(), stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
     ui.reasons = null;
     await store.load();
     const rel = newestRelease(prj, res);

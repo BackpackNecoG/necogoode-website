@@ -36,7 +36,7 @@
     <p class="lede">PMOFlow is a hosted display layer. Your process and project records live in your own Microsoft tenant. This page states what is in place today, how it works in your tenant, and what is still planned.</p>
     <nav class="toc" aria-label="On this page">
       <a href="#model">Display-layer model</a><a href="#access">Access to real data</a><a href="#signin">Sign-in</a><a href="#roles">Roles</a>
-      <a href="#audit">Audit</a><a href="#encryption">Encryption</a><a href="#hosting">Hosting</a><a href="#ai">AI</a><a href="#roadmap">Roadmap</a><a href="#risks">Known limits</a>
+      <a href="#audit">Audit</a><a href="#encryption">Encryption</a><a href="#hosting">Hosting</a><a href="#it">What IT sets up</a><a href="#continuity">If we go away</a><a href="#ai">AI</a><a href="#roadmap">Roadmap</a><a href="#risks">Known limits</a>
     </nav>
   </div>
 </section>
@@ -87,7 +87,10 @@
     <h2 id="roles-h">Roles and separation of duties</h2>
     <ul class="fact-list">
       <li><b>Four roles:</b> Admin, Editor, Approver and Viewer. Approvers and viewers are free seats.</li>
-      <li><span class="tag now">In place</span> <b>Two-person rule.</b> The person who records test results can’t also approve them, and go-live needs separate approvers.</li>
+      <li><span class="tag now">In place</span> <b>Separate approvers.</b> Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.</li>
+      <li><span class="tag now">In place</span> <b>Passing tests.</b> People pass only tests assigned to them or to no one, and a test linked to an open problem can’t pass until it is fixed.</li>
+      <li><span class="tag now">In place</span> <b>Two people for launch overrides.</b> Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.</li>
+      <li><span class="tag now">In place</span> <b>No Admin exemption.</b> The server checks every rule above, for Admins too.</li>
       <li><span class="tag now">In place</span> <b>Each department approves only its own part</b> of a process change.</li>
     </ul>
   </div>
@@ -98,7 +101,10 @@
     <h2 id="audit-h">Audit</h2>
     <ul class="fact-list">
       <li><span class="tag now">In place</span> <b>Every change is recorded in history:</b> who, what and when.</li>
-      <li><b>Audit export</b> as CSV or JSON, with each entry chained to the one before it so the export can be verified as complete and unaltered.</li>
+      <li><span class="tag now">In place</span> <b>Audit export</b> as CSV or JSON. Each entry carries a SHA-256 fingerprint of itself and the entry before it.</li>
+      <li><span class="tag now">In place</span> <b>Signed exports.</b> A full JSON export carries a signed head: the number of entries and the last fingerprint, signed (HMAC-SHA256) with a key held by the PMOFlow service. Checking the file in Admin catches an edited entry, entries removed from the end, and fingerprints recomputed after export.</li>
+      <li><span class="tag now">In place</span> <b>Checkpoints.</b> Each export records the current head, so a later change to history up to that point shows up as broken.</li>
+      <li><b>What this does not prove.</b> Fingerprints are worked out from the stored history when you view or export it, not as each change is saved. The signature shows a file came unchanged from the PMOFlow service; it is not an independent notary.</li>
     </ul>
   </div>
 </section>
@@ -127,6 +133,30 @@
   </div>
 </section>
 
+<section class="block" id="it" aria-labelledby="it-h">
+  <div class="wrap">
+    <h2 id="it-h">What the Team plan needs from IT</h2>
+    <ul class="fact-list">
+      <li><b>A one-time setup in your Azure subscription.</b> Your admin runs our template, which sets up the API your records live behind, under your own managed identity. We get no standing access to your Azure.</li>
+      <li><b>No relay, no tool keys.</b> The relay is a small Azure Function in your subscription, and it is only needed when you connect Jira or Azure DevOps or send Teams and Outlook notifications. Those are Business-plan features, so Team runs without it.</li>
+      <li><b>Nothing installed on people’s computers.</b> PMOFlow runs in the browser.</li>
+      <li><b>On Business</b> you add sign-in with Microsoft Entra ID and, if you want them, the relay for Jira, Azure DevOps, Teams and Outlook, with its keys in your Key Vault.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="continuity" aria-labelledby="cont-h">
+  <div class="wrap">
+    <h2 id="cont-h">If PMOFlow goes away</h2>
+    <ul class="fact-list">
+      <li><b>Your records stay in your tenant.</b> They live in your own Azure subscription, not with us. If you leave, or we do, you keep them and lose the screens.</li>
+      <li><span class="tag now">In place</span> <b>Export at any time:</b> process maps as BPMN 2.0 files other tools open, work items and the portfolio as CSV, and the full change history as CSV or JSON.</li>
+      <li><b>If our hosting is down,</b> the screens are down. Your data is unaffected.</li>
+      <li><span class="tag now">On request</span> <b>Source code escrow for Enterprise.</b> PMOFlow's source code and build instructions are deposited with an independent escrow agent and kept up to date. If PMOFlow stops trading or stops supporting the product, the agent releases them to you so you can keep running it. The escrow agent's fee is paid by the customer who asks for it.</li>
+    </ul>
+  </div>
+</section>
+
 <section class="block" id="ai" aria-labelledby="ai-h">
   <div class="wrap">
     <h2 id="ai-h">AI data handling</h2>
@@ -143,11 +173,12 @@
     <h2 id="road-h">Roadmap: <em>planned, not yet done</em></h2>
     <p class="soft">PMOFlow does not hold any security certification today. These items are planned:</p>
     <ul class="fact-list amber">
-      <li><span class="tag planned">Planned</span> <b>SOC 2 Type II or Microsoft 365 Certification</b> (independent attestation). Not yet obtained.</li>
-      <li><span class="tag planned">Planned</span> <b>Annual third-party penetration test.</b></li>
+      <li><span class="tag planned">Target Q1 2027</span> <b>Third-party penetration test</b>, then annually. The summary letter is shared with customers on request.</li>
+      <li><span class="tag planned">Target Q3 2027</span> <b>SOC 2 Type I</b>, followed by SOC 2 Type II. Not yet obtained.</li>
       <li><span class="tag planned">Planned</span> <b>Customer-approved, signed releases</b> with a verifying loader and a public transparency log, for regulated buyers.</li>
       <li><span class="tag planned">Planned</span> <b>SCIM provisioning</b> on the Enterprise plan.</li>
     </ul>
+    <p class="small" data-u="mt16"><a href="/pmoflow/demo?topic=security" data-cta="security-packet">Request our security packet</a></p>
   </div>
 </section>
 
@@ -161,7 +192,7 @@
       <li>If our hosting is down, the display layer is down. Your data is unaffected.</li>
     </ul>
     <div class="cta-row"><a class="btn" href="/pmoflow/demo" data-cta="book">Book a demo</a><a class="btn ghost" href="/pmoflow/pricing">See pricing</a></div>
-    <p class="small soft" data-u="mt16">Security questionnaire or architecture review? Ask on the demo form and we’ll walk your team through it.</p>
+    <p class="small soft" data-u="mt16">Security questionnaire or architecture review? <a href="/pmoflow/demo?topic=security" data-cta="security-packet">Request our security packet</a> and we’ll walk your team through it.</p>
   </div>
 </section>
 </main>

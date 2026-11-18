@@ -302,3 +302,51 @@ test('notifications: Teams Workflows Adaptive Card and Graph sendMail bodies', (
   assert.match(S.noticeFor('approval', { projectName: 'P', approval: { bu: 'Compliance', ready: true, approverName: 'Dave Ortiz' } }).title, /^Approval needed: Compliance/);
   assert.match(S.noticeFor('launchDone', { projectName: 'P', live: true, liveDate: 'Dec 9' }).title, /P is live/);
 });
+
+/* ---------- R11 G4: counters equal the log; Done before dependencies is flagged (through the route, in-memory store) ---------- */
+test('R11 route: "changed issues since the last sync" excludes PMOFlow’s own writes; counts match the log; early Done is flagged', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r11-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.9' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const st = (await call('GET', `ws/${ws}/state`)).body;
+    const owner = st.docs.project.find(d => d.id === PRJ).data.owner;
+    const r = await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: owner });
+    assert.equal(r.status, 201);
+    const c = r.body.connection, sum = r.body.sync.summary;
+    const outRows = c.log.filter(e => e.dir === 'out' && e.result === 'ok');
+    assert.equal(sum.sent, outRows.length, 'changes sent = PMOFlow → Jira rows in the log');
+    assert.equal(sum.created, outRows.filter(e => e.op === 'create').length);
+    assert.equal(sum.linked, outRows.filter(e => e.op === 'link').length);
+    assert.match(r.body.sync.sentence, new RegExp(`^${sum.created} issues created in Jira · ${sum.linked} dependency links set in Jira$`));
+    /* the next sync reads nothing: PMOFlow just wrote every issue itself */
+    const again = await call('POST', `workspaces/${ws}/connections/${c.id}/sync`, { actor: owner });
+    assert.equal(again.body.connection.log.find(e => e.op === 'pull').detail, '0 changed issues since the last sync.');
+    assert.equal(again.body.sentence, 'Everything was already in sync');
+    /* one person changes one issue: exactly 1 changed issue; it is Done while its predecessors are open, so it is flagged */
+    const items = again.body.connection.sim.items;
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const open = id => (docs.workItem.find(d => d.id === id) || {}).data;
+    const key = Object.keys(items).find(k => { const w = open(items[k].pmoId); return w && w.status !== 'done' && (w.deps || []).some(d => open(d) && open(d).status !== 'done'); });
+    assert.ok(key, 'the seed has a task waiting on open work');
+    const sim = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key, status: 'Done', actor: owner });
+    assert.equal(sim.status, 200);
+    const log = sim.body.connection.log;
+    assert.equal(log.find(e => e.op === 'pull').detail, '1 changed issue since the last sync.');
+    const flag = log.find(e => e.op === 'flag');
+    assert.ok(flag && flag.result === 'flagged' && flag.key === key, 'flag row in the sync log');
+    assert.match(flag.detail, /^Finished before the work it depends on \(.+ still open\)\. Accepted/);
+    assert.equal(sim.body.summary.received, 1); assert.equal(sim.body.summary.early, 1);
+    assert.match(sim.body.sentence, /1 task updated from Jira · 1 finished before the work it depends on \(flagged\)/);
+    const after = (await call('GET', `ws/${ws}/state`)).body.docs;
+    assert.equal(after.workItem.find(d => d.id === items[key].pmoId).data.status, 'done', 'accepted, not refused');
+    const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+    assert.ok(evs.some(e => /finished before the work it depends on/i.test(e.summary)), 'recorded in history');
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});

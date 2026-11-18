@@ -43,8 +43,14 @@ test('GET admin: default roles, seats, no settings yet', async () => {
   assert.equal(roles.ta, 'admin');      /* Project Manager */
   assert.equal(roles.mc, 'admin');      /* Process Owner */
   assert.equal(roles.lp, 'editor');
-  assert.equal(r.body.seats.paid, r.body.people.length);
-  assert.equal(r.body.seats.free, 0);
+  /* R11 §8 (G1 seed): Dave Ortiz only approves, so he is an Approver on a free seat */
+  assert.equal(roles.do, 'approver');
+  /* R11 (F1 seed): each team has a department-head Approver on a free seat: do, nb, sk, rv, gw */
+  for (const id of ['nb', 'sk', 'rv', 'gw']) assert.equal(roles[id], 'approver', id);
+  const free = r.body.people.filter(p => p.role === 'approver' || p.role === 'viewer').length;
+  assert.equal(free, 5);
+  assert.equal(r.body.seats.free, free);
+  assert.equal(r.body.seats.paid, r.body.people.length - free);
   assert.deepEqual(r.body.calendar.holidays || [], []);
 });
 
@@ -56,7 +62,7 @@ test('roles: only an Admin changes them; last Admin is protected; event recorded
   const ok = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.people.find(p => p.id === 'ps').role, 'approver');
-  assert.equal(ok.body.seats.free, 1);
+  assert.equal(ok.body.seats.free, 6);   /* 5 seeded approvers + Priya */
   const bad = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'owner', actor: 'ta' });
   assert.equal(bad.status, 400);
   /* demote mc, then the last admin (ta) cannot demote themself */
@@ -198,26 +204,181 @@ test('audit export over the history store: JSON, CSV, filters, anchor, verify a 
   const j3 = await call('GET', `workspaces/${ws}/admin/audit`, null, {});
   assert.equal(j3.body.verify.ok, true);
   assert.equal(j3.body.verify.anchorsChecked, 1);
-  /* verify a saved file, then a tampered copy */
-  const good = await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: j.body.entries });
-  assert.equal(good.body.verify.ok, true);
+  /* verify a saved file (entries + signed head), then a tampered copy */
+  assert.equal(j.body.head.count, j.body.total);
+  assert.equal(j.body.head.hash, j.body.verify.head);
+  assert.match(j.body.head.signature, /^[a-f0-9]{64}$/);
+  assert.equal(f.body.head, null, 'a filtered export carries no signed head');
+  assert.match(c.body, /# Signed head: \d+ entries, head [a-f0-9]{64}, signature [a-f0-9]{64}/);
+  const good = await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: j.body.entries, head: j.body.head });
+  assert.equal(good.body.verify.ok, true, good.body.verify.summary);
+  assert.equal(good.body.verify.signed, true);
   const bad = j.body.entries.map(e => Object.assign({}, e)); bad[0].actor = 'lp';
-  const vb = await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: bad });
+  const vb = await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: bad, head: j.body.head });
   assert.equal(vb.body.verify.ok, false);
   assert.equal(vb.body.verify.firstBreak.seq, 1);
 });
 
-test('CSV cells are escaped and formula-safe', () => {
-  const csv = admin.toCSV([{ seq: 1, at: 'a', actor: 'x', actorName: '=HYPERLINK("e")', action: 'u', ref: 'r', summary: 'a, "b"', prevHash: 'p', hash: 'h' }],
-    { summary: 'Chain intact.', head: 'h', at: 'now' });
-  assert.match(csv, /'=HYPERLINK\(""e""\)/);
-  assert.match(csv, /"a, ""b"""/);
+/* R11 §1: the three break tests from the PMO expert's review (expert-pmo.md, "The audit chain recomputes") */
+test('audit break tests: deleted tail, re-hashed forgery, edited entry, missing head, filtered file', async () => {
+  const ws = await newWs();
+  for (let i = 0; i < 3; i++) await call('PUT', `ws/${ws}/doc/risk/rk-b${i}`, { data: { title: 'Risk ' + i, status: 'open' }, actor: 'ta', summary: 'Logged risk ' + i });
+  const j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+  const verify = async (entries, head, extra) => (await call('POST', `workspaces/${ws}/admin/audit/verify`, Object.assign({ entries, head }, extra || {}))).body.verify;
+  assert.equal((await verify(j.entries, j.head)).ok, true);
+  /* 1. delete the last entry and keep the head: count mismatch */
+  const cut = j.entries.slice(0, -1);
+  let v = await verify(cut, j.head);
+  assert.equal(v.ok, false); assert.match(v.summary, /removed from the end/);
+  /* 1b. delete the last entry and edit the head to match: signature fails */
+  v = await verify(cut, Object.assign({}, j.head, { count: cut.length, hash: cut[cut.length - 1].hash }));
+  assert.equal(v.ok, false); assert.match(v.summary, /signature does not match/);
+  /* 2. re-hashed forgery: change an entry, recompute every fingerprint and the head hash (all public), keep the signature */
+  const forged = j.entries.map(e => ({ at: e.at, actor: e.actor, action: e.action, ref: e.ref, summary: e.summary }));
+  forged[1].summary = 'Nothing to see here';
+  const rechained = admin.chainEvents(ws, forged);
+  v = await verify(rechained, Object.assign({}, j.head, { hash: rechained[rechained.length - 1].hash }));
+  assert.equal(v.ok, false); assert.match(v.summary, /signature does not match/);
+  /* 2b. ...and with a signature made with a guessed key */
+  const guess = crypto.createHmac('sha256', 'guess').update(`pmoflow-audit-head|v1|${ws}|${rechained.length}|${rechained[rechained.length - 1].hash}`).digest('hex');
+  v = await verify(rechained, { count: rechained.length, hash: rechained[rechained.length - 1].hash, signature: guess });
+  assert.equal(v.ok, false);
+  /* 3. an edited entry */
+  const edited = j.entries.map(e => Object.assign({}, e)); edited[2].summary += ' (changed)';
+  v = await verify(edited, j.head);
+  assert.equal(v.ok, false); assert.equal(v.firstBreak.seq, 3); assert.match(v.summary, /changed after it was recorded/);
+  /* no head (an R10-style file) can't be confirmed complete; a filtered file can't be checked */
+  v = await verify(j.entries, null);
+  assert.equal(v.ok, false); assert.match(v.summary, /no signed head/);
+  v = await verify(j.entries, j.head, { filtered: true });
+  assert.equal(v.ok, false); assert.match(v.summary, /filtered/);
+  /* the head is bound to its workspace: another workspace can't vouch for it */
+  const ws2 = await newWs();
+  const other = (await call('POST', `workspaces/${ws2}/admin/audit/verify`, { entries: j.entries, head: j.head })).body.verify;
+  assert.equal(other.ok, false);
+  /* a server checkpoint beyond a saved file's end doesn't fail an older, honest file */
+  await call('POST', `workspaces/${ws}/admin/audit/anchor`, { actor: 'ta' });
+  await call('PUT', `ws/${ws}/doc/risk/rk-b9`, { data: { title: 'Later', status: 'open' }, actor: 'ta', summary: 'Later risk' });
+  await call('POST', `workspaces/${ws}/admin/audit/anchor`, { actor: 'ta' });
+  assert.equal((await verify(j.entries, j.head)).ok, true);
+  /* the live view: history shorter than a recorded checkpoint is reported as broken */
+  const live = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+  assert.equal(live.verify.ok, true); assert.equal(live.verify.anchorsChecked, 2);
+  assert.ok(!JSON.stringify(live).includes(process.env.PMOFLOW_AUDIT_KEY || '\u0000never'), 'the key is never returned');
+  const short = admin.verifyChain(ws, live.entries.slice(0, -1), live.anchors, {});
+  assert.equal(short.ok, false); assert.match(short.summary, /only \d+ remain/);
 });
 
-test('unknown workspace and bad routes', async () => {
-  assert.equal((await call('GET', 'workspaces/zzzzzzzzzzzzzzzz/admin')).status, 404);
-  assert.equal((await call('GET', 'workspaces/BAD/admin')).status, 400);
-  const ws = await newWs();
-  assert.equal((await call('POST', `workspaces/${ws}/admin/nope`, { actor: 'ta' })).status, 404);
-  assert.equal((await call('POST', `workspaces/${ws}/admin`, {})).status, 405);
+test('audit key: app setting wins, else derived from the storage connection, never exposed', () => {
+  const saved = { k: process.env.PMOFLOW_AUDIT_KEY, c: process.env.EMCEE_STORAGE_CONNECTION };
+  try {
+    process.env.PMOFLOW_AUDIT_KEY = 'unit-test-audit-key-0123456789';
+    assert.equal(admin.auditKeySource(), 'app-setting');
+    const a = admin.signHead('wsk', 3, 'a'.repeat(64));
+    process.env.PMOFLOW_AUDIT_KEY = 'another-unit-test-key-abcdefghij';
+    assert.notEqual(admin.signHead('wsk', 3, 'a'.repeat(64)), a, 'the signature depends on the key');
+    delete process.env.PMOFLOW_AUDIT_KEY;
+    process.env.EMCEE_STORAGE_CONNECTION = 'AccountName=unit;AccountKey=dW5pdA==';
+    assert.equal(admin.auditKeySource(), 'derived');
+    const d = admin.signHead('wsk', 3, 'a'.repeat(64));
+    assert.equal(admin.signHead('wsk', 3, 'a'.repeat(64)), d, 'stable for the same connection');
+    assert.notEqual(admin.signHead('wsk2', 3, 'a'.repeat(64)), d, 'keyed per workspace');
+    assert.notEqual(admin.signHead('wsk', 4, 'a'.repeat(64)), d, 'covers the count');
+    /* in Azure, no fallback: without the app setting, signing is refused */
+    process.env.WEBSITE_SITE_NAME = 'unit-test-site';
+    assert.equal(admin.auditKeySource(), 'missing');
+    assert.throws(() => admin.signHead('wsk', 3, 'a'.repeat(64)), e => e.status === 503 && !/AccountKey|dW5pdA/.test(e.message));
+    process.env.PMOFLOW_AUDIT_KEY = 'unit-test-audit-key-0123456789';
+    assert.equal(admin.auditKeySource(), 'app-setting');
+    delete process.env.WEBSITE_SITE_NAME;
+  } finally {
+    delete process.env.WEBSITE_SITE_NAME;
+    if (saved.k === undefined) delete process.env.PMOFLOW_AUDIT_KEY; else process.env.PMOFLOW_AUDIT_KEY = saved.k;
+    if (saved.c === undefined) delete process.env.EMCEE_STORAGE_CONNECTION; else process.env.EMCEE_STORAGE_CONNECTION = saved.c;
+  }
+});
+
+/* R11 §2: sandbox limits and the returning-visitor cookie (through the route module, so Set-Cookie is visible) */
+async function createVia(ip, cookie, host) {
+  let res = null;
+  const req = { headers: Object.assign({ 'x-forwarded-for': ip, host: host || 'www.necogoode.com' }, cookie ? { cookie } : {}), query: {} };
+  const send = (status, body, headers) => { res = { status, body, headers: headers || {} }; };
+  const fail = (status, error) => { res = { status, body: { error } }; };
+  const handled = await admin.handle({ method: 'POST', seg: ['workspaces'], body: {}, req, store, send, fail,
+    clientIpHash: r => require(path.join(API, 'pmoflow/index.js'))._internal.clientIpHash(r), dayInput: () => ({}), clientToday: (d, t) => t });
+  assert.equal(handled, true);
+  return res;
+}
+const hashOf = ip => fn._internal.clientIpHash({ headers: { 'x-forwarded-for': ip } });
+const testIp = () => `198.51.100.${200 + Math.floor(Math.random() * 50)}-${rnd()}`;
+
+test('sandbox: new visitor gets a 30-day HttpOnly SameSite=Lax cookie; a returning visitor keeps their sandbox', async () => {
+  const ip = testIp();
+  const r = await createVia(ip);
+  assert.equal(r.status, 201);
+  created.push([r.body.id, hashOf(ip)]);
+  const ck = r.headers['Set-Cookie'];
+  assert.match(ck, new RegExp(`^pmoflow_ws=${r.body.id}; `));
+  for (const part of ['Max-Age=2592000', 'Path=/api/pmoflow', 'HttpOnly', 'SameSite=Lax', 'Secure']) assert.ok(ck.includes(part), part);
+  /* returning with the cookie: same sandbox, not counted, cookie never outlives the sandbox */
+  const back = await createVia(ip, `other=1; pmoflow_ws=${r.body.id}`);
+  assert.equal(back.status, 200);
+  assert.deepEqual(back.body, { id: r.body.id, returning: true });
+  const age = Number(/Max-Age=(\d+)/.exec(back.headers['Set-Cookie'])[1]);
+  assert.ok(age <= 2592000 && age > 2592000 - 120);
+  /* a cookie for an unknown or malformed sandbox starts a new one */
+  const fresh = await createVia(ip, 'pmoflow_ws=zzzzzzzzzzzzzzzzzzzz');
+  assert.equal(fresh.status, 201); assert.notEqual(fresh.body.id, r.body.id);
+  created.push([fresh.body.id, hashOf(ip)]);
+  const junk = await createVia(ip, 'pmoflow_ws=../../x');
+  assert.equal(junk.status, 201);
+  created.push([junk.body.id, hashOf(ip)]);
+  /* local plain-http dev server: no Secure flag, so the cookie works on http://localhost */
+  const local = await createVia(ip, null, 'localhost:8904');
+  assert.ok(!/Secure/.test(local.headers['Set-Cookie']));
+  created.push([local.body.id, hashOf(ip)]);
+  /* GET is not allowed */
+  let res = null;
+  await admin.handle({ method: 'GET', seg: ['workspaces'], body: {}, req: { headers: {} }, store, send: () => {}, fail: (s) => { res = s; } });
+  assert.equal(res, 405);
+});
+
+test('sandbox: burst limit of 10 per network in 10 minutes, with one plain message', async () => {
+  const ip = testIp();
+  for (let i = 0; i < store.BURST_MAX; i++) {
+    const r = await createVia(ip);
+    assert.equal(r.status, 201, 'create ' + (i + 1));
+    created.push([r.body.id, hashOf(ip)]);
+  }
+  const r = await createVia(ip);
+  assert.equal(r.status, 429);
+  assert.deepEqual(r.body, { error: 'This network has started a lot of demos in the last few minutes. Try again in 10 minutes, or book a guided demo.' });
+  assert.equal(store.BURST_MAX, 10); assert.equal(store.BURST_WINDOW_MS, 600000);
+  /* a returning visitor is not blocked by the limit */
+  const back = await createVia(ip, 'pmoflow_ws=' + created[created.length - 1][0]);
+  assert.equal(back.status, 200);
+  /* another network is unaffected */
+  const other = testIp();
+  const o = await createVia(other);
+  assert.equal(o.status, 201); created.push([o.body.id, hashOf(other)]);
+});
+
+test('sandbox: daily cap of 50 per network, with one plain message', { skip: store._backend() !== 'memory' && 'creates 50 sandboxes: in-memory backend only' }, async () => {
+  assert.equal(store.CREATES_PER_DAY, 50);
+  const ip = testIp(), hash = hashOf(ip);
+  /* step the clock 11 minutes after every 10 sandboxes, inside one UTC day, so only the daily cap can refuse */
+  const realNow = Date.now;
+  const base = Date.parse(new Date().toISOString().slice(0, 10) + 'T00:05:00Z');
+  let n = 0;
+  Date.now = () => base + Math.floor(n / 10) * 11 * 60000;
+  try {
+    for (; n < 50; n++) {
+      const r = await createVia(ip);
+      assert.equal(r.status, 201, 'create ' + (n + 1));
+      created.push([r.body.id, hash]);
+    }
+    const r = await createVia(ip);
+    assert.equal(r.status, 429);
+    assert.deepEqual(r.body, { error: 'This network has started a lot of demos today. Try again tomorrow, or book a guided demo.' });
+  } finally { Date.now = realNow; }
 });

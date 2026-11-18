@@ -160,7 +160,7 @@ function resultHTML(r) {
   return `<div class="cx-result ${r.error ? 'err' : ''}" data-cx-result role="status">${r.error ? esc(r.error) : `<b>${esc(r.title || 'Synced')}</b> ${esc(r.sentence || '')}.${st}`}</div>`;
 }
 
-const RESULT_BADGE = { ok: ['b-done', 'Done'], failed: ['b-late', 'Failed'], refused: ['b-done', 'Refused'], conflict: ['b-soon', 'Conflict'], skipped: ['b-idle', 'Skipped'], ignored: ['b-idle', 'Put back'] };
+const RESULT_BADGE = { flagged: ['b-soon', 'Check order'], ok: ['b-done', 'Done'], failed: ['b-late', 'Failed'], refused: ['b-done', 'Refused'], conflict: ['b-soon', 'Conflict'], skipped: ['b-idle', 'Skipped'], ignored: ['b-idle', 'Put back'] };
 function logHTML(c) {
   const sync = S(), tool = sync.TOOLS[c.tool].name;
   const items = (c.log || []).slice(0, 25);
@@ -168,7 +168,7 @@ function logHTML(c) {
   return `<div class="cx-log" data-cx-log>${items.map(e => {
     const [cls, lbl] = RESULT_BADGE[e.result] || ['b-idle', e.result];
     const dir = e.dir === 'out' ? `PMOFlow → ${tool}` : `${tool} → PMOFlow`;
-    const what = { create: 'Create', update: 'Update', link: 'Link', pull: 'Read changes', apply: 'Apply', conflict: 'Conflict', skip: 'Skip', ignore: 'Keep PMOFlow’s', 'replay-test': 'Replay test' }[e.op] || e.op;
+    const what = { create: 'Create', update: 'Update', link: 'Link', pull: 'Read changes', apply: 'Apply', conflict: 'Conflict', skip: 'Skip', ignore: 'Keep PMOFlow’s', flag: 'Finished early', 'replay-test': 'Replay test' }[e.op] || e.op;
     const open = ui.openLog.has(e.id);
     const tech = e.intent || (e.requests && e.requests.length);
     return `<div class="cx-le"><div class="cx-lh"><span class="badge ${cls}">${esc(lbl)}</span><span class="cx-ld">${esc(dir)}</span>
@@ -180,6 +180,12 @@ function logHTML(c) {
   }).join('')}</div>`;
 }
 
+/* R11 §9: G1's engine helper (the one definition), shown while it is still true */
+function earlyFlag(wid) {
+  const eng = window.PMOEngine;
+  if (!wid || !eng || typeof eng.doneBeforeDeps !== 'function') return null;
+  try { const r = eng.doneBeforeDeps(store.state.docs, wid); return r && r.flag ? r.text : null; } catch (e) { return null; }
+}
 function simHTML(c, p) {
   const sync = S(), T = sync.TOOLS[c.tool];
   const items = Object.values((c.sim && c.sim.items) || {}).sort((a, b) => String(a.key).localeCompare(String(b.key), 'en', { numeric: true }));
@@ -190,7 +196,8 @@ function simHTML(c, p) {
     const who = (sync.personByEmail(store.state.docs, it.assigneeEmail, c.emailDomain) || {}).name || it.assigneeEmail || 'Unassigned';
     return `<div class="cx-si" data-cx-item="${esc(it.key)}"><span class="cx-key">${esc(it.key)}</span>
       <div class="cx-st"><div class="t">${esc(it.title)}</div><div class="s">${esc(who)}${it.due ? ' · due ' + esc(fmt(it.due)) : ''}${(it.deps || []).length ? ' · after ' + esc(it.deps.join(', ')) : ''}</div>
-        <div class="s">In PMOFlow: ${w ? `<b data-cx-pmo="${esc(wid)}">${esc(statusName(p, w.status))}</b>` : '<i>deleted</i>'}</div></div>
+        <div class="s">In PMOFlow: ${w ? `<b data-cx-pmo="${esc(wid)}">${esc(statusName(p, w.status))}</b>` : '<i>deleted</i>'}</div>
+        ${(() => { const t = earlyFlag(wid); return t ? `<div class="s warn cx-flag" data-cx-early="${esc(wid)}" role="note">${esc(t)}.</div>` : ''; })()}</div>
       <label class="cx-ss"><span>${esc(T.name)} status</span><select data-cx-simstatus="${esc(it.key)}" aria-label="Status of ${esc(it.key)} in ${esc(T.simName)}">${statuses.concat(statuses.includes(it.status) ? [] : [it.status]).map(s => `<option ${s === it.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label></div>`;
   }).join('')}</div>`;
 }

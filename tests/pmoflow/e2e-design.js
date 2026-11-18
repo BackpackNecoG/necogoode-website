@@ -71,13 +71,264 @@ function modelOf(nodes, dataName) {
 }
 const docsOf = st => st.docs;
 
+
+/* ---------------------------------------------------------------- R11 G2: import fidelity, process pages and RACI
+   A fresh sandbox (same test IP). The reviewers' own procedures (market-review/r10 karen.md, expert-bpm.md). */
+const R11_KAREN = `Vendor Setup Procedure
+Owner: Purchasing
+1. Buyer gets the vendor's W-9, certificate of insurance and bank details.
+2. Buyer enters the request on the new vendor form.
+3. Credit/Finance reviews the vendor's credit application and payment terms.
+4. If Credit/Finance rejects the vendor, the Buyer tells the requester.
+5) Purchasing manager approves the new vendor in Coupa.
+6 - AP enters vendor in the ERP (vendor master)
+7. AP calls the vendor's known number to confirm the bank details.
+8. Finance releases the vendor for payment.
+9. Purchasing emails the vendor a welcome letter.`;
+const R11_CREDIT = `Credit Limit Increase SOP
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit limit request in Salesforce.
+2. The Credit Analyst pulls the Dun & Bradstreet report for the customer.
+3. The Credit Analyst reviews the customer's payment history in NetSuite.
+4. If the requested limit exceeds $50,000, the Credit Manager reviews the request.
+5. Otherwise, the Credit Analyst approves the request.
+6. If the Credit Manager does not approve within 2 business days, escalate to the CFO.
+7. If the Credit Manager rejects the request, the Sales Rep tells the customer.
+8. Limits above $250,000 also need sign-off from the Controller (Sam Wu).
+9. The Credit Analyst updates the credit limit in NetSuite.
+10. The Credit Analyst records the decision in Workiva.
+11. The Sales Rep notifies the customer of the new limit.
+12. The Credit Analyst files the approval letter in SharePoint.`;
+
+async function r11(browser, ip, errors) {
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r11 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r11 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const adv = async on => { await page.evaluate(v => localStorage.setItem('pmoflow.advanced', v), on ? '1' : '0'); };
+  const paste = async text => {
+    await nav('/import'); await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const saveDraft = async name => {
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', name);
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    return page.url().match(/process\/([^?/]+)/)[1];
+  };
+  try {
+    await nav('/'); await adv(false);
+    console.log('# R11 G2 §1/§3/§4: Karen\'s 9-line vendor procedure');
+    await paste(R11_KAREN);
+    ok((await page.getAttribute('[data-lines]', 'data-lines-text')) === '9 lines → 9 steps, 1 choice', 'Karen: "9 lines → 9 steps, 1 choice" shown: ' + await page.getAttribute('[data-lines]', 'data-lines-text'));
+    const titles = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
+    ok(titles.some(t => /^Enter vendor in the ERP/.test(t)), 'Karen: line "6 - AP enters vendor in the ERP" is a step');
+    ok(!titles.some(t => /^otherwise/i.test(t)), 'no step titled "Otherwise…"');
+    const who = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
+    ok(who[0] === 'Buyer' && who.includes('Credit/Finance'), 'Karen: "Buyer gets…" and "Credit/Finance reviews…" are roles: ' + who.slice(0, 4).join(', '));
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(!nds.some(n => /known/i.test(n)) && nds.includes('Vendor phone number') && nds.includes('Bank details'), 'Karen: no "Known number"; "Vendor phone number" and "Bank details" proposed: ' + nds.join(', '));
+    ok(await page.isVisible('.is-draft [data-end-node]'), 'reject path shows "Ends here"');
+    ok(await page.isVisible('[data-or-import] , .hdr-side [data-bpmn-file]') || !!(await page.$('.hdr-side [data-bpmn-file]')), 'paste page offers "import a Visio or BPMN file"');
+    /* §4: "Things to check" counts are live and agree */
+    const noBox = async () => (await page.$$('.is-draft [data-noowner]')).length;
+    const promptN = async () => { const t = await page.textContent('[data-owner-prompt]').catch(() => ''); const m = /(\d+) steps? need/.exec(t || ''); return m ? +m[1] : 0; };
+    ok(!(await page.textContent('.is-draft')).match(/do(es)? not say who/), 'no stale "N steps do not say who" sentence');
+    const n0 = await noBox(); ok(n0 === await promptN(), `owner prompt says ${await promptN()} = ${n0} empty boxes`);
+    await shot('r11-karen-draft'); await overflow('R11 Karen draft @1366');
+    /* the preview's information owner is what gets saved */
+    const ownersPreview = await page.$$eval('[data-nd-owner]', els => els.map(e => e.getAttribute('data-nd-owner')));
+    const pidK = await saveDraft('Karen vendor setup');
+    const stK = await state();
+    const pK = stK.docs.process.find(d => d.id === pidK).data;
+    const mine = stK.docs.dataElement.map(d => d.data).filter(d => /pasted procedure/.test(JSON.stringify(stK.events ? '' : '')) || true).filter(d => flat(pK.asis).some(s => (s.data || []).includes(d.id)));
+    const savedOwners = mine.map(d => d.ownerRole || (d.owner ? (stK.docs.person.find(x => x.id === d.owner) || { data: {} }).data.name : 'whoever does the step'));
+    ok(mine.length === ownersPreview.length && mine.every(d => !d.owner || d.owner !== 'mc'), `saved information is not owned by the importer (${mine.length} pieces)`);
+    ok(JSON.stringify(savedOwners.slice().sort()) === JSON.stringify(ownersPreview.slice().sort()), 'information owner saved = owner the preview showed: ' + savedOwners.join(', '));
+    /* §6: processes list shows the saved counts immediately (Future not opened) */
+    await nav('/processes');
+    const stepsCell = await page.getAttribute(`[data-prow="${pidK}"] [data-steps]`, 'data-steps');
+    ok(+stepsCell === flat(pK.asis).length && +stepsCell === 9, `processes list: ${stepsCell} steps straight after save (Today map)`);
+    const dc = await page.getAttribute(`[data-prow="${pidK}"] [data-datacounts]`, 'data-datacounts');
+    ok(dc && +dc.split('/')[4] === mine.length, 'processes list: information counted at once, as "not checked yet": ' + dc);
+    ok(/not checked yet/i.test(await page.textContent(`[data-prow="${pidK}"]`)), 'processes list says "not checked yet"');
+    /* §5: one label per state on the process page */
+    await nav(`/process/${pidK}?mode=asis`);
+    const labels = await page.$$eval('[data-block-label]', els => els.map(e => e.getAttribute('data-block-label')));
+    const sideAvail = await page.$$eval('[data-side-data] [data-avail]', els => els.map(e => e.textContent.replace(/\s*›\s*$/, '').trim()));
+    ok(!labels.includes('Not available yet') && sideAvail.every(x => x === 'Not checked yet'), `"Not checked yet" items never also read "Not available yet" (${[...new Set(labels.concat(sideAvail))].join(', ') || 'none'})`);
+    /* process page and import agree on the step owner */
+    const whoTexts = await page.$$eval('#canvas .node[data-step] [data-who]', els => els.map(e => e.textContent.trim()));
+    ok(whoTexts[0] === 'Buyer', 'process page step owner = the role from the procedure: ' + whoTexts[0]);
+    /* §5: map cards and the step page count "Not checked yet" on its own, never as "not available yet" */
+    const cardTxt = await page.$$eval('#canvas .node[data-step] .stats', els => els.map(e => e.textContent));
+    const uncN = await page.$$eval('#canvas [data-unchecked-n]', els => els.reduce((a, e) => a + +e.dataset.uncheckedN, 0));
+    const uncWant = flat(pK.asis).reduce((a, x) => a + (x.data || []).filter(id => mine.some(d => d.id === id)).length, 0);
+    ok(uncN === uncWant && uncN >= mine.length && !cardTxt.some(t => /not available yet/i.test(t)), `map cards: ${uncN} "not checked yet", none "not available yet"`);
+    const sK = flat(pK.asis).find(x => (x.data || []).length);
+    await nav(`/process/${pidK}/step/${sK.id}`);
+    const kTxt = await page.textContent('[data-kpi-info]');
+    ok(/not checked yet/.test(kTxt) && !/not available yet/i.test(kTxt), 'step page counts "not checked yet", never "not available yet": ' + kTxt.replace(/\s+/g, ' ').trim());
+    const dK = mine[0]; await nav(`/data/${dK.id}`);
+    const dTxt = await page.textContent('#app');
+    ok(/Not checked yet/.test(dTxt) && !/Not available yet/.test(dTxt), 'data page of pasted information: "Not checked yet" only (the sample card says "No sample looked at yet")');
+    /* §4: "N steps need someone" recomputes live as owners are filled in */
+    await paste('Expense claim\n1. Receive the expense claim.\n2. Check the receipts.\n3. Pay the claim.');
+    const pr0 = await promptN(), bx0 = await noBox();
+    ok(pr0 === 3 && bx0 === 3, `no roles in the text: "3 steps need someone" (${pr0}) = 3 highlighted boxes (${bx0})`);
+    await page.fill('.is-draft input.is-who >> nth=0', 'Clerk'); await page.dispatchEvent('.is-draft input.is-who >> nth=0', 'change'); await settle();
+    const pr1 = await promptN(), bx1 = await noBox();
+    ok(pr1 === 2 && bx1 === 2, `after one owner is typed the count follows at once (${pr1} = ${bx1})`);
+    for (let k = 0; k < 2; k++) { await page.fill('.is-draft input.is-who[data-noowner] >> nth=0', 'Finance'); await page.dispatchEvent('.is-draft input.is-who >> nth=' + (k + 1), 'change'); await settle(); }
+    ok(!(await page.$('[data-owner-prompt]')) && await noBox() === 0 && !/need(s)? someone|do(es)? not say who/.test(await page.textContent('.is-draft')), 'all owners filled: no "need someone" or "do not say who" left');
+
+    console.log('# R11 G2 §2: credit-limit SOP (BPM expert): else branch, reject ends, escalation timer');
+    await paste(R11_CREDIT);
+    ok((await page.getAttribute('[data-lines]', 'data-lines-text')) === '12 lines → 11 steps, 2 choices', '12 lines → 11 steps, 2 choices: ' + await page.getAttribute('[data-lines]', 'data-lines-text'));
+    ok(await page.isVisible('[data-line-as="else"]') && await page.isVisible('[data-line-as="timer"]'), 'the line map explains the "Otherwise" line and the escalation line');
+    ok(/If not done in 2 business days: Escalate to the CFO/.test(await page.textContent('.is-timer')), 'escalation shows as a timer on the step');
+    const w2 = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
+    ok(w2.includes('Controller') && !w2.some(x => /^the\s/i.test(x)), 'Controller (Sam Wu) mid-line is a role; no leading article: ' + w2.join(', '));
+    await shot('r11-credit-draft');
+    await page.setViewportSize({ width: 390, height: 844 }); await overflow('R11 credit draft @390'); await shot('r11-credit-draft-390'); await page.setViewportSize({ width: 1366, height: 900 });
+    const pidC = await saveDraft('Credit limit increase');
+    const pC = (await state()).docs.process.find(d => d.id === pidC).data;
+    const timed = flat(pC.asis).find(s => s.timer);
+    ok(timed && timed.timer.iso === 'P2D' && timed.timer.to === 'CFO' && timed.ownerRole === 'Credit Manager', 'saved: the Credit Manager step carries the 2-business-day escalation timer');
+    ok(await page.isVisible('#canvas .d-timer'), 'process map shows the escalation timer');
+    const rejEnd = allNodes(pC.asis).find(n => n.type === 'decision' && /rejects/.test(n.title));
+    ok(rejEnd && rejEnd.branches[0].nodes.some(n => n.type === 'end'), 'saved: the reject path ends');
+
+    console.log('# R11 G2 §8: RACI (Advanced)');
+    await adv(true);
+    await nav(`/process/${pidC}?mode=raci`);
+    ok(await page.isVisible('[data-raci-matrix]'), 'RACI matrix tab renders (Advanced)');
+    ok(/RACI/.test(await page.textContent('.d-modes')), 'RACI is a process view tab in Advanced');
+    const rRows = await page.$$eval('[data-raci-row]', els => els.length);
+    ok(rRows === flat(pC.asis).filter(s => s.type !== 'wait').length, `one row per step (${rRows})`);
+    const first = flat(pC.asis)[0];
+    /* make the Credit Manager consulted on step 1 */
+    const sel = `[data-raci-cell="${first.id}"][data-raci-col="r:Credit Manager"]`;
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }), page.selectOption(sel, 'C')]);
+    await settle();
+    let pC2 = (await state()).docs.process.find(d => d.id === pidC).data;
+    ok(JSON.stringify(flat(pC2.asis)[0].raci) === JSON.stringify({ a: '', c: ['Credit Manager'], i: [] }), 'RACI cell edit saved: ' + JSON.stringify(flat(pC2.asis)[0].raci));
+    await nav(`/process/${pidC}?mode=raci`);
+    ok((await page.getAttribute(`[data-raci-row="${first.id}"] td[data-raci-val="C"]`, 'data-raci-val')) === 'C', 'RACI edit persists after reload');
+    ok(/RACI on/.test(await page.textContent('#app')), 'history shows the RACI change');
+    const [csvDl] = await Promise.all([page.waitForEvent('download'), page.click('[data-raci-csv]')]);
+    const csvFile = `${OUT}/r11-raci.csv`; await csvDl.saveAs(csvFile); const csv = fs.readFileSync(csvFile, 'utf8');
+    ok(/^Step,/.test(csv) && csv.split('\r\n').filter(Boolean).length === rRows + 1 && /Credit Manager/.test(csv.split('\r\n')[0]) && csv.includes(',C') && csv.includes('R'), 'RACI CSV export: header + one row per step');
+    await shot('r11-raci'); await page.setViewportSize({ width: 390, height: 844 }); await overflow('RACI @390'); await shot('r11-raci-390'); await page.setViewportSize({ width: 1366, height: 900 });
+    /* step page: R/A/C/I and the timer */
+    await nav(`/process/${pidC}/step/${first.id}?v=asis`);
+    if (!(await page.$('[data-raci]'))) await nav(`/process/${pidC}/step/${first.id}`);
+    ok(await page.isVisible('[data-raci] [data-raci-r]') && await page.isVisible('[data-raci] [data-raci-consulted]'), 'step page shows R and C');
+    await nav(`/process/${pidC}/step/${timed.id}`);
+    ok(await page.isVisible('[data-step-timer]') && !(await page.$('[data-no-ops]')), 'step page shows the escalation timer (and never "No time limit … set" beside it)');
+    /* §7 BPMN: potentialOwner + boundary timer, and it round-trips */
+    await nav(`/process/${pidC}?mode=asis`);
+    if (await page.$('[data-more]:not([open])')) await page.click('[data-more] > summary');
+    await page.click('[data-bpmn]'); await page.waitForSelector('.overlay [data-act="download"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), act('download')]);
+    const bFile = `${OUT}/r11-credit.bpmn`; await dl.saveAs(bFile); const xml = fs.readFileSync(bFile, 'utf8');
+    let xr = null; try { xr = checkXml(xml); } catch (e) { ok(false, 'R11 BPMN well-formed: ' + e.message); }
+    ok(xr && xr.counts.boundaryEvent === 1 && /attachedToRef="N_[^"]+" cancelActivity="false"/.test(xml) && /<bpmn:timeDuration>P2D<\/bpmn:timeDuration>/.test(xml), 'BPMN: the escalation is a non-interrupting boundary timer (P2D)');
+    ok(xr && xr.counts.potentialOwner === flat(pC.asis).filter(s => s.type === 'step' && (s.ownerRole || s.owner)).length && /<bpmn:formalExpression[^>]*>Credit Manager<\/bpmn:formalExpression>/.test(xml), 'BPMN: Responsible exported as potentialOwner on every owned task');
+    ok(/<pmoflow:raci[^>]*consulted="Credit Manager"/.test(xml), 'BPMN: A/C/I kept in the pmoflow:raci extension');
+    ok(xr && !xr.danglingRefs.length, 'BPMN: no dangling refs');
+    /* import it back as a new process: the timer comes back on the same step; nothing dropped; no extra step */
+    await nav('/processes');
+    await page.setInputFiles('[data-bpmn-file]', bFile);
+    await page.waitForSelector('.overlay [data-impsum]');
+    ok((await page.getAttribute('.overlay [data-dropped]', 'data-dropped')) === '0', 'BPMN re-import: nothing dropped (boundary timer understood)');
+    ok(+(await page.getAttribute('.overlay [data-imp-steps]', 'data-imp-steps')) === flat(pC.asis).length, 'BPMN re-import: same step count (the escalation task is folded into the timer)');
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('import')]); await settle();
+    const pidB = page.url().match(/process\/([^?/]+)/)[1];
+    const pB = (await state()).docs.process.find(d => d.id === pidB).data;
+    const tB = flat(pB.asis).find(s => s.timer);
+    ok(tB && tB.title === timed.title && tB.timer.iso === 'P2D' && tB.timer.action === 'Escalate to the CFO' && tB.timer.to === 'CFO', 'BPMN round trip keeps the timer: ' + JSON.stringify(tB && tB.timer));
+    /* a third-party BPMN boundary timer (no PMOFlow extension) */
+    const foreign = `<?xml version="1.0" encoding="UTF-8"?><definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" id="d1"><process id="P1" name="Invoice approval"><laneSet><lane id="L1" name="AP clerk"><flowNodeRef>t1</flowNodeRef></lane><lane id="L2" name="Controller"><flowNodeRef>t2</flowNodeRef><flowNodeRef>esc</flowNodeRef></lane></laneSet>
+      <startEvent id="s"/><userTask id="t1" name="Log the invoice"/><userTask id="t2" name="Approve the invoice"/><endEvent id="e"/>
+      <boundaryEvent id="b1" attachedToRef="t2" cancelActivity="false"><timerEventDefinition><timeDuration>P3D</timeDuration></timerEventDefinition></boundaryEvent>
+      <userTask id="esc" name="Remind the approver"/><endEvent id="e2"/>
+      <sequenceFlow id="f1" sourceRef="s" targetRef="t1"/><sequenceFlow id="f2" sourceRef="t1" targetRef="t2"/><sequenceFlow id="f3" sourceRef="t2" targetRef="e"/><sequenceFlow id="f4" sourceRef="b1" targetRef="esc"/><sequenceFlow id="f5" sourceRef="esc" targetRef="e2"/></process></definitions>`;
+    const fFile = `${OUT}/r11-foreign-timer.bpmn`; fs.writeFileSync(fFile, foreign);
+    await nav('/processes'); await page.setInputFiles('[data-bpmn-file]', fFile); await page.waitForSelector('.overlay [data-impsum]');
+    ok((await page.getAttribute('.overlay [data-dropped]', 'data-dropped')) === '0' && (await page.getAttribute('.overlay [data-imp-steps]', 'data-imp-steps')) === '2', 'third-party boundary timer: imported, not dropped, 2 steps');
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('import')]); await settle();
+    const pF = (await state()).docs.process.find(d => d.id === page.url().match(/process\/([^?/]+)/)[1]).data;
+    const tF = flat(pF.asis).find(s => s.timer);
+    ok(tF && tF.title === 'Approve the invoice' && tF.timer.iso === 'P3D' && tF.timer.action === 'Remind the approver', 'third-party timer lands on its step: ' + JSON.stringify(tF && tF.timer));
+
+    console.log('# R11 G2 §9: Visio from the paste page takes the page name');
+    await adv(false);
+    await nav('/import');
+    ok(!!(await page.$('.hdr-side [data-bpmn-file]')) && /Visio/.test(await page.textContent('.hdr-side')), 'paste page: "Import a Visio or BPMN file"');
+    await page.setInputFiles('.hdr-side [data-bpmn-file]', `${OUT}/purchase-request.vsdx`);
+    await page.waitForSelector('.overlay [data-impsum]');
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('import')]); await settle();
+    const pV = (await state()).docs.process.find(d => d.id === page.url().match(/process\/([^?/]+)/)[1]).data;
+    ok(pV.name === 'Purchase request', 'Visio import named after the page, not the file: ' + pV.name);
+
+    console.log('# R11 G2: Enter in the information box never closes the step editor');
+    await nav(`/process/${pidC}?mode=edit&v=asis`);
+    await page.click('#canvas .node[data-step] [data-edit], #canvas .node[data-step] .d-tools button >> nth=0').catch(() => {});
+    if (!(await page.$('.overlay #d-f-info'))) await page.click('#canvas .node[data-step] .ttl');
+    const opened = await page.waitForSelector('.overlay #d-f-info', { timeout: 5000 }).then(() => true).catch(() => false);
+    if (opened) {
+      await page.fill('.overlay #d-f-info', 'Credit memo'); await page.press('.overlay #d-f-info', 'Enter');
+      ok(await page.isVisible('.overlay #d-f-info') && (await page.$$('.overlay [data-ichip][data-iname="Credit memo"]')).length === 1, 'Enter adds a chip and keeps the step editor open');
+      await page.press('.overlay #d-f-info', 'Enter');
+      ok(await page.isVisible('.overlay #d-f-info'), 'Enter in an empty information box does not save or close');
+      await act('cancel');
+    } else ok(false, 'could not open the step editor');
+
+    console.log('# R11 G2 §10: the data page shows every rule the tests use');
+    await adv(true);
+    await nav('/data/D2');
+    const rules = await page.$$eval('[data-spec-rules]', els => els.map(e => e.getAttribute('data-spec-rules')));
+    ok(rules.includes('digits only · 4–17 digits'), 'Account number shows "digits only · 4–17 digits": ' + rules.join(' | '));
+    /* §10: "Unique per vendor" written only as the rule text still flags a duplicate account number in the sample */
+    const dupChk = await page.evaluate(async () => {
+      const { withRuleFlags } = await import('/concepts/pmoflow/app/pages/data.js');
+      const E = window.PMOEngine;
+      const de = { id: 'X', name: 'Bank', fields: [{ name: 'Account number', type: 'digits', min: 4, max: 17, rule: 'Required, unique per vendor' }] };
+      const prof = { rows: 3, columns: [{ name: 'account_number', rows: 3, nulls: 0, distinct: 2, duplicates: 1, minLen: 9, maxLen: 9 }] };
+      const eng = E && E.specDrift ? E : null;
+      return eng ? { flagged: eng.specDrift(withRuleFlags(de), prof).some(d => d.issue === 'duplicates' && d.field === 'Account number'), plain: eng.specDrift(de, prof).some(d => d.issue === 'duplicates') } : null;
+    }).catch(e => ({ err: e.message }));
+    ok(dupChk && dupChk.flagged === true, '"Unique per vendor" in the rule text flags duplicate account numbers: ' + JSON.stringify(dupChk));
+    await page.setViewportSize({ width: 390, height: 844 }); await overflow('data rules @390'); await shot('r11-data-rules-390');
+    await nav('/import'); await overflow('paste page @390'); await shot('r11-import-390');
+    await nav('/processes'); await overflow('processes @390'); await shot('r11-processes-390');
+    await nav(`/process/${pidC}/step/${timed.id}`); await overflow('step @390'); await shot('r11-step-390');
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await nav('/processes'); await shot('r11-processes');
+    await nav(`/process/${pidC}/step/${timed.id}`); await shot('r11-step');
+  } catch (e) {
+    fail++; failures.push('r11 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r11 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r11-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
-  const ip = `10.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}.${(Math.random()*250|0)+1}`;
+  const ip = process.env.PMO_IP || `198.51.100.${(Math.random()*250|0)+1}`;
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R11 === '1') { await r11(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
 
@@ -178,7 +429,8 @@ const docsOf = st => st.docs;
       const p = procs.find(x => x.id === r.id); const ds = ENG.diffSummary(p); const ids = [...new Set(flat(p.tobe).flatMap(s => s.data || []))];
       const c = k => ids.filter(d => ENG.effectiveAvail(st.docs, d) === k).length;
       const projs = (st.docs.project || []).map(d => d.data).filter(j => (j.processes || []).includes(p.id));
-      const exp = { ver: 'v' + (p.version || 1), steps: String(flat(p.tobe).length), diff: (() => { const c = ENG.changeSummary(p); return `${c.added}/${c.changed}/${c.removed}`; })(), data: ids.length ? `${c('live')}/${c('pending')}/${c('example')}/${c('missing')}` : '' };
+      /* R11 G2: "Not checked yet" is its own count (the fifth number); the seed has none */
+      const exp = { ver: 'v' + (p.version || 1), steps: String(flat(p.tobe).length), diff: (() => { const c = ENG.changeSummary(p); return `${c.added}/${c.changed}/${c.removed}`; })(), data: ids.length ? `${c('live')}/${c('pending')}/${c('example')}/${c('missing') + c('problem')}/0` : '' };
       if (r.ver !== exp.ver || r.steps !== exp.steps || r.diff !== exp.diff || r.data !== exp.data || !r.owner.includes(st.people.find(x => x.id === p.owner).name) || !projs.every(j => r.prj.includes(j.name))) { rowsOk = false; console.log('    row mismatch', r, exp); }
     }
     ok(rowsOk, 'each row: version, owner, steps, R10 new/changed/removed (engine changeSummary), live/pending/examples/missing (effectiveAvail), projects');
@@ -202,7 +454,7 @@ const docsOf = st => st.docs;
       await shot('process-' + m); await overflow('process ' + m + ' @1440'); await iconCheck('process ' + m);
     }
     const tabOrder = await page.$$eval('.d-modes button', bs => bs.map(b => b.textContent.trim()));
-    ok(tabOrder.join(',') === 'Today,Future,What changed,By person,Who’s affected', 'R7 (Advanced) tabs in order: ' + tabOrder.join(','));
+    ok(tabOrder.join(',') === 'Today,Future,What changed,By person,Who’s affected,RACI', 'R7 (Advanced) tabs in order (R11: + RACI): ' + tabOrder.join(','));
     ok(await page.isVisible('.d-editbtn[data-mode="edit"]'), 'R7: Edit is a button next to the tabs (editors only)');
 
     console.log('# R3: effective data state on map cards, diffSummary counts');
@@ -1258,7 +1510,7 @@ const docsOf = st => st.docs;
     ok(!st.docs.dataElement.some(d => d.data.note && /BPMN import of r6-rt-1/.test(d.data.note)), 'round trip in the same workspace creates no duplicate data elements');
     await nav(`/process/${rtPid}?mode=tobe`);
     const x2 = await exportBpmn('r6-rt-2', true);
-    const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|_p\\d|_in\\d|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
+    const norm = (x, nodes, pid0) => { let out = x.replace(/(<bpmn:process [^>]*>\s*<bpmn:documentation>)[^<]*(<\/bpmn:documentation>)/, '$1$2'); const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); allNodes(nodes).map((n, i) => [String(n.id).replace(/[^\w.-]/g, '_'), i]).sort((a, b) => b[0].length - a[0].length).forEach(([id, i]) => { out = out.replace(new RegExp(`(N_|Message_|MessageFlow_)${reEsc(id)}(?=_join|_timer|_msg|_di|_p\\d|_in\\d|_po|_tmr|_esc|"|<)`, 'g'), `$1#${i}#`); }); return out.split(pid0).join('#P#'); };
     const noPid = x => x.replace(/(<pmoflow:node) id="[^"]*"/g, '$1'); /* R8: the PMOFlow id travels in the file; ids aside */
     const n1 = norm(noPid(x1), np.tobe, newPid), n2 = norm(noPid(x2), rt.tobe, rtPid);
     ok(n1 === n2, 'export -> import -> export gives the same BPMN (ids aside)' + (n1 === n2 ? '' : ': ' + diffAt(n1, n2)));
@@ -1661,7 +1913,8 @@ const docsOf = st => st.docs;
       const offAll = allNodes(off.asis);
       ok(offAll.some(n => n.type === 'end' && /request rejected/i.test(n.title)) && offAll.filter(n => n.type === 'step').some(n => n.system === 'ServiceNow') && offAll.some(n => !n.owner && n.ownerRole === 'HR Manager' && /Maya Chen/.test(n.note || '') && /exit form/i.test(n.title)) && !offAll.some(n => n.owner === 'mc'), 'R9 §9 / R10: the saved map keeps the "Stop: request rejected" end, the system and the role (the name stays in the note)');
       const exitDe = des.find(d => /employee exit form/i.test(d.name)), reqDe = des.find(d => /access request form/i.test(d.name));
-      ok(exitDe && exitDe.ownerRole === 'HR Manager' && exitDe.owner === me && reqDe && reqDe.ownerRole === 'Clerk' && exitDe.avail === 'unchecked', 'R9 §8 / R10: pasted information shows its step’s role (HR Manager, Clerk), the importer checks it, and it starts "Not checked yet"');
+      /* R11 G2 §4: the saved owner is the owner the preview showed (the step's role), never the importer */
+      ok(exitDe && exitDe.ownerRole === 'HR Manager' && !exitDe.owner && reqDe && reqDe.ownerRole === 'Clerk' && !reqDe.owner && exitDe.avail === 'unchecked' && D.ndOwners.includes(exitDe.ownerRole) && D.ndOwners.includes(reqDe.ownerRole), 'R11 G2 §4: saved information owner = the preview’s owner (HR Manager, Clerk), never the importer, and it starts "Not checked yet"');
       if (reqDe) { await nav(`/data/${reqDe.id}`); const ow = (await page.textContent('.hdr .res')).replace(/\s+/g, ' '); ok(/Clerk/.test(ow) && !/—|None\b/.test(ow), 'R9 §8: the data page shows the role as owner, never "—": ' + ow.slice(0, 80)); }
       await nav(`/process/${offPid}?mode=asis`); await shot('r9-import-saved-map');
       ok(await page.isVisible('#canvas .node.end:has-text("Stop: request rejected")'), 'R9 §9: the map draws the rejected path ending');
@@ -1937,6 +2190,7 @@ const docsOf = st => st.docs;
     fail++; failures.push('exception: ' + e.message.split('\n')[0]); console.log('  FAIL exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
     await page.screenshot({ path: `${OUT}/failure.png`, fullPage: true }).catch(() => {});
   }
+  if (process.env.SKIP_R11 !== '1') await r11(browser, ip, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

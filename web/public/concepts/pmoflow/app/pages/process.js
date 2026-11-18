@@ -35,8 +35,11 @@ export function allNodes(nodes) { const out = []; (nodes || []).forEach(n => { i
 /* compact SLA / system / duration line, e.g. "⏱ 2 business days · ERP · 4h" */
 export function opsLine(n) {
   const parts = [n.sla ? '⏱ ' + n.sla : '', n.system || '', n.durationHrs ? n.durationHrs + 'h' : ''].filter(Boolean);
-  return parts.length ? `<div class="d-ops">${esc(parts.join(' · '))}</div>` : '';
+  const t = timerText(n);
+  return (parts.length ? `<div class="d-ops">${esc(parts.join(' · '))}</div>` : '') + (t ? `<div class="d-ops d-timer" data-timer="${esc(n.timer.iso || '')}">⏰ ${esc(t)}</div>` : '');
 }
+/* R11 G2 §2: a time-limit escalation on a step (a BPMN boundary timer): "If not done in 2 business days: Escalate to the CFO" */
+export const timerText = n => n && n.timer && (n.timer.after || n.timer.action) ? `If not done in ${n.timer.after || durationText(n.timer.iso) || 'time'}: ${n.timer.action || 'Escalate'}` : '';
 /* ---------- R6 node types ----------
    subprocess {calls: processId, callsName?}  calls another process; its card shows that process's step count and opens it
    wait       {wait: "2 business days"}       a timer, e.g. "Wait 2 business days for vendor response"
@@ -240,7 +243,8 @@ export function caseLbl(c) {
   const same = store.list('testCase', t => t.dataId === c.dataId);
   return 'TC' + (same.findIndex(t => t.id === c.id) + 1);
 }
-export function readyCounts(ids) { ids = ids || []; const st = ids.map(effAvail); return { live: st.filter(a => a === 'live').length, total: ids.length, missing: st.filter(a => a === 'missing').length, example: st.filter(a => a === 'example').length, pending: st.filter(a => a === 'pending').length }; }
+/* R11 G2 §5: "Not checked yet" (availInfo) is its own count, never also counted as "not available yet" */
+export function readyCounts(ids) { ids = ids || []; const st = ids.map(id => availInfo(id).unchecked ? 'unchecked' : effAvail(id)); return { live: st.filter(a => a === 'live').length, total: ids.length, missing: st.filter(a => a === 'missing').length, example: st.filter(a => a === 'example').length, pending: st.filter(a => a === 'pending').length, unchecked: st.filter(a => a === 'unchecked').length }; }
 /* new/changed/removed counts (R3): every count shown comes from the engine's diffSummary */
 export function diffCounts(p) {
   const r = eng('diffSummary', [p], null);
@@ -309,7 +313,9 @@ const TRIG_PHS = [TRIG_PH, 'What starts it?', 'What starts it'];
 const trigTitle = n => (n && n.title && !TRIG_PHS.includes(n.title.trim())) ? n.title : '';
 /* R9 §13: system names are not teams */
 const SYSTEM_WORDS = /^(servicenow|hris|erp|crm|workday|sap|oracle|netsuite|concur|salesforce|sharepoint|docusign|jira|coupa|ariba|quickbooks|xero|okta|active directory|zendesk|hubspot|dynamics|outlook|teams|excel|finance system|.* system|.* portal)$/i;
-export const isSystemName = t => SYSTEM_WORDS.test(String(t || '').trim());
+/* R11 G2: the import module's ~70-name systems dictionary counts too, once it is loaded */
+export const isSystemName = t => { const x = String(t || '').trim(); if (SYSTEM_WORDS.test(x)) return true;
+  const PI = typeof window !== 'undefined' && window.PMOImport; return !!(PI && PI.SYSTEMS && PI.SYSTEMS.some(y => y.toLowerCase() === x.toLowerCase())); };
 const touchChip = t => isSystemName(t) ? `<span class="chip d-syschip" title="System">${esc(t)}</span>` : `<span class="chip touch" title="Team involved">Team: ${esc(t)}</span>`;
 const clone = o => JSON.parse(JSON.stringify(o));
 
@@ -361,10 +367,11 @@ function nodeHTML(n, ctx, idx) {
   } else {
     const bare = !rd.total && !tn && !(n.subs || []).length; /* nothing tagged: no empty stats line */
     /* R8 §1: Simple shows how much information the step needs and, only when some is missing, how much is not available yet */
-    const notYet = rd.total - rd.live;
+    const notYet = rd.total - rd.live - rd.unchecked;
+    const unc = rd.unchecked ? `<span class="d-pend" data-unchecked-n="${rd.unchecked}" title="Information from a pasted procedure that its owner has not checked yet">${rd.unchecked} not checked yet</span>` : '';
     const infoStats = isAdv()
-      ? `${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}`
-      : `${rd.total ? `<span data-info-n="${rd.total}">Information <b>${rd.total}</b></span>` : ''}${notYet ? `<span class="d-miss" data-notyet="${notYet}" title="Information that is not available yet">${LOCK} ${notYet} not available yet</span>` : ''}`;
+      ? `${rd.total ? `<span>Information <b>${rd.live}/${rd.total}</b> connected</span>` : ''}${rd.missing ? `<span class="d-miss" title="Information that is not available yet">${LOCK} ${rd.missing} not available yet</span>` : ''}${rd.pending ? `<span class="d-pend" title="A fix is done; the owner has not confirmed it is connected">${rd.pending} waiting for confirmation</span>` : ''}${rd.example ? `<span class="d-needlive" title="${NEEDS_LIVE}">${rd.example} sample only</span>` : ''}${unc}`
+      : `${rd.total ? `<span data-info-n="${rd.total}">Information <b>${rd.total}</b></span>` : ''}${notYet ? `<span class="d-miss" data-notyet="${notYet}" title="Information that is not available yet">${LOCK} ${notYet} not available yet</span>` : ''}${unc}`;
     body = (sp ? typeBody(n, ctx) : '') + (bare ? '' : `<div class="stats">${infoStats}${tn ? `<span>${tn} team${tn === 1 ? '' : 's'}</span>` : ''}${(n.subs || []).length ? `<span>${n.subs.length} detail step${n.subs.length === 1 ? '' : 's'}</span>` : ''}</div>`) + opsLine(n);
     if (showDiff && status === 'changed') body += changeNote(n, ctx);
   }
@@ -439,6 +446,85 @@ function removedHTML(diff, n, from) {
   const gone = ((diff && diff.removed) || []).filter(g => g && g.type !== 'trigger' && g.type !== 'end');
   const count = n != null ? n : gone.length;
   return gone.length || count ? `<div class="conn"></div><div class="hint d-removed-h">Removed from ${esc(from || 'Today')} <span class="n" data-removed-n>${count}</span></div>${gone.map(g => `<div class="ghost" data-ghost="${esc(g.id)}" data-ntype="${esc(g.type || 'step')}">${isGw(g) ? `<span aria-hidden="true">${g.type === 'parallel' ? '⊕' : '◆'}</span> <span class="d-gwkind">${g.type === 'parallel' ? 'At the same time:' : 'Choice:'}</span> ` : isSpecial(g) ? `<span class="d-ghost-ic" title="${esc(NT[g.type].label)}">${NT[g.type].icon}</span> ` : ''}${esc(g.title)}${g.owner ? ` <span class="d-ghost-own">· ${esc(pname(g.owner))}</span>` : ''}</div>`).join('<div style="height:8px"></div>')}` : '';
+}
+/* ---------- R11 G2 §8: RACI matrix (Advanced): steps × people and roles, R/A/C/I cells ----------
+   R is the step's owner (person or role), A is one person or role, C and I are lists. A cell edits A/C/I; R changes
+   with the step's "Who does it". Columns are people (by id) or roles (as written). */
+const raciExtra = {};    /* pid -> column keys the visitor added that no step uses yet */
+const rKey = v => { const p = v && store.person(v); return p ? 'p:' + p.id : 'r:' + String(v || '').trim(); };
+const rVal = k => k.slice(2);
+const rName = k => k.startsWith('p:') ? pname(k.slice(2)) : k.slice(2);
+const respKeyOf = s => s.owner && store.person(s.owner) && !s.ownerRole ? 'p:' + s.owner : s.ownerRole ? 'r:' + s.ownerRole : s.owner ? 'p:' + s.owner : '';
+/* the map the matrix shows and edits: Future once it exists, else Today */
+export const raciVer = p => (flat(p && p.tobe).length ? 'tobe' : 'asis');
+export function raciMatrix(nodes, extra) {
+  const steps = flat(nodes).filter(s => s.type !== 'wait');
+  const cols = [];
+  const addCol = k => { if (k && k.length > 2 && !cols.includes(k)) cols.push(k); };
+  const rows = steps.map(s => {
+    const r = raciNorm(s), cells = {};
+    const put = (k, L) => { if (!k || k.length <= 2) return; addCol(k); const c = cells[k] || (cells[k] = []); if (!c.includes(L)) c.push(L); };
+    put(respKeyOf(s), 'R'); if (r.a) put(rKey(r.a), 'A'); r.c.forEach(x => put(rKey(x), 'C')); r.i.forEach(x => put(rKey(x), 'I'));
+    return { s, cells };
+  });
+  (extra || []).forEach(addCol);
+  const ORD = 'RACI';
+  rows.forEach(r => Object.values(r.cells).forEach(c => c.sort((a, b) => ORD.indexOf(a) - ORD.indexOf(b))));
+  return { cols, rows };
+}
+export function raciCsv(p, m) {
+  const q = v => /[",\n]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
+  const head = ['Step'].concat(m.cols.map(rName));
+  return [head].concat(m.rows.map(r => [r.s.title].concat(m.cols.map(k => (r.cells[k] || []).join('/'))))).map(row => row.map(q).join(',')).join('\r\n') + '\r\n';
+}
+function raciHTML(p, editable) {
+  const ver = raciVer(p), nodes = p[ver] || [];
+  const m = raciMatrix(nodes, raciExtra[p.id]);
+  if (!m.rows.length) return '<div class="empty">No steps yet. Add steps and say who does each one, then the matrix fills in.</div>';
+  const cell = (r, k) => {
+    const L = r.cells[k] || [], other = L.filter(x => x !== 'R'), R = L.includes('R');
+    const lbl = `${r.s.title}: ${rName(k)}`;
+    const sel = editable ? `<select class="d-raci-sel" data-raci-cell="${esc(r.s.id)}" data-raci-col="${esc(k)}" aria-label="${esc(lbl)}"><option value="" ${other.length ? '' : 'selected'}>${R ? '' : '–'}</option>${['A', 'C', 'I'].map(x => `<option value="${x}" ${other[0] === x ? 'selected' : ''}>${x}</option>`).join('')}</select>` : other.map(x => `<b class="d-raci-l d-raci-${x.toLowerCase()}">${x}</b>`).join('');
+    return `<td data-raci-val="${esc(L.join('/'))}" class="${L.length ? 'on' : ''}">${R ? '<b class="d-raci-l d-raci-r" title="Responsible: does the step">R</b>' : ''}${sel}</td>`;
+  };
+  return `<div class="d-raciwrap" data-raci-matrix="${ver}">
+    <div class="d-racibar"><span class="hint">${ver === 'tobe' ? 'Future' : 'Today'} map. <b>R</b> does the step · <b>A</b> signs off · <b>C</b> is asked first · <b>I</b> is told when it is done. R changes with “Who does it” on the step.</span>
+      <span class="d-raciacts">${editable ? `<input class="d-raci-add" data-raci-addcol list="d-people" placeholder="Add a person or role" aria-label="Add a person or role column" /><button class="btn sm" data-raci-addbtn>Add column</button>` : ''}<button class="btn sm" data-raci-csv>Download CSV</button></span></div>
+    <div class="tbl-wrap d-racitbl"><table class="d-raci-t"><thead><tr><th scope="col">Step</th>${m.cols.map(k => `<th scope="col" data-raci-colh="${esc(k)}">${k.startsWith('p:') ? av(rVal(k)) : ''}${esc(rName(k))}</th>`).join('')}</tr></thead>
+    <tbody>${m.rows.map((r, i) => `<tr data-raci-row="${esc(r.s.id)}"><th scope="row"><span class="d-raci-n">${i + 1}</span>${esc(r.s.title)}</th>${m.cols.map(k => cell(r, k)).join('')}</tr>`).join('')}</tbody></table></div>${editable ? peopleList() : ''}</div>`;
+}
+/* set column k's letter on step sid ('' clears A/C/I for that column) */
+function raciSet(node, k, L) {
+  const r = raciNorm(node), v = k.startsWith('p:') ? rVal(k) : rVal(k);
+  const same = x => rKey(x) === k;
+  const out = { a: same(r.a) ? '' : r.a, c: r.c.filter(x => !same(x)), i: r.i.filter(x => !same(x)) };
+  if (L === 'A') out.a = v; else if (L === 'C') out.c.push(v); else if (L === 'I') out.i.push(v);
+  if (out.a || out.c.length || out.i.length) node.raci = out; else delete node.raci;
+}
+function bindRaci(root, pid) {
+  const wrap = root.querySelector('[data-raci-matrix]'); if (!wrap) return;
+  const cur = () => store.get('process', pid);
+  const csv = wrap.querySelector('[data-raci-csv]');
+  if (csv) csv.onclick = () => {
+    const p = cur(); const m = raciMatrix(p[raciVer(p)] || [], raciExtra[pid]);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([raciCsv(p, m)], { type: 'text/csv' }));
+    a.download = `${String(p.name || 'process').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-raci.csv`; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast('Downloaded the RACI matrix');
+  };
+  const addIn = wrap.querySelector('[data-raci-addcol]'), addBtn = wrap.querySelector('[data-raci-addbtn]');
+  const addCol = () => { const t = (addIn.value || '').trim(); if (!t) { addIn.focus(); return; } const hit = store.state.people.find(x => x.name.toLowerCase() === t.toLowerCase());
+    const k = hit ? 'p:' + hit.id : 'r:' + t; (raciExtra[pid] = raciExtra[pid] || []).includes(k) || raciExtra[pid].push(k); addIn.value = ''; store.emit(); };
+  if (addBtn) addBtn.onclick = addCol;
+  if (addIn) addIn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addCol(); } });
+  wrap.querySelectorAll('[data-raci-cell]').forEach(sel => sel.onchange = async () => {
+    const p = clone(cur()); const ver = raciVer(p);
+    const node = flat(p[ver]).find(n => n.id === sel.dataset.raciCell); if (!node) return;
+    const k = sel.dataset.raciCol, L = sel.value;
+    raciSet(node, k, L);
+    const word = { A: 'Accountable', C: 'Consulted', I: 'Informed' }[L];
+    await saveProc(p, `RACI on '${node.title}': ${rName(k)} ${word ? '→ ' + word : 'removed'}`);
+  });
 }
 function lanesHTML(nodes, ctx) {
   /* rows in document order: each step sits in its owner's lane; each gateway gets its own full-width row */
@@ -520,6 +606,8 @@ export function bpmnXml(p, nodes, label, opts) {
   /* R10 S2: lanes by ROLE (the step's role, else the person's job title), with the people in each lane as a property */
   const roleKey = n => { if (!n) return ''; if (n.ownerRole) return n.ownerRole; const pp = n.owner && store.person(n.owner); return pp ? (pp.role || pp.name) : ''; };
   const laneKeys = [], lanePeople = {}; flat(nodes).forEach(n => { const k = roleKey(n); if (!laneKeys.includes(k)) laneKeys.push(k); if (n.owner && store.person(n.owner)) (lanePeople[k] = lanePeople[k] || new Set()).add(n.owner); });
+  /* R11: the role an escalation goes to gets its own lane */
+  flat(nodes).forEach(n => { const t = n.timer && String(n.timer.to || '').trim(); if (t && !laneKeys.includes(t)) laneKeys.push(t); });
   if (!laneKeys.length) laneKeys.push(roleKey((nodes || []).find(n => n.type === 'trigger')));
   const laneOf = k => Math.max(0, laneKeys.indexOf(k));
   const laneRefs = laneKeys.map(() => []);
@@ -552,16 +640,32 @@ export function bpmnXml(p, nodes, label, opts) {
   }).join('\n');
   const ids = new Set(allNodes(nodes).map(n => n.id));
   let ended = false;
+  /* R11 G2 §8: RACI in standard BPMN: Responsible is the task's potentialOwner (the pmoflow:raci extension keeps A/C/I) */
+  const potOwner = (n, id) => { const who = n.ownerRole || (n.owner ? pname(n.owner) : ''); return who ? `      <bpmn:potentialOwner id="${id}_po" name="Responsible">\n        <bpmn:resourceAssignmentExpression id="${id}_po_e">\n          <bpmn:formalExpression id="${id}_po_f">${xe(who)}</bpmn:formalExpression>\n        </bpmn:resourceAssignmentExpression>\n      </bpmn:potentialOwner>` : ''; };
+  const tail = (n, id) => [dataAssoc(n, id), potOwner(n, id)].filter(Boolean).join('\n');
+  /* R11 G2 §7: a step's escalation timer is a non-interrupting boundary timer event, with the escalation task after it */
+  const boundaries = [];
+  function emitTimer(n, id) {
+    const t = n.timer; if (!t || !(t.after || t.iso)) return;
+    const iso = t.iso || isoDuration(t.after) || '', bid = id + '_tmr', tb = pos[id], back = curLane;
+    const d = durInfo(t.after);
+    boundaries.push(`    <bpmn:boundaryEvent id="${bid}" name="${xe('Not done in ' + (t.after || durationText(iso)))}" attachedToRef="${id}" cancelActivity="false">\n      <bpmn:extensionElements>\n        <pmoflow:timer${attr('after', t.after)}${attr('iso', iso)}${d && d.businessDays != null ? ` businessDays="${d.businessDays}"` : ''}${attr('action', t.action)}${attr('to', t.to)} />\n      </bpmn:extensionElements>\n      <bpmn:timerEventDefinition id="${bid}_def">${iso ? `\n        <bpmn:timeDuration>${iso}</bpmn:timeDuration>\n      ` : ''}</bpmn:timerEventDefinition>\n    </bpmn:boundaryEvent>`);
+    pos[bid] = { x: tb.x + tb.w - 18, y: tb.y + tb.h - 18, w: 36, h: 36, tag: 'boundaryEvent' }; laneRefs[curLane].push(bid);
+    add('userTask', id + '_esc', `      <bpmn:extensionElements>\n        <pmoflow:node nodeType="escalation" />\n      </bpmn:extensionElements>`, t.action || 'Escalate', t.to ? laneOf(t.to) : curLane);
+    add('endEvent', id + '_escEnd', '', 'Escalated');
+    flow(bid, id + '_esc'); flow(id + '_esc', id + '_escEnd');
+    curLane = back;
+  }
   function emitTask(n, id) {
     const lane = laneOf(roleKey(n));
-    if (n.type === 'subprocess') add('callActivity', id, body(n, dataAssoc(n, id)), n.title, lane, n.calls ? ` calledElement="${xe('Process_' + String(n.calls).replace(/[^\w.-]/g, '_'))}"` : '');
+    if (n.type === 'subprocess') { add('callActivity', id, body(n, tail(n, id)), n.title, lane, n.calls ? ` calledElement="${xe('Process_' + String(n.calls).replace(/[^\w.-]/g, '_'))}"` : ''); emitTimer(n, id); }
     else if (n.type === 'wait') { const iso = isoDuration(n.wait); add('intermediateCatchEvent', id, body(n, `      <bpmn:timerEventDefinition id="${id}_timer">${iso ? `\n        <bpmn:timeDuration>${iso}</bpmn:timeDuration>\n      ` : ''}</bpmn:timerEventDefinition>`), n.title, lane); }
     else if (n.type === 'message') {
       const send = n.direction !== 'receive', mid = 'Message_' + id.slice(2);
       messages.push({ id: mid, name: (n.party || 'External party') + ': ' + n.title });
       msgFlows.push({ id: 'MessageFlow_' + id.slice(2), node: id, send, name: n.party || 'External party' });
       add(send ? 'intermediateThrowEvent' : 'intermediateCatchEvent', id, body(n, `      <bpmn:messageEventDefinition id="${id}_msg" messageRef="${mid}" />`), n.title, lane);
-    } else add('userTask', id, body(n, dataAssoc(n, id)), n.title, lane);
+    } else { add('userTask', id, body(n, tail(n, id)), n.title, lane); emitTimer(n, id); }
   }
   function emit(list, tails) {
     for (const n of list || []) {
@@ -618,7 +722,7 @@ ${messages.map(m => `  <bpmn:message id="${m.id}" name="${xe(m.name)}" />`).join
     <bpmn:laneSet id="LaneSet_1">
 ${lanes.map(l => `      <bpmn:lane id="${l.id}" name="${xe(l.name)}">\n${l.people.length ? `        <bpmn:documentation>${xe('People: ' + l.people.map(pname).join(', '))}</bpmn:documentation>\n        <bpmn:extensionElements>\n${l.people.map(x => `          <pmoflow:person id="${xe(x)}" name="${xe(pname(x))}" />`).join('\n')}\n        </bpmn:extensionElements>\n` : ''}${l.refs.map(r => `        <bpmn:flowNodeRef>${r}</bpmn:flowNodeRef>`).join('\n')}\n      </bpmn:lane>`).join('\n')}
     </bpmn:laneSet>
-${els.join('\n')}
+${els.concat(boundaries).join('\n')}
 ${doShapes.map(o => `    <bpmn:dataObject id="${o.id}" name="${xe(o.name)}" />\n    <bpmn:dataObjectReference id="${o.id}_ref" name="${xe(o.name)}" dataObjectRef="${o.id}" />`).join('\n')}
 ${flows.map(f => `    <bpmn:sequenceFlow id="${f.id}" sourceRef="${f.from}" targetRef="${f.to}"${f.name ? ` name="${xe(f.name)}"` : ''} />`).join('\n')}
   </bpmn:process>
@@ -667,8 +771,10 @@ export function parseBpmn(text, people, me) {
   const human = t => t.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
   const label = el => (el.getAttribute('name') || '').trim() || el.getAttribute('id') || '';
   const defOf = el => { const k = [...el.children].map(c => c.localName); return k.includes('timerEventDefinition') ? 'timer' : k.includes('messageEventDefinition') ? 'message' : null; };
+  const bounds = [];
   kids.forEach(el => {
     const t = el.localName;
+    if (t === 'boundaryEvent') { bounds.push(el); return; }
     if (TASKS.has(t) || GWS[t] || ['startEvent', 'endEvent', 'intermediateCatchEvent', 'intermediateThrowEvent'].includes(t)) nodes[el.getAttribute('id')] = { el, tag: t, name: (el.getAttribute('name') || '').trim(), def: /^intermediate/.test(t) ? defOf(el) : null };
     else if (!IGNORED.has(t)) dropped.push({ name: label(el), type: human(t), reason: 'not supported by PMOFlow' });
   });
@@ -723,6 +829,30 @@ export function parseBpmn(text, people, me) {
   const fromPmo = (doc.documentElement.getAttribute('exporter') || '') === 'PMOFlow';
   const pmoIdOf = (elId, a) => (a && a.id) || (fromPmo && /^N_/.test(elId || '') && !/_join$/.test(elId) ? elId.slice(2) : null);
   const emitted = {}; let pendingAlias = [];
+  /* R11 G2 §7: boundary timer events become the attached step's escalation timer ({after, iso, action, to}); the
+     escalation path after it (a task, then an end) is folded into the timer, so a round trip keeps it and adds no step.
+     Other boundary events (error, message, signal) are reported as dropped. */
+  const timerOn = {};
+  const bFlows = kids.filter(el => el.localName === 'sequenceFlow').map(el => ({ from: el.getAttribute('sourceRef'), to: el.getAttribute('targetRef') }));
+  bounds.forEach(b => {
+    const att = b.getAttribute('attachedToRef'), isTimer = [...b.children].some(c => c.localName === 'timerEventDefinition');
+    if (!isTimer || !nodes[att] || !TASKS.has(nodes[att].tag)) { dropped.push({ name: label(b), type: 'boundary event', reason: isTimer ? 'not attached to a step' : 'only time-limit boundary events are supported' }); return; }
+    const ee = [...b.children].find(c => c.localName === 'extensionElements');
+    const te = ee && [...ee.children].find(c => c.namespaceURI === PMO_NS && c.localName === 'timer');
+    const td = b.getElementsByTagNameNS('*', 'timeDuration')[0];
+    const iso = (te && te.getAttribute('iso')) || (td ? td.textContent.trim() : '');
+    let action = (te && te.getAttribute('action')) || '', to = (te && te.getAttribute('to')) || '';
+    const chain = []; let cur = (bFlows.find(f => f.from === b.getAttribute('id')) || {}).to;
+    while (cur && nodes[cur] && !chain.includes(cur) && (ins[cur] || []).every(f => chain.includes(f.from))) {
+      chain.push(cur); const nn = nodes[cur];
+      if (TASKS.has(nn.tag) && !action) { action = nn.name; to = to || laneRole[cur] || ''; } else if (TASKS.has(nn.tag) && !to) to = laneRole[cur] || '';
+      if (nn.tag === 'endEvent') break;
+      const o = outs[cur] || []; if (o.length !== 1) break; cur = o[0].to;
+    }
+    chain.forEach(c => { emitted[c] = null; });
+    const bd = te && te.getAttribute('businessDays');
+    timerOn[att] = { after: (te && te.getAttribute('after')) || durationText(iso) || (b.getAttribute('name') || '').replace(/^not done in\s+/i, ''), iso, businessDays: bd != null && bd !== '' ? +bd : null, action: action || 'Escalate', to };
+  });
   const mark = (bid, nid) => { emitted[bid] = nid; pendingAlias.forEach(a => emitted[a] = nid); pendingAlias = []; };
   const taskLike = n => !!n && (TASKS.has(n.tag) || !!n.def);
   const passThrough = id => { const n = nodes[id]; return n && ((GWS[n.tag] && (outs[id] || []).length <= 1) || (/Event$/.test(n.tag) && n.tag !== 'startEvent' && n.tag !== 'endEvent' && !n.def)); };
@@ -758,6 +888,7 @@ export function parseBpmn(text, people, me) {
     const have = new Set((out.data || []).map(dataName).map(v => String(v).toLowerCase()));
     out.data = [...new Set((out.data || []).concat(refs(assocData(n.el).filter(r => !have.has(r.name.toLowerCase())))))];
     if (x && x.raci) out.raci = x.raci;
+    if (timerOn[id]) out.timer = timerOn[id];
     stepN++; return out;
   };
   /* nodes reachable from start without passing through already-emitted nodes, with BFS distance */
@@ -876,7 +1007,7 @@ export function cmpDiff(A, B) {
 export const verLabel = p => `v${p.version || 1}${(p.tobeRev || 1) > 1 ? ' · Future rev ' + p.tobeRev : ''}`;
 /* which node list the page is showing, and its label */
 function shown(p, q) {
-  let mode = ['asis', 'tobe', 'diff', 'lanes', 'impact', 'edit', 'compare'].includes(q.mode) ? q.mode : (flat(p.tobe).length ? 'tobe' : 'asis');
+  let mode = ['asis', 'tobe', 'diff', 'lanes', 'impact', 'raci', 'edit', 'compare'].includes(q.mode) ? q.mode : (flat(p.tobe).length ? 'tobe' : 'asis');
   if (mode === 'edit' && !canEditProc(p)) mode = 'tobe'; /* read-only for non-editors */
   const rel = q.rel ? (p.released || []).find(r => String(r.version) === String(q.rel)) : null;
   if (rel) return { mode: 'asis', rel, nodes: rel.asis || [], key: 'released', label: 'released v' + rel.version + ' Today' };
@@ -916,7 +1047,7 @@ export function render(params) {
 
   /* tabs: Today · Future · What changed. Advanced adds By person and Who's affected as tabs; in Simple they sit in "⋯ More". */
   const tabOn = k => !rel && (k === 'asis' ? (mode === 'asis' || (editing && ver === 'asis')) : k === 'tobe' ? (mode === 'tobe' || (editing && ver === 'tobe')) : mode === k);
-  const modes = [['asis', 'Today'], ['tobe', 'Future'], ['diff', 'What changed']].concat(adv ? [['lanes', 'By person'], ['impact', 'Who’s affected']] : []);
+  const modes = [['asis', 'Today'], ['tobe', 'Future'], ['diff', 'What changed']].concat(adv ? [['lanes', 'By person'], ['impact', 'Who’s affected'], ['raci', 'RACI']] : []);
   const rels = (p.released || []).slice().sort((a, b) => b.version - a.version);
   const undo = (undoStack[pid] || []).length ? undoStack[pid][undoStack[pid].length - 1] : null;
   const ownerName = pname(p.owner);
@@ -933,7 +1064,7 @@ export function render(params) {
   const editBtn = rel || !editor ? '' : editing ? `<button class="btn sm primary" data-edit-done>✓ Done</button>` : `<button class="btn sm d-editbtn" data-mode="edit" aria-label="Edit steps">✎ Edit<span class="d-long"> steps</span></button>`;
   const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information available</span></div></div>` : '';
   /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
-  const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : 'Who’s affected';
+  const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : mode === 'raci' ? 'RACI' : 'Who’s affected';
   const vcount = flat(view.nodes).length;
   /* R9 §13: "10 steps · 4 new · 2 changed" (step counts only, so the parts never exceed the whole) */
   const sc = stepChangeCounts(p), scText = view.key === 'tobe' || mode === 'diff' ? sc.text : '';
@@ -957,7 +1088,7 @@ export function render(params) {
   /* canvas */
   let canvas;
   const modeNote = rel || mode === 'compare' ? '' : futureView ? FUTURE_HINT
-    : ({ asis: 'How it works today. Tap a step to see its details.', diff: 'Future compared with Today: what is new, what changed, and what was removed.', lanes: 'The Future steps grouped by who does them.', impact: 'For each Future step: other steps that use the same information, and projects with work on it.', })[mode] || '';
+    : ({ asis: 'How it works today. Tap a step to see its details.', diff: 'Future compared with Today: what is new, what changed, and what was removed.', lanes: 'The Future steps grouped by who does them.', impact: 'For each Future step: other steps that use the same information, and projects with work on it.', raci: 'RACI: who does each step, who signs off, who is asked first and who is told.' })[mode] || '';
   const roBanner = deniedEdit ? `<div class="d-robanner" role="status" data-edit-denied><b>${LOCK} You can view this process but not change it.</b><span>Only ${esc(ownerName)} (owner) and the people they add can change it. ${esc(askAccess(p))}.</span><button class="btn sm" data-ask-access>Ask ${esc(ownerName)}</button></div>` : '';
   if (rel) canvas = `<div class="d-relbanner" role="status"><b>Released ${esc(fmt(String(rel.at || '').slice(0, 10)))} by ${esc(pname(rel.by))}</b><span>Version ${esc(rel.version)} of the Today map, view only. This is how the process ran before the next release.</span><button class="btn sm" data-version-current>Back to current</button></div>
       ${(rel.asis || []).length ? `<div class="flow">${flowHTML(rel.asis, ctx, 'root')}</div>` : '<div class="empty">This release has no Today map stored.</div>'}`;
@@ -971,6 +1102,7 @@ export function render(params) {
   }
   else if (mode === 'lanes') canvas = lanesHTML(tobe, ctx);
   else if (mode === 'impact') canvas = impactHTML(p);
+  else if (mode === 'raci') canvas = raciHTML(p, editor && !rel);
   else if (mode === 'asis') canvas = flat(asis).length || asis.length ? `<div class="flow">${flowHTML(asis, ctx, 'root')}</div>${editor && !flat(asis).length ? '<div class="d-firsthint" role="note">No steps yet. Tap “✎ Edit steps” to add them.</div>' : ''}` : '<div class="empty">No Today map yet.</div>';
   else if (editing) {
     canvas = `<div class="d-editbar" role="group" aria-label="Editor"><span>${ver === 'asis' ? 'Changing <b>Today</b>: how it works now. Tap “+ Add a step”, or + to add one in between.' : 'Changing <b>Future</b>: how it should work.'} Every change is saved.</span>
@@ -990,7 +1122,9 @@ export function render(params) {
   const missingSteps = adv ? stepsWith('missing') : notYetSteps;
   const pendSteps = adv ? stepsWith('pending') : [];
   const liveSteps = adv ? stepsWith('example') : [];
-  const blockNames = s => (s.data || []).filter(d => adv ? availOf(d) === 'missing' : availOf(d) !== 'live').map(d => esc(dataName(d))).join(', ');
+  /* R11 G2 §5: one label per state, from availInfo (the engine's availLabel): "Not checked yet: X · Not available yet: Y" */
+  const blockNames = s => { const g = new Map(); (s.data || []).filter(d => adv ? availOf(d) === 'missing' : availOf(d) !== 'live' || availInfo(d).unchecked).forEach(d => { const l = availInfo(d).label; if (!g.has(l)) g.set(l, []); g.get(l).push(esc(dataName(d))); });
+    return [...g].map(([l, ns]) => `<span data-block-label="${esc(l)}">${esc(l)}: ${ns.join(', ')}</span>`).join(' · '); };
   const ord = ['missing', 'pending', 'example', 'live'];
   const dataRows = dl.slice().sort((a, b) => ord.indexOf(availOf(a)) - ord.indexOf(availOf(b))).map(d => {
     const x = dataEl(d) || {}; const u = usage(d, pid);
@@ -1008,7 +1142,7 @@ export function render(params) {
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
       <div class="r d-draftacts"><button class="btn sm" data-draft-cmp="${esc(d.id)}" aria-label="Compare ${esc(d.name)} with the current Future">Compare</button>${editor ? `<button class="btn sm" data-draft-restore="${esc(d.id)}" aria-label="Restore ${esc(d.name)}">Restore</button><button class="btn sm danger" data-draft-del="${esc(d.id)}" aria-label="Delete saved version ${esc(d.name)}">Delete</button>` : ''}</div></div>`).join('') : '<div class="s">No saved versions yet. “Save version” (in ⋯ More) keeps a named copy you can compare or restore.</div>'}</div>`;
   const whoMini = s => s.ownerRole ? `<span class="d-rolesm" data-who>${esc(s.ownerRole)}</span>` : whoAv(s);
-  const blockCard = missingSteps.length || pendSteps.length || liveSteps.length || adv ? `<div class="card" data-side-blocked><h3>${LOCK} Steps waiting for information <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)} data-blocked-step="${esc(s.id)}"><div><div class="t">${esc(s.title)}</div><div class="s">Not available yet: ${blockNames(s)}</div></div><div class="r">${whoMini(s)}</div></div>`).join('') : '<div class="s">Every step has the information it needs, or a plan to get it.</div>'}
+  const blockCard = missingSteps.length || pendSteps.length || liveSteps.length || adv ? `<div class="card" data-side-blocked><h3>${LOCK} Steps waiting for information <span class="n">${missingSteps.length}</span></h3><div class="hint" style="margin:-4px 0 8px">In the ${esc(vname)} map</div>${missingSteps.length ? missingSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)} data-blocked-step="${esc(s.id)}"><div><div class="t">${esc(s.title)}</div><div class="s">${blockNames(s)}</div></div><div class="r">${whoMini(s)}</div></div>`).join('') : '<div class="s">Every step has the information it needs, or a plan to get it.</div>'}
       ${liveSteps.length ? `<div class="d-needlive-h" data-sample-steps>Sample only: ${NEEDS_LIVE.toLowerCase()} <span class="n">${liveSteps.length}</span></div>${liveSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)} data-sample-step="${esc(s.id)}"><div><div class="t">${esc(s.title)}</div><div class="s">Sample only: ${s.data.filter(d => availOf(d) === 'example').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoMini(s)}</div></div>`).join('')}` : ''}
       ${pendSteps.length ? `<div class="d-needlive-h d-pend-h" data-pend-steps>Waiting for confirmation <span class="n">${pendSteps.length}</span></div>${pendSteps.map(s => `<div class="row ${stepGo(s) ? 'click' : ''}" ${stepGo(s)}><div><div class="t">${esc(s.title)}</div><div class="s">${esc(awaitingText(s.data.find(d => availOf(d) === 'pending')))}: ${s.data.filter(d => availOf(d) === 'pending').map(d => esc(dataName(d))).join(', ')}</div></div><div class="r">${whoMini(s)}</div></div>`).join('')}` : ''}</div>` : '';
   const sideHTML = `${blockCard}
@@ -1122,7 +1256,7 @@ const chipHTML = c => `<span class="d-ichip" data-ichip="${esc(c.id || '')}" dat
 function raciFields(node) {
   const r = raciNorm(node), any = r.a || r.c.length || r.i.length;
   const v = list => list.map(raciName).join(', ');
-  return `<details class="d-raci" data-raci-fields${any ? ' open' : ''}><summary>Who else is involved (optional)</summary><div class="d-raci-b">
+  return `<details class="d-raci" data-raci-fields${any ? ' open' : ''}><summary>${isAdv() ? 'RACI: who else is involved' : 'Who else is involved (optional)'}</summary><div class="d-raci-b">
     <p class="hint" style="margin:0 0 6px">The person or role in “Who does it” is responsible. Add anyone who signs off, is asked first, or is told.</p>
     <div class="field"><label for="d-f-ra">Signs off (accountable)</label><input id="d-f-ra" name="raci_a" list="d-people" value="${esc(r.a ? raciName(r.a) : '')}" placeholder="e.g. Finance manager" autocomplete="off" /></div>
     <div class="frow"><div class="field"><label for="d-f-rc">Asked first (consulted)</label><input id="d-f-rc" name="raci_c" value="${esc(v(r.c))}" placeholder="e.g. Legal, Tax" autocomplete="off" /></div>
@@ -1160,7 +1294,9 @@ async function stepModal(p, ver, node, opts) {
       ${ver === 'tobe' ? `<div class="field"><label>Replaces this step from Today</label><select name="from"><option value="">None: new in Future</option>${asisSteps.map(a => `<option value="${esc(a.id)}" ${a.id === node.from ? 'selected' : ''}>${esc(a.title)}</option>`).join('')}</select></div>` : ''}
       ${kind === 'wait' ? '' : `<div class="frow d-frow3"><div class="field"><label>Time limit</label><input name="sla" value="${esc(node.sla || '')}" placeholder="e.g. 2 business days" /></div>
         <div class="field"><label>System used</label><input name="system" value="${esc(node.system || '')}" placeholder="e.g. Finance system" /></div>
-        <div class="field"><label>How long (hours)</label><input name="durationHrs" type="number" min="0" step="0.25" inputmode="decimal" value="${esc(node.durationHrs != null ? node.durationHrs : '')}" /></div></div>`}
+        <div class="field"><label>How long (hours)</label><input name="durationHrs" type="number" min="0" step="0.25" inputmode="decimal" value="${esc(node.durationHrs != null ? node.durationHrs : '')}" /></div></div>
+        <div class="frow" data-timer-fields><div class="field"><label for="d-f-ta">Escalate if not done within</label><input id="d-f-ta" name="timer_after" value="${esc((node.timer && node.timer.after) || '')}" placeholder="e.g. 2 business days" autocomplete="off" /></div>
+        <div class="field"><label for="d-f-tx">Then</label><input id="d-f-tx" name="timer_action" value="${esc((node.timer && node.timer.action) || '')}" placeholder="e.g. Escalate to the CFO" autocomplete="off" /></div></div>`}
       <div class="field"><label>Teams involved (separate with commas)</label><input name="touches" value="${esc((node.touches || []).join(', '))}" placeholder="e.g. Finance, Legal" /></div>
       ${hasData ? `<div class="field"><label>Add information with a different owner or source</label>
         <div class="d-inline-new" data-nd-row><input data-nd-name placeholder="Information name" aria-label="New information name" /><select data-nd-avail aria-label="Do we have it?">${availOpts(defaultAvail(ver))}</select>
@@ -1206,8 +1342,16 @@ async function stepModal(p, ver, node, opts) {
     box.addEventListener('click', e => { const b = e.target.closest('[data-ichip-del]'); if (b) { b.closest('[data-ichip]').remove(); infoEl.focus(); } else if (e.target === box) infoEl.focus(); });
     box.addEventListener('change', e => { const t = e.target.closest('[data-have]'); if (!t) return; const dot = t.closest('[data-ichip]').querySelector('.dot'); if (dot) dot.outerHTML = availDot(t.checked ? 'live' : 'missing'); });
   }
-  /* Enter in the three main fields: add the step (and start the next one when quick-adding) */
-  m.querySelectorAll('#d-f-title, #d-f-who, #d-f-info').forEach(el => el.addEventListener('keydown', e => {
+  /* R11 G2: Enter in the information box turns what was typed into a chip. It never saves or closes the step editor;
+     only while quick-adding new steps (R7: "Press Enter to add this step and start the next one") does it also add
+     the step, and the editor stays open on the next one. */
+  if (infoEl) infoEl.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault(); e.stopPropagation(); flushInfo();
+    if (isNew && opts.quick) { next = true; const sb = m.parentNode.querySelector('[data-act="save"]'); if (sb) sb.click(); }
+  });
+  /* Enter in the name and who fields: add the step (and start the next one when quick-adding) */
+  m.querySelectorAll('#d-f-title, #d-f-who').forEach(el => el.addEventListener('keydown', e => {
     if (e.key !== 'Enter' || e.isComposing) return;
     e.preventDefault(); flushInfo();
     next = !!(isNew && opts.quick);
@@ -1271,6 +1415,13 @@ async function stepModal(p, ver, node, opts) {
   }
   if (kind === 'wait') out.data = [];
   ['sla', 'system'].forEach(k => { const v = (r.form[k] || '').trim(); if (v) out[k] = v; else delete out[k]; });
+  /* R11 G2: the escalation timer (kept as typed; the ISO duration and the role it goes to are worked out from it) */
+  if (kind !== 'wait') {
+    const ta = String(r.form.timer_after || '').trim(), tx = String(r.form.timer_action || '').trim();
+    if (ta || tx) { const d = durInfo(ta); const toM = /\bto\s+(?:the\s+)?(.+)$/i.exec(tx);
+      out.timer = { after: ta || (node.timer && node.timer.after) || '', iso: d ? d.iso : '', businessDays: d && d.businessDays != null ? d.businessDays : null, action: tx || 'Escalate', to: toM ? toM[1].trim() : (node.timer && node.timer.action === tx ? node.timer.to || '' : '') }; }
+    else delete out.timer;
+  }
   if (isFinite(hrs) && hrs > 0) out.durationHrs = hrs; else delete out.durationHrs;
   if (kind === 'wait') { out.wait = (r.form.wait || '').trim() || '1 business day'; if (!out.title) out.title = 'Wait ' + out.wait; }
   if (kind === 'message') { out.direction = r.form.direction === 'receive' ? 'receive' : 'send'; out.party = (r.form.party || '').trim() || 'External party'; if (!out.title) out.title = (out.direction === 'send' ? 'Notify ' : 'Receive from ') + out.party.toLowerCase(); }
@@ -1642,6 +1793,7 @@ export function bind(root, params) {
   const q = params.q || {};
   const ver = q.v === 'asis' ? 'asis' : 'tobe';
   drawLoops(root);
+  bindRaci(root, pid);
   const vs = root.querySelector('[data-version]');
   if (vs) vs.onchange = () => go(vs.value ? `/process/${pid}?mode=asis&rel=${encodeURIComponent(vs.value)}` : `/process/${pid}?mode=asis`);
   const vc = root.querySelector('[data-version-current]'); if (vc) vc.onclick = () => go(`/process/${pid}?mode=asis`);

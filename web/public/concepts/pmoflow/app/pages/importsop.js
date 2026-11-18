@@ -6,7 +6,7 @@
    "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED } from './process.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText } from './process.js';
 
 const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
@@ -92,6 +92,8 @@ function normStep(n) {
     sla: slaOf(n),
     note: typeof n.note === 'string' ? n.note : '',
     raci: n.raci || undefined,
+    /* R11 G2: "if not approved within 2 days, escalate to the CFO" is a timer on the step */
+    timer: n.timer && typeof n.timer === 'object' ? Object.assign({}, n.timer) : undefined,
     subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [] }).filter(s => s.title),
     /* information the reader linked by id becomes a fresh proposal by name, on this step */
     newData: [...new Set((Array.isArray(n.newData) ? n.newData.map(x => String(typeof x === 'string' ? x : x.name || '')) : []).concat((n.data || n.dataElements || []).map(dataNameOf)).filter(Boolean))],
@@ -136,13 +138,15 @@ function normalize(res) {
   /* R9 §9: the step count is stated once, by this page, from the steps actually in the draft (the reader's own
      "Found N steps" sentence counted steps the repair below merges or removes) */
   notes = notes.map(t => t.replace(/^Found \d+ steps?[^.]*\.\s*/i, '').trim()).filter(Boolean);
+  /* R11 G2 §4: owner counts are worked out live on this page ("N steps need someone"), never copied from the reader */
+  notes = notes.map(t => t.split(/(?<=\.)\s+/).filter(x => !/\b(do(es)? not say who|no one assigned|no owner)\b/i.test(x)).join(' ').trim()).filter(Boolean);
   if (skipped.length) notes.push(`Not proposed as data (they name a person or an action, not a document, record or field): ${skipped.join(', ')}.`);
   const src = res && res.source === 'rules' ? 'Rules' : 'AI';
   const trigNode = raw.find(n => n && n.type === 'trigger' && n.title);
   const trigger = (res && (res.trigger || (res.process && res.process.trigger))) || (trigNode && trigNode.title) || '';
   newData.forEach(x => { x.target = targetOf(nodes, x); });
   const teams = [...new Set((Array.isArray(res && res.teams) ? res.teams : []).concat(targets(nodes).flatMap(x => x.touches || [])))];
-  return { nodes, newData, notes, source: res && res.source === 'template' ? 'Template' : src, name: res && (res.name || (res.process && res.process.name)), trigger: cleanTitle(trigger), teams };
+  return { nodes, newData, notes, source: res && res.source === 'template' ? 'Template' : src, name: res && (res.name || (res.process && res.process.name)), trigger: cleanTitle(trigger), teams, lines: Array.isArray(res && res.lines) ? res.lines : null };
 }
 
 /* R6: a data proposal must name a document, record or field, never a person doing something ("Receiving clerk records"). */
@@ -190,8 +194,10 @@ const words = s => strip(s).split(' ').filter(w => w.length > 2 && !/^(the|and|f
 const covers = (hay, needle) => { const h = new Set(words(hay)); const n = words(needle); return n.length > 0 && n.every(w => h.has(w) || h.has(w.replace(/s$/, '')) || h.has(w + 's')); };
 const overlap = (a, b) => { const h = new Set(words(a)); return words(b).filter(w => h.has(w)).length; };
 /* the numbered lines of the pasted text: [{num, body}] */
+/* R11: the same numbering the reader accepts ("6.", "6)", "(6)", "6 - …", "Step 6:") */
+const NUM_LINE = /^\s*\(?(?:step\s+)?(\d{1,3})(?:\s*[.):]|\s*[-–—]\s+)\s*(\S.*)$|^\s*step\s+(\d{1,3})\s+([A-Za-z].*)$/i;
 function numberedLines(text) {
-  return String(text || '').split(/\r?\n/).map(l => /^\s*(?:step\s+)?(\d+)[.):]\s+(.+)$/i.exec(l)).filter(m => m && !/^\d+\.\d/.test(m[0].trim())).map(m => ({ num: +m[1], body: m[2].trim() }));
+  return String(text || '').split(/\r?\n/).map(l => NUM_LINE.exec(l)).filter(m => m && !/^\d+\.\d/.test(m[0].trim())).map(m => ({ num: +(m[1] || m[3]), body: (m[2] || m[4]).trim() }));
 }
 /* "updates" -> "update", "verifies" -> "verify", "reaches" -> "reach" */
 const verbBase = v => { const w = String(v || ''); if (/ies$/i.test(w)) return w.slice(0, -3) + 'y'; if (/(ch|sh|ss|x|z)es$/i.test(w)) return w.slice(0, -2); if (/[^s]s$/i.test(w)) return w.slice(0, -1); return w; };
@@ -210,6 +216,9 @@ function fixStep(n) {
   /* system nouns become the step's system, never information or a team. R10: the title keeps every word ("Enter the
      vendor into the ERP and check …"); the system is shown beside it as well */
   const m = sysRe.exec(n.title);
+  /* R11: the module's systems dictionary (about 70 names) once it is loaded */
+  const modSys = ui.PI && ui.PI.systemIn ? ui.PI.systemIn(n.title) : '';
+  if (modSys && !n.system) n.system = modSys;
   if (m && !n.system) n.system = m[1].replace(/\s+/g, ' ');
   /* a trailing "in ServiceNow" moves to the system chip (nothing is lost); mid-sentence it stays */
   if (m && n.system === m[1].replace(/\s+/g, ' ')) n.title = capRole(cleanTitle(n.title.replace(new RegExp('\\s+(?:in|into|on|using|via|through|from|to|with)\\s+(?:the\\s+)?' + m[1].replace(/\s+/g, '\\s+') + '(?:\\s+(?:system|app|tool))?\\s*[.;]?$', 'i'), '')));
@@ -311,7 +320,13 @@ function foundSummary(d) {
     systems.length ? `${n(systems.length, 'system', 'systems')} (${systems.join(', ')})` : ''].filter(Boolean);
   const last = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0] || 'no steps';
   const teams = [...new Set((d.teams || []).concat(all.flatMap(x => x.touches || [])))];
-  return `<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}${teams.length ? ` <span data-found-teams>Teams involved: ${teams.map(esc).join(', ')}.</span>` : ''}</div>`;
+  /* R11 G2 §1: "9 lines → 9 steps": every numbered or bulleted line of the procedure is accounted for (live counts) */
+  const lc = d.lineCount || 0;
+  const linesTxt = lc ? `${lc} line${lc === 1 ? '' : 's'} → ${n(numbered, 'step', 'steps') || '0 steps'}${choices ? ', ' + n(choices, 'choice', 'choices') : ''}${pars ? `, ${pars} at the same time` : ''}` : '';
+  const special = (d.lines || []).filter(l => l.as === 'else' || l.as === 'timer');
+  const lineNote = l => l.as === 'else' ? `Line ${l.num != null ? l.num : l.line} is the other path of the choice above it` : `Line ${l.num != null ? l.num : l.line} is a time limit on a step (an escalation), not a step of its own`;
+  const linesHtml = linesTxt ? `<div class="is-lines" data-lines="${lc}" data-lines-text="${esc(linesTxt)}"><b>${esc(linesTxt)}</b>${special.length ? `<ul>${special.map(l => `<li data-line-as="${esc(l.as)}">${esc(lineNote(l))}: “${esc(l.text.replace(/^\(?(?:step\s+)?\d+\s*[.):\-–—]?\s*/i, '').slice(0, 90))}”</li>`).join('')}</ul>` : ''}</div>` : '';
+  return `${linesHtml}<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}${teams.length ? ` <span data-found-teams>Teams involved: ${teams.map(esc).join(', ')}.</span>` : ''}</div>`;
 }
 
 /* ---------- R10 S2 §6: start from a template ---------- */
@@ -360,6 +375,7 @@ const factChips = s => {
   if (!s.owner && s.ownerRole) out.push(roleChip(s));
   else if (s.owner) out.push(`<span class="chip is-role" data-owner-person="${esc(s.owner)}">Who: ${esc(pname(s.owner))}</span>`);
   if (s.sla) out.push(`<span class="chip is-fact" data-sla="${esc(s.sla)}">Time limit: ${esc(s.sla)}</span>`);
+  if (s.timer) out.push(`<span class="chip is-fact is-timer" data-timer="${esc(s.timer.iso || '')}">⏰ ${esc(timerText(s))}</span>`);
   if (s.system && !adv()) out.push(`<span class="chip is-fact" data-system="${esc(s.system)}">System: ${esc(s.system)}</span>`);
   if (s.note) out.push(`<span class="chip is-fact" data-step-note>${esc(s.note)}</span>`);
   return out.length ? `<div class="is-facts">${out.join('')}</div>` : '';
@@ -450,7 +466,8 @@ export function render() {
 
   return `<datalist id="is-people">${store.state.people.map(p => `<option value="${esc(p.name)}"></option>`).join('')}</datalist><section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · Paste a procedure</div>
       <h1>Paste a procedure you already have</h1><p>Paste your written steps. We turn them into a process map: the steps, who does each one, and the information each step needs. You check every step before anything is saved.</p></div>
-    <div class="hdr-side"><a class="btn" href="${link('/new')}" data-link>Start from blank</a></div></section>
+    <div class="hdr-side"><div class="is-hdracts"><a class="btn" href="${link('/new')}" data-link>Start from blank</a>${importBtn('Import a Visio or BPMN file', 'Import a Visio (.vsdx) or BPMN 2.0 (.bpmn, .xml) file', 'btn')}</div>
+      <span class="hint is-orimport" data-or-import>Have a diagram instead? Import a Visio or BPMN file.</span></div></section>
     <div class="is-grid ${d ? 'has-draft' : ''}">
       <div class="card"><h3>Your procedure</h3>
         <div class="field"><textarea class="is-text" data-sop aria-label="Your procedure" placeholder="Paste your procedure here. Numbered steps work best.">${esc(ui.text)}</textarea></div>
@@ -490,6 +507,7 @@ function removeAt(path) {
 }
 
 export function bind(root) {
+  bindImport(root);
   if (!ui.PI) loadImport().then(PI => { if (PI && !ui.PI) { ui.PI = PI; store.emit(); } }).catch(e => console.warn('Import module unavailable:', e && e.message));
   if (/[?&]template=/.test(location.search) && !ui.tplSeen) { ui.tplSeen = true; ui.tplOpen = true; setTimeout(() => { const t = root.querySelector('[data-templates]'); if (t) { t.open = true; t.scrollIntoView({ block: 'center' }); } }, 0); }
   const tp = root.querySelector('[data-templates]');
@@ -505,7 +523,10 @@ export function bind(root) {
     try {
       const res = await store.api('/ai/sop-import', { text: ui.text });
       const n = normalize(res);
-      ui.draft = { nodes: n.nodes, newData: n.newData, name: n.name || '', trigger: n.trigger || '', teams: n.teams }; ui.openData = null;
+      /* R11: how many lines the procedure has (the reader's own map when it sent one, else this module's) */
+      let lines = n.lines;
+      if (!lines) { try { const PI = ui.PI || await loadImport(); lines = PI && PI.sopLines ? PI.sopLines(ui.text) : null; } catch (_) { lines = null; } }
+      ui.draft = { nodes: n.nodes, newData: n.newData, name: n.name || '', trigger: n.trigger || '', teams: n.teams, lines: lines || [], lineCount: lines ? lines.length : numberedLines(ui.text).length }; ui.openData = null;
       ui.source = n.source; ui.notes = n.notes;
       toast(`Found ${countNumbered(n.nodes)} steps`);
     } catch (e) { toast('Could not draft: ' + e.message); }
@@ -591,7 +612,8 @@ async function createProcess() {
       const st = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))) || {};
       /* R10: the role that does the step is shown as the owner; the person importing is accountable for checking it,
          so someone can confirm it ("Not checked yet" -> "We have it") */
-      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { owner: store.state.me, ownerRole: st.ownerRole } : { owner: store.state.me };
+      /* R11 G2 §4: the owner saved is the owner the preview showed: the step's person, else its role (never the importer) */
+      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { ownerRole: st.ownerRole } : {};
       /* information the procedure already uses today: "We have it" (R8 §1), described, not blocked */
       /* R10: "Not checked yet" until its owner confirms it (never "Connected" without a source) */
       await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, { source: '', avail: 'unchecked', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.`, fields: [], samples: [], discovered: [] }),
@@ -624,6 +646,7 @@ async function createProcess() {
     if (s.sla) node.sla = s.sla;
     if (s.note) node.note = s.note;
     if (s.raci) node.raci = s.raci;
+    if (s.timer) node.timer = s.timer;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;

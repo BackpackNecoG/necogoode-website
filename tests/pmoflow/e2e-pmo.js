@@ -579,7 +579,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('conflict link opens the other project', page.url().includes('/project/' + expConf[0]));
   await prjGo('?mode=work', 'table.pmo-work');
   const dl = await page.locator('.pmo-dl').allInnerTexts();
-  check('R9 one schedule format: "Due X · expected Y (N business days late)"', dl.length > 0 && dl.every(t => /^Due [A-Z][a-z]{2} \d{1,2} · (expected|done) [A-Z][a-z]{2} \d{1,2}( \(\d+ business days? late\))?$/.test(t.trim())), dl.slice(0, 3));
+  check('R9 one schedule format: "Due X · expected Y (N business days late)"', dl.length > 0 && dl.every(t => /^(Was due|Due) [A-Z][a-z]{2} \d{1,2} · (expected|done) [A-Z][a-z]{2} \d{1,2}( \(\d+ business days? late\))?$/.test(t.trim())), dl.slice(0, 3));
 
   /* ---------------- baseline ---------------- */
   console.log('baseline');
@@ -651,6 +651,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const depBox = page.locator('.overlay input[name="dep_1"][value="S:0"]');
     if (!(await depBox.isChecked())) await depBox.check();
     await act('create'); await settle();
+    await page.waitForFunction(n => document.querySelectorAll('tr[data-wid]').length >= n, countBeforeSuggest + 2, { timeout: 15000 }).catch(() => {});
     check('two suggested items created', await page.locator('tr[data-wid]').count() === countBeforeSuggest + 2);
     const sg = await page.evaluate(async ([u, t]) => { const { store } = await import(u); const w = store.list('workItem', x => x.title === t)[0]; return w && Object.assign({}, w, { depTitles: (w.deps || []).map(d => (store.get('workItem', d) || {}).title) }); }, [STORE, SG]);
     check('edited suggestion saved with owner/effort/dates', sg && sg.owner === otherOwner && sg.effortDays === 4 && sg.start === ns && sg.due === nd, sg);
@@ -1259,8 +1260,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const dashRag = await page.evaluate(() => [...document.querySelectorAll('[data-widget="rag"] [data-dash-prj]')].map(a => [a.dataset.dashPrj, a.querySelector('[data-summary-label]').dataset.summaryLabel]));
   check('R8 dashboard status widget = projectTruth', dashRag.length === nPrj && dashRag.every(([id, k]) => k === wantK(healthAll[id]) || id === PRJ), dashRag);
   check('R6 dashboard: program roll-up cards group by project.program', await page.locator('[data-rollup] [data-program]').count() === await page.evaluate(async u => new Set((await import(u)).store.list('project').map(p => String(p.program || '').trim() || 'No program')).size, STORE));
-  const nBl = await page.evaluate(async u => { const { store } = await import(u); return store.list('project', p => p.status !== 'live').reduce((a, p) => a + window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today).who.filter(x => x.why === 'blocker').length, 0); }, STORE);
-  check('R9 dashboard: blockers widget = who.filter(blocker) of every project', await page.locator('[data-dash-blocker]').count() === Math.min(6, nBl), { nBl, shown: await page.locator('[data-dash-blocker]').count() });
+  const nBl = await page.evaluate(async u => { const { store } = await import(u); return store.list('project', p => p.status !== 'live').reduce((a, p) => a + window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today).blocking.count, 0); }, STORE);
+  check('R11 dashboard: blockers widget = projectTruth.blocking items of every project', await page.locator('[data-dash-blocker]').count() === Math.min(6, nBl), { nBl, shown: await page.locator('[data-dash-blocker]').count() });
   check('R6 dashboard: go-lives, risks and EV widgets have rows',  await page.locator('[data-dash-golive]').count() > 0 && await page.locator('[data-dash-risk]').count() > 0 && await page.locator('[data-dash-ev]').count() === nPrj);
   check('R6 dashboard: no overflow @1440', await noOverflow());
   await shot('34-r6-dashboard-1440');
@@ -1305,6 +1306,141 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R6 new project: target defaults to E().defaultTarget(today)', await page.inputValue('.overlay input[name="target"]') === dt && !isWkend(dt), dt);
   await act('cancel');
   check('R6: no unlabelled icon-only controls', (await unlabelled()).length === 0, await unlabelled());
+
+  /* ---------------- R11 G3: plan draft, late-on-arrival warning, timeline axis, retire label, workload parity ---------------- */
+  console.log('R11 G3 plan draft + late-on-arrival');
+  const rmProc = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    const p = store.list('process').find(x => E.diffProcess(x, store.state.docs).removed.some(r => !Array.isArray(r.branches))); return p ? p.id : null; }, STORE);
+  check('R11 seed: a process whose Future drops a Today step exists', !!rmProc, rmProc);
+  const DP = 'E2E Northwind draft plan';
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]');
+  await page.locator('.sect [data-new-project]').click(); await modalOpen();
+  await page.fill('.overlay input[name="name"]', DP);
+  if (rmProc) await page.selectOption('.overlay select[name="from"]', rmProc);
+  await act('create'); await page.waitForURL(/\/project\/prj-/, { timeout: 10000 });
+  await page.waitForSelector('.overlay [data-first-plan]', { timeout: 15000 });
+  const dpId = decodeURIComponent(new URL(page.url()).pathname.split('/project/')[1]);
+  const dpN = Number(await page.getAttribute('.overlay [data-first-plan]', 'data-first-plan'));
+  check('R11 plan card: says Cancel keeps a draft and offers Dismiss', await page.locator('.overlay [data-draft-hint]').count() === 1 && await page.locator('.overlay [data-act="dismiss"]').count() === 1);
+  /* navigate away with the dialog open (Back to Home): the suggestion must survive */
+  await page.goBack(); await settle();
+  check('R11 leaving the page closes the plan dialog', await page.locator('.overlay [data-first-plan]').count() === 0);
+  const dDoc = await getDoc('project', dpId);
+  check('R11 the suggestion is kept as a draft on the project', !!(dDoc && dDoc.planDraft && dDoc.planDraft.items.length === dpN), dDoc && dDoc.planDraft && dDoc.planDraft.items.length);
+  await page.goto(ROOT + '/project/' + encodeURIComponent(dpId)); await page.waitForSelector('[data-plan-draft]', { timeout: 10000 });
+  check('R11 project page: "Suggested plan not added yet · N tasks" with Review / Dismiss', Number(await page.getAttribute('[data-plan-draft]', 'data-plan-draft')) === dpN && await page.locator('[data-draft-open]').count() === 1 && await page.locator('[data-draft-dismiss]').count() === 1);
+  await page.reload(); await page.waitForSelector('[data-plan-draft]', { timeout: 10000 });
+  check('R11 reload: the draft is still there', await page.locator('[data-plan-draft]').count() === 1);
+  await openAct(); await page.waitForSelector('[data-history] .ev', { timeout: 10000 }).catch(() => {});
+  check('R11 history: "Kept a suggested plan as a draft"', (await page.locator('[data-history]').innerText()).includes('Kept a suggested plan as a draft'));
+  await page.click('[data-draft-open]'); await page.waitForSelector('.overlay [data-first-plan]', { timeout: 10000 });
+  check('R11 Review reopens the same plan', Number(await page.getAttribute('.overlay [data-first-plan]', 'data-first-plan')) === dpN);
+  check('R11 retire task names the step it drops (never "Unknown step")', !(await page.innerText('.overlay .modal')).includes('Unknown step'));
+  await page.click('.overlay [data-act="adjust"]'); await page.waitForSelector('.overlay .pmo-sg', { timeout: 10000 });
+  const editedTitle = 'E2E kept edit ' + Date.now().toString(36);
+  await page.fill('.overlay input[name="t_0"]', editedTitle);
+  await act('cancel'); await settle();
+  const dDoc2 = await getDoc('project', dpId);
+  check('R11 Adjust → Cancel keeps the edits in the draft', !!(dDoc2.planDraft && dDoc2.planDraft.mode === 'adjust' && dDoc2.planDraft.items[0].title === editedTitle), dDoc2.planDraft && dDoc2.planDraft.items[0]);
+  await page.click('[data-draft-open]'); await page.waitForSelector('.overlay .pmo-sg', { timeout: 10000 });
+  check('R11 Review reopens the adjusted plan with the edit', await page.inputValue('.overlay input[name="t_0"]') === editedTitle);
+  await act('dismiss'); await settle();
+  check('R11 Dismiss clears the draft', !(await getDoc('project', dpId)).planDraft && await page.locator('[data-plan-draft]').count() === 0);
+
+  /* late on arrival: a deadline the plan can't meet gets a clear warning and "Accept anyway" / "Adjust" */
+  const dpj = await getDoc('project', dpId);
+  const soon = await page.evaluate(async u => window.PMOEngine.addBusinessDays((await import(u)).store.state.today, 2), STORE);
+  await page.evaluate(async ([u, id, t]) => { const { store } = await import(u); const j = store.get('project', id); await store.save('project', id, Object.assign({}, j, { target: t }), 'E2E: deadline in two business days'); }, [STORE, dpId, soon]);
+  await page.goto(ROOT + '/project/' + encodeURIComponent(dpId)); await page.waitForSelector('.pmo-toolbar'); await settle();
+  await page.locator('[data-suggest]').first().click(); await page.waitForSelector('.overlay [data-first-plan]', { timeout: 15000 });
+  const lateTxt = await page.locator('.overlay [data-plan-late]').innerText().catch(() => '');
+  check('R11 late on arrival: "This needs until X, past your Y deadline" warning', /needs until .+ past your .+ deadline/.test(lateTxt), lateTxt);
+  check('R11 late on arrival: the options are "Accept anyway" and "Adjust"', (await page.innerText('.overlay [data-act="accept"]')).trim() === 'Accept anyway' && await page.locator('.overlay [data-act="adjust"]').count() === 1);
+  check('R11 late warning uses planFit (finish attribute = planFit.forecastFinish)', await page.evaluate(async ([u, id]) => { const { store } = await import(u); const f = window.PMOEngine.planFit(store.state.docs, id, store.state.today); return document.querySelector('.overlay [data-plan-late]').dataset.planFinish === f.forecastFinish; }, [STORE, dpId]));
+  await shot('r11-late-on-arrival-1440', false);
+  await page.click('.overlay [data-act="accept"]'); await page.waitForSelector('.overlay', { state: 'detached', timeout: 15000 });
+  /* poll (waitForFunction treats an async predicate's Promise as truthy and returns at once) */
+  for (let k = 0; k < 60; k++) { if (await page.evaluate(async ([u, id, n]) => { const { store } = await import(u); const p = store.get('project', id); return store.list('workItem', w => w.projectId === id).length === n && p && !p.planDraft; }, [STORE, dpId, dpN])) break; await sleep(500); }
+  const accN = await page.evaluate(async ([u, id]) => (await import(u)).store.list('workItem', w => w.projectId === id).length, [STORE, dpId]);
+  const accDraft = !!(await getDoc('project', dpId)).planDraft;
+  check('R11 Accept anyway adds the tasks and clears the draft', accN === dpN && !accDraft, { accN, dpN, accDraft });
+  await page.evaluate(async ([u, id, t]) => { const { store } = await import(u); const j = store.get('project', id); await store.save('project', id, Object.assign({}, j, { target: t }), 'E2E: restore the deadline'); }, [STORE, dpId, dpj.target]);
+
+  console.log('R11 G3 timeline: retire label + adaptive axis');
+  const retire = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === id && x.retires)[0]; if (!w) return null; const p = store.get('process', w.pid);
+    const walk = ns => { for (const n of ns || []) { if (n.id === w.retires) return n; for (const b of n.branches || []) { const x = walk(b.nodes); if (x) return x; } } return null; };
+    return { id: w.id, pid: w.pid, name: (walk(p.asis) || {}).title }; }, [STORE, dpId]);
+  check('R11 accepted plan has a "Retire the old step" task', !!(retire && retire.name), retire);
+  /* stretch the plan over ~8 months so the axis must switch from weeks to months */
+  const far = await page.evaluate(async u => window.PMOEngine.addDays((await import(u)).store.state.today, 240), STORE);
+  await page.evaluate(async ([u, id, d]) => { const { store } = await import(u); const w = store.list('workItem', x => x.projectId === id)[0]; await store.save('workItem', w.id, Object.assign({}, w, { due: d, updatedAt: new Date().toISOString() }), 'E2E: long task'); }, [STORE, dpId, far]);
+  await page.goto(ROOT + '/project/' + encodeURIComponent(dpId) + '?mode=timeline'); await page.waitForSelector('#pmoTl [data-axis]'); await sleep(600);
+  const axis = async () => page.evaluate(() => { const lane = document.querySelector('#pmoTl [data-axis]'); const vis = [...lane.querySelectorAll('.tick')].filter(t => !t.hidden).map(t => t.getBoundingClientRect());
+    let overlaps = 0; for (let i = 1; i < vis.length; i++) if (vis[i].left < vis[i - 1].right + 2) overlaps++; return { unit: lane.dataset.axis, n: vis.length, overlaps }; });
+  const ax1 = await axis();
+  check('R11 timeline: a multi-month span uses month ticks', ax1.unit === 'month' && ax1.n >= 4, ax1);
+  check('R11 timeline: axis labels never overlap @1440', ax1.overlaps === 0, ax1);
+  const subs = await page.locator('#pmoTl .lab .s').allInnerTexts();
+  check('R11 timeline: "Retire the old step" shows the removed step\'s name, not "Unknown step"', retire && subs.some(t => t.includes('Old step: ' + retire.name)) && !subs.some(t => t.includes('Unknown step')), subs);
+  await shot('r11-timeline-months-1440');
+  await page.setViewportSize({ width: 390, height: 844 }); await sleep(600);
+  const ax2 = await axis();
+  check('R11 timeline: axis labels never overlap @390', ax2.overlaps === 0 && ax2.n >= 2, ax2);
+  check('R11 timeline: no overflow @390', await noOverflow());
+  await shot('r11-timeline-months-390');
+  await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
+  await prjGo('?mode=timeline', '#pmoTl [data-axis]'); await sleep(500);
+  const ax3 = await axis();
+  check('R11 timeline: short spans keep week ticks, no overlap', ['week', '2weeks'].includes(ax3.unit) && ax3.overlaps === 0, ax3);
+  await page.goto(ROOT + '/project/' + encodeURIComponent(dpId) + '?mode=work'); await page.waitForSelector('table.pmo-work');
+  check('R11 work list: no "Unknown step"', !(await page.innerText('table.pmo-work')).includes('Unknown step'));
+
+  console.log('R11 G3 workload parity');
+  await page.evaluate(() => { try { localStorage.removeItem('pmoflow.dashboard'); } catch (e) { /* */ } });
+  await page.goto(ROOT + '/portfolio'); await page.waitForSelector('[data-wl]');
+  const pfWl = await page.locator('[data-wl]').evaluateAll(xs => xs.map(x => x.dataset.wl + ':' + x.querySelector('.pmo-wl-n b').textContent));
+  await page.goto(ROOT + '/dashboard'); await page.waitForSelector('[data-dash-wl]');
+  const dbWl = await page.locator('[data-dash-wl]').evaluateAll(xs => xs.map(x => x.dataset.dashWl + ':' + x.querySelector('.pmo-wl-n b').textContent));
+  const nPeople = await page.evaluate(async u => (await import(u)).store.state.people.length, STORE);
+  check('R11 Dashboard workload lists the same people, order and numbers as Portfolio', pfWl.length === nPeople && pfWl.join('|') === dbWl.join('|'), { pfWl, dbWl });
+
+  console.log('R11 G3 engine truths on the PMO pages');
+  /* lateness: every late row on the Work tab says the engine's ONE number (projectTruth.lateness), "Was due" only for past dates */
+  const VM = 'vendor-modernization';
+  /* earlier sections finish or move VM's late work, so this check makes its own: on the draft-plan project, one open
+     task is moved to a past due date (past due, "Was due") and the tasks after it finish after their future due dates ("Due") */
+  await page.evaluate(async ([u, id]) => { const { store } = await import(u); const E = window.PMOEngine;
+    const w = store.list('workItem', x => x.projectId === id && x.status !== 'done' && !(x.deps || []).length)[0]; if (!w) return;
+    await store.save('workItem', w.id, Object.assign({}, w, { start: E.addBusinessDays(store.state.today, -6), due: E.addBusinessDays(store.state.today, -3), updatedAt: new Date().toISOString() }), 'E2E: a task that is past due'); }, [STORE, dpId]);
+  const lateWork = async id => { await page.goto(ROOT + '/project/' + encodeURIComponent(id) + '?mode=work'); await page.waitForSelector('table.pmo-work'); await settle();
+    return page.evaluate(async ([u, id]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, id, store.state.today);
+    const rows = [...document.querySelectorAll('tr[data-wid]')].map(r => ({ id: r.dataset.wid, dl: r.querySelector('.pmo-dl').textContent.trim() }));
+    const bad = rows.filter(r => { const li = t.lateness[r.id]; const m = /\((\d+) business days? late\)/.exec(r.dl); const w = store.get('workItem', r.id);
+      if (w.status === 'done') return false;
+      if (li) return !m || Number(m[1]) !== li.days || (/^Was due/.test(r.dl) !== (w.due < store.state.today));
+      return !!m || /^Was due/.test(r.dl); });
+    return { n: Object.keys(t.lateness).length, past: Object.values(t.lateness).filter(x => x.pastDue).length, bad, blocking: t.blocking.count, hdr: document.querySelector('.hdr [data-t="blockers"]').textContent.trim() }; }, [STORE, id]); };
+  const ltD = await lateWork(dpId);
+  check('R11 Work tab: each late task shows the engine\'s one "N business days late"; "Was due" only for past dates', ltD.n > 1 && ltD.past > 0 && ltD.past < ltD.n && ltD.bad.length === 0, ltD);
+  const lt = await lateWork(VM);
+  check('R11 Work tab (Vendor modernization): late rows match projectTruth.lateness', lt.bad.length === 0, lt);
+  check('R11 header "Blocking" = projectTruth.blocking.count', lt.hdr === String(lt.blocking), lt);
+  /* sprints: working days and capacity from the holiday-aware sprint calendar */
+  await page.goto(ROOT + '/project/' + VM + '?mode=sprints'); await page.waitForSelector('[data-sprints]'); await settle();
+  const spr = await page.evaluate(async ([u, id]) => { const { store } = await import(u); const cal = window.PMOEngine.sprintCalendar(store.state.docs, id, store.state.today);
+    const got = [...document.querySelectorAll('[data-sprint]')].map(x => ({ id: x.dataset.sprint, days: Number(x.querySelector('[data-sprint-days]').dataset.sprintDays), text: x.querySelector('[data-sprint-days]').textContent }));
+    return { ok: got.length > 0 && got.every(g => { const c = cal.find(y => String(y.id) === g.id); return c && c.workingDays === g.days && g.text === c.text; }), got: got.slice(0, 3), cal: cal.slice(0, 3).map(c => [c.id, c.workingDays, c.text]) }; }, [STORE, VM]);
+  check('R11 sprints: working days and the days off come from E().sprintCalendar', spr.ok, spr);
+  /* earned value: 0.00 (never "—") when money is spent with nothing finished, and the engine's flags are shown */
+  await page.evaluate(() => { try { localStorage.removeItem('pmoflow.dashboard'); } catch (e) { /* */ } });
+  await page.goto(ROOT + '/dashboard'); await page.waitForSelector('[data-dash-ev]');
+  const evx = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    return store.list('project').map(p => { const t = E.projectTruth(store.state.docs, p.id, store.state.today); const row = document.querySelector(`[data-dash-ev="${p.id}"]`); if (!row) return { id: p.id, ok: false };
+      const flags = p.status === 'live' ? [] : (t.evFlags || []).map(f => f.text);
+      const spi = row.querySelector('[class] b, td b') ? [...row.querySelectorAll('td b')].map(b => b.textContent) : [];
+      return { id: p.id, ok: flags.every(f => row.textContent.includes(f)) && (t.ev.SPI !== 0 || spi.includes('0.00')), flags, spi, SPI: t.ev.SPI }; }); }, STORE);
+  check('R11 dashboard EV: the engine\'s flags shown, 0.00 when spent with nothing finished', evx.every(x => x.ok), evx);
+  check('R11 seed shows a "Spent with nothing finished" project', evx.some(x => x.flags && x.flags.some(f => /nothing finished/.test(f))), evx);
 
   /* ---------------- phone width ---------------- */
   console.log('phone 390');
@@ -1439,11 +1575,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sGo('/project/' + PRJ7, '[data-who-acts]');
   check('R7 project tabs (Simple): Plan · Timeline · Work', (await sp.locator('.pmo-tabs a').allInnerTexts()).join('|') === 'Plan|Timeline|Work');
   const whoCard = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, id, store.state.today);
-    const rows = [...document.querySelectorAll('[data-who-acts] [data-who-row]')].map(r => ({ name: r.querySelector('[data-who-name]').textContent, what: r.querySelector('.s').textContent }));
-    const bl = document.querySelectorAll('[data-whats-blocking] [data-who-row]').length;
-    return { ok: rows.length > 0 && rows.length <= 5 && rows.every((r, i) => r.what === t.who[i].what && r.name === t.who[i].name), blOk: bl === Math.min(3, t.who.filter(x => x.why === 'blocker').length), rows, who: t.who.slice(0, 5).map(x => [x.name, x.what]) }; }, [STORE, PRJ7]);
+    /* R11: the "What's blocking" box is projectTruth.blocking; an unplanned blocker's who row is shown inside it, the rest of who follows in order */
+    const box = new Set(t.blocking.items.map(b => 'data:' + b.dataId));
+    const want = t.who.filter(x => !(x.why === 'blocker' && box.has(x.ref)));
+    const rows = [...document.querySelectorAll('[data-who-acts] > .pmo-who-list [data-who-row]')].map(r => ({ name: r.querySelector('[data-who-name]').textContent, what: r.querySelector('.s').textContent }));
+    /* every box line is one blocking item, in the engine's order; it is a who row (with its who index) only when who has it */
+    const lines = [...document.querySelectorAll('[data-whats-blocking] [data-blocking-item]')].map(a => ({ d: a.dataset.blockingItem, row: a.dataset.whoRow }));
+    const blN = Number((document.querySelector('[data-blocking-count]') || { textContent: 0 }).textContent);
+    const top = t.blocking.items.slice(0, 3);
+    const linesOk = lines.length === top.length && top.every((b, i) => { const wi = t.who.findIndex(x => x.why === 'blocker' && x.ref === 'data:' + b.dataId);
+      return lines[i].d === b.dataId && (wi < 0 ? lines[i].row === undefined : Number(lines[i].row) === wi); });
+    const allRows = [...document.querySelectorAll('[data-who-acts] [data-who-row]')].map(r => Number(r.dataset.whoRow));
+    const rowsAreWho = allRows.every(i => i >= 0 && i < t.who.length) && new Set(allRows).size === allRows.length;
+    return { ok: rows.length > 0 && rows.length <= 5 && rows.every((r, i) => r.what === want[i].what && r.name === want[i].name), blOk: linesOk && blN === t.blocking.count && rowsAreWho, rows, lines, blN, blocking: t.blocking.count, who: want.slice(0, 5).map(x => [x.name, x.what]) }; }, [STORE, PRJ7]);
   check('R9 Who needs to act: projectTruth.who in order, each names who acts', whoCard.ok, whoCard);
-  check('R9 What\'s blocking = who.filter(why === "blocker")', whoCard.blOk, whoCard);
+  check('R11 What\'s blocking = projectTruth.blocking (count and items); every person row is a projectTruth.who entry', whoCard.blOk, whoCard);
   const ls = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const want = window.PMOEngine.launchSteps(store.state.docs, id, store.state.today);
     const got = [...document.querySelectorAll('[data-launch-steps] li')].map(li => [li.querySelector('.t').firstChild.textContent.trim(), li.dataset.lsDone === '1']);
     return { ok: got.length === want.length && want.every((x, i) => got[i][0] === x.label && got[i][1] === !!x.done), got, want: want.map(x => [x.label, x.done]) }; }, [STORE, PRJ7]);

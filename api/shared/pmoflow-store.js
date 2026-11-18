@@ -5,7 +5,8 @@
      pmoflowws      PK 'ws',        RK wsId               {createdAt, seedDate, ipHash}
      pmoflowdocs    PK wsId,        RK '<type>~<docId>'   {type, docId, deleted, n, d0..d3}  (overrides + tombstones)
      pmoflowevents  PK wsId,        RK inverted-ts + rand {at, actor, action, ref, summary}   (newest first)
-     pmoflowlimits  PK 'create-<YYYYMMDD>', RK ipHash     {count}
+     pmoflowlimits  PK 'create-<YYYYMMDD>', RK ipHash     {count}         (R11: 50 new sandboxes per network per UTC day)
+                    PK 'burst',             RK ipHash     {times: JSON [ms]} (R11: 10 new sandboxes per network per rolling 10 minutes)
    State = seed(seedDate) overlaid with the workspace's override rows. Creating a
    workspace is one row write; reset deletes the overrides and re-dates the seed.
    Without EMCEE_STORAGE_CONNECTION an in-memory backend is used (dev only). */
@@ -15,7 +16,14 @@ const { seed, DOC_TYPES } = require('./pmoflow-seed');
 
 const T = { ws: 'pmoflowws', docs: 'pmoflowdocs', events: 'pmoflowevents', limits: 'pmoflowlimits' };
 const EXPIRY_DAYS = 30;
-const CREATES_PER_DAY = 5;
+const CREATES_PER_DAY = 50;      /* R11: a shared office NAT must not lock people out */
+const BURST_MAX = 10;            /* R11: abuse guard, per network, rolling window */
+const BURST_WINDOW_MS = 10 * 60000;
+/* R11: one plain message per limit. The client shows it as is. */
+const LIMIT_MSG = {
+  daily: 'This network has started a lot of demos today. Try again tomorrow, or book a guided demo.',
+  burst: 'This network has started a lot of demos in the last few minutes. Try again in 10 minutes, or book a guided demo.',
+};
 const CHUNK = 16000;            /* chars per string property (Table limit is 64 KiB of UTF-16) */
 const APP = 'pmoflow';
 
@@ -104,17 +112,30 @@ async function getWorkspace(wsId) {
   return { id: wsId, createdAt: r.createdAt, seedDate: r.seedDate || String(r.createdAt).slice(0, 10), expired: isExpired(r.createdAt) };
 }
 
-/* Throws {status: 429} when this IP hash has already created CREATES_PER_DAY workspaces today. */
+/* Throws {status: 429, limit: 'burst'|'daily', message} when this network (IP hash) has created BURST_MAX sandboxes in the
+   last 10 minutes or CREATES_PER_DAY today (UTC day). The burst check runs first, so a refused request is never counted.
+   Counters are read-then-write without a lock: two simultaneous requests can both pass at the edge, which is acceptable
+   for a demo abuse guard (the limit can be exceeded by at most the number of truly concurrent requests). */
 async function createWorkspace(ipHash, opts) {
   opts = opts || {};
-  const pk = 'create-' + dayKey(new Date());
+  const nowMs = Date.now();
+  const pk = 'create-' + dayKey(new Date(nowMs));
   const rk = String(ipHash || 'unknown').slice(0, 64);
-  const rows = await db().list(T.limits, `PartitionKey eq '${pk}' and RowKey eq '${q(rk)}'`);
-  const count = (rows[0] && rows[0].count) || 0;
-  if (count >= CREATES_PER_DAY) throw Object.assign(new Error('Workspace limit reached for today'), { status: 429 });
-  await db().upsert(T.limits, { PartitionKey: pk, RowKey: rk, count: count + 1, app: APP });
+  const [dayRows, burstRows] = await Promise.all([
+    db().list(T.limits, `PartitionKey eq '${pk}' and RowKey eq '${q(rk)}'`),
+    db().list(T.limits, `PartitionKey eq 'burst' and RowKey eq '${q(rk)}'`)]);
+  let times = [];
+  try { times = JSON.parse((burstRows[0] && burstRows[0].times) || '[]'); } catch (e) { times = []; }
+  times = (Array.isArray(times) ? times : []).filter(t => Number.isFinite(t) && nowMs - t < BURST_WINDOW_MS && t <= nowMs + 1000);
+  if (times.length >= BURST_MAX) throw Object.assign(new Error(LIMIT_MSG.burst), { status: 429, limit: 'burst' });
+  const count = (dayRows[0] && dayRows[0].count) || 0;
+  if (count >= CREATES_PER_DAY) throw Object.assign(new Error(LIMIT_MSG.daily), { status: 429, limit: 'daily' });
+  times.push(nowMs);
+  await Promise.all([
+    db().upsert(T.limits, { PartitionKey: pk, RowKey: rk, count: count + 1, app: APP }),
+    db().upsert(T.limits, { PartitionKey: 'burst', RowKey: rk, times: JSON.stringify(times.slice(-BURST_MAX)), app: APP })]);
   const id = opts.id || newWorkspaceId();
-  const now = new Date().toISOString();
+  const now = new Date(nowMs).toISOString();
   /* R8 §2: the seed is dated with the visitor's own today (already validated by the caller), else the server's UTC date */
   const seedDate = validDay(opts.seedDate) || now.slice(0, 10);
   await db().upsert(T.ws, { PartitionKey: 'ws', RowKey: id, createdAt: now, seedDate, ipHash: rk, app: APP });
@@ -197,9 +218,9 @@ async function deleteWorkspace(wsId, ipHash) {
   const b = db();
   await resetWorkspace({ id: wsId, createdAt: new Date().toISOString() });
   await b.del(T.ws, 'ws', wsId);
-  if (ipHash) await b.del(T.limits, 'create-' + dayKey(new Date()), ipHash);
+  if (ipHash) { await b.del(T.limits, 'create-' + dayKey(new Date()), ipHash); await b.del(T.limits, 'burst', ipHash); }
   return true;
 }
 
 module.exports = { getWorkspace, createWorkspace, getState, putDoc, deleteDoc, appendEvent, listEvents, resetWorkspace,
-  deleteWorkspace, isExpired, EXPIRY_DAYS, CREATES_PER_DAY, TABLES: T, _backend: () => (parseConn() ? 'table' : 'memory') };
+  deleteWorkspace, isExpired, EXPIRY_DAYS, CREATES_PER_DAY, BURST_MAX, BURST_WINDOW_MS, LIMIT_MSG, TABLES: T, _backend: () => (parseConn() ? 'table' : 'memory') };

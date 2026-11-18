@@ -93,18 +93,21 @@ function signInHTML() {
 }
 
 /* ------------------------------------------------------------ people */
+/* R11 §3: the demo workspace runs on the Business plan; its name, price and any editor limit come from pricing.json */
+const DEMO_PLAN = 'business';
 function seatsHTML() {
   const s = S.view.seats;
   const plans = (S.pricing && Array.isArray(S.pricing.plans)) ? S.pricing.plans : [];
-  const biz = plans.find(p => p.id === 'business'), team = plans.find(p => p.id === 'team');
-  const cost = biz && biz.perEditorMonthly ? s.paid * biz.perEditorMonthly * 12 : null;
-  return `<div class="card adm-seats" data-seats><h3>Seats</h3>
+  const plan = plans.find(p => p.id === DEMO_PLAN) || null;
+  const cost = plan && plan.perEditorMonthly ? s.paid * plan.perEditorMonthly * 12 : null;
+  const limit = plan && plan.maxEditors ? ` · ${esc(plan.name)} allows up to ${plan.maxEditors}` : '';
+  return `<div class="card adm-seats" data-seats data-plan="${esc(plan ? plan.id : DEMO_PLAN)}"><h3>Seats</h3>
     <div class="adm-kpis">
-      <div class="kc"><span>Editor seats</span><b data-seat-paid>${s.paid}</b><small>Admins and editors${team && team.maxEditors ? ` · Team plan allows up to ${team.maxEditors}` : ''}</small></div>
+      <div class="kc"><span>Paid seats</span><b data-seat-paid>${s.paid}</b><small>${plural(s.admin, 'admin')} · ${plural(s.editor, 'editor')}${limit}</small></div>
       <div class="kc"><span>Free seats</span><b data-seat-free>${s.free}</b><small>${plural(s.approver, 'approver')} · ${plural(s.viewer, 'viewer')}</small></div>
-      <div class="kc"><span>Plan</span><b>${biz ? esc(biz.name) : 'Business'}</b><small>${cost != null ? `${money(cost)} a year (${s.paid} × $${biz.perEditorMonthly}/editor/month, ${esc(S.pricing.billing || 'billed annually')})` : 'Approvers and viewers are free'}</small></div>
+      <div class="kc"><span>Plan</span><b data-plan-name>${plan ? esc(plan.name) : 'Business'}</b><small>${cost != null ? `${money(cost)} a year (${s.paid} × $${plan.perEditorMonthly} per paid seat a month, ${esc(S.pricing.billing || 'billed annually')})` : 'Approvers and viewers are free'}</small></div>
     </div>
-    <div class="hint">Approvers and viewers are always free. Invited people count once they have a role. <a href="/pmoflow/pricing" style="color:var(--accent)">See pricing</a></div></div>`;
+    <div class="hint">Admins and editors are paid seats. Approvers and viewers are always free. Invited people count once they have a role. <a href="/pmoflow/pricing" style="color:var(--accent)">See pricing</a></div></div>`;
 }
 function peopleHTML() {
   const admin = isAdmin();
@@ -157,7 +160,7 @@ function historyHTML() {
   return `<div class="card adm-verify ${v.ok ? 'ok' : 'bad'}" data-verify="${v.ok ? 'ok' : 'broken'}">
       <div class="adm-vicon" aria-hidden="true">${v.ok ? '✓' : '✕'}</div>
       <div><b>${v.ok ? 'History is intact' : 'History has been changed'}</b>
-        <div class="s">${esc(v.summary)} Each change is sealed with a SHA-256 fingerprint of itself and the change before it, so an edited, removed or reordered entry shows up here.</div></div>
+        <div class="s">${esc(v.summary)} Each change gets a SHA-256 fingerprint of itself and the change before it. Every export also records a checkpoint, so a later edit to history up to that point shows up here.</div></div>
     </div>
     <div class="card"><h3>Every change <span class="n" data-count>${list.length}${anyF ? ` of ${S.audit.total}` : ''}</span></h3>
       <div class="adm-filters" data-filters>
@@ -171,7 +174,7 @@ function historyHTML() {
         ${list.slice(0, S.shown).map(e => `<tr data-entry="${e.seq}"><td class="adm-when">${esc(fmtTime(e.at))}</td><td class="adm-who">${av(e.actor)} ${esc(e.actorName || pname(e.actor))}</td><td>${esc(e.summary || e.action)}</td><td>${itemCell(e.ref)}</td></tr>`).join('')}
       </tbody></table></div>${list.length > S.shown ? `<div style="text-align:center;margin-top:8px"><button class="btn sm" data-more>Show ${Math.min(PAGE, list.length - S.shown)} more</button></div>` : ''}`
       : `<div class="empty">${anyF ? 'No changes match these filters.' : 'No changes recorded yet.'}</div>`}
-      <div class="hint" style="margin-top:8px">Exports use the filters above and carry each entry’s fingerprints plus the Verify result. The demo keeps the latest ${S.audit.limit || 500} changes.</div>
+      <div class="hint" style="margin-top:8px" data-audit-claim>Exports use the filters above and carry each entry’s fingerprints. An unfiltered export also carries a signed head (the entry count and last fingerprint, signed by the PMOFlow service), so checking it catches an edited entry, entries removed from the end, and fingerprints recomputed after export. Fingerprints are worked out from the stored history when you view or export it, not as each change is saved. The demo keeps the latest ${S.audit.limit || 500} changes.</div>
       <details class="adm-check" ${fc ? 'open' : ''}><summary>Check a saved JSON export</summary>
         <div class="adm-checkrow"><input type="file" accept="application/json,.json" data-checkfile aria-label="Saved JSON export" />
         ${fc ? `<span class="${fc.ok ? 'pass' : 'fail'}" data-filecheck="${fc.ok ? 'ok' : 'broken'}">${fc.ok ? '✓ ' : '✕ '}${esc(fc.summary)}</span>` : ''}</div>
@@ -218,11 +221,14 @@ function securityHTML() {
     <div class="card" data-sec="now"><h3><span class="adm-dot now"></span>On now, in this workspace</h3><ul class="adm-ul">${li([
       ['Roles', 'Admins manage people, the calendar and settings. Editors make changes. Approvers and viewers are free.'],
       ['Process and project owners', 'Only a process’s owner and its resources edit it. Only the project manager changes the launch plan.'],
-      ['Two-person rule', 'The person who records tests can’t also approve them, and going live needs separate approvers.'],
+      ['Passing tests', 'You can pass only tests assigned to you or to no one. A test linked to an open problem can’t pass until the problem is fixed.'],
+      ['Separate approvers', 'Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.'],
+      ['Two people for launch overrides', 'Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.'],
+      ['No Admin exemption', 'Admins follow every rule above. The server checks each one, not just the screen.'],
       ['Extra sign-in check', 'Approvals, going live and data-access grants ask for a second check. In the demo any 6 digits work.'],
       ['Time-boxed data access', 'Access to real data is approved by its owner, expires, and closes automatically at launch.'],
       ['Statistics only', 'Data checks keep counts and patterns, never the values themselves.'],
-      ['Every change recorded', 'History lists every change, sealed so edits show up, and exports as CSV or JSON.'],
+      ['Every change recorded', 'History lists every change and exports as CSV or JSON. A JSON export is signed, so an edited entry, entries cut from the end, or recomputed fingerprints fail the check.'],
       ['No third-party scripts', 'No analytics or tag managers run in the app.'],
     ])}</ul></div>
     <div class="card" data-sec="business"><h3><span class="adm-dot biz"></span>With the Business plan, in your own Microsoft tenant</h3><ul class="adm-ul">${li([
@@ -314,7 +320,7 @@ export function bind(root, params) {
       const entries = Array.isArray(j) ? j : j.entries;
       if (!Array.isArray(entries)) throw new Error('That file isn’t a PMOFlow history export.');
       if (j.filtered) { S.fileCheck = { ok: false, summary: 'This export was filtered, so its chain has gaps. Export without filters to check it.' }; rerender(); return; }
-      S.fileCheck = (await api('POST', '/audit/verify', { entries })).verify;
+      S.fileCheck = (await api('POST', '/audit/verify', { entries, head: Array.isArray(j) ? null : (j.head || null) })).verify;
     } catch (e) { S.fileCheck = { ok: false, summary: e.message }; }
     rerender();
   });

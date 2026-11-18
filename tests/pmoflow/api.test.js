@@ -58,7 +58,7 @@ test('POST /workspaces creates a workspace; state has every doc type and people'
   assert.equal(s.status, 200);
   assert.equal(s.headers['cache-control'], 'no-store');
   for (const t of DOC_TYPES) assert.ok(Array.isArray(s.body.docs[t]), 'missing type ' + t);
-  assert.equal(s.body.people.length, 7);   /* R9 §7: + Dave Ortiz, Head of Compliance */
+  assert.equal(s.body.people.length, 11);   /* R9 §7: + Dave Ortiz, Head of Compliance; R11 §2: + the AP, IT, Procurement and Treasury heads */
   assert.ok(s.body.people.every(p => p.bu));
   assert.equal(s.body.today, new Date().toISOString().slice(0, 10));
   assert.equal(s.body.docs.dataElement.length, 8);
@@ -66,18 +66,19 @@ test('POST /workspaces creates a workspace; state has every doc type and people'
   assert.equal(s.body.docs.workItem.length, 19);   /* R8: + the ERP Upgrade Readiness project's 2 tasks */
 });
 
-test('workspace creation is limited to 5 per IP hash per day', async () => {
+test('workspace creation: a burst guard per network (R11: daily cap raised for shared offices)', async () => {
   const ip = testIp();
   const hash = fn._internal.clientIpHash({ headers: { 'x-forwarded-for': ip } });
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < store.BURST_MAX; i++) {
     const r = await call('POST', 'workspaces', {}, {}, ip);
     assert.equal(r.status, 201);
     created.push([r.body.id, hash]);
   }
   const r = await call('POST', 'workspaces', {}, {}, ip);
   assert.equal(r.status, 429);
-  /* R8 §8: one plain message, nothing else */
-  assert.deepEqual(r.body, { error: 'Too many new demo sandboxes from your network today. Try again tomorrow.' });
+  /* R11: one plain message, nothing else, and never two contradictory retry times */
+  assert.deepEqual(Object.keys(r.body), ['error']);
+  assert.ok(!(/tomorrow/.test(r.body.error) && /minute/.test(r.body.error)), r.body.error);
 });
 
 test('IP is hashed, never raw', () => {
@@ -156,6 +157,31 @@ test('validation errors use {error} and the right status codes', async () => {
   }
 });
 
+test('R11 profile keeps the duplicates count (no values): a repeated account number is flagged against "unique per vendor"', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const de = find(st, 'dataElement', 'D2').data;
+  const rows = engine.parseCsv(de.sampleCsv);
+  const ai = rows[0].indexOf('account_number');
+  assert.ok(ai >= 0 && rows.length > 3);
+  rows[2][ai] = rows[1][ai];                               /* one vendor's account number repeated */
+  const csv = rows.map(r => r.map(v => /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v).join(',')).join('\n') + '\n';
+  const r = await call('POST', `ws/${ws}/profile/D2`, { csv, actor: 'mc' });
+  assert.equal(r.status, 200);
+  const prof = find(await state(ws), 'profile', 'profile-D2').data;
+  const col = prof.columns.find(c => c.name === 'account_number');
+  assert.equal(col.duplicates, 1);
+  assert.ok(!JSON.stringify(prof).includes(rows[1][ai]), 'the repeated value itself is never stored');
+  const drift = engine.specDrift(de, prof);
+  const dup = drift.find(x => x.issue === 'duplicates');
+  assert.ok(dup && dup.field === 'Account number', JSON.stringify(drift));
+  assert.match(dup.detail, /must be unique/);
+  /* the clean seeded sample has no duplicates, so nothing is flagged */
+  const r0 = await call('POST', `ws/${ws}/profile/D2`, { csv: de.sampleCsv, actor: 'mc' });
+  assert.equal(r0.status, 200);
+  assert.ok(!engine.specDrift(de, find(await state(ws), 'profile', 'profile-D2').data).some(x => x.issue === 'duplicates'));
+});
+
 test('profile stores statistics only (no raw CSV value survives)', async () => {
   const ws = await newWs();
   const st = await state(ws);
@@ -172,7 +198,7 @@ test('profile stores statistics only (no raw CSV value survives)', async () => {
     const raw = cells.filter(v => v && v.length >= 5);
     assert.ok(raw.length > 100);
     for (const v of raw) assert.ok(!json.includes(v), 'raw value leaked into profile');
-    for (const c of stored.data.columns) assert.deepEqual(Object.keys(c).filter(k => !['name', 'nulls', 'distinct', 'minLen', 'maxLen', 'min', 'max', 'charClasses', 'specials', 'patterns', 'examples'].includes(k)), []);
+    for (const c of stored.data.columns) assert.deepEqual(Object.keys(c).filter(k => !['name', 'nulls', 'distinct', 'minLen', 'maxLen', 'min', 'max', 'charClasses', 'specials', 'patterns', 'examples', 'duplicates'].includes(k)), []);
   }
   const prof = find(await state(ws), 'profile', 'profile-D2').data;
   const routing = prof.columns.find(c => c.name === 'routing_number');
@@ -294,11 +320,14 @@ async function addRunbook(ws, opts) {
   opts = opts || {};
   const st = await state(ws);
   const pr = st.docs.project.find(d => d.id === 'access-review-automation').data;
-  const r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, {
-    tasks: [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'owner' in opts ? opts.owner : 'dk', planned: '08:00', gonogo: true, done: opts.done !== false }] }) }) });
+  /* R11: no launch window here (the launch guard has its own tests), and IT's part is approved by Maya Chen
+     (Dev Kumar does IT's steps and recorded its tests, so he can't approve it) */
+  const r = await call('PUT', `ws/${ws}/doc/project/access-review-automation`, { actor: 'ta', data: Object.assign({}, pr, { approvers: Object.assign({}, pr.approvers, { IT: 'mc' }), cutover: Object.assign({}, pr.cutover, {
+    window: '', tasks: [{ id: 'CT1', order: 1, task: 'Enable automated campaign', owner: 'owner' in opts ? opts.owner : 'dk', planned: '08:00', gonogo: true, done: opts.done !== false }] }) }) });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const at = new Date(Date.now() + 1000).toISOString();
-  await call('PUT', `ws/${ws}/doc/approval/AP8`, { actor: 'dk', data: { projectId: 'access-review-automation', bu: 'IT', approver: 'dk', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'Re-approved after runbook' } });
+  const a = await call('PUT', `ws/${ws}/doc/approval/AP8`, { actor: 'mc', data: { projectId: 'access-review-automation', bu: 'IT', approver: 'mc', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'Re-approved after runbook' } });
+  assert.equal(a.status, 200, JSON.stringify(a.body));
 }
 
 function assertNoIds(value, docs, where) {
@@ -327,7 +356,7 @@ test('go-live: refused with 409 + reasons; passes end to end; keeps v1; rollback
   await call('PUT', `ws/${ws}/doc/workItem/A4`, { data: Object.assign({}, a4, { status: 'done', doneAt: st.today }), actor: 'ps' });
   st = await state(ws);
   assert.equal(engine.readiness(st.docs, 'access-review-automation', st.today).pass, false);
-  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps',
+  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do',
     decision: 'approved', at: new Date(Date.now() + 1000).toISOString(), snapshotAt: new Date(Date.now() + 1000).toISOString(), stepUp: true, note: 'ok' } });
   st = await state(ws);
   const gate = engine.readiness(st.docs, 'access-review-automation', st.today);
@@ -503,7 +532,7 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
   const a4 = find(st, 'workItem', 'A4').data;
   await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today }) });
   const at = new Date(Date.now() + 1000).toISOString();
-  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   st = await state(ws);
   if (isR4Engine()) {
     assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'pending', 'a finished fix awaits the owner');
@@ -755,7 +784,7 @@ async function readyAccessReview(ws, runbookOpts) {
   const st = await state(ws);
   await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, find(st, 'workItem', 'A4').data, { status: 'done', doneAt: st.today }) });
   const at = new Date(Date.now() + 1500).toISOString();
-  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'ps', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   return state(ws);
 }
 
@@ -1306,12 +1335,13 @@ test('R7 approvals: saving an approval is never blocked by other failing checks;
   let st = await state(ws);
   assert.equal(engine.readiness(st.docs, 'vendor-modernization', st.today).pass, false);
   const at = new Date().toISOString();
-  const r = await call('PUT', `ws/${ws}/doc/approval/AP-r7`, { actor: 'lp', data: { projectId: 'vendor-modernization', bu: 'Treasury', approver: 'lp',
-    decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'I reviewed the changes to Capture banking details and the test results' } });
+  /* R11 §2: Dave (Approver, does no Compliance steps, recorded no tests) approves Compliance's part */
+  const r = await call('PUT', `ws/${ws}/doc/approval/AP-r7`, { actor: 'do', data: { projectId: 'vendor-modernization', bu: 'Compliance', approver: 'do',
+    decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'I reviewed the changes to screening and the test results' } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   st = await state(ws);
   const bu = engine.readiness(st.docs, 'vendor-modernization', st.today).checks.find(c => c.id === 'bu-signoff');
-  assert.ok(!bu.unsigned.includes('Treasury'), 'the Treasury part counts as approved while other checks fail');
+  assert.ok(bu.sectionStatus.find(x => x.bu === 'Compliance').approved, 'the Compliance part counts as approved while other checks fail');
   const g = await call('POST', `ws/${ws}/golive/vendor-modernization`, { actor: 'ta' });
   assert.equal(g.status, 409);
   assert.ok(g.body.reasons.length > 0);
@@ -1496,7 +1526,7 @@ test('R8 dates: the client today dates the sandbox, state, releases, approvals a
   assert.equal((await call('GET', `ws/${ws}/state`, null, { today: shiftDay(server, -9) })).body.today, server, 'a far-off date is ignored');
   /* approvals carry the approver's date; the ISO timestamp is untouched */
   const at = new Date().toISOString();
-  r = await call('PUT', `ws/${ws}/doc/approval/AP7`, { actor: 'ps', today: yday, data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  r = await call('PUT', `ws/${ws}/doc/approval/AP7`, { actor: 'do', today: yday, data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   assert.equal(r.status, 200);
   assert.equal(r.body.doc.data.date, yday);
   assert.equal(r.body.doc.data.at, at);
@@ -1761,4 +1791,103 @@ test('R10.1 AI path: the model gets only the period and overall facts; the perio
     global.fetch = saved;
     ['AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_KEY', 'AZURE_OPENAI_DEPLOYMENT'].forEach(k => delete process.env[k]);
   }
+});
+
+/* ================= R11 (G1) separation of duties, enforced by the API (never only in the page) ================= */
+const put = (ws, type, id, actor, data, extra) => call('PUT', `ws/${ws}/doc/${type}/${id}`, Object.assign({ actor, data }, extra || {}));
+
+test('R11 §2 bulk pass: only tests assigned to you or unassigned; never as someone else; never while the problem is open', { skip: !(engine && engine.heldTests) && 'engine without R11' }, async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const tc11 = find(st, 'testCase', 'TC11').data, tc12 = find(st, 'testCase', 'TC12').data;
+  await put(ws, 'testCase', 'TC11', 'ta', Object.assign({}, tc11, { tester: 'ps' }));     // assigned to Priya
+  await put(ws, 'testCase', 'TC12', 'ta', Object.assign({}, tc12, { tester: 'mc' }));     // assigned to Maya (an Admin)
+  const run = (id, by, results, actor) => put(ws, 'testRun', id, actor || by, { projectId: 'vendor-modernization', env: 'uat', at: new Date().toISOString(), by, results });
+  // Maya is an Admin: no exemption. She can't pass Priya's test, even in a bulk pass with her own
+  let r = await run('RX1', 'mc', [{ caseId: 'TC11', outcome: 'pass', evidence: 'bulk' }, { caseId: 'TC12', outcome: 'pass', evidence: 'bulk' }]);
+  assert.equal(r.status, 403); assert.match(r.body.error, /only pass tests assigned to you or unassigned ones\. 1 of the 2 selected tests is assigned to Priya Shah\./);
+  // her own and an unassigned one are fine
+  r = await run('RX2', 'mc', [{ caseId: 'TC12', outcome: 'pass', evidence: 'ok' }, { caseId: 'TC13', outcome: 'pass', evidence: 'ok' }]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // a failure on someone else's test can be recorded (anyone may report a problem)
+  r = await run('RX3', 'mc', [{ caseId: 'TC11', outcome: 'fail', note: 'Rejected a valid value' }]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // nobody records results under another person's name
+  r = await run('RX4', 'ps', [{ caseId: 'TC11', outcome: 'pass' }], 'mc');
+  assert.equal(r.status, 403); assert.match(r.body.error, /recorded under your own name/);
+  // the test held by the open bank-form problem (TC4 ↔ W12, in progress) can't pass, not even unassigned
+  r = await run('RX5', 'lp', [{ caseId: 'TC4', outcome: 'pass', evidence: 'looks fine' }]);
+  assert.equal(r.status, 403); assert.match(r.body.error, /can't pass while its problem is still open\. Fix “Fix: the bank details form accepts a blank account holder”/);
+  // once the problem is marked fixed, the retest passes
+  st = await state(ws);
+  const w12 = find(st, 'workItem', 'W12').data;
+  await put(ws, 'workItem', 'W12', 'lp', Object.assign({}, w12, { defectStatus: 'fixed' }));
+  r = await run('RX6', 'lp', [{ caseId: 'TC4', outcome: 'pass', evidence: 'blank holder now rejected' }]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+});
+
+test('R11 §2 approvals: step owners, test recorders, the PM, other names and no step-up are refused; Admin is no exemption', { skip: !(engine && engine.approvalBar) && 'engine without R11' }, async () => {
+  const ws = await newWs();
+  const at = () => new Date(Date.now() + 1000).toISOString();
+  const appr = (id, actor, bu, extra) => put(ws, 'approval', id, actor, Object.assign({ projectId: 'vendor-modernization', bu, approver: actor, decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' }, extra || {}));
+  let r = await appr('Q1', 'ps', 'Compliance');                        // Priya does Compliance steps (and recorded its tests)
+  assert.equal(r.status, 403); assert.match(r.body.error, /Priya Shah does steps in Compliance’s part, so someone else must approve it/);
+  r = await appr('Q2', 'mc', 'Procurement');                           // Maya: Admin role, does Procurement steps
+  assert.equal(r.status, 403); assert.match(r.body.error, /Maya Chen does steps in Procurement’s part/);
+  r = await appr('Q3', 'ta', 'Compliance');                            // the project manager
+  assert.equal(r.status, 403); assert.match(r.body.error, /project manager/);
+  r = await appr('Q4', 'mc', 'Compliance', { approver: 'do' });        // as someone else
+  assert.equal(r.status, 403); assert.match(r.body.error, /under your own name/);
+  r = await appr('Q5', 'do', 'Compliance', { stepUp: false });         // no step-up
+  assert.equal(r.status, 403); assert.match(r.body.error, /step-up/);
+  r = await appr('Q6', 'do', 'Compliance');                            // Dave: an Approver who neither does the steps nor recorded tests
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // recording any result for a part's tests bars that person from approving it
+  const ws2 = await newWs();
+  r = await put(ws2, 'testRun', 'RD', 'ar', { projectId: 'vendor-modernization', env: 'uat', at: new Date().toISOString(), by: 'ar', results: [{ caseId: 'TC14', outcome: 'pass' }] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await put(ws2, 'approval', 'Q7', 'ar', { projectId: 'vendor-modernization', bu: 'Compliance', approver: 'ar', decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' });
+  assert.equal(r.status, 403); assert.match(r.body.error, /Ana Ruiz recorded test results for Compliance’s part/);
+});
+
+test('R11 §2/§3 launch overrides need the PM and a sponsor, both with step-up; nobody overrides alone', { skip: !(engine && engine.launchOverrideStatus) && 'engine without R11' }, async () => {
+  const ws = await newWs();
+  await addRunbook(ws);
+  let st = await state(ws);
+  const a4 = find(st, 'workItem', 'A4').data;
+  await put(ws, 'workItem', 'A4', 'ps', Object.assign({}, a4, { status: 'done', doneAt: st.today }));
+  const at = () => new Date(Date.now() + 1000).toISOString();
+  let r = await put(ws, 'approval', 'AQ', 'do', { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // the launch window opens in 3 business days and a launch-day step is still open
+  st = await state(ws);
+  const pr = find(st, 'project', 'access-review-automation').data;
+  const opens = engine.addBusinessDays(st.today, 3);
+  r = await put(ws, 'project', 'access-review-automation', 'ta', Object.assign({}, pr, { cutover: Object.assign({}, pr.cutover, { window: opens + ' 08:00–10:00',
+    tasks: pr.cutover.tasks.concat([{ id: 'CT2', order: 2, task: 'Brief the service desk', owner: 'dk', planned: '09:00', done: false }]) }) }));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // re-take approvals after the launch-day plan edit
+  r = await put(ws, 'approval', 'AP8', 'mc', { projectId: 'access-review-automation', bu: 'IT', approver: 'mc', decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'again' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  st = await state(ws);
+  assert.equal(engine.readiness(st.docs, 'access-review-automation', st.today).pass, true);
+  const go = () => call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', localNow: st.today + 'T09:00', stepUp: { at: new Date().toISOString() } });
+  r = await go();
+  assert.equal(r.status, 409); assert.equal(r.body.error, 'launch locked');
+  assert.ok(r.body.reasons.some(x => /^The launch window opens /.test(x)) && r.body.reasons.some(x => /launch-day step is not done yet: “Brief the service desk”/.test(x)), JSON.stringify(r.body));
+  const sign = (id, actor, role, extra) => put(ws, 'approval', id, actor, Object.assign({ projectId: 'access-review-automation', kind: 'launch-override', role, approver: actor, decision: 'approved',
+    stepUp: true, at: at(), reason: 'Steering group moved the launch up' }, extra || {}));
+  // the PM alone (who is also the launch owner) is not enough
+  r = await sign('O1', 'ta', 'pm'); assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await go(); assert.equal(r.status, 409); assert.match(r.body.reasons.join(' '), /A sponsor or approver still has to sign/);
+  // wrong role, someone who can't sign, and no step-up are refused
+  r = await sign('O2', 'do', 'pm'); assert.equal(r.status, 403); assert.match(r.body.error, /only as the sponsor or approver/);
+  r = await sign('O3', 'ps', 'sponsor'); assert.equal(r.status, 403); assert.match(r.body.error, /can't sign a launch override/);
+  r = await sign('O4', 'do', 'sponsor', { stepUp: false }); assert.equal(r.status, 403);
+  // the sponsor's sign-off completes the override
+  r = await sign('O5', 'do', 'sponsor'); assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await go();
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.release.override.signoffs.map(x => [x.role, x.by]), [['pm', 'ta'], ['sponsor', 'do']]);
+  assert.ok(!r.body.release.approvers.includes('ta'), 'override sign-offs are never team approvals');
 });

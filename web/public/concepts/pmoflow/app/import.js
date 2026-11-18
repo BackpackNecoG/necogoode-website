@@ -54,7 +54,8 @@
   const TEAM_SET = new Set(TEAMS.map(t => t.toLowerCase()));
   const TEAM_CANON = Object.fromEntries(TEAMS.map(t => [t.toLowerCase(), t]));
   const isTeam = w => TEAM_SET.has(String(w || '').toLowerCase().replace(/\s+/g, ' '));
-  const roleNoun = w => { const x = String(w || '').toLowerCase().replace(/[^a-z-]/g, ''); return ROLE_NOUNS.has(x) || ROLE_NOUNS.has(x.replace(/s$/, '')) || ROLE_NOUNS.has(x.replace(/ies$/, 'y')) || isTeam(x); };
+  /* "Credit/Finance", "AP/AR": every part of a slashed actor is a role noun or a team */
+  const roleNoun = w => { if (/\w\/\w/.test(String(w || ''))) return String(w).split('/').every(x => x && roleNoun(x)); const x = String(w || '').toLowerCase().replace(/[^a-z-]/g, ''); return ROLE_NOUNS.has(x) || ROLE_NOUNS.has(x.replace(/s$/, '')) || ROLE_NOUNS.has(x.replace(/ies$/, 'y')) || isTeam(x); };
   const DET = /^(the|a|an|our|your|their|its|this|that|these|those|each|every|any|all|both)$/i;
   const PREP = /^(to|in|into|on|onto|at|by|for|from|with|via|of|about|against|through|under|over|after|before|within|without|per|as|than)$/i;
   /* base verbs a step can start with (imperative) or that an actor's third-person verb reduces to */
@@ -79,9 +80,27 @@
   }
   const isBase = w => { const x = String(w || '').toLowerCase(); const h = /^[a-z]+-(.+)$/.exec(x); return VERBS.has(x) || !!(h && VERBS.has(h[1])); };
   const MODAL = /^(must|should|will|shall|can|may|might|needs?|has|have|also|then|now|first|always|usually|promptly|immediately)$/i;
-  const SYSTEMS = ['ServiceNow', 'HRIS', 'ERP', 'CRM', 'Workday', 'SAP', 'Oracle', 'NetSuite', 'Concur', 'Salesforce', 'SharePoint', 'DocuSign', 'Jira',
-    'Coupa', 'Ariba', 'QuickBooks', 'Xero', 'Okta', 'Active Directory', 'Zendesk', 'HubSpot', 'Dynamics', 'Outlook', 'Excel'];
-  const SYS_RE = new RegExp('\\b(' + SYSTEMS.map(s => s.replace(/\s+/g, '\\s+')).join('|') + ')\\b');
+  /* R11 G2: about 60 common business systems (ERP, CRM, HR, finance, ITSM, documents, messaging). A system is the step's
+     system, never a role, a team or a piece of information. Longest names first so "SAP Ariba" wins over "SAP". */
+  const SYSTEMS = ['ServiceNow', 'HRIS', 'ERP', 'CRM', 'Workday', 'SAP', 'SAP Ariba', 'SuccessFactors', 'Oracle', 'Oracle Fusion', 'NetSuite', 'PeopleSoft',
+    'JD Edwards', 'Epicor', 'Infor', 'Sage Intacct', 'Sage', 'QuickBooks', 'Xero', 'Dynamics 365', 'Dynamics', 'Business Central', 'Concur', 'Coupa', 'Ariba',
+    'Jaggaer', 'Tipalti', 'AvidXchange', 'Bill.com', 'Expensify', 'Navan', 'BlackLine', 'Kyriba', 'Workiva', 'Avalara', 'Vertex', 'Dun & Bradstreet', 'D&B',
+    'Salesforce', 'HubSpot', 'Zoho', 'Pipedrive', 'Marketo', 'Zendesk', 'Freshdesk', 'Freshservice', 'Jira Service Management', 'Jira', 'Confluence',
+    'ADP', 'Paychex', 'Gusto', 'UKG', 'BambooHR', 'Greenhouse', 'iCIMS', 'Taleo', 'DocuSign', 'Adobe Sign', 'Ironclad', 'Icertis', 'SharePoint', 'OneDrive',
+    'Google Drive', 'Smartsheet', 'Microsoft Teams', 'Slack', 'Outlook', 'Gmail', 'Excel', 'Power BI', 'Tableau', 'Okta', 'Active Directory', 'Entra ID', 'Azure AD',
+    'Stripe', 'Shopify'];
+  const reEsc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s*&\s*/g, '\\s*&\\s*').replace(/\s+/g, '\\s+');
+  const SYS_SRC = '(?<![\\w&])(' + SYSTEMS.slice().sort((a, b) => b.length - a.length).map(reEsc).join('|') + '|(?<=\\b(?:in|on|via|over|through|using)\\s+)Teams)(?![\\w&])';
+  const SYS_RE = new RegExp(SYS_SRC);
+  const SYS_RE_G = new RegExp(SYS_SRC, 'g');
+  /* the canonical spelling of the first system a line names ("dun & bradstreet" is never matched: names are case-sensitive) */
+  function systemIn(t) {
+    const m = SYS_RE.exec(String(t || '')); if (!m) return '';
+    const x = m[1].replace(/\s+/g, ' ').replace(/\s*&\s*/g, ' & ').replace(/^D & B$/, 'D&B');
+    return x === 'Teams' ? 'Microsoft Teams' : x;
+  }
+  /* text with every system name replaced by a comma, so a system never becomes (part of) an information name */
+  const withoutSystems = t => String(t || '').replace(SYS_RE_G, ' , ');
 
   /* ---------------------------------------------------------------- actor */
   /* {actor, action, name?} from one clause. An actor is a role phrase that ends in a role noun, a team name, a list of
@@ -109,6 +128,8 @@
       if (actorWords.some(w => /[,;:]$/.test(w))) break;
       if (!roleWords(actorWords)) continue;
       const w = words[k].replace(/[,;:]$/, '');
+      /* "Buyer gets the W-9" is an actor and a verb; "the request gets approved" is a passive */
+      if (/^gets?$/i.test(w) && words[k + 1] && !/(ed|en)$/i.test(words[k + 1].replace(/[,;:.]$/, ''))) return { actor: canonRole(actorWords.join(' ')), action: imperative('get', words.slice(k + 1).join(' ')) };
       if (/^(is|are|was|were|be|been|gets?)$/i.test(w)) return { actor: null, action: t };
       let v = verbBase(w), restAt = k + 1;
       const plural = actorWords.some(a => /^(and|&)$/i.test(a)) || /s$/i.test(actorWords[actorWords.length - 1]) && !isTeam(actorWords[actorWords.length - 1]);
@@ -184,7 +205,7 @@
   const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?)$/i;
   const NOUNISH = /^(request|review|purchase|change|check|schedule|order|payment|expense|update|access|record|screening|approval|contact|delivery|return|transfer|release|exit|welcome|termination|refund|offer|onboarding|tax|credit|time|start|end|due|ship|bill)$/i;
   const OF_HEADS = /^(certificate|record|proof|copy|statement|letter|bill|notice|evidence|confirmation)s?$/i;
-  const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded|their|its|his|her|our|your|returned)$/i;
+  const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded|their|its|his|her|our|your|returned|known|listed|usual|main|registered|existing|official|verified|primary|preferred|same|other)$/i;
   const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?)$/i;
   const INFO_NOUNS = [
     { re: /\bamounts?\b/i, name: 'Amount' },
@@ -221,6 +242,12 @@
         for (let i = k + 2; i < words.length && tail.length < 2; i++) { const x = bare(words[i]).toLowerCase(); if (x === ',' || DET.test(x) || PREP.test(x) || /^(and|or)$/.test(x) || isBase(x) || verbBase(x)) break; tail.push(x); }
         if (tail.length) { out.push(cap(mods.concat([head, 'of'], tail).join(' '))); return; }
       }
+      /* "calls the vendor's known number" -> "Vendor phone number" (never "Known number") */
+      if (/^numbers?$/i.test(w) && !mods.length && /\b(call|calls|called|phone|phones|ring|rings|dial|dials|text|texts)\b/i.test(line)) {
+        let own = '';
+        for (let i = k - 1; i >= Math.max(0, k - 3); i--) if (/['’]s$|s['’]$/i.test(words[i])) { own = bare(words[i].replace(/’/g, "'")).toLowerCase(); break; }
+        out.push(cap((own ? own + ' ' : '') + 'phone number')); return;
+      }
       if (!mods.length && GENERIC_ALONE.test(w)) return;
       out.push(cap(mods.concat([head]).join(' ')));
     });
@@ -245,11 +272,51 @@
     return cap(tidy(c)) + '?';
   }
 
+  /* ---------------------------------------------------------------- R11 G2: time-limit escalations and reject paths */
+  /* "If the Credit Manager does not approve within 2 business days, escalate to the CFO" / "if not approved within 2 days,
+     escalate to the CFO" / "If no response in 3 days, remind the vendor": a timer on the step it watches (a BPMN boundary
+     timer), not a choice. Returns {who, timer:{after, iso, businessDays, action, to}} or null. "If not returned within 5
+     days, notify Legal" waits on something outside the step (a returned laptop), so it stays a choice. */
+  const DONE_VERBS = /^(approve|approved|approves|review|reviewed|reviews|sign|signed|signs|complete|completed|completes|done|finish|finished|action|actioned|resolve|resolved|resolves|respond|responded|responds|response|reply|replied|replies|decide|decided|decides|answer|answered|answers|process|processed|act|acted|confirm|confirmed|confirms)$/i;
+  const ESC_RE = /^(?:if|when)\s+(?:(.+?)\s+)?(?:(?:is|are|has|have|was|were)\s+)?(?:not|no|does\s+not|do\s+not|did\s+not|doesn['’]t|don['’]t|didn['’]t|has\s+not|have\s+not|hasn['’]t|haven['’]t|is\s+not|are\s+not|isn['’]t|aren['’]t)\s+(?:yet\s+)?([a-z]+)\b(.*?)\b(?:within|in|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|thirty)\s+((?:business|working|calendar)\s+)?(hours?|days?|weeks?)\s*(?:of\s+[a-z ]+?)?\s*[,:]\s*(?:then\s+)?(.+?)[.;]?$/i;
+  function escalationOf(sen) {
+    const m = ESC_RE.exec(squash(sen)); if (!m) return null;
+    const act = stripEnd(m[7]);
+    if (!(DONE_VERBS.test(m[2]) || /^(escalate|remind|chase|follow up|nudge|alert|page)\b/i.test(act))) return null;
+    const d = durationInfo(`${m[4]} ${m[5] || ''}${m[6]}`);
+    const sp = splitActor(act);
+    const to = /\bto\s+(?:the\s+)?((?:[A-Z][\w&/-]*\s+){0,3}[A-Z][\w&/-]*)/.exec(sp.action);
+    const who = m[1] && !/^(it|they|this|that|the request|request)$/i.test(m[1]) && roleWords(m[1].replace(/^(the|a|an)\s+/i, '').split(/\s+/)) ? canonRole(m[1]) : '';
+    return { who, timer: { after: d ? d.text : `${m[4]} ${m[6]}`, iso: d ? d.iso : '', businessDays: d ? d.businessDays : null, action: cap(tidy(sp.action)), to: to && roleWords(to[1].split(/\s+/)) ? canonRole(to[1]) : (sp.actor || '') } };
+  }
+  /* the step a timer watches: the latest step of the named role, else the latest approval-like step, else the latest step */
+  function escalationHost(nodes, es) {
+    const order = []; const walk = ns => (ns || []).forEach(n => { if (n.type === 'step') order.push(n); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(nodes);
+    const rev = order.slice().reverse();
+    return (es.who && rev.find(n => String(n.ownerRole || '').toLowerCase() === es.who.toLowerCase()))
+      || rev.find(n => /^(approve|review|sign|authori[sz]e|decide|check|verify|countersign|co-approve)\b/i.test(n.title)) || rev[0] || null;
+  }
+  const REJECT_COND = /\b(reject\w*|declin\w*|den(?:y|ies|ied)|refus\w*|not\s+approv\w*|fail\w*|not\s+accept\w*)\b/i;
+  const APPROVE_COND = /\b(approv\w*|accept\w*|ok|okay|pass(?:es|ed)?)\??$/i;
+  /* the path a choice takes when the request is turned down: it ends ("Stop: request rejected") unless the text says where
+     it goes. "Rejects the request?" -> its Yes path; "Approved?" -> its No path. */
+  function endRejectPath(d) {
+    if (!d || d.type !== 'decision' || !Array.isArray(d.branches)) return;
+    const t = String(d.title || '');
+    const lbl = REJECT_COND.test(t) ? 'yes' : APPROVE_COND.test(t) && !/\bnot\b/i.test(t) ? 'no' : null;
+    if (!lbl) return;
+    const b = d.branches.find(x => String(x.label).toLowerCase() === lbl); if (!b) return;
+    if (b.goto != null || b.gotoNum != null || (b.nodes || []).some(n => n.type === 'end')) return;
+    b.nodes.push({ id: 'e' + d.id, type: 'end', title: 'Stop: request rejected' });
+    d.rejectEnds = true;
+  }
+
   /* ---------------------------------------------------------------- the SOP parser */
   const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event|procedure|process|name|notes?)\b\s*[:\-–—]/i;
   const TRIGGER_LINE = /^(trigger|start(?:ing)? event|starts? when|begins? when)\s*[:\-–—]\s*(.+)$/i;
   const TRIGGER_PROSE = /\b(?:process|procedure|sop|workflow)\s+(?:starts|begins|is triggered|is initiated|kicks off)\s+(?:when|once|after|by)\s+(.+?)\.?$/i;
-  const NUM = /^(?:step\s+)?(\d+)[.):]\s+|^step\s+(\d+)\s*[-–:]\s*/i;
+  /* R11 G2: "6.", "6)", "(6)", "6:", "6 - …", "6 – …", "Step 6:", "Step 6 -", "Step 6 …" are all numbered lines */
+  const NUM = /^\(?(?:step\s+)?(\d{1,3})(?:\s*[.):]|\s*[-–—]\s+)\s*(?=\S)|^step\s+(\d{1,3})\s+(?=[A-Za-z])/i;
   const SUBNUM = /^\d+\.\d+[.):]?\s+/;
   const LETTER = /^(?:[a-h]|[ivx]{1,4})[.)]\s+/i;
   const BULLET = /^[-*•–]\s+/;
@@ -288,7 +355,7 @@
     const teamsAll = [];
     const addTeams = ts => ts.forEach(t => { if (!teamsAll.includes(t)) teamsAll.push(t); });
     const propose = (name, line, node) => {
-      name = tidy(name); if (!name || name.length > 60) return;
+      name = tidy(name); if (!name || name.length > 60 || SYS_RE.test(name)) return;
       const key = ndKey(name);
       let p = newData.find(x => x.key === key);
       if (!p) { if (newData.length >= 25) return; p = { key, name, reason: `Mentioned in "${clip(line, 80)}".`, steps: [] }; newData.push(p); }
@@ -312,7 +379,7 @@
       if (ol) { ownerTxt = ol[1].replace(/[.;]$/, ''); t = t.slice(0, ol.index).trim(); }
       const sla = slaOf(t);
       if (sla) { n.sla = sla.sla; t = squash(t.replace(sla.strip, ' ')); }
-      const sys = SYS_RE.exec(line); if (sys) n.system = sys[1].replace(/\s+/g, ' ');
+      const sys = systemIn(clause); if (sys) n.system = sys;
       const sp = splitActor(t);
       let action = sp.action;
       if (sp.actor) { n.ownerRole = sp.actor.slice(0, 60); if (sp.name) n.named = sp.name; }
@@ -325,6 +392,17 @@
         const o = canonRole(ownerTxt);
         if (o && roleWords(o.split(' ')) || /^[A-Z][a-z]+(\s+[A-Z][\w'-]+){1,2}$/.test(ownerTxt.trim())) n.ownerRole = o;
       }
+      /* "… sign-off from the Controller (Sam Wu)": a "Role (Name)" anywhere in the line names who does it */
+      if (!n.ownerRole) {
+        const rx = /((?:[A-Za-z][\w&/-]*\s+){0,3}[A-Z][\w&/-]*)\s*\(([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){1,2})\)/g;
+        let m;
+        while (!n.ownerRole && (m = rx.exec(t))) {
+          const ws = m[1].split(/\s+/);
+          for (let j = 0; j < ws.length; j++) { const cand = ws.slice(j); if (cand.length && !DET.test(cand[0]) && roleWords(cand)) { n.ownerRole = canonRole(cand.join(' ')); n.named = m[2]; break; } }
+          if (n.ownerRole) action = action.replace(m[0], m[0].replace(/\s*\([^)]*\)/, ''));
+        }
+      }
+      if (n.ownerRole) n.ownerRole = cap(squash(n.ownerRole.replace(/^(?:the|a|an|our|your|their)\s+/i, '')));
       n.title = cap(tidy(stripEnd(action))) || cap(tidy(stripEnd(clause)));
       if (n.named) n.note = `Named in the procedure: ${n.named}`;
       delete n.named;
@@ -333,7 +411,7 @@
       addTeams(n.touches);
       /* information named by the action (never by the actor), plus any the line's condition reads ("the amount") */
       const extra = opts.dataText ? String(opts.dataText).replace(clause, ' ') : '';
-      [...new Set(infoPhrases(action).concat(extra ? infoPhrases(extra) : []))].forEach(nm => propose(nm, line, n));
+      [...new Set(infoPhrases(withoutSystems(action)).concat(extra ? infoPhrases(withoutSystems(extra)) : []))].forEach(nm => propose(nm, line, n));
       return n;
     };
     const addNote = (n, extra) => {
@@ -343,17 +421,25 @@
     };
 
     /* one numbered or bulleted line -> 1 node (a step or wait), or a step plus a decision, or a decision, or a parallel */
-    const lineNodes = (body, num) => {
+    const lineNodes = (body, num, prior) => {
       const out = [];
+      prior = prior || [];
       const full = squash(body);
       /* split into sentences; "; otherwise", "; if not" and ", otherwise" start a clause too */
       const sentences = full.split(/(?<=[.!?])\s+(?=[A-Z("“])|;\s*(?=(?:otherwise|else|if|unless)\b)|,\s*(?=(?:otherwise|if not)\b)/i).map(s => s.trim()).filter(s => s.length >= 2);
       let main = null, dec = null, lastDec = null;
       const notes = [];
+      timerHosts = [];
       sentences.forEach((sen, si) => {
         const g = GOTO_RE.exec(sen);
         const own = /^owner\s*[:\-–—]\s*(.+?)\.?$/i.exec(sen);
         if (own) { if (main && main.type === 'step') { const o = canonRole(own[1]); main.ownerRole = o; main.touches = [...new Set(main.touches.concat(teamOfRole(o)))]; addTeams(main.touches); } return; }
+        /* R11: "…; if not approved within 2 business days, escalate to the CFO": a timer on the step, not a choice */
+        const es = escalationOf(sen);
+        if (es) {
+          const host = main && main.type === 'step' ? main : escalationHost(out.length ? out : prior, es);
+          if (host) { host.timer = es.timer; timerHosts.push(host.id); return; }
+        }
         const els = ELSE_RE.exec(sen);
         /* "if not returned within 5 days, notify Legal" (after the line's main step): a choice whose No path holds the action */
         const ifNot = /^if\s+not\s+(.+?),(?!\d)\s*(?:then\s+)?(.+)$/i.exec(sen);
@@ -416,7 +502,7 @@
         }
         /* any other sentence on the line is part of the same step: kept in its note, its information on the step */
         notes.push(stripEnd(sen));
-        if (main.type === 'step') infoPhrases(sen).forEach(nm => propose(nm, full, main));
+        if (main.type === 'step') infoPhrases(withoutSystems(sen)).forEach(nm => propose(nm, full, main));
       });
       if (main && main.type === 'step') notes.forEach(x => addNote(main, x));
       else if (!main && out.length && notes.length) notes.forEach(x => addNote(out[0].branches && out[0].branches[0].nodes[0], x));
@@ -424,6 +510,7 @@
       return out;
     };
 
+    let timerHosts = [];
     const lines = text.replace(/\t/g, '    ').split(/\r?\n/);
     let trigger = 'Process starts';
     for (const rl of lines) { const t = rl.trim(); const m = TRIGGER_LINE.exec(t) || TRIGGER_PROSE.exec(t); if (m) { trigger = cap(tidy(m[m.length - 1].replace(/[.;]$/, ''))) || trigger; break; } }
@@ -442,18 +529,23 @@
         const last = items[items.length - 1];
         const ownLine = /^(?:[-*•–]\s+|[a-z][.)]\s+)?(?:step\s+)?owner\s*[:\-–—]\s*(.+?)\.?$/i.exec(t);
         if (ownLine && last) { last.owner = ownLine[1]; prevBlank = false; continue; }
-        if (SKIP_LINE.test(t) || /^#+\s/.test(t) || TRIGGER_LINE.test(t)) { prevBlank = false; continue; }
         const isNum = NUM.test(t) && !SUBNUM.test(t), isSub = SUBNUM.test(t), isLetter = !isNum && LETTER.test(t), isBullet = BULLET.test(t);
+        /* R11: metadata lines ("Purpose: …") are skipped only when they are not numbered: a numbered line is always a step */
+        if (!isNum && (SKIP_LINE.test(t.replace(BULLET, '')) || /^#+\s/.test(t) || TRIGGER_LINE.test(t))) { prevBlank = false; continue; }
         const body = t.replace(SUBNUM, '').replace(NUM, '').replace(LETTER, '').replace(BULLET, '').trim();
         if (!body) { prevBlank = false; continue; }
-        if (isNum || (isBullet && (!hasNum && indent === 0))) {
-          const m = /(\d+)/.exec(t); items.push({ num: isNum && m ? +m[1] : null, body, subs: [], indent }); prevBlank = false; continue;
+        if (isNum || (isBullet && ((!hasNum && indent === 0) || !last))) {
+          const m = /(\d+)/.exec(t); items.push({ num: isNum && m ? +m[1] : null, body, subs: [], indent, text: t }); prevBlank = false; continue;
         }
         if (last && (isSub || isLetter || isBullet)) { last.subs.push(body); prevBlank = false; continue; }
         /* a wrapped line straight after a step (indented, no blank line between) continues it */
         if (last && !prevBlank && indent > 0 && !last.subs.length) { last.body += ' ' + body; continue; }
+        /* R11: an unnumbered "Otherwise, …" / "If not, …" line belongs to the step above it (its choice's other path) */
+        if (last && /^(?:otherwise|else|if\s+not)\b/i.test(body)) { last.body += ' ' + body; prevBlank = false; continue; }
         if (wasFirst) { prevBlank = false; continue; }
-        prevBlank = false;                                  /* prose around the list: title, intro, notes */
+        /* prose between steps is kept as a note on the step above (nothing is dropped); prose before the list is intro */
+        if (last && !/^(?:[A-Z][\w ]{0,30}):\s*$/.test(t)) (last.extra = last.extra || []).push(body);
+        prevBlank = false;
       }
     } else {
       /* no list markers: every sentence of the prose is a step (title and metadata lines skipped) */
@@ -466,14 +558,41 @@
       });
       prose.join(' ').split(/(?<=[.!?])\s+(?=[A-Z])/).map(s => s.trim()).filter(s => s.length >= 3).forEach(s => {
         if (ELSE_RE.test(s) && items.length) items[items.length - 1].body += ' ' + s;
-        else items.push({ num: null, body: s, subs: [] });
+        else items.push({ num: null, body: s, subs: [], text: s });
       });
     }
 
     const nodes = [];
     const lineFirst = {};
+    /* R11 G2: every numbered or bulleted line is accounted for: lineMap[i] = {line, num, text, as, nodes:[ids]}.
+       as: 'step' (one or more steps or choices), 'else' (the other path of the choice above), 'timer' (a time limit on an
+       earlier step), 'parallel'. Nothing is dropped: a line the reader cannot place becomes a plain step. */
+    const lineMap = [];
+    const record = (it, idx, as, ids) => lineMap.push({ line: idx + 1, num: it.num, text: clip(squash(it.text || it.body), 120), as, nodes: ids.filter(Boolean) });
+    const lastTop = () => nodes[nodes.length - 1];
     items.forEach((it, idx) => {
-      if (nodes.length >= 60) return;
+      if (nodes.length >= 200) { const st = makeStep(it.body, it.body); nodes.push(st); record(it, idx, 'step', [st.id]); return; }
+      /* R11: "Otherwise, the Credit Analyst approves." on a line of its own is the other path of the choice just above it */
+      const el = /^(?:otherwise|else)\b[,:]?\s*(.*)$|^if\s+not\s*[,:]\s*(.*)$/i.exec(squash(it.body));
+      const prevDec = lastTop() && lastTop().type === 'decision' ? lastTop() : null;
+      if (el && prevDec && !escalationOf(it.body)) {
+        const restRaw = stripEnd(el[1] != null ? el[1] : el[2] || '');
+        const g = GOTO_RE.exec(restRaw);
+        const rest = stripEnd(restRaw.replace(GOTO_STRIP, ''));
+        const br = prevDec.branches.slice().reverse().find(b => !b.nodes.length && b.gotoNum == null) || prevDec.branches[1];
+        const made = [];
+        if (rest && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed|carry on)\b/i.test(rest)) {
+          const st = makeStep(rest, it.body);
+          const other = (prevDec.branches.find(b => b !== br) || { nodes: [] }).nodes[0];
+          if (st.type === 'step' && other && other.type === 'step' && st.title.split(' ').length === 1 && other.title.toLowerCase().startsWith(st.title.toLowerCase() + ' ')) st.title = other.title;
+          it.subs.forEach(sb => st.subs && st.subs.push({ title: cap(tidy(stripEnd(sb))), data: [] }));
+          br.nodes.push(st); made.push(st.id);
+        }
+        if (g) br.gotoNum = +g[1];
+        if (it.num != null) lineFirst[it.num] = made[0] || prevDec.id;
+        record(it, idx, 'else', made.length ? made : [prevDec.id]);
+        return;
+      }
       /* "At the same time, A and B": a parallel set */
       if (PAR_RE.test(it.body)) {
         const rest = squash(it.body.replace(PAR_RE, ' ')).replace(/^[\s,:;-]+|[\s,]+$/g, '');
@@ -484,7 +603,7 @@
           const gw = { id: id('p'), type: 'parallel', title: 'At the same time', branches: steps.map((s, i) => ({ label: s.ownerRole || 'Path ' + String.fromCharCode(65 + i), nodes: [s] })) };
           it.subs.forEach(sb => steps[steps.length - 1].subs.push({ title: cap(tidy(stripEnd(sb))), data: [] }));
           if (it.num != null) lineFirst[it.num] = gw.id;
-          nodes.push(gw); return;
+          nodes.push(gw); record(it, idx, 'parallel', [gw.id]); return;
         }
         if (/:$/.test(it.body.trim()) || !parts.length) {
           /* "In parallel:" followed by sub-items: each sub-item is a path */
@@ -492,18 +611,23 @@
           if (steps.length >= 2) {
             const gw = { id: id('p'), type: 'parallel', title: 'At the same time', branches: steps.map((s, i) => ({ label: s.ownerRole || 'Path ' + String.fromCharCode(65 + i), nodes: [s] })) };
             if (it.num != null) lineFirst[it.num] = gw.id;
-            nodes.push(gw); return;
+            nodes.push(gw); record(it, idx, 'parallel', [gw.id]); return;
           }
         }
       }
-      const out = lineNodes(it.body, it.num);
+      let out = lineNodes(it.body.replace(/^(?:notes?|nb|tip)\s*[:\-–—]\s*/i, ''), it.num, nodes);
+      /* a line that is only a time limit on an earlier step ("If the Credit Manager does not approve within 2 days, …") */
+      if (!out.length && timerHosts.length) { record(it, idx, 'timer', timerHosts.slice()); return; }
+      /* never drop a line: whatever the reader could not place is kept as a plain step with the line's own words */
+      if (!out.length) { const st = makeStep(it.body.replace(/^(?:otherwise|else)\b[,:]?\s*/i, ''), it.body, { noWait: true }); out = [st]; }
       const main = out.find(n => n.type === 'step' || n.type === 'wait') || null;
       if (main && main.type === 'step') {
+        (it.extra || []).forEach(x => addNote(main, stripEnd(x)));
         if (it.owner) { main.ownerRole = canonRole(it.owner); main.touches = [...new Set(main.touches.concat(teamOfRole(main.ownerRole)))]; addTeams(main.touches); }
         it.subs.forEach(sb => {
           const sub = { title: cap(tidy(stripEnd(sb))), data: [] };
           main.subs.push(sub);
-          infoPhrases(sb).forEach(nm => propose(nm, sb, main));
+          infoPhrases(withoutSystems(sb)).forEach(nm => propose(nm, sb, main));
         });
       } else if (it.subs.length && out[0] && out[0].branches) {
         const host = out[0].branches[0].nodes[0];
@@ -511,10 +635,13 @@
       }
       if (it.num != null && out[0]) lineFirst[it.num] = out[0].id;
       out.forEach(n => nodes.push(n));
+      record(it, idx, 'step', out.map(n => n.id).concat(timerHosts));
     });
     /* "return to step N": the branch loops back to the first node that line N produced */
     const walk = (ns, f) => (ns || []).forEach(n => { f(n); (n.branches || []).forEach(b => walk(b.nodes, f)); });
     walk(nodes, n => (n.branches || []).forEach(b => { if (b.gotoNum != null) { if (lineFirst[b.gotoNum]) b.goto = lineFirst[b.gotoNum]; delete b.gotoNum; } }));
+    /* R11: a rejected request stops unless the procedure says where it goes */
+    walk(nodes, endRejectPath);
     nodes.unshift({ id: 'k', type: 'trigger', title: trigger, touches: [] });
     const c = countNodes(nodes);
     const roles = []; walk(nodes, n => { if (n.type === 'step' && n.ownerRole && !roles.includes(n.ownerRole)) roles.push(n.ownerRole); });
@@ -523,11 +650,20 @@
       roles.length ? `Who does them, as written: ${roles.join(', ')}.` : '',
       nobody.length ? `${plural(nobody.length, 'step')} ${nobody.length === 1 ? 'does' : 'do'} not say who does ${nobody.length === 1 ? 'it' : 'them'}.` : '',
       'Check each step before saving.'].filter(Boolean).join(' ');
-    return { nodes, newData, notes, trigger, teams: teamsAll, name: deriveName(text) };
+    return { nodes, newData, notes, trigger, teams: teamsAll, name: deriveName(text), lines: lineMap, linesText: linesText(lineMap.length, c) };
   }
+  /* "9 lines → 9 steps", "12 lines → 11 steps, 2 choices": the one sentence every screen shows for what the reader made */
+  function linesText(lines, c) {
+    const bits = [plural(c.steps + (c.waits || 0) + (c.messages || 0) + (c.subprocesses || 0), 'step')];
+    if (c.decisions) bits.push(plural(c.decisions, 'choice'));
+    if (c.parallels) bits.push(plural(c.parallels, 'set') + ' at the same time');
+    return `${plural(lines, 'line')} → ${bits.join(', ')}`;
+  }
+  /* lines of a pasted procedure the reader treats as steps (numbered or bulleted; prose sentences when there are none) */
+  function sopLines(text) { return parseSop(text).lines; }
   const clip = (t, n) => (t.length > n ? t.slice(0, n - 3).replace(/\s+\S*$/, '') + '…' : t);
   /* the API's rules fallback: same output as parseSop. Workspace docs are ignored on purpose (demo-data isolation). */
-  function sopRules(text /* , docs */) { const r = parseSop(text); return { nodes: r.nodes, newData: r.newData, notes: r.notes, trigger: r.trigger, teams: r.teams, name: r.name }; }
+  function sopRules(text /* , docs */) { const r = parseSop(text); return { nodes: r.nodes, newData: r.newData, notes: r.notes, trigger: r.trigger, teams: r.teams, name: r.name, lines: r.lines, linesText: r.linesText }; }
 
   /* counts by kind, the same way on every screen: wait and message nodes are numbered steps of their own kind */
   function countNodes(nodes) {
@@ -691,7 +827,12 @@
     /* a terminator with no way in is the start; with no way out the end */
     flowShapes.forEach(s => { if (s.kind === 'terminator') s.kind = !(ins[s.id] || []).length ? 'start' : !(outs[s.id] || []).length ? 'end' : 'process'; });
     flowShapes.filter(s => s.kind !== 'start' && s.kind !== 'end' && !(ins[s.id] || []).length && !(outs[s.id] || []).length).forEach(s => dropped.push({ name: s.text || 'Shape ' + s.id, type: s.kind, reason: 'not connected to the flow' }));
-    const name = opts.name || docTitle || '';
+    /* R11 G2 §9: the process takes the diagram PAGE's name ("Vendor onboarding"), not the file's; a default page name
+       ("Page-1") falls back to the document title */
+    let pageTitle = '';
+    const px = files['visio/pages/pages.xml'];
+    if (px) { const pg = all(parseXml(utf8(px)), 'Page')[0]; const nm = pg ? squash(pg.attrs.Name || pg.attrs.NameU || '') : ''; if (nm && !/^(page|seite|página|pagina)[-\s]?\d*$/i.test(nm)) pageTitle = nm; }
+    const name = opts.name || pageTitle || docTitle || '';
     const bpmn = vsdxBpmn({ name: name || 'Imported Visio process', shapes, flowShapes, links: links.filter(l => flowKinds.has(shapes[l.from].kind) && flowKinds.has(shapes[l.to].kind)), laneOf, dataOf, ins, outs });
     const c = { steps: flowShapes.filter(s => s.kind === 'process' || s.kind === 'wait').length, decisions: flowShapes.filter(s => s.kind === 'decision').length, parallels: flowShapes.filter(s => s.kind === 'parallel').length };
     return Object.assign({ name, lanes: lanes.map(l => l.name), links, dropped, bpmn }, c);
@@ -835,6 +976,6 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
     return { id: t.id, name: t.name, desc: t.desc, trigger: t.trigger, nodes, newData, teams, notes: '', source: 'template' };
   }
 
-  return { parseSop, sopRules, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn,
+  return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn,
     RACI_ROLES, raciOf, raciEmpty, raciText, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
 });

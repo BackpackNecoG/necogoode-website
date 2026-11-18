@@ -1000,13 +1000,19 @@ async function recordRun(prj, opts) {
   if (!cases.length && !scripts.length) { toast(only ? 'Nothing to retest.' : opts.simple ? 'Add tests first.' : 'Generate test cases or UAT scripts first.'); return; }
   const env0 = prev ? prev.env : (opts.env || (c0 || {}).env || 'dev');
   const sel = (name, label) => `<select name="${name}" aria-label="${esc(label)}"><option value="">Not run</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="blocked">Blocked</option></select>`;
-  const pick = (k, label) => `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
+  /* R11 §2 separation of duties, shown here as the server enforces it: you pass only tests assigned to you or unassigned
+     ones, and never a test held by an open problem (engine heldTests). Such rows can't be selected for a bulk pass. */
+  const heldMap = eng('heldTests', store.state.docs, prj.id) || {};
+  const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : '';
+  const lockAttr = (id, tester) => { const t = passLock(id, tester); return t ? ` data-pass-locked="${esc(t)}"` : ''; };
+  const lockHint = (id, tester) => { const t = passLock(id, tester); return t ? `<small class="hint" data-lock-hint>${esc(t)}</small>` : ''; };
+  const pick = (k, label, locked) => locked ? '<span class="ts-pick" aria-hidden="true"></span>' : `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
   /* Simple: no test ids and no "expect accept/reject": the value to try and what should happen, in words */
   const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const nm = opts.simple ? `${d.name}${tok(c.field) !== tok(d.name) ? ' · ' + c.field : ''}` : `${d.name} ${caseLbl(c.id)} · ${c.field}`;
     const exp = opts.simple ? (c.expect === 'reject' ? 'should be rejected' : 'should be accepted') : 'expect ' + c.expect;
-    return `<div class="ts-case" data-row="${esc(k)}"><div class="ts-case-t">${pick(k, nm)}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small></div>
+    return `<div class="ts-case" data-row="${esc(k)}"${lockAttr(c.id, c.tester)}><div class="ts-case-t">${pick(k, nm, !!passLock(c.id, c.tester))}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small>${lockHint(c.id, c.tester)}</div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
-  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}><div class="ts-case-t">${pick(k, s.title)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
+  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}${lockAttr(s.id, s.tester)}><div class="ts-case-t">${pick(k, s.title, !!passLock(s.id, s.tester))}${lockHint(s.id, s.tester)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
     <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(opts.simple ? plainEnv(x.action) : x.action)}<small>Expected: ${esc(opts.simple ? plainEnv(x.expected) : x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence (required to pass): link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({
@@ -1046,6 +1052,9 @@ async function recordRun(prj, opts) {
         if (oc === 'fail' && !val(row, 'n_' + k) && !so.some(x => x.o === 'fail' && x.note)) { out.push(`Add a note for the failing step in “${titleOf(row)}”.`); row.classList.add('ts-bad'); }
         if (oc === 'pass' && !val(row, 'e_' + k)) { out.push(`“${titleOf(row)}” passed: add evidence (a link or a note on what you saw).`); row.classList.add('ts-bad'); }
       } else if (row.querySelector('select').value === 'fail' && !val(row, 'n_' + k)) { out.push(`Add a note for the failing case “${titleOf(row)}”.`); row.classList.add('ts-bad'); }
+      const lock = row.getAttribute('data-pass-locked');
+      const passed = row.hasAttribute('data-script-row') ? scriptOutcome([...row.querySelectorAll('[data-step-row] select')].map(x => x.value)) === 'pass' : row.querySelector('select').value === 'pass';
+      if (lock && passed) { out.push(`“${titleOf(row)}” can’t be marked passed by you. ${lock}`); row.classList.add('ts-bad'); }
     });
     return out;
   };
@@ -1108,9 +1117,10 @@ async function recordRun(prj, opts) {
   if (prev) doc.retestOf = prev.id;
   const cyc = cycles.find(c => c.id === r.form.cycleId && c.env === env);
   if (cyc) doc.cycleId = cyc.id;
-  await store.save('testRun', id, doc,
+  try { await store.save('testRun', id, doc,
     prev ? `Recorded ${envTxt(env)} retest (cycle ${cycle}) for ${prj.name}: ${fresh.size} retested, ${fails.length} still failing`
       : `Recorded ${envTxt(env)} test run for ${prj.name}${cyc ? ` in “${cyc.name}”` : ''}: ${results.length} of ${total} run, ${fails.length} failed`);
+  } catch (e) { ui.runOpen.delete(id); toast('Not saved: ' + ((e && e.message) || 'the server refused the results')); return; }
   toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : opts.simple ? `Saved: ${results.filter(x => x.outcome === 'pass').length} passed${fails.length ? `, ${fails.length} failed` : ''}` : `${envTxt(env)} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
   await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);

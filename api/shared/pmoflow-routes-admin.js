@@ -8,7 +8,8 @@
      DELETE /workspaces/:ws/admin/holidays/:date       {actor}                  Admin only
      GET    /workspaces/:ws/admin/audit?format=json|csv&person=&item=&from=&to=   chained log + Verify result
      POST   /workspaces/:ws/admin/audit/anchor         {actor}                  records the current chain head
-     POST   /workspaces/:ws/admin/audit/verify         {entries:[...]}          re-checks a saved JSON export
+     POST   /workspaces/:ws/admin/audit/verify         {entries:[...], head}    re-checks a saved JSON export (links, signed head, checkpoints)
+     POST   /workspaces                                  R11: sandbox creation (returning visitor via the pmoflow_ws cookie, limits)
    Roles, invites and audit checkpoints live in ONE doc: type 'workspace', id 'settings'
      { roles: {personId: role}, invites: [...], anchors: [...] }   (rides along in /ws/:ws/state as docs.workspace)
    Holidays live in S1's calendar doc: type 'calendar', id 'workspace', { holidays: [{date, name}, {date, name, off: true}] },
@@ -16,7 +17,17 @@
 
    AUDIT CHAIN (computed at export time; see chainEvents): entries are ordered oldest first, exactly as the history
    store returns them, and each entry's hash = SHA-256(prevHash + "\n" + canonical(entry)). The first prevHash is a
-   per-workspace genesis value. Recorded anchors (head hash at entry n) make later edits to anchored history detectable. */
+   per-workspace genesis value. Recorded anchors (head hash at entry n) make later edits to anchored history detectable.
+   R11 KEYED HEAD: every export carries head = {count, hash, signature}, signature = HMAC-SHA256 over
+   (workspace, count, head hash) with a per-workspace key = HMAC-SHA256(server secret, workspace id). The server secret is
+   the app setting PMOFLOW_AUDIT_KEY, else a dev key derived (HMAC) from the storage connection string read at runtime,
+   else (in-memory dev backend only) a random per-process key. The secret is never returned, printed or logged.
+   Verify fails on: an edited entry (hash mismatch), a deleted or added tail (count/head mismatch), a fully re-hashed
+   forgery (bad signature), and history that no longer matches a recorded checkpoint.
+   Why export time and not write time: events are appended by the shared history store (pmoflow-store.appendEvent, called
+   from index.js), which this stream does not own; chaining there needs a per-workspace head row with optimistic retry.
+   So: an export is sealed when it is made, and checkpoints are recorded at every export. Not guaranteed: a change made
+   directly in storage to entries newer than the latest checkpoint, before the next export. */
 const crypto = require('crypto');
 const seedMod = require('./pmoflow-seed');
 
@@ -46,6 +57,8 @@ const clean = (s, n) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f
 /* Default role from the directory title: the project manager and the process owner run the workspace; everyone else edits.
    Defaults never take write access away from anyone, so existing flows keep working until an Admin changes a role. */
 function defaultRole(person) {
+  /* R11: a seeded app role wins (e.g. Dave Ortiz, approve-only: appRole 'approver', a free seat) */
+  if (person && ROLES.includes(person.appRole)) return person.appRole;
   const t = String((person && person.role) || '');
   if (/project manager|process owner/i.test(t)) return 'admin';
   return 'editor';
@@ -101,6 +114,36 @@ function adminError(docs, actor) {
 /* ---------- audit chain ---------- */
 const sha256 = s => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 const genesis = wsId => sha256('pmoflow-audit-genesis|' + wsId);
+const EPHEMERAL_SECRET = crypto.randomBytes(32);
+/* The server secret and where it came from. Never returned, printed or logged: callers get only the source label.
+   Production (Azure: WEBSITE_SITE_NAME / WEBSITE_INSTANCE_ID set by the platform) uses ONLY the app setting
+   PMOFLOW_AUDIT_KEY; without it, signing is refused (503) rather than falling back. The dev key derived from the storage
+   connection string, and the per-process key, are for local runs only. */
+const inAzure = () => !!(process.env.WEBSITE_SITE_NAME || process.env.WEBSITE_INSTANCE_ID);
+function auditSecret() {
+  const app = process.env.PMOFLOW_AUDIT_KEY;
+  if (app && String(app).trim()) return { key: Buffer.from(String(app).trim(), 'utf8'), source: 'app-setting' };
+  if (inAzure()) throw Object.assign(new Error('The audit signing key is not configured (app setting PMOFLOW_AUDIT_KEY).'), { status: 503 });
+  const conn = process.env.EMCEE_STORAGE_CONNECTION;
+  if (conn && String(conn).trim()) return { key: crypto.createHmac('sha256', String(conn).trim()).update('pmoflow-audit-dev-key|v1').digest(), source: 'derived' };
+  return { key: EPHEMERAL_SECRET, source: 'ephemeral' };
+}
+const auditKeySource = () => { try { return auditSecret().source; } catch (e) { return 'missing'; } };
+const wsKey = wsId => crypto.createHmac('sha256', auditSecret().key).update('pmoflow-audit-ws|v1|' + wsId).digest();
+const headPayload = (wsId, count, hash) => `pmoflow-audit-head|v1|${wsId}|${count}|${hash}`;
+function signHead(wsId, count, hash) {
+  return crypto.createHmac('sha256', wsKey(wsId)).update(headPayload(wsId, count, hash)).digest('hex');
+}
+function headOf(wsId, chain) {
+  const last = chain[chain.length - 1];
+  const hash = last ? last.hash : genesis(wsId);
+  return { count: chain.length, hash, signature: signHead(wsId, chain.length, hash), algorithm: 'HMAC-SHA256 over (workspace, count, head hash), keyed per workspace by the PMOFlow service' };
+}
+function headSignatureOk(wsId, head) {
+  if (!head || typeof head.signature !== 'string' || !/^[a-f0-9]{64}$/.test(head.signature)) return false;
+  const want = Buffer.from(signHead(wsId, Number(head.count), String(head.hash || '')), 'hex');
+  return crypto.timingSafeEqual(want, Buffer.from(head.signature, 'hex'));
+}
 /* The hashed content of an entry: position plus the five stored fields, in a fixed order. */
 const canonical = (seq, e) => JSON.stringify([seq, String(e.at || ''), String(e.actor || ''), String(e.action || ''), String(e.ref || ''), String(e.summary || '')]);
 /* events: oldest first. Returns entries with seq, prevHash, hash. Deterministic for the same ordered input. */
@@ -114,30 +157,43 @@ function chainEvents(wsId, events) {
     return out;
   });
 }
-/* Recompute a chain from its entries (as exported). Checks each prevHash link and each hash, then any anchors. */
-function verifyChain(wsId, entries, anchors) {
+/* Recompute a chain from its entries (as exported). Checks each prevHash link and each hash, then the signed head
+   (opts.head: count, last hash, signature) when given or required, then any recorded anchors (checkpoints).
+   opts: {head, requireHead, anchorsWithin}. Passing an array as the third argument keeps the R10 call shape (anchors only). */
+function verifyChain(wsId, entries, anchors, opts) {
+  opts = opts || {};
+  entries = entries || [];
   let prev = genesis(wsId);
-  const out = { ok: true, count: 0, head: prev, firstBreak: null, anchorsChecked: 0, at: new Date().toISOString() };
-  for (let i = 0; i < (entries || []).length; i++) {
+  const out = { ok: true, count: 0, head: prev, firstBreak: null, anchorsChecked: 0, signed: false, at: new Date().toISOString() };
+  const brk = (seq, reason) => { out.ok = false; out.firstBreak = { seq, reason }; };
+  for (let i = 0; i < entries.length; i++) {
     const e = entries[i] || {};
     const seq = i + 1;
     const want = sha256(prev + '\n' + canonical(seq, e));
     if (Number(e.seq) !== seq || e.prevHash !== prev || e.hash !== want) {
-      out.ok = false;
-      out.firstBreak = { seq, reason: Number(e.seq) !== seq ? 'an entry is missing or out of order' : e.prevHash !== prev ? 'the link to the previous entry is broken' : 'the entry was changed after it was recorded' };
+      brk(seq, Number(e.seq) !== seq ? 'an entry is missing or out of order' : e.prevHash !== prev ? 'the link to the previous entry is broken' : 'the entry was changed after it was recorded');
       break;
     }
     prev = want; out.count = seq; out.head = want;
+  }
+  if (out.ok && (opts.head || opts.requireHead)) {
+    const h = opts.head;
+    if (!h || typeof h !== 'object') brk(entries.length, 'the file has no signed head, so missing entries at the end could not be ruled out');
+    else if (!headSignatureOk(wsId, h)) brk(Number(h.count) || entries.length, 'the signature does not match, so the file was not exported from this workspace as it is now (its fingerprints were recomputed or its head was edited)');
+    else if (Number(h.count) !== entries.length) brk(Math.min(Number(h.count), entries.length) + 1, `the signed head covers ${Number(h.count)} entries but the file has ${entries.length}, so entries ${Number(h.count) > entries.length ? 'were removed from the end' : 'were added'}`);
+    else if (h.hash !== out.head) brk(entries.length, 'the last entry does not match the signed head');
+    else out.signed = true;
   }
   for (const a of anchors || []) {
     if (!out.ok) break;
     const n = Number(a.n);
     if (!(n >= 1)) continue;
+    if (opts.anchorsWithin && n > entries.length) continue;   /* a saved file predates later checkpoints; its own end is covered by the signed head */
     out.anchorsChecked++;
-    const e = (entries || [])[n - 1];
-    if (!e || e.hash !== a.hash) { out.ok = false; out.firstBreak = { seq: n, reason: `history up to entry ${n} no longer matches the copy recorded ${String(a.at || '').slice(0, 10)}` }; }
+    const e = entries[n - 1];
+    if (!e || e.hash !== a.hash) brk(n, !e ? `entries up to ${n} were recorded at the checkpoint of ${String(a.at || '').slice(0, 10)}, but only ${entries.length} remain` : `history up to entry ${n} no longer matches the checkpoint recorded ${String(a.at || '').slice(0, 10)}`);
   }
-  out.summary = out.ok ? `Chain intact: ${out.count} entr${out.count === 1 ? 'y' : 'ies'} recomputed${out.anchorsChecked ? `, ${out.anchorsChecked} recorded checkpoint${out.anchorsChecked === 1 ? '' : 's'} match` : ''}.`
+  out.summary = out.ok ? `Chain intact: ${out.count} entr${out.count === 1 ? 'y' : 'ies'} recomputed${out.signed ? ', signed head matches' : ''}${out.anchorsChecked ? `, ${out.anchorsChecked} recorded checkpoint${out.anchorsChecked === 1 ? '' : 's'} match` : ''}.`
     : `Chain broken at entry ${out.firstBreak.seq}: ${out.firstBreak.reason}.`;
   return out;
 }
@@ -146,11 +202,12 @@ function csvCell(v) {
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;           /* no spreadsheet formula injection */
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
-function toCSV(entries, verify) {
+function toCSV(entries, verify, head) {
   const cols = ['seq', 'at', 'actor', 'actorName', 'action', 'ref', 'summary', 'prevHash', 'hash'];
   const lines = [cols.join(',')].concat(entries.map(e => cols.map(c => csvCell(e[c])).join(',')));
   lines.push('');
   lines.push(csvCell('# Verify: ' + verify.summary + ' Head ' + verify.head + '. Recomputed ' + verify.at + '.'));
+  if (head) lines.push(csvCell(`# Signed head: ${head.count} entries, head ${head.hash}, signature ${head.signature} (HMAC-SHA256; check it with Verify in Admin > History).`));
   return lines.join('\r\n') + '\r\n';
 }
 function filterEntries(entries, q) {
@@ -191,8 +248,57 @@ function view(docs, s) {
   return { settings: s, calendar: calendarOf(docs).doc, people: effectiveRoles(docs), seats: seats(docs), roles: ROLES.map(r => ({ id: r, label: ROLE_LABEL[r], paid: PAID.includes(r) })) };
 }
 
+/* ---------- sandbox creation (R11 §2) ---------- */
+/* A returning visitor keeps their sandbox through the pmoflow_ws cookie (HttpOnly, SameSite=Lax, 30 days at most and never
+   past the sandbox's own expiry), in addition to the client's localStorage. Limits per network (salted IP hash):
+   10 new sandboxes per rolling 10 minutes, 50 per UTC day (pmoflow-store.createWorkspace). A returning visitor is never
+   counted against them. The cookie travels only to /api/pmoflow. */
+const WS_COOKIE = 'pmoflow_ws';
+function readCookie(req, name) {
+  const h = (req && req.headers) || {};
+  const raw = String(h.cookie || h.Cookie || '');
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+}
+function wsCookie(req, id, maxAgeSec) {
+  const h = (req && req.headers) || {};
+  const host = String(h['x-forwarded-host'] || h.host || '').split(',')[0].trim().replace(/:\d+$/, '');
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(host);   /* plain-http dev server only */
+  return `${WS_COOKIE}=${id}; Max-Age=${Math.max(0, Math.floor(maxAgeSec))}; Path=/api/pmoflow; HttpOnly; SameSite=Lax${local ? '' : '; Secure'}`;
+}
+async function createSandbox({ body, req, store, send, clientIpHash, dayInput, clientToday }) {
+  const life = (store.EXPIRY_DAYS || 30) * 86400;
+  const back = readCookie(req, WS_COOKIE);
+  if (back && WS_RE.test(back)) {
+    const ws = await store.getWorkspace(back);
+    if (ws && !ws.expired) {
+      const left = life - (Date.now() - Date.parse(ws.createdAt)) / 1000;
+      send(200, { id: ws.id, returning: true }, { 'Set-Cookie': wsCookie(req, ws.id, left) });
+      return;
+    }
+  }
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const seedDate = typeof clientToday === 'function' && typeof dayInput === 'function' ? clientToday(dayInput(req, body || {}), today) : today;
+    const ws = await store.createWorkspace(clientIpHash(req), { seedDate });
+    send(201, { id: ws.id }, { 'Set-Cookie': wsCookie(req, ws.id, life) });
+  } catch (e) {
+    if (e.status === 429) { send(429, { error: e.message }); return;   /* one plain message, nothing else (R8 §8) */ }
+    throw e;
+  }
+}
+
 /* ---------- route handler ---------- */
-async function handle({ method, seg, body, req, store, send, fail }) {
+async function handle({ method, seg, body, req, store, send, fail, clientIpHash, dayInput, clientToday }) {
+  /* POST /workspaces (R11: owned here; index.js keeps its old handler as an unreachable fallback) */
+  if (seg[0] === 'workspaces' && seg.length === 1) {
+    if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
+    await createSandbox({ body, req, store, send, clientIpHash, dayInput, clientToday });
+    return true;
+  }
   /* Guard: the generic doc API must not write the settings doc directly (it would skip the Admin check). */
   if (seg[0] === 'ws' && seg[2] === 'doc' && seg[3] === 'workspace' && method !== 'GET') { fail(403, 'Workspace settings change only from Admin.'); return true; }
   if (seg[0] !== 'workspaces' || seg[2] !== 'admin') return false;
@@ -214,27 +320,33 @@ async function handle({ method, seg, body, req, store, send, fail }) {
 
   /* audit */
   if (rest[0] === 'audit') {
+    try { auditSecret(); } catch (e) { fail(e.status || 503, e.message); return true; }
     if (rest.length === 1) {
       if (method !== 'GET') { fail(405, 'method not allowed'); return true; }
       const st = await store.getState(ws);
       const s = settingsOf(st.docs);
       const chain = await chainFor(store, ws);
-      const verify = verifyChain(wsId, chain, s.anchors);
+      const head = headOf(wsId, chain);
+      const verify = verifyChain(wsId, chain, s.anchors, { head });
       const names = Object.fromEntries((st.docs.person || []).map(d => [d.id, d.data.name]));
       const entries = filterEntries(chain, q).map(e => Object.assign({}, e, { actorName: names[e.actor] || e.actor }));
       const filtered = entries.length !== chain.length;
       if (String(q.format || 'json') === 'csv') {
-        send(200, toCSV(entries, verify));
+        send(200, toCSV(entries, verify, filtered ? null : head));
         return true;
       }
       send(200, { workspace: wsId, exportedAt: new Date().toISOString(), algorithm: 'SHA-256(prevHash + "\\n" + JSON[seq, at, actor, action, ref, summary])',
-        genesis: genesis(wsId), total: chain.length, filtered, verify, anchors: s.anchors, entries, limit: AUDIT_LIMIT });
+        genesis: genesis(wsId), total: chain.length, filtered, head: filtered ? null : head, verify, anchors: s.anchors, entries, limit: AUDIT_LIMIT,
+        keySource: auditKeySource() === 'app-setting' ? 'service key' : 'development key' });
       return true;
     }
     if (rest[1] === 'verify' && rest.length === 2) {
       if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
       if (!Array.isArray(body.entries) || body.entries.length > 5000) { fail(400, 'entries must be the array from a JSON export'); return true; }
-      send(200, { verify: verifyChain(wsId, body.entries, []) });
+      if (body.filtered === true) { send(200, { verify: { ok: false, count: 0, signed: false, anchorsChecked: 0, firstBreak: null, summary: 'This export was filtered, so its chain has gaps. Export without filters to check it.' } }); return true; }
+      /* the saved file must carry its signed head; checkpoints come from the server, never from the file */
+      const st = await store.getState(ws);
+      send(200, { verify: verifyChain(wsId, body.entries, settingsOf(st.docs).anchors, { head: isPlainObject(body.head) ? body.head : null, requireHead: true, anchorsWithin: true }) });
       return true;
     }
     if (rest[1] === 'anchor' && rest.length === 2) {
@@ -358,5 +470,5 @@ async function handle({ method, seg, body, req, store, send, fail }) {
   return true;
 }
 
-module.exports = { handle, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, filterEntries, genesis, canonical,
+module.exports = { handle, readCookie, wsCookie, WS_COOKIE, signHead, headOf, auditKeySource, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, filterEntries, genesis, canonical,
   ROLES, ROLE_LABEL, defaultRole };

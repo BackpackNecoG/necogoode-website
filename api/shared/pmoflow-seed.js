@@ -52,8 +52,16 @@ const PEOPLE = [
   { id: 'ar', name: 'Ana Ruiz', role: 'AP Lead', color: '#16a34a', bu: 'Accounts Payable' },
   { id: 'dk', name: 'Dev Kumar', role: 'Integration Eng.', color: '#2563eb', bu: 'IT' },
   /* R9 §7: a department head who approves Compliance's part of Vendor Onboarding Modernization. He recorded none of
-     its tests (Priya did), so the separation-of-duties rule is satisfied and the part is genuinely ready to approve. */
+     its tests (Priya did) and does none of its steps, so the separation-of-duties rules (R11 §2) are satisfied and the
+     part is genuinely ready to approve. Workspace role: Approver (free seat; see the workspace settings below). */
   { id: 'do', name: 'Dave Ortiz', role: 'Head of Compliance', color: '#4f46e5', bu: 'Compliance' },
+  /* R11 §2 (separation of duties): every other team's steps are done, and its tests recorded, by its own members, so
+     each team needs one eligible approver who does none of its steps and records none of its tests: its department
+     head, an Approver (free seat), like Dave. Without them those parts could never be approved in the demo. */
+  { id: 'nb', name: 'Nina Brooks', role: 'Head of Accounts Payable', color: '#15803d', bu: 'Accounts Payable' },
+  { id: 'sk', name: 'Sam Keller', role: 'Head of IT', color: '#1d4ed8', bu: 'IT' },
+  { id: 'rv', name: 'Rosa Vega', role: 'Head of Procurement', color: '#9333ea', bu: 'Procurement' },
+  { id: 'gw', name: 'Grant Wu', role: 'Head of Treasury', color: '#c2410c', bu: 'Treasury' },
 ];
 
 /* ---------- synthetic CSV extracts (fake values, deterministic) ---------- */
@@ -302,6 +310,9 @@ function seed(createdAtISODate) {
 
   PEOPLE.forEach(p => add('person', clone(p)));
   add('calendar', { id: 'workspace', holidays: [] });
+  /* R11 §8: Dave Ortiz (and each department head) only approves, so he is an Approver (a free seat). This shows "approvers are free" in the demo:
+     the Admin seats line counts him as free, and he can still approve Compliance's part. */
+  add('workspace', { id: 'settings', roles: { do: 'approver', nb: 'approver', sk: 'approver', rv: 'approver', gw: 'approver' }, invites: [], anchors: [] });
   dataElements().forEach(d => add('dataElement', d));
   processes().forEach(p => add('process', p));
 
@@ -346,9 +357,10 @@ function seed(createdAtISODate) {
     reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ps', approvedAt: at(-15, 13),
     expires: bizDay(day, 14), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ps', action: 'approved' }] });
 
-  add('approval', { id: 'AP1', projectId: 'vendor-modernization', bu: 'Procurement', approver: 'mc', decision: 'approved',
+  /* R11 §2: each part is approved by its department head, never by someone who does its steps (Maya, Dev) */
+  add('approval', { id: 'AP1', projectId: 'vendor-modernization', bu: 'Procurement', approver: 'rv', decision: 'approved',
     at: at(-2, 16), stepUp: true, note: 'Procurement steps (intake, contract activation) reviewed and approved.' });
-  add('approval', { id: 'AP2', projectId: 'access-review-automation', bu: 'IT', approver: 'dk', decision: 'approved',
+  add('approval', { id: 'AP2', projectId: 'access-review-automation', bu: 'IT', approver: 'sk', decision: 'approved',
     at: at(-1, 14), stepUp: true, note: 'Entitlement pull and auto-removal steps approved.' });
 
   add('risk', { id: 'R1', projectId: 'vendor-modernization', title: 'Screening vendor contract is held up in legal review', impact: 'high', likelihood: 'med', owner: 'ps',

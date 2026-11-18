@@ -100,7 +100,8 @@ async function runSync(ctx, conn, st, opts) {
   const nowIso = () => new Date().toISOString();
   const entry = (e) => { const x = Object.assign({ id: 'log-' + crypto.randomBytes(5).toString('hex'), at: nowIso() }, e); entries.push(x); return x; };
   const before = truthSummary(docs, conn.projectId, today);
-  const sum = { sent: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0 };
+  /* sent = created + updated + linked; each one is exactly one "PMOFlow → tool" row in the sync log */
+  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0 };
 
   const exec = (intent) => {
     const signed = sign(intent, secretFor(wsId, conn));
@@ -112,7 +113,10 @@ async function runSync(ctx, conn, st, opts) {
   const outbound = (intents) => {
     for (const it of intents) {
       const { signed, result } = exec(it);
-      if (result.ok) { S.recordResult(conn, signed, result, docs); sum.sent++; }
+      if (result.ok) {
+        S.recordResult(conn, signed, result, docs); sum.sent++;
+        if (it.op === 'create') sum.created++; else if (it.op === 'link') sum.linked++; else sum.updated++;
+      }
       const changed = it.op === 'update' ? ` (${(it.changed || []).map(f => S.FIELD_LABELS[f].toLowerCase()).join(', ')})` : '';
       entry({ dir: 'out', op: it.op, key: result.key || it.ref.key || null, workItemId: it.ref.workItemId, title: it.ref.title || '',
         result: result.ok ? 'ok' : 'failed', detail: (result.detail || '') + changed, intent: signed, requests: S.describeRequest(conn, signed) });
@@ -138,6 +142,15 @@ async function runSync(ctx, conn, st, opts) {
           summary: `From ${S.TOOLS[conn.tool].name} ${u.key}: work item "${u.data.title}" ${what}`.slice(0, 300) });
         entry({ dir: 'in', op: 'apply', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'ok', detail: 'Updated in PMOFlow: ' + what });
         sum.received++;
+        /* R11 §9: a "Done" from the tool is accepted, but flagged when work it depends on is still open */
+        const early = u.changes.some(c => c.field === 'status') ? doneBeforeDeps(st.docs, u.workItemId) : null;
+        if (early && early.flag) {
+          const detail = `${early.text}. Accepted as ${S.TOOLS[conn.tool].name} reported it; check the order.`;
+          entry({ dir: 'in', op: 'flag', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'flagged', flag: 'finished-before-dependencies', open: early.open.map(w => w.id), detail });
+          await store.appendEvent(wsId, { actor, action: 'sync', ref: 'workItem:' + u.workItemId,
+            summary: `From ${S.TOOLS[conn.tool].name} ${u.key}: "${u.data.title}": ${early.text}`.slice(0, 300) });
+          sum.early++;
+        }
       }
       for (const c of applied.conflicts) {
         entry({ dir: 'in', op: 'conflict', key: c.key, workItemId: c.workItemId, result: 'conflict',
@@ -160,10 +173,22 @@ async function runSync(ctx, conn, st, opts) {
   return { sum, entries, before, after, updates };
 }
 
+/* R11 §9: G1's engine helper is the one definition of "finished before the work it depends on":
+   doneBeforeDeps(docs, workId) -> {flag, open: [{id, title}], text}. */
+function doneBeforeDeps(docs, workItemId) {
+  const eng = engine();
+  if (!eng || typeof eng.doneBeforeDeps !== 'function') return { flag: false, open: [], text: '' };
+  try { return eng.doneBeforeDeps(docs, workItemId) || { flag: false, open: [], text: '' }; } catch (e) { return { flag: false, open: [], text: '' }; }
+}
+
 function syncSentence(conn, sum) {
-  const tool = S.TOOLS[conn.tool].name, parts = [];
-  if (sum.sent) parts.push(`${sum.sent} change${sum.sent === 1 ? '' : 's'} sent to ${tool}`);
+  const T = S.TOOLS[conn.tool], tool = T.name, noun = n => `${T.itemNoun}${n === 1 ? '' : 's'}`, parts = [];
+  if (sum.created) parts.push(`${sum.created} ${noun(sum.created)} created in ${tool}`);
+  if (sum.updated) parts.push(`${sum.updated} ${noun(sum.updated)} updated in ${tool}`);
+  if (sum.linked) parts.push(`${sum.linked} dependency link${sum.linked === 1 ? '' : 's'} set in ${tool}`);
+  if (sum.sent && !(sum.created || sum.updated || sum.linked)) parts.push(`${sum.sent} change${sum.sent === 1 ? '' : 's'} sent to ${tool}`);
   if (sum.received) parts.push(`${sum.received} task${sum.received === 1 ? '' : 's'} updated from ${tool}`);
+  if (sum.early) parts.push(`${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on (flagged)`);
   if (sum.conflicts) parts.push(`${sum.conflicts} conflict${sum.conflicts === 1 ? '' : 's'} settled (later change wins)`);
   if (sum.ignored) parts.push(`${sum.ignored} PMOFlow-owned date${sum.ignored === 1 ? '' : 's'} put back`);
   if (sum.refused) parts.push(`${sum.refused} refused by the relay`);
@@ -351,4 +376,4 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
   fail(404, 'unknown route'); return true;
 }
 
-module.exports = { handle, _internal: { sign, verify, secretFor, runSync, noticeContext, syncSentence } };
+module.exports = { handle, _internal: { sign, verify, secretFor, runSync, noticeContext, syncSentence, doneBeforeDeps } };

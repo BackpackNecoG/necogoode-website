@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, reportEvents, reportSubject, windowWords } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -21,7 +21,7 @@ export function byProgram(projects) {
   return Object.keys(g).sort((a, b) => (a === NO_PROGRAM) - (b === NO_PROGRAM) || a.localeCompare(b)).map(k => ({ program: k, projects: g[k] }));
 }
 function projectRow(j) {
-  const t = truthOf(j), s = projectStats(j.id), gi = gateInfo(j, s), c = financials(j), nb = blockerWho(t).length, first = whoActs(j, 1)[0];
+  const t = truthOf(j), s = projectStats(j.id), gi = gateInfo(j, s), c = financials(j), nb = j.status === 'live' ? 0 : blockingCount(t), first = whoActs(j, 1)[0];
   const when = gi.k === 'live' ? `<b style="color:var(--done)">${esc(gi.label)}</b><div class="hint">finished <span data-t="forecast">${esc(fmt(t.forecast))}</span></div>`
     : !s.total ? `<b class="pmo-muted" data-t="forecast">Not planned</b><div class="hint">deadline ${esc(fmt(j.target))}</div>`
     : `<b data-t="forecast" class="${t.buffer != null && t.buffer < 0 ? 'fail' : ''}">${esc(fmt(t.forecast))}</b> <span class="hint">/ ${esc(fmt(j.target))}</span><div class="hint">${gi.k === 'awaiting' ? `<a href="${link('/release/' + encodeURIComponent(j.id))}" data-link>${esc(gi.label)} ›</a>` : esc(bufferText(t)) || '—'}</div>`;
@@ -32,7 +32,7 @@ function projectRow(j) {
     <td>${summaryPill(summaryOf(j))}</td>
     <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
     <td class="pmo-nowrap" data-when>${when}</td>
-    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}"><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && t.stepsLeft != null ? ` · <b data-t="steps">${t.stepsLeft}</b> launch step${t.stepsLeft === 1 ? '' : 's'} left` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
+    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}" ${nb ? `title="${esc(blockingInfo(t).text)}"` : ''}><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && t.stepsLeft != null ? ` · <b data-t="steps">${t.stepsLeft}</b> launch step${t.stepsLeft === 1 ? '' : 's'} left` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
     <td class="pmo-nowrap pmo-num">${t.cost.show ? `<span data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</span><div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div>` : '<span class="hint">No budget or rates</span>'}</td>
     <td>${j.status === 'live' ? `<span class="badge b-done">Launched</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not launched ›</a>`}</td></tr>`;
 }
@@ -59,7 +59,7 @@ function financialsHTML(projects) {
   const pct = n => (n / max * 100).toFixed(2);
   const row = j => {
     const f = financials(j), over = f.planned && f.forecast > f.planned, v = f.planned ? f.forecast - f.planned : null;
-    return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>
+    return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>${evFlagsHTML(j) ? `<div class="pmo-evflags">${evFlagsHTML(j)}</div>` : ''}
         <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, expected ${money(f.forecast)}, actual ${money(f.actual)}`)}">
           ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span><span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
       <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
@@ -90,7 +90,7 @@ export function portfolioCSVRows(projects) {
     const t = truthOf(j), ev = t.ev || {};
     const n = v => v == null ? '' : Math.round(v * 100) / 100;
     const first = whoActs(j, 1)[0];
-    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, blockerWho(t).length, first ? whoName(first) : '', j.status === 'live' ? 0 : (t.stepsLeft == null ? '' : t.stepsLeft), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
+    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, j.status === 'live' ? 0 : blockingCount(t), first ? whoName(first) : '', j.status === 'live' ? 0 : (t.stepsLeft == null ? '' : t.stepsLeft), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
   }));
   return [head, ...rows];
 }
@@ -122,16 +122,20 @@ export function workloadRows() {
   return rows.map(r => {
     const pid = typeof r.person === 'object' && r.person ? r.person.id : r.person;
     const cap = Number((store.person(pid) || {}).capacity) > 0 ? Number(store.person(pid).capacity) : 4;
-    const capN = cap * 2; /* from the person doc so an edit shows immediately */
+    /* R11 G3 §4/§5: capacity is the engine's (holiday-aware when G1 provides it); cap × 2 only when the engine has no row */
+    const capN = typeof r.capacityNext14 === 'number' && isFinite(r.capacityNext14) ? r.capacityNext14 : cap * 2;
     const effN = typeof r.effortNext14 === 'number' ? r.effortNext14 : 0;
     return Object.assign({}, r, { pid, cap, capN, effN, overloaded: effN > capN });
   });
 }
 const d1 = n => Math.round(n * 10) / 10;
+/* R11 G3 §5: ONE workload list, in one order, for Portfolio and the Dashboard widget (same people, same numbers). */
+export function workloadList() {
+  return workloadRows().sort((a, b) => (b.effN / (b.capN || 1)) - (a.effN / (a.capN || 1)) || (b.open || 0) - (a.open || 0) || pname(a.pid).localeCompare(pname(b.pid)));
+}
 function workloadHTML() {
-  const rows = workloadRows();
+  const rows = workloadList();
   if (!rows.length) return '<div class="card"><h3>Workload</h3><div class="empty">No people in this workspace.</div></div>';
-  rows.sort((a, b) => (b.effN / (b.capN || 1)) - (a.effN / (a.capN || 1)) || b.open - a.open);
   const max = Math.max(1, ...rows.map(r => Math.max(r.effN, r.capN)));
   const over = rows.filter(r => r.overloaded).length;
   return `<div class="card"><h3>Workload <span class="n">${over ? `<span class="fail">${over} overloaded</span>` : rows.length + ' people'}</span></h3><div class="hint" style="margin:-4px 0 10px">Planned effort in the next 14 days against each person’s capacity, across every project</div>
@@ -194,9 +198,11 @@ function matrixHTML(risks) {
 function linkedWork(r) {
   const ws = (r.workItems || []).map(id => store.get('workItem', id)).filter(Boolean);
   if (!ws.length) return '';
-  /* R10 §7: each linked task shows its LIVE state (never a status frozen into the risk's text) */
-  const STATE = { idle: 'not started', prog: 'in progress', done: 'done' };
-  return `<div class="pmo-rlinks"><span class="hint">Affects</span>${ws.map(w => `<a class="chip" href="${link('/project/' + encodeURIComponent(w.projectId) + '?task=' + encodeURIComponent(w.id))}" data-link data-risk-work="${esc(w.id)}" data-risk-work-state="${esc(w.status)}">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)} · <span class="pmo-rstate">${esc(STATE[w.status] || 'not started')}</span></a>`).join('')}</div>`;
+  /* R10 §7 / R11 §5: each linked task shows its LIVE state, in the same words the plan uses (its status name, the
+     engine's one lateness) — never a status frozen into the risk */
+  const state = w => { const j = store.get('project', w.projectId), li = lateOf(w);
+    return [String(j ? statusName(w, j) : w.status).toLowerCase(), li ? li.text.toLowerCase() : ''].filter(Boolean).join(' · '); };
+  return `<div class="pmo-rlinks"><span class="hint">Affects</span>${ws.map(w => `<a class="chip" href="${link('/project/' + encodeURIComponent(w.projectId) + '?task=' + encodeURIComponent(w.id))}" data-link data-risk-work="${esc(w.id)}" data-risk-work-state="${esc(w.status)}">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)} · <span class="pmo-rstate">${esc(state(w))}</span></a>`).join('')}</div>`;
 }
 /* R8: an open risk whose linked work is all done is probably over. Say so, and offer one tap to close it. */
 export function likelyResolved(r) {

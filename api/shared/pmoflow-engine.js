@@ -195,7 +195,18 @@
   function changeSummary(x, docs) {
     const procs = x && Array.isArray(x.processes) && !x.tobe ? (docs ? linkedProcesses(docs, x) : []) : x ? [x] : [];
     const out = { added: 0, changed: 0, removed: 0 };
-    procs.forEach(p => { if (!p || !Array.isArray(p.tobe) || !p.tobe.length) return; const d = diffSummary(p); out.added += d.added; out.changed += d.changed; out.removed += d.removed; });
+    // R11 §8: only steps count (steps, waits, messages, calls to other processes), never choices (decision /
+    // parallel gateways), so "10 steps · 4 new · 6 changed" can never exceed the step count.
+    out.steps = 0;
+    procs.forEach(p => {
+      if (!p || !Array.isArray(p.tobe) || !p.tobe.length) return;
+      const d = diffProcess(p), idx = {};
+      allNodes(p.tobe).forEach(n => { if (n && n.id) idx[n.id] = n; });
+      const steps = flatSteps(p.tobe);
+      out.steps += steps.length;
+      steps.forEach(n => { const st = d.nodes[n.id]; if (st === 'new') out.added++; else if (st === 'changed') out.changed++; });
+      out.removed += (d.removed || []).filter(r => r && isStep(r)).length;
+    });
     out.total = out.added + out.changed + out.removed;
     out.text = changeText(out);
     return out;
@@ -450,7 +461,7 @@
       let res;
       if (w.status === 'done') {
         const fin = isDate(w.doneAt) ? w.doneAt : isDate(w.due) ? w.due : null;
-        res = { forecast: fin, start: isDate(w.start) ? w.start : fin, sched: 'done', late: false, pastDueDays: 0, slipDays: fin && isDate(w.due) ? Math.max(0, businessDaysBetween(w.due, fin)) : 0, basis: { kind: 'done' } };
+        res = { forecast: fin, start: isDate(w.start) ? w.start : fin, sched: 'done', late: false, pastDueDays: 0, lateDays: 0, slipDays: fin && isDate(w.due) ? Math.max(0, businessDaysBetween(w.due, fin)) : 0, basis: { kind: 'done' } };
       } else {
         const dur = duration(w);
         // R9 §3: a weekend due date counts as the next Monday; no forecast lands on a weekend.
@@ -493,6 +504,8 @@
         // R9 §1 one notion of late: past due ('late') or forecast after due ('slip').
         res.late = res.sched === 'late' || res.sched === 'slip';
         res.pastDueDays = res.sched === 'late' ? businessDaysBetween(due, isDate(today) ? today : due) : 0;
+        // R11 §5 ONE lateness number per task: business days from its due date to its expected finish.
+        res.lateDays = res.late ? Math.max(res.slipDays, res.pastDueDays) : 0;
         if (viaId && best && due && best > due) {
           if (basis.kind === 'data') { res.cause = basis.ref; res.causeWork = basis.resolver; }
           else {
@@ -752,9 +765,18 @@
       if (plannedB.length) reasons.push(joinList(plannedB.map(b => b.name), 3) + ' ' + isAre(plannedB.length) + ' not available yet; work is planned to get ' + (plannedB.length === 1 ? 'it' : 'them'));
     }
     if (effortReason && rag !== 'grey' && !allDone) reasons.splice(effortOnly ? 0 : 1, 0, effortReason);
-    const label = effortOnly ? 'Behind on effort' : RAG_LABEL[rag], labelAdvanced = effortOnly ? 'Behind on effort' : RAG_LABEL_ADVANCED[rag];
+    // R11 §3: a launch day on a weekend, holiday or workspace day off is never "On track".
+    const ld = project ? launchDate(docs, project) : null;
+    let launchFlag = null;
+    if (ld && ld.problem && ld.source === 'window' && project.status !== 'live') {
+      launchFlag = 'Launch day ' + ld.problem + ' is a day off: pick a business day';
+      reasons.unshift(launchFlag);
+      if (rag === 'green') rag = 'amber';
+    }
+    let label2 = effortOnly ? 'Behind on effort' : RAG_LABEL[rag], labelAdv2 = effortOnly ? 'Behind on effort' : RAG_LABEL_ADVANCED[rag];
+    if (launchFlag && (label2 === RAG_LABEL.amber || label2 === 'Behind on effort') && !late.length) { label2 = 'Launch day is a day off'; labelAdv2 = label2; }
     return { project, items, open, allDone, finish, target, bufferDays, late, pastDue, finishAfterDue, runningLate: finishAfterDue, blockers, rag,
-      label, labelAdvanced, reasons, fc, ev, behindEffort };
+      label: label2, labelAdvanced: labelAdv2, reasons, fc, ev, behindEffort, today: today || null, launchFlag };
   }
   // R10 §3 the ONE launch date: the launch window's day when set, else the deadline. Every screen (Launch page,
   // dashboard "Upcoming launches", project header) shows this. {date, source: 'window'|'deadline'|null, problem}
@@ -770,6 +792,7 @@
   function launchDate(docs, prj) {
     const project = projOf(docs, prj);
     if (!project) return { date: null, source: null, problem: null };
+    if (docs) syncCalendar(docs);
     const w = windowDate(project.cutover && project.cutover.window);
     if (w) return { date: w, source: 'window', problem: launchWindowProblem(w) };
     return { date: isDate(project.target) ? project.target : null, source: isDate(project.target) ? 'deadline' : null, problem: null };
@@ -872,7 +895,14 @@
   function hashStr(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
   // R7 per-section fingerprint for re-approval scoping. Save it on the approval (approval.fingerprint) when a
   // section is approved; readiness then makes that section stale only when ITS OWN steps, information
-  // definitions, tests or launch-day tasks changed. Format "s:<h>;d:<h>;t:<h>;c:<h>".
+  // definitions, tests or launch-day tasks changed. Format "s:<h>;d:<h>;t:<h>;c:<h>;k:<step>=<h>.<h>…,…".
+  // R11: `k` keeps a short hash per step field (STEP_FIELDS order), so a reopened approval can say WHAT changed
+  // ("“Capture banking details” owner changed"). ownerRole, raci and timer are part of a step: changing them reopens it.
+  const STEP_FIELDS = [['title', 'name'], ['owner', 'owner'], ['data', 'information'], ['touches', 'teams involved'], ['subs', 'sub-steps'],
+    ['sla', 'time limit'], ['system', 'system'], ['calls', 'called process'], ['raci', 'RACI'], ['timer', 'timer'], ['type', 'kind']];
+  function stepFieldHashes(st) {
+    return STEP_FIELDS.map(([f]) => hashStr(JSON.stringify(f === 'owner' ? [st.owner, st.ownerRole] : st[f])).slice(0, 4)).join('.');
+  }
   function sectionParts(docs, project, bu) {
     const people = personMap(docs);
     const { stepBus } = sectionHelpers(people);
@@ -880,8 +910,9 @@
     linkedProcesses(docs, project).forEach(p => allNodes(p.tobe).forEach(n => {
       if (!n || isGateway(n) || n.type === 'end') return;
       if (!stepBus(n).includes(bu)) return;
-      stepsOut.push({ pid: p.id, id: n.id, title: n.title || '', type: n.type || '', owner: n.owner || '', data: stepData(n).slice().sort(),
-        touches: (n.touches || []).map(String).sort(), subs: (n.subs || []).map(x => x && x.title || ''), sla: n.sla == null ? '' : n.sla, system: n.system || '', calls: n.calls || '' });
+      stepsOut.push({ pid: p.id, id: n.id, title: n.title || '', type: n.type || '', owner: n.owner || '', ownerRole: n.ownerRole || '', data: stepData(n).slice().sort(),
+        touches: (n.touches || []).map(String).sort(), subs: (n.subs || []).map(x => x && x.title || ''), sla: n.sla == null ? '' : n.sla, system: n.system || '', calls: n.calls || '',
+        raci: n.raci == null ? '' : n.raci, timer: n.timer == null ? '' : n.timer });
     }));
     const dataIds = [...new Set(stepsOut.flatMap(x => x.data))].sort();
     const dataOut = dataIds.map(id => { const d = get(docs, 'dataElement', id) || {}; return { id, name: d.name || '', fields: d.fields || [] }; });
@@ -889,10 +920,31 @@
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
     const tasks = (project.cutover && Array.isArray(project.cutover.tasks) ? project.cutover.tasks.filter(Boolean) : []).filter(t => taskBu(people, t) === bu)
       .map(t => ({ id: t.id || '', task: t.task || t.title || '', owner: t.owner || '', gonogo: !!t.gonogo, order: t.order == null ? '' : t.order, plannedStart: t.plannedStart || '', durationMins: t.durationMins == null ? '' : t.durationMins }));
-    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)) };
+    const k = stepsOut.map(st => encodeURIComponent(st.pid + '/' + st.id) + '=' + stepFieldHashes(st)).join(',');
+    const titles = {}; stepsOut.forEach(st => { titles[st.pid + '/' + st.id] = st.title; });
+    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)), k, titles };
   }
-  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c; }
-  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtc]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c + (parts.k != null ? ';k:' + parts.k : ''); }
+  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtck]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function fpSteps(k) { const out = {}; String(k || '').split(',').filter(Boolean).forEach(x => { const i = x.indexOf('='); if (i > 0) out[decodeURIComponent(x.slice(0, i))] = x.slice(i + 1).split('.'); }); return out; }
+  // R11 (partStepChanges): what changed in a part's steps since the approval, in words: [{key, title, text}] ("“X” owner changed").
+  // Needs the per-step hashes (k); approvals saved before R11 have none, so [] (the caller says "its steps").
+  function partStepChanges(wasK, now, docs) {
+    if (wasK == null) return [];
+    const was = fpSteps(wasK), cur = fpSteps(now.k), out = [];
+    Object.keys(cur).forEach(key => {
+      const t = '“' + (now.titles[key] || 'a step') + '”';
+      if (!was[key]) return out.push({ key, title: now.titles[key] || '', text: t + ' added' });
+      const f = STEP_FIELDS.filter((x, i) => was[key][i] !== cur[key][i]).map(x => x[1]);
+      if (f.length) out.push({ key, title: now.titles[key] || '', text: t + ' ' + joinList(f) + ' changed' });
+    });
+    Object.keys(was).filter(key => !cur[key]).forEach(key => {
+      const [pid, id] = key.split('/'); const pr = docs ? get(docs, 'process', pid) : null;
+      const n = pr ? [...allNodes(pr.tobe), ...allNodes(pr.asis)].find(x => x && x.id === id) : null;
+      out.push({ key, title: (n && n.title) || '', text: (n && n.title ? '“' + n.title + '”' : 'a step') + ' is no longer in this part' });
+    });
+    return out;
+  }
   function sectionFingerprint(docs, projectId, bu) {
     const project = get(docs, 'project', projectId);
     return project ? fpString(sectionParts(docs, project, bu)) : '';
@@ -947,6 +999,144 @@
       if (reason) out.push({ dataId: id, reason });
     })));
     return out;
+  }
+
+  // R11 §1 THE testing facts (one function; the gate check, testingTruth, perBU, the matrix and the audit strings all
+  // read it). Scope: test cases on information the project changes + UAT scripts + saved scenarios.
+  //  - Each phase keeps its own latest result per test: "Try it out" = dev/sit/system runs, "Business check" = uat
+  //    runs. Recording one phase never changes the other phase's counts.
+  //  - 'not-run'/'skipped' never override; a script pass without evidence counts only from a 'ci' run.
+  //  - A test linked to an open problem whose fix is not done (defect state new/triaged/in progress) is "waiting for
+  //    a fix": it never counts as passed, in any phase.
+  //  - Per test: 'fix' (held by an open problem) > 'failed' (latest fail in either phase) > 'blocked' (business) >
+  //    'passed' (latest business check passed) > 'notRun'.
+  //  - Coverage: every piece of changed information needs at least one non-custom case AND a case on each of its rule
+  //    fields; every new or changed step (and gateway) needs a script. Information the Future steps use that the
+  //    project does not change needs no tests (listed in notChanged, never counted as a gap).
+  const FIX_DONE = ['fixed', 'verified', 'closed'];
+  function rawDefectState(w) { return String((w && w.defectStatus) || '').trim().toLowerCase().replace(/[\s_]+/g, '-'); }
+  function problemFixDone(w) { return !!w && (w.status === 'done' || FIX_DONE.includes(rawDefectState(w))); }
+  // {testId: defect workItem id} for open problems whose fix is not done yet
+  function heldTests(docs, projectId) {
+    const m = {};
+    list(docs, 'workItem').filter(w => w.projectId === projectId && w.kind === 'defect' && !problemFixDone(w)).forEach(w => {
+      const k = w.testRef && (w.testRef.caseId || w.testRef.scriptId); if (k && !m[k]) m[k] = w.id;
+    });
+    return m;
+  }
+  function projectScripts(docs, project) {
+    return (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, project.id)).filter(Boolean)
+      .concat(Array.isArray(project.uatScenarios) ? project.uatScenarios.filter(Boolean) : []);
+  }
+  function testFacts(docs, project) {
+    const changed = changedInformation(docs, project);
+    const changedSet = new Set(changed.map(x => x.dataId));
+    const dataIdx = byId(list(docs, 'dataElement'));
+    const cases = list(docs, 'testCase').filter(c => changedSet.has(c.dataId));
+    const scripts = projectScripts(docs, project);
+    const caseIds = cases.map(c => c.id), scriptIds = scripts.map(s => s.id);
+    const ids = caseIds.concat(scriptIds);
+    const runs = list(docs, 'testRun').filter(r => r.projectId === project.id).sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+    const phase = { system: {}, uat: {} }, noEvidence = new Set(), skipped = new Set(), byEnv = {};
+    ENVS.forEach(e => { byEnv[e] = {}; });
+    runs.forEach(r => {
+      const ph = stageOfEnv(r.env);
+      (r.results || []).forEach(x => {
+        const k = x && (x.caseId || x.scriptId); if (!k) return;
+        if (x.outcome === 'not-run' || x.outcome === 'skipped') { if (byEnv[r.env] && !byEnv[r.env][k]) skipped.add(r.env + ':' + k); return; }
+        if (x.scriptId && x.outcome === 'pass' && r.source !== 'ci' && !String(x.evidence || '').trim()) { noEvidence.add(k); return; }
+        const v = { outcome: x.outcome, runId: r.id, at: r.at || null, by: r.by || null };
+        if (byEnv[r.env]) { byEnv[r.env][k] = x.outcome; skipped.delete(r.env + ':' + k); }
+        if (ph) phase[ph][k] = v;
+      });
+    });
+    const held = heldTests(docs, project.id);
+    const statusOf = k => {
+      const s = phase.system[k] && phase.system[k].outcome, b = phase.uat[k] && phase.uat[k].outcome;
+      if (held[k]) return 'fix';
+      if (s === 'fail' || b === 'fail') return 'failed';
+      if (b === 'blocked') return 'blocked';
+      if (b === 'pass') return 'passed';
+      return 'notRun';
+    };
+    const status = {}; ids.forEach(k => { status[k] = statusOf(k); });
+    const stageCount = (key, list_) => {
+      const m = phase[key], o = { total: list_.length, passed: 0, failed: 0, blocked: 0, notRun: 0 };
+      list_.forEach(k => {
+        const v = m[k] && m[k].outcome;
+        if (held[k] && v) o.failed++;
+        else if (v === 'pass') o.passed++;
+        else if (v === 'fail') o.failed++;
+        else if (v === 'blocked') o.blocked++;
+        else o.notRun++;
+      });
+      o.run = runs.some(r => stageOfEnv(r.env) === key);
+      return o;
+    };
+    const system = Object.assign({ key: 'system', label: 'Try it out' }, stageCount('system', caseIds));
+    const uat = Object.assign({ key: 'uat', label: 'Business sign-off' }, stageCount('uat', ids));
+    system.done = !caseIds.length || (system.run && !system.failed);
+    uat.done = !ids.length || uat.passed === ids.length;
+    // coverage
+    const elements = changed.map(x => {
+      const d = dataIdx[x.dataId] || { id: x.dataId };
+      const mine = cases.filter(c => c.dataId === x.dataId);
+      const fields = (d.fields || []).filter(Boolean);
+      const unc = fields.filter(f => !mine.some(c => c.kind !== 'custom' && tokens(c.field) === tokens(f.name))).map(f => f.name);
+      const state = !mine.length ? 'no-cases' : unc.length ? 'fields-missing' : 'covered';
+      return { dataId: x.dataId, name: d.name || 'some information', reason: x.reason, cases: mine.length, fields: fields.length, fieldsCovered: fields.length - unc.length,
+        uncoveredFields: unc, covered: state === 'covered', state };
+    });
+    const procs = linkedProcesses(docs, project);
+    const scriptGaps = [];
+    procs.forEach(p => {
+      const diff = diffProcess(p);
+      flatSteps(p.tobe).concat(flatGateways(p.tobe)).forEach(s => {
+        const st = diff.nodes[s.id];
+        if ((st === 'new' || st === 'changed') && !scripts.some(x => x.pid === p.id && x.step === s.id)) scriptGaps.push({ pid: p.id, step: s.id, title: s.title || 'untitled step' });
+      });
+    });
+    const used = [...new Set(procs.flatMap(p => flatSteps(p.tobe).flatMap(stepData)))];
+    const notChanged = used.filter(id => !changedSet.has(id)).map(id => ({ dataId: id, name: (dataIdx[id] && dataIdx[id].name) || 'some information',
+      cases: list(docs, 'testCase').filter(c => c.dataId === id).length }));
+    const notCovered = elements.filter(e => !e.covered);
+    const uncoveredFields = [];
+    elements.forEach(e => e.uncoveredFields.forEach(f => uncoveredFields.push({ dataId: e.dataId, field: f })));
+    const fieldsTotal = elements.reduce((a, e) => a + e.fields, 0);
+    const coverage = { denominator: 'information this project changes', elements, needTests: elements.length, haveTests: elements.length - notCovered.length,
+      notCovered: notCovered.map(e => e.dataId), noCases: elements.filter(e => e.state === 'no-cases').map(e => e.dataId),
+      uncoveredFields, fieldsTotal, fieldsCovered: fieldsTotal - uncoveredFields.length, scriptGaps,
+      gaps: notCovered.length + scriptGaps.length, notChanged };
+    const work = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    const defects = work.filter(w => w.kind === 'defect' && w.status !== 'done').map(w => w.id);
+    const n = s => ids.filter(k => status[k] === s);
+    return { project, cases, scripts, caseIds, scriptIds, ids, runs, phase, byEnv, skipped, noEvidence, held, status, stages: { system, uat }, coverage, defects,
+      passed: n('passed'), failed: n('failed'), fix: n('fix'), blocked: n('blocked'), notRun: n('notRun'), changed };
+  }
+
+  // R11 §2 separation of duties for approving one team's part. Nobody approves a part when they are the project
+  // manager, the launch owner, own a step in that part, or recorded any test result for that part's tests. The
+  // Admin role grants no exemption. Returns null when the person may approve, else {rule, text}.
+  function partBars(docs, project, bu, ctx) {
+    ctx = ctx || {};
+    const people = personMap(docs);
+    const sc = ctx.scope || sectionScope(docs, project, bu);
+    const tests = new Set(sc.caseIds.concat(sc.scriptIds));
+    const runs = ctx.runs || list(docs, 'testRun').filter(r => r.projectId === project.id);
+    const recorders = [...new Set(runs.filter(r => r.by && (r.results || []).some(x => { const k = x && (x.caseId || x.scriptId); return k && tests.has(k); })).map(r => r.by))].sort();
+    const stepOwners = [...new Set(sc.steps.map(x => x.s.owner).filter(Boolean))].sort();
+    return { recorders, stepOwners, pm: project.owner || null, launchOwner: project.releaseManager || project.owner || null, people };
+  }
+  function approvalBar(docs, prj, bu, personId, ctx) {
+    const project = projOf(docs, prj);
+    if (!project || !personId) return { rule: 'unknown', text: 'Choose who approves.' };
+    const b = ctx && ctx.bars ? ctx.bars : partBars(docs, project, bu, ctx);
+    const nm = nameOf(docs, personId);
+    if (personId === b.pm) return { rule: 'project-manager', text: nm + ' is the project manager, so they can’t approve a team’s part.' };
+    if (personId === b.launchOwner) return { rule: 'launch-owner', text: nm + ' is the launch owner, so they can’t approve a team’s part.' };
+    if (b.stepOwners.includes(personId)) return { rule: 'step-owner', text: nm + ' does steps in ' + bu + '’s part, so someone else must approve it.' };
+    if (b.recorders.includes(personId)) return { rule: 'recorded-tests', text: nm + ' recorded test results for ' + bu + '’s part, so someone else must approve it.' };
+    return null;
   }
 
   function readiness(docs, projectId, today) {
@@ -1061,98 +1251,68 @@
     //    spec need any case); no open defects.
     // R8: tests are needed only for information the project changes (new, fixed or rule changes). Stages: any
     // dev/sit/system run counts toward "Try it out" (system); uat runs toward "Business sign-off".
-    const changedSet = new Set(changedInformation(docs, project).map(x => x.dataId));
-    const usedSet = changedSet;
-    const cases = list(docs, 'testCase').filter(c => usedSet.has(c.dataId));
+    // R11 §1: built from testFacts, the same facts testingTruth, perBU and the matrix read.
+    const tf = testFacts(docs, project);
+    const changedSet = new Set(tf.changed.map(x => x.dataId));
+    const cases = tf.cases;
     const caseIdx = byId(cases);
-    const scripts = (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, projectId))
-      .concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []);
+    const scripts = tf.scripts;
     const scriptIdx = byId(scripts);
-    const runs = list(docs, 'testRun').filter(r => r.projectId === projectId);
-    const lastDev = latestBy(runs.filter(r => r.env === 'dev'), 'at');
+    const runs = tf.runs;
     const lastUat = latestBy(runs.filter(r => r.env === 'uat'), 'at');
-    const rid = x => x.caseId || x.scriptId;
-    const noEvidence = new Set(), skipped = new Set();
-    const latestPerItem = env => {
-      const m = {};
-      runs.filter(r => r.env === env).sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')))
-        .forEach(r => (r.results || []).forEach(x => {
-          const k = rid(x); if (!k) return;
-          if (x.outcome === 'not-run' || x.outcome === 'skipped') { if (!m[k]) skipped.add(env + ':' + k); return; }
-          if (x.scriptId && x.outcome === 'pass' && r.source !== 'ci' && !String(x.evidence || '').trim()) { noEvidence.add(k); return; }
-          m[k] = x.outcome; skipped.delete(env + ':' + k);
-        }));
-      return m;
-    };
-    const byEnv = {};
-    ENVS.forEach(env => { byEnv[env] = latestPerItem(env); });
     const sysRuns = runs.filter(r => stageOfEnv(r.env) === 'system');
-    const sysOut = {}, anyOut = {};
-    runs.slice().sort((a, b) => String(a.at || '').localeCompare(String(b.at || ''))).forEach(r => (r.results || []).forEach(x => {
-      const k = rid(x); if (!k || x.outcome === 'not-run' || x.outcome === 'skipped') return;
-      if (x.scriptId && x.outcome === 'pass' && r.source !== 'ci' && !String(x.evidence || '').trim()) return;
-      if (stageOfEnv(r.env) === 'system') sysOut[k] = x.outcome;
-      if (stageOfEnv(r.env)) anyOut[k] = x.outcome;
-    }));
-    const failing = new Set(), blocked = new Set();
-    Object.keys(sysOut).forEach(k => { if (sysOut[k] === 'fail') failing.add(k); });
-    const uatOut = byEnv.uat;
-    const coveredUat = new Set(Object.keys(uatOut));
-    Object.keys(uatOut).forEach(k => { if (uatOut[k] === 'fail') failing.add(k); else if (uatOut[k] === 'blocked') blocked.add(k); });
-    const unrun = cases.map(c => c.id).concat(scripts.map(x => x.id)).filter(id => !coveredUat.has(id));
+    // a failure recorded in this project's runs blocks even for a test outside the counted scope (never counted)
+    const outside = k => !tf.ids.includes(k);
+    const failing = new Set(tf.failed.concat(Object.keys(tf.phase.system).concat(Object.keys(tf.phase.uat)).filter(k => outside(k) && ((tf.phase.system[k] || {}).outcome === 'fail' || (tf.phase.uat[k] || {}).outcome === 'fail'))));
+    const blocked = new Set(tf.blocked), held = tf.fix.slice();
+    const unrun = tf.notRun.slice();
     const changedData = usedData.filter(d => changedSet.has(d));
-    const noCases = changedData.filter(d => !cases.some(c => c.dataId === d));
-    const uncoveredFields = [];
-    changedData.forEach(d => ((dataIdx[d] && dataIdx[d].fields) || []).forEach(f => {
-      const k = tokens(f.name);
-      if (!cases.some(c => c.dataId === d && c.kind !== 'custom' && tokens(c.field) === k)) uncoveredFields.push({ dataId: d, field: f.name });
-    }));
-    const defects = work.filter(w => w.kind === 'defect' && w.status !== 'done').map(w => w.id);
+    const noCases = tf.coverage.noCases.slice();
+    const uncoveredFields = tf.coverage.uncoveredFields.slice();
+    const scriptGaps = tf.coverage.scriptGaps.slice();
+    const defects = tf.defects.slice();
+    const noEvidence = tf.noEvidence;
     const missingRuns = [cases.length && !sysRuns.length ? 'system' : null, (cases.length || scripts.length) && !lastUat ? 'uat' : null].filter(Boolean);
     const tname = id => caseIdx[id] ? dn(caseIdx[id].dataId) + ' ' + (caseLabel(docs, id) || 'case') + ' · ' + (caseIdx[id].field || 'case') + ' (' + (caseIdx[id].kind || 'case') + ')'
       : scriptIdx[id] ? 'UAT script "' + (scriptIdx[id].title || 'untitled') + '"' : 'a test outside this project';
-    const tp = failing.size === 0 && blocked.size === 0 && unrun.length === 0 && defects.length === 0 && missingRuns.length === 0 && noCases.length === 0 && uncoveredFields.length === 0;
-    const skippedIds = [...new Set([...skipped].map(x => x.slice(x.indexOf(':') + 1)))];
+    const tp = failing.size === 0 && blocked.size === 0 && held.length === 0 && unrun.length === 0 && defects.length === 0 && missingRuns.length === 0 && noCases.length === 0 && uncoveredFields.length === 0 && scriptGaps.length === 0;
+    const skippedIds = [...new Set([...tf.skipped].map(x => x.slice(x.indexOf(':') + 1)))];
     const tDetail = [];
     if (missingRuns.length) tDetail.push('No ' + joinList(missingRuns.map(e => e === 'system' ? 'system test ("Try it out")' : 'UAT (business sign-off)')) + ' run has been recorded.');
     if (noCases.length) tDetail.push(joinList(noCases.map(dn)) + (noCases.length === 1 ? ' has' : ' have') + ' no test cases.');
     if (uncoveredFields.length) tDetail.push(nWord(uncoveredFields.length, 'spec field') + ' ' + (uncoveredFields.length === 1 ? 'has' : 'have') + ' no test case: ' + joinList(uncoveredFields.map(x => dn(x.dataId) + ' · ' + x.field), 4) + '.');
+    if (scriptGaps.length) tDetail.push(nWord(scriptGaps.length, 'changed step') + ' ' + (scriptGaps.length === 1 ? 'has' : 'have') + ' no business check script: ' + joinList(scriptGaps.map(x => '"' + x.title + '"'), 3) + '.');
+    if (held.length) tDetail.push(nWord(held.length, 'test') + ' ' + (held.length === 1 ? 'waits' : 'wait') + ' for an open problem to be fixed: ' + joinList(held.map(tname), 3) + '.');
     if (failing.size) tDetail.push(nWord(failing.size, 'test') + ' failed on its latest run: ' + joinList([...failing].map(tname), 3) + '.');
     if (blocked.size) tDetail.push(nWord(blocked.size, 'test') + ' ' + (blocked.size === 1 ? 'was' : 'were') + ' blocked on the latest UAT result: ' + joinList([...blocked].map(tname), 3) + '.');
-    if (unrun.length) tDetail.push(nWord(unrun.length, 'test') + ' ' + (unrun.length === 1 ? 'was' : 'were') + ' never run in UAT: ' + joinList(unrun.map(tname), 3) + '.');
+    if (unrun.length) tDetail.push(nWord(unrun.length, 'test') + ' ' + (unrun.length === 1 ? 'has' : 'have') + ' not passed the business check yet: ' + joinList(unrun.map(tname), 3) + '.');
     if (skippedIds.length) tDetail.push(nWord(skippedIds.length, 'test') + ' skipped.');
     if (noEvidence.size) tDetail.push(nWord(noEvidence.size, 'UAT script pass') + ' had no evidence and ' + (noEvidence.size === 1 ? 'does' : 'do') + ' not count.');
     if (defects.length) tDetail.push(nWord(defects.length, 'defect') + ' ' + isAre(defects.length) + ' still open: ' + joinList(defects.map(wt), 3) + '.');
     if (tp) tDetail.push(nWord(cases.length, 'data test case') + ' and ' + nWord(scripts.length, 'UAT script') + ' passed; no open defects.');
     const envSummary = {};
     ENVS.forEach(env => {
-      const o = byEnv[env], sm = { pass: 0, fail: 0, blocked: 0, skipped: 0 };
+      const o = tf.byEnv[env] || {}, sm = { pass: 0, fail: 0, blocked: 0, skipped: 0 };
       Object.keys(o).forEach(k => { if (sm[o[k]] != null) sm[o[k]]++; });
-      sm.skipped = [...skipped].filter(x => x.startsWith(env + ':')).length;
+      sm.skipped = [...tf.skipped].filter(x => x.startsWith(env + ':')).length;
       envSummary[env] = sm;
     });
-    const allTests = cases.map(c => c.id).concat(scripts.map(x => x.id));
-    const stages = {
-      system: { key: 'system', label: 'Try it out', total: cases.length, run: sysRuns.length > 0, passed: cases.filter(c => sysOut[c.id] === 'pass').length,
-        failed: cases.filter(c => sysOut[c.id] === 'fail').length },
-      uat: { key: 'uat', label: 'Business sign-off', total: allTests.length, run: !!lastUat, passed: allTests.filter(id => uatOut[id] === 'pass').length,
-        failed: allTests.filter(id => uatOut[id] === 'fail').length, blocked: allTests.filter(id => uatOut[id] === 'blocked').length },
-    };
-    stages.system.done = !cases.length || (stages.system.run && !stages.system.failed);
-    stages.uat.done = !allTests.length || stages.uat.passed === allTests.length;
+    const allTests = tf.ids;
+    const stages = { system: Object.assign({}, tf.stages.system), uat: Object.assign({}, tf.stages.uat) };
     checks.push({ id: 'tests-passed', label: 'Tests passed', pass: tp, detail: tDetail.join(' '),
-      total: allTests.length, passed: allTests.filter(id => anyOut[id] === 'pass').length, stages, changedData, cases: cases.map(c => c.id),
-      items: [...new Set([...failing, ...blocked, ...unrun, ...defects, ...noCases])], failing: [...failing], blocked: [...blocked], unrun, defects, noCases,
-      uncoveredFields, skipped: skippedIds, noEvidence: [...noEvidence], byEnv: envSummary, scripts: scripts.map(x => x.id) });
+      total: allTests.length, passed: tf.passed.length, stages, changedData, cases: cases.map(c => c.id),
+      items: [...new Set([...failing, ...held, ...blocked, ...unrun, ...defects, ...noCases])], failing: [...failing], held, blocked: [...blocked], unrun, defects, noCases,
+      uncoveredFields, scriptGaps, skipped: skippedIds, noEvidence: [...noEvidence], byEnv: envSummary, scripts: scripts.map(x => x.id), coverage: tf.coverage });
 
     // grants-closed: requested/approved block; active ones are expired automatically at go-live.
     const grants = list(docs, 'grant').filter(g => g.projectId === projectId);
     const gname = g => dn(g.dataId) + ' (' + String(g.env || '').toUpperCase() + ', ' + (g.access || 'access') + ')';
-    const blockG = grants.filter(g => g.status === 'requested' || g.status === 'approved');
-    const expG = grants.filter(g => g.status === 'active');
+    // R11 §3: one set of words with grantCounts: waiting (requested) blocks; open (approved/active) closes at launch.
+    const blockG = grants.filter(g => grantState(g, today) === 'waiting');
+    const expG = grants.filter(g => grantState(g, today) === 'open');
     checks.push({ id: 'grants-closed', label: 'Access grants closed', pass: blockG.length === 0,
-      detail: (blockG.length ? 'Still ' + joinList([...new Set(blockG.map(g => g.status))]) + ': ' + joinList(blockG.map(gname)) + '. Deny, revoke or activate ' + (blockG.length === 1 ? 'it' : 'them') + ' first. ' : 'No pending access requests. ') +
-        'Active grants expire automatically at go-live' + (expG.length ? ' (' + joinList(expG.map(gname)) + ').' : '.'),
+      detail: (blockG.length ? nWord(blockG.length, 'access request') + ' ' + (blockG.length === 1 ? 'is' : 'are') + ' waiting for approval: ' + joinList(blockG.map(gname)) + '. Approve or decline ' + (blockG.length === 1 ? 'it' : 'them') + ' first. ' : 'No access requests waiting for approval. ') +
+        (expG.length ? nWord(expG.length, 'open grant') + ' close' + (expG.length === 1 ? 's' : '') + ' automatically at launch (' + joinList(expG.map(gname)) + ').' : 'Open grants close automatically at launch.'),
       items: blockG.concat(expG).map(g => g.id), blocking: blockG.map(g => g.id), expiring: expG.map(g => g.id) });
 
     // bu-signoff: latest approval per BU approved with step-up and not stale.
@@ -1161,7 +1321,7 @@
     // R7: approvals count any time (no lock behind the other checks); staleness is scoped per section.
     const releaseManager = project.releaseManager || project.owner || null;
     const excluded = [...new Set([project.owner, releaseManager].filter(Boolean))];
-    const allApprovals = list(docs, 'approval').filter(a => a.projectId === projectId);
+    const allApprovals = list(docs, 'approval').filter(a => a.projectId === projectId && a.bu && !a.kind);
     const approvals = allApprovals.filter(a => !excluded.includes(a.approver));
     const ownerApprovals = allApprovals.length - approvals.length;
     // R8: only teams whose part changed (new/changed steps, changed triggers) or who own launch-plan tasks approve.
@@ -1171,28 +1331,31 @@
     // R9 §13 separation of duties ("two different people"): when one person recorded every test result of a
     // section, that person cannot approve it; someone else must. Never a dead end: the section then needs an
     // approver chosen (needsApprover, sodBlockedBy names the recorder).
-    const recordersOf = bu => [...new Set(runs.filter(r => r.by && (r.results || []).some(x => { const k = x && (x.caseId || x.scriptId); return k && testBus(k).includes(bu); })).map(r => r.by))].sort();
-    const soleRecorder = {};
-    bus.forEach(bu => { const rc = recordersOf(bu); soleRecorder[bu] = rc.length === 1 ? rc[0] : null; });
+    // R11 §2: nobody approves a part they recorded test results for or do steps in (not only a sole recorder).
+    const barsOf = {};
+    bus.forEach(bu => { barsOf[bu] = partBars(docs, project, bu, { runs }); });
+    const recordersOf = bu => barsOf[bu].recorders;
+    const barOf = (bu, id) => approvalBar(docs, project, bu, id, { bars: barsOf[bu] });
     const validForRaw = bu => {
-      const latest = latestBy(approvals.filter(a => a.bu === bu), 'at');
-      return latest && latest.decision === 'approved' && latest.stepUp === true && latest.approver !== soleRecorder[bu] ? latest : null;
+      const latest = latestBy(approvals.filter(a => a.bu === bu && !a.kind), 'at');
+      return latest && latest.decision === 'approved' && latest.stepUp === true && !barOf(bu, latest.approver) ? latest : null;
     };
     const overrides = project.approvers && typeof project.approvers === 'object' ? project.approvers : {};
-    const eligible = {}, sodBlocked = {};
+    const eligible = {}, sodBlocked = {}, barred = {};
     bus.forEach(bu => {
       const e = Object.keys(people).filter(id => people[id] && people[id].bu === bu && !excluded.includes(id));
       const o = overrides[bu];
       if (o && people[o] && !excluded.includes(o) && !e.includes(o)) e.push(o);
-      const ok = e.filter(id => id !== soleRecorder[bu]);
-      if (e.length && !ok.length) sodBlocked[bu] = soleRecorder[bu];
+      const ok = e.filter(id => !barOf(bu, id));
+      barred[bu] = e.filter(id => barOf(bu, id)).map(id => Object.assign({ person: id }, barOf(bu, id)));
+      if (e.length && !ok.length) sodBlocked[bu] = barred[bu][0].person;
       eligible[bu] = ok;
     });
     const needsApprover = bus.filter(bu => !eligible[bu].length && !validForRaw(bu));
     const suggestions = {};
     needsApprover.forEach(bu => {
       const p = procs.find(pp => allNodes(pp.tobe).some(n => n && !isGateway(n) && stepBus(n).includes(bu)));
-      const cand = [p && p.owner].concat(procs.map(pp => pp.owner)).find(id => id && people[id] && !excluded.includes(id) && id !== soleRecorder[bu]);
+      const cand = [p && p.owner].concat(procs.map(pp => pp.owner), project.sponsor || null).find(id => id && people[id] && !excluded.includes(id) && !barOf(bu, id));
       suggestions[bu] = cand || null;
     });
     const noPerson = needsApprover;
@@ -1215,7 +1378,12 @@
       if (a.fingerprint) {
         // R7 exact scope: compare the section's own content with what was approved.
         const was = fpParse(a.fingerprint), now = sectionParts(docs, project, bu);
-        ['s', 'd', 't'].forEach(k => { if (was[k] != null && was[k] !== now[k]) out.push({ ref: 'section:' + bu + '#' + k, label: PART_LABEL[k] }); });
+        ['s', 'd', 't'].forEach(k => {
+          if (was[k] == null || was[k] === now[k]) return;
+          const sc = k === 's' ? partStepChanges(was.k, now, docs) : [];
+          if (sc.length) sc.forEach(x => out.push({ ref: 'section:' + bu + '#s:' + x.key, label: x.text }));
+          else out.push({ ref: 'section:' + bu + '#' + k, label: PART_LABEL[k] });
+        });
         if (was.c != null && was.c !== now.c) out.push({ ref: 'project:' + project.id + '#cutover', label: 'the launch-day plan' });
         return out;
       }
@@ -1239,9 +1407,9 @@
     const pnSafe = id => (people[id] && people[id].name) || null;
     const buDetail = [];
     if (!bus.length) buDetail.push("No team's part changed, so no approvals are needed.");
-    needsApprover.forEach(b => buDetail.push((sodBlocked[b] ? pn(sodBlocked[b]) + ' recorded these tests, so someone else must approve ' + b + "'s part: choose who." : 'No approver in ' + b + ': assign one.') + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
+    needsApprover.forEach(b => buDetail.push((sodBlocked[b] ? barred[b].map(x => x.text).join(' ') + ' Choose who approves ' + b + "'s part." : 'No approver in ' + b + ': assign one.') + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
     if (unsigned.length) buDetail.push('Waiting for sign-off from ' + joinList(unsigned) + '.');
-    stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + ' changed after sign-off.'));
+    stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + (x.changed.every(c => /#s:/.test(c.ref)) ? ' (after sign-off).' : ' changed after sign-off.')));
     if (bus.length && !unsigned.length && !stale.length && !needsApprover.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
     const exclNames = joinList(excluded.map(pn));
     const exclRole = excluded.length > 1 ? 'the project owner and release manager' : releaseManager === project.owner ? 'the project owner' : 'the release manager';
@@ -1253,12 +1421,13 @@
     const sectionStatus = bus.map(bu => ({ bu, approved: !!validFor(bu), approval: validFor(bu) ? validFor(bu).id || null : null, stale: staleSet.has(bu),
       needsApprover: needsApprover.includes(bu), eligible: eligible[bu].slice(), suggestion: suggestions[bu] || null, override: overrides[bu] || null,
       approver: validFor(bu) ? validFor(bu).approver || null : null, approvedAt: validFor(bu) ? validFor(bu).at || null : null,
-      sodBlockedBy: sodBlocked[bu] || null, recorders: recordersOf(bu) }));
+      sodBlockedBy: sodBlocked[bu] || null, recorders: recordersOf(bu), stepOwners: barsOf[bu].stepOwners.slice(), barred: barred[bu].slice() }));
     // R9 §13: a team that does not need to approve is never a gate condition (no changed teams → nothing to approve).
     checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0,
       detail: buDetail.join(' '), items: needsApprover.concat(unsigned, stale.map(x => x.bu)), unsigned, noPerson, needsApprover, eligible, suggestions, sectionStatus, launchOwnerReview,
       sections: bus, excludedApprover: project.owner || null, excludedApprovers: excluded, releaseManager,
-      stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)) })) });
+      stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), details: x.changed.map(c => ({ ref: c.ref, label: c.label })), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)),
+        text: x.bu + ' must approve again: ' + joinList(x.changed.map(c => c.label)) + '.' })) });
 
     // two-person: approved, non-stale approvals only (matches the sign-off panel).
     const current = bus.filter(bu => validFor(bu) && !staleSet.has(bu)).map(validFor);
@@ -1301,10 +1470,13 @@
     }));
     const excList = [...excRefs.values()];
     const excW = excList.filter(c => c.ref.startsWith('workItem:')), excP = excList.filter(c => c.ref.startsWith('process:'));
-    const excS = excList.filter(c => c.ref.startsWith('section:'));
+    const excS = excList.filter(c => c.ref.startsWith('section:') && !/#s:/.test(c.ref));
+    // R11: step-level changes say which step and what changed, grouped per team
+    const excSS = {}; excList.filter(c => /^section:[^#]+#s:/.test(c.ref)).forEach(c => { const b = c.ref.slice(8, c.ref.indexOf('#')); (excSS[b] = excSS[b] || []).push(c.label); });
     const excNames = excW.map(c => '"' + c.label + '"').concat(excP.map(c => c.label), excS.map(c => c.ref.slice(8, c.ref.indexOf('#')) + "'s " + c.label.replace(/^its /, '')));
     const exDetail = [];
     if (excNames.length) exDetail.push(capFirst(joinList(excNames, 5)) + (excNames.length === 1 ? ' was' : ' were') + ' changed after sign-off; ' + (excNames.length === 1 ? 'its section needs' : 'those sections need') + ' re-approval.');
+    Object.keys(excSS).sort().forEach(b => exDetail.push(b + "'s steps changed after sign-off (" + joinList(excSS[b], 5) + '); its section needs re-approval.'));
     if (cutoverBus.length) exDetail.push('Cutover plan changed after ' + joinList(cutoverBus.slice().sort()) + ' sign-off.');
     // Runbook (R6): an open task whose planned start + duration has passed is overdue (warning). `today` may carry
     // a time (ISO date-time); a date alone means the start of that day (UTC).
@@ -1315,15 +1487,17 @@
       return !isNaN(st) && !isNaN(nowMs) && st + (isFinite(+t.durationMins) ? +t.durationMins : 0) * 60000 < nowMs;
     });
     if (overdueTasks.length) exDetail.push(nWord(overdueTasks.length, 'runbook task') + ' ' + isAre(overdueTasks.length) + ' overdue: ' + joinList(overdueTasks.map(t => '"' + (t.task || t.title || 'untitled task') + '"'), 3) + '.');
-    checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: excNames.length === 0 && cutoverBus.length === 0 && overdueTasks.length === 0, warning: true,
+    checks.push({ id: 'exceptions', label: 'Changes after sign-off', pass: excNames.length === 0 && !Object.keys(excSS).length && cutoverBus.length === 0 && overdueTasks.length === 0, warning: true,
       detail: exDetail.length ? exDetail.join(' ') : 'No work or process changed after sign-off.',
-      items: excW.map(c => c.ref.slice('workItem:'.length)).concat(excP.map(c => c.ref), excS.map(c => c.ref), cutoverBus.length ? ['cutover'] : [], overdueTasks.map(t => 'task:' + (t.id || t.task || ''))),
+      items: excW.map(c => c.ref.slice('workItem:'.length)).concat(excP.map(c => c.ref), excS.map(c => c.ref), excList.filter(c => /^section:[^#]+#s:/.test(c.ref)).map(c => c.ref), cutoverBus.length ? ['cutover'] : [], overdueTasks.map(t => 'task:' + (t.id || t.task || ''))),
       cutoverBus, overdueTasks: overdueTasks.map(t => t.id || t.task || '') });
 
     checks.forEach(finishCheck);
     // R7: signoffOpen is informational only (every other blocking check passes); approvals count any time.
     const signoffOpen = checks.filter(c => !c.warning && c.id !== 'bu-signoff' && c.id !== 'two-person').every(c => c.pass);
-    return { pass: checks.filter(c => !c.warning).every(c => c.pass), checks, summary: summarize(checks), signoffOpen };
+    const out = { pass: checks.filter(c => !c.warning).every(c => c.pass), checks, summary: summarize(checks), signoffOpen };
+    Object.defineProperty(out, '_tf', { value: tf, enumerable: false });   // R11: testingTruth reads the same facts
+    return out;
   }
 
   /* ------------------------------------------------------------------ */
@@ -2159,6 +2333,7 @@
   //  - every task starts the business day after each prerequisite finishes, and nobody does two suggested tasks at
   //    once (levelled per owner); every due date is at least its own forecast, so nothing is late on day one.
   const SUGGEST_EFFORT = 3;
+  const MAX_TASK_DAYS = 10;   // R11 §4 default cap on one suggested task's span (business days)
   function suggestWorkFromDiff(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
     if (!project) return [];
@@ -2178,18 +2353,25 @@
       const w = work.find(x => x.id === dep);
       return w ? (w.status === 'done' ? (w.doneAt || w.due) : fc[w.id] && fc[w.id].forecast) : null;
     };
-    // R10 §6: a person always: the step's owner, else the PM with the role (or "nobody named") in the note.
+    // R11 §4: the step's owner; a role-only step gets the one person in the workspace with that role (exact title),
+    // otherwise the task stays unassigned with the role shown ("Needs an owner: Credit Analyst"), never the PM.
+    const ppl = personList(docs);
+    const roleHolder = role => { const m = ppl.filter(p => String(p.role || '').trim().toLowerCase() === role.toLowerCase()); return m.length === 1 ? m[0] : null; };
     const ownerOf = (st, fallbackPerson) => {
       if (st && st.owner) return { owner: st.owner };
-      const role = st && String(st.ownerRole || '').trim();
-      if (role) return { owner: pm, note: 'The step is done by the role "' + role + '"; the project manager owns this task until a person is named.' };
+      const role = st && String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
+      if (role) {
+        const h = roleHolder(role);
+        return h ? { owner: h.id, ownerRole: role, note: 'The step is done by the role "' + role + '"; ' + (h.name || 'one person') + ' is the only ' + role + ' in the workspace.' }
+          : { owner: null, ownerRole: role, note: 'Needs an owner: ' + role + '.' };
+      }
       if (fallbackPerson) return { owner: fallbackPerson };
-      return { owner: pm, note: 'Nobody is named on this step, so the project manager owns this task.' };
+      return { owner: null, note: 'Needs an owner: nobody is named on this step.' };
     };
     const push = sg => {
       sg.key = 'sug-' + (++n);
       if (!sg.effortDays) sg.effortDays = SUGGEST_EFFORT;
-      if (!sg.owner) sg.owner = pm;
+      if (sg.owner === undefined) sg.owner = pm;
       if (!sg.note) delete sg.note;
       out.push(sg);
       return sg;
@@ -2203,10 +2385,13 @@
       out.forEach(sg => {
         if (!anchor) { sg.start = null; sg.due = null; return; }
         const fins = sg.deps.map(finishOf).filter(isDate);
-        const who = sg.owner || '';
+        const who = sg.owner || sg.key;   // unassigned tasks never queue behind each other
         sg.start = maxDate([anchor, fins.length ? addBusinessDays(maxDate(fins), 1) : anchor, free[who] || anchor]);
-        const span = Math.max(1, Math.round(sg.effortDays * factor));
+        // R11 §4: no task spans more than MAX_TASK_DAYS business days. A later forecast moves the start, never
+        // stretches the task.
+        const span = Math.min(MAX_TASK_DAYS, Math.max(1, Math.round(sg.effortDays * factor)));
         sg.due = maxDate([addBusinessDays(sg.start, span), minDue[sg.key]].filter(isDate));
+        if (businessDaysBetween(sg.start, sg.due) > span) sg.start = addBusinessDays(sg.due, -span);
         free[who] = addBusinessDays(sg.due, 1);
       });
     };
@@ -2284,11 +2469,37 @@
     if (anyChange) {
       const ends = stepTasks.slice();
       const people = [...changedPeople].map(id => nameOf(docs, id)), roles = [...changedRoles];
+      // R11 §4 "Tell affected teams" names the process's own teams: each changed step's team (its owner's team, else
+      // its role), plus the teams it touches.
+      const pmap = personMap(docs), teams = [];
+      linkedProcesses(docs, project).forEach(p => { const df = diffProcess(p); flatSteps(p.tobe).forEach(st => {
+        if (df.nodes[st.id] !== 'new' && df.nodes[st.id] !== 'changed') return;
+        const t = st.owner && pmap[st.owner] && pmap[st.owner].bu ? pmap[st.owner].bu : String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
+        const known = new Set(Object.keys(pmap).map(id => pmap[id] && pmap[id].bu).filter(Boolean).concat(KNOWN_BUS).map(x => String(x).toLowerCase()));
+        [t].concat((Array.isArray(st.touches) ? st.touches : []).filter(x => known.has(String(x || '').trim().toLowerCase())))
+          .forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); });
+      }); });
       // telling the teams happens early (1 day, can start now); training follows the changed steps' work
       if (!own.some(w => w.tag === 'tell')) push({ pid: null, step: null, title: 'Tell affected teams about the change', kind: 'other', tag: 'tell', owner: pm, deps: [], effortDays: 1,
-        note: 'Teams: ' + (joinList(sectionBus(docs, project, personMap(docs)), 8) || 'everyone the change touches') + '.' });
+        note: 'Teams: ' + (joinList(teams, 8) || 'everyone the change touches') + '.', teams: teams.slice() });
       if (!own.some(w => w.tag === 'train')) push({ pid: null, step: null, title: 'Train the people who do the changed steps', kind: 'other', tag: 'train', owner: pm, deps: ends,
         note: 'Who: ' + (joinList(people.concat(roles.map(r => r + ' (role)')), 8) || 'the people on the changed steps') + '.' });
+    }
+    // R11 §4: longer work is split into parts of at most MAX_TASK_DAYS days, each after the one before
+    for (let i = 0; i < out.length; i++) {
+      const sg = out[i];
+      if (!(sg.effortDays > MAX_TASK_DAYS)) continue;
+      const parts = Math.ceil(sg.effortDays / MAX_TASK_DAYS), base = sg.title, total = sg.effortDays;
+      sg.effortDays = MAX_TASK_DAYS; sg.title = base + ' (part 1 of ' + parts + ')';
+      let prev = sg.key;
+      for (let k = 2; k <= parts; k++) {
+        const part = Object.assign({}, sg, { title: base + ' (part ' + k + ' of ' + parts + ')', deps: [prev], effortDays: Math.min(MAX_TASK_DAYS, total - MAX_TASK_DAYS * (k - 1)) });
+        delete part.resolves;
+        part.key = 'sug-' + (++n);
+        out.splice(i + k - 1, 0, part);
+        prev = part.key;
+      }
+      out.forEach(x => { if (x !== sg && x.deps.includes(sg.key) && !/\(part \d+ of/.test(x.title)) x.deps = x.deps.map(d => d === sg.key ? prev : d); });
     }
     schedule();
     if (anchor && out.length) {
@@ -2340,7 +2551,7 @@
   function planFit(docs, projectId, today, suggestions) {
     const sug = suggestions || suggestWorkFromDiff(docs, projectId, today);
     const t = projectTruth(withPlan(docs, projectId, sug), projectId, today);
-    if (!t) return { forecastFinish: null, deadline: null, fits: false, lateCount: 0, message: 'This project could not be found.' };
+    if (!t) return { forecastFinish: null, deadline: null, fits: false, lateCount: 0, message: 'This project could not be found.', warning: null, unassigned: [], longestTaskDays: 0, maxTaskDays: MAX_TASK_DAYS };
     const fin = t.forecastFinish, dl = t.deadline;
     const fits = !dl || !fin || fin <= dl;
     const keys = new Set(sug.map(s => s.key));
@@ -2349,7 +2560,13 @@
       : !dl ? 'Done by about ' + fmtDay(fin) + '. No deadline is set.'
       : fits ? 'Done by about ' + fmtDay(fin) + ', ' + nWord(t.bufferDays, 'business day') + ' before your ' + fmtDay(dl) + ' deadline.'
       : 'This plan needs until ' + fmtDay(fin) + ', past your ' + fmtDay(dl) + ' deadline.';
-    return { forecastFinish: fin, deadline: dl, fits, lateCount, message };
+    // R11 §4 never offer a plan that is late on arrival without a clear warning and a choice
+    const warning = fits ? null : { key: 'late-on-arrival', daysLate: dl && fin ? businessDaysBetween(dl, fin) : null,
+      text: 'This needs until ' + fmtDay(fin) + ', past your ' + fmtDay(dl) + ' deadline' + (dl && fin ? ' (' + nWord(businessDaysBetween(dl, fin), 'business day') + ' late)' : '') + '.',
+      options: [{ key: 'accept', label: 'Accept anyway' }, { key: 'adjust', label: 'Adjust' }] };
+    const unassigned = sug.filter(x => !x.owner).map(x => ({ key: x.key, title: x.title, role: x.ownerRole || null, text: 'Needs an owner' + (x.ownerRole ? ': ' + x.ownerRole : '') }));
+    const longest = sug.reduce((a, x) => Math.max(a, isDate(x.start) && isDate(x.due) ? businessDaysBetween(x.start, x.due) : 0), 0);
+    return { forecastFinish: fin, deadline: dl, fits, lateCount, message, warning, unassigned, longestTaskDays: longest, maxTaskDays: MAX_TASK_DAYS };
   }
 
   /* ------------------------------------------------------------------ */
@@ -2585,7 +2802,7 @@
   function costOf(project, planned, ev) {
     const r2 = n => Math.round(n * 100) / 100;
     const forecastCost = ev.EAC != null ? ev.EAC : ev.estimate, actualCost = ev.AC;
-    return { planned, estimate: ev.estimate, forecastCost, forecastBasis: ev.EAC != null ? 'eac' : 'estimate', actualCost, remainingCost: r2(Math.max(0, forecastCost - actualCost)),
+    return { planned, estimate: ev.estimate, forecastCost, forecastBasis: ev.EAC != null && ev.eacMethod === 'cpi' ? 'eac' : 'estimate', eacMethod: ev.eacMethod || null, actualCost, remainingCost: r2(Math.max(0, forecastCost - actualCost)),
       variance: planned == null ? null : r2(forecastCost - planned), overBudget: planned != null && forecastCost > planned,
       program: project && project.program || null };
   }
@@ -2633,10 +2850,21 @@
     // AND actual cost > 0. EAC = BAC / CPI, blank when CPI is blank. pctDone is the share of the budgeted work done:
     // EV = BAC × pctDone exactly, and the "% done" tile shows round(pctDone × 100).
     const started = EV > 0;
-    const SPI = PV > 0 && started && AC > 0 ? r2(EV / PV) : null, CPI = started && AC > 0 ? r2(EV / AC) : null;
-    const EAC = CPI ? r2(BAC / (EV / AC)) : null;
+    // R11 §6: money spent with nothing finished shows 0.00 (never "—") and is flagged.
+    const spentNothing = AC > 0 && !started;
+    const SPI = PV > 0 && AC > 0 && (started || spentNothing) ? r2(EV / PV) : null, CPI = AC > 0 && (started || spentNothing) ? r2(EV / AC) : null;
+    // R11 §6 ONE expected-cost (EAC) method for every project: BAC / CPI when CPI is defined and above 0; otherwise
+    // max(bottom-up estimate, spent + remaining estimate). Never below what is already spent.
+    const remainingEst = items.reduce((a, w, i) => a + (w.status === 'done' ? 0 : costs[i] * (1 - progressOf(w))), 0);
+    const eacMethod = CPI ? 'cpi' : 'bottom-up';
+    const EAC = !items.length ? null : r2(Math.max(AC, CPI ? BAC / (EV / AC) : Math.max(total, AC + remainingEst)));
     const pctDone = BAC > 0 ? EV / BAC : 0;
-    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, estimate: r2(total), pctDone, pct: Math.round(pctDone * 100), started };
+    const doneNoHours = items.filter(w => w.status === 'done' && !(Array.isArray(w.time) ? w.time : []).some(t => t && isFinite(+t.hours) && +t.hours > 0)).map(w => w.id);
+    const flags = [];
+    if (spentNothing) flags.push({ key: 'spent-nothing-finished', text: 'Spent with nothing finished' });
+    if (doneNoHours.length) flags.push({ key: 'done-no-hours', items: doneNoHours, text: nWord(doneNoHours.length, 'task') + ' marked Done with no hours logged, so the cost figures may be too low' });
+    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, eacMethod, remainingEstimate: r2(remainingEst), estimate: r2(total), pctDone, pct: Math.round(pctDone * 100), started,
+      spentNothing, doneNoHours, flags };
   }
 
   // R6 capacity leveling. Load: each open item's effort (effortDays, default 1) is spread evenly over the business
@@ -2905,10 +3133,23 @@
     const openIds = new Set(c.open.map(w => w.id));
     const holding = w => dependents(docs, w.id).filter(id => openIds.has(id)).length;
     const verb = w => w.kind === 'defect' ? 'Fix the problem: ' + q(problemTitle(w)) : 'Finish ' + q(w.title);
-    c.blockers.filter(b => !b.planned).forEach(b => add(b.owner, 'Plan work to get ' + b.name, 'blocker', '/data/' + b.dataId, 'data:' + b.dataId));
+    // R11 §5 one blocking definition: every projectTruth.blocking item (information not available yet that holds up
+    // at least one open task, planned or not) is exactly one 'blocker' row, so who.filter(blocker) = blocking.count
+    // and the "What's blocking" box is a view of this list. A planned blocker's row is its open fix task's action
+    // (that task is then not listed again); missing information that holds nothing up is an 'info' row.
+    const workIdx = byId(c.open);
+    const resolverWhat = w => c.pastDue.includes(w.id) ? verb(w) + (isDate(w.due) && isDate(c.today) && w.due < c.today ? ' (was due ' + fmtDay(w.due) + ')' : isDate(w.due) ? ' (due ' + fmtDay(w.due) + ')' : '')
+      : c.finishAfterDue.includes(w.id) || (fc[w.id] && fc[w.id].causesSlip) ? 'Get ' + q(w.title) + ' back on schedule' : verb(w);
+    c.blockers.filter(b => b.held > 0).forEach(b => {
+      if (!b.planned) return add(b.owner, 'Plan work to get ' + b.name, 'blocker', '/data/' + b.dataId, 'data:' + b.dataId);
+      const rw = b.resolver && workIdx[b.resolver];
+      add(rw ? rw.owner || b.resolverOwner || b.owner : b.resolverOwner || b.owner, rw ? resolverWhat(rw) : 'Get ' + b.name + ' ready', 'blocker', '/data/' + b.dataId, 'data:' + b.dataId);
+      if (rw) { seen.add('work:' + rw.id); const row = out[out.length - 1]; if (row && row.ref === 'data:' + b.dataId) row.workId = rw.id; }
+    });
+    c.blockers.filter(b => !b.planned && !(b.held > 0)).forEach(b => add(b.owner, 'Plan work to get ' + b.name, 'info', '/data/' + b.dataId, 'data:' + b.dataId));
     const byHold = arr => arr.map(w => ({ w, n: holding(w) })).sort((x, y) => y.n - x.n || String(x.w.due || '').localeCompare(String(y.w.due || '')));
     byHold(c.open.filter(w => c.pastDue.includes(w.id))).forEach(({ w }) =>
-      add(w.owner, verb(w) + (isDate(w.due) ? ' (was due ' + fmtDay(w.due) + ')' : ''), 'past-due', taskHref(project, w), 'work:' + w.id));
+      add(w.owner, verb(w) + (isDate(w.due) && isDate(c.today) && w.due < c.today ? ' (was due ' + fmtDay(w.due) + ')' : isDate(w.due) ? ' (due ' + fmtDay(w.due) + ')' : ''), 'past-due', taskHref(project, w), 'work:' + w.id));
     if (c.finish && c.target && c.finish > c.target && !c.late.length) add(project.owner, 'Review the plan: the work finishes after the deadline', 'deadline', '/project/' + project.id, 'deadline:' + project.id);
     const fad = byHold(c.open.filter(w => c.finishAfterDue.includes(w.id)));
     fad.filter(x => x.n > 0 || (fc[x.w.id] && fc[x.w.id].causesSlip)).forEach(({ w }) => add(w.owner, 'Get ' + q(w.title) + ' back on schedule', 'delaying', taskHref(project, w), 'work:' + w.id));
@@ -2944,8 +3185,8 @@
     const unplanned = blockers.filter(b => !b.planned);
     if (unplanned.length) parts.push(capFirst(unplanned[0].text) + nm(unplanned[0].owner) + '.' + (unplanned.length > 1 ? ' ' + nWord(unplanned.length - 1, 'other piece') + ' of information ' + (unplanned.length === 2 ? 'is' : 'are') + ' missing too.' : ''));
     if (c.late.length) {
-      const first = who.find(x => (x.why === 'past-due' || x.why === 'delaying' || x.why === 'late') && x.ref && c.late.includes(x.ref.slice(5)));
-      const w = first ? c.open.find(x => 'work:' + x.id === first.ref) : c.open.find(x => c.late.includes(x.id));
+      const first = who.find(x => ((x.why === 'past-due' || x.why === 'delaying' || x.why === 'late') && x.ref && c.late.includes(x.ref.slice(5))) || (x.why === 'blocker' && x.workId && c.late.includes(x.workId)));
+      const w = first ? c.open.find(x => x.id === first.workId || 'work:' + x.id === first.ref) : c.open.find(x => c.late.includes(x.id));
       parts.push((c.late.length === 1 ? '1 task is late: ' : c.late.length + ' tasks are late; first: ') + q(w && w.title) + nm(w && w.owner) + '.');
     } else if (!unplanned.length) {
       const pb = blockers.find(b => b.planned);
@@ -2975,41 +3216,72 @@
   function testingCore(docs, project, r) {
     const c = (r.checks || []).find(x => x.id === 'tests-passed');
     const READY = 'Ready for business sign-off';
-    if (r.released) return { done: true, passed: null, total: null, failed: 0, notRun: 0, needTests: 0, haveTests: 0, count: '', stage: 'done', next: 'Testing was finished before launch',
-      sentence: 'Yes: testing was finished before launch.', stages: [], nextAction: { key: 'none', label: 'Testing was finished before launch' }, perBU: {} };
-    if (!c) return { done: false, passed: 0, total: 0, failed: 0, notRun: 0, needTests: 0, haveTests: 0, count: '0 of 0 tests passed', stage: 'create', next: 'Add the work first',
-      sentence: 'Not yet: no tests have been set up.', stages: [], nextAction: { key: 'create', label: 'Add the work first' }, perBU: {} };
+    if (r.released) return { done: true, passed: null, total: null, failed: 0, notRun: 0, blocked: 0, waitingForFix: 0, needTests: 0, haveTests: 0, count: '', stage: 'done', next: 'Testing was finished before launch',
+      sentence: 'Yes: testing was finished before launch.', stages: [], nextAction: { key: 'none', label: 'Testing was finished before launch' }, perBU: {}, coverage: null, phases: {} };
+    if (!c) return { done: false, passed: 0, total: 0, failed: 0, notRun: 0, blocked: 0, waitingForFix: 0, needTests: 0, haveTests: 0, count: '0 of 0 tests passed', stage: 'create', next: 'Add the work first',
+      sentence: 'Not yet: no tests have been set up.', stages: [], nextAction: { key: 'create', label: 'Add the work first' }, perBU: {}, coverage: null, phases: {} };
+    const tf = r._tf || testFacts(docs, project);
     const n = a => (a || []).length;
-    const out = latestAnyStage(docs, project.id);
-    const ids = (c.cases || []).concat(c.scripts || []);
-    const total = ids.length;
-    const passed = ids.filter(id => out[id] === 'pass').length, failed = ids.filter(id => out[id] === 'fail').length;
-    const notRun = total - passed - failed;
-    // R10 §4: a piece of information "has tests" only when it has cases AND every one of its rule fields has a case,
-    // so "1 of 2 have tests" always agrees with "Add tests for 1 new piece of information".
-    const needTests = n(c.changedData);
-    const haveTests = (c.changedData || []).filter(d => !(c.noCases || []).includes(d) && !(c.uncoveredFields || []).some(u => u.dataId === d)).length;
-    const toAdd = [...new Set((c.noCases || []).concat((c.uncoveredFields || []).map(x => x.dataId)))];
+    const total = tf.ids.length;
+    const passed = tf.passed.length, failedOnly = tf.failed.length, waitingForFix = tf.fix.length, blocked = tf.blocked.length;
+    const failed = failedOnly + waitingForFix;
+    const notRun = total - passed - failed;   // blocked counts as not run
+    const cov = tf.coverage;
+    const needTests = cov.needTests, haveTests = cov.haveTests;
+    const toAdd = cov.notCovered;
     const count = passed + ' of ' + nWord(total, 'test') + ' passed';
-    const stages = [c.stages.system, c.stages.uat].map(x => Object.assign({}, x));
+    const stages = [Object.assign({}, tf.stages.system), Object.assign({}, tf.stages.uat)];
     let stage, next, key;
-    const fixN = n(c.defects) || n(c.failing);
+    const fixN = n(c.defects) || failed;
     if (c.pass) { stage = 'done'; next = READY; key = 'none'; }
     else if (toAdd.length) { stage = 'create'; key = 'generate'; next = 'Add tests for ' + nWord(toAdd.length, 'new piece') + ' of information'; }
+    else if (cov.scriptGaps.length) { stage = 'create'; key = 'scripts'; next = 'Add business check scripts for ' + nWord(cov.scriptGaps.length, 'changed step'); }
     else {
-      stage = !c.stages.system.done ? 'tryout' : 'business';
+      stage = !tf.stages.system.done ? 'tryout' : 'business';
       if (fixN) { key = 'fix'; next = 'Fix ' + nWord(fixN, 'problem') + ', then re-run ' + (fixN === 1 ? 'its test' : 'their tests'); }
-      else if (notRun) { key = 'run'; next = 'Run the ' + nWord(notRun, 'test') + ' that ' + (notRun === 1 ? "hasn't" : "haven't") + ' run'; }   // R10 §7 grammar
-      else if (stage === 'tryout') { key = 'run-build'; next = 'Try out the ' + nWord(n(c.cases), 'test'); }
-      else if (stages[1].total - stages[1].passed > 0) { key = 'run'; next = 'Run the business check for ' + nWord(stages[1].total - stages[1].passed, 'test'); }
+      else if (stage === 'tryout') { key = 'run-build'; next = 'Try out the ' + nWord(tf.stages.system.notRun || tf.caseIds.length, 'test'); }
+      else if (notRun) { key = 'run'; next = 'Run the business check for ' + nWord(notRun, 'test'); }
       else if (n(c.noEvidence)) { key = 'evidence'; next = 'Add evidence to ' + nWord(n(c.noEvidence), 'passed test'); }
       else { key = 'review'; next = 'Review the test results'; }
     }
     const done = !!c.pass;
     const sentence = done ? (total ? 'Yes: ' + count + ' and no problems are open.' : 'Yes: nothing this project changes needs testing.')
       : 'Not yet: ' + count + '. Next: ' + next.charAt(0).toLowerCase() + next.slice(1) + '.';
-    return { done, passed, total, failed, notRun, needTests, haveTests, count, stage, next, sentence, stages,
-      changedInformation: n(c.changedData), problems: n(c.defects), nextAction: { key, label: next } };
+    // per-test status for any screen that lists tests: 'passed' | 'failed' | 'fix' | 'blocked' | 'notRun'
+    const statusById = Object.assign({}, tf.status);
+    const phases = {};
+    ['system', 'uat'].forEach(k => { phases[k] = {}; Object.keys(tf.phase[k]).forEach(id => { phases[k][id] = tf.phase[k][id].outcome; }); });
+    return { done, passed, total, failed, failedOnly, waitingForFix, blocked, notRun, needTests, haveTests, count, stage, next, sentence, stages,
+      changedInformation: n(c.changedData), problems: n(c.defects), nextAction: { key, label: next },
+      coverage: { denominator: cov.denominator, needTests, haveTests, gaps: cov.gaps, notCovered: cov.notCovered.slice(), elements: cov.elements.map(e => Object.assign({}, e)),
+        fieldsTotal: cov.fieldsTotal, fieldsCovered: cov.fieldsCovered, uncoveredFields: cov.uncoveredFields.slice(), scriptGaps: cov.scriptGaps.slice(), notChanged: cov.notChanged.slice(),
+        text: cov.gaps ? nWord(cov.gaps, 'coverage gap') + ': ' + joinList(cov.elements.filter(e => !e.covered).map(e => e.name + (e.state === 'no-cases' ? ' has no tests' : ' has no test for ' + joinList(e.uncoveredFields, 3))).concat(cov.scriptGaps.map(g => '“' + g.title + '” has no business check script')), 4)
+          : (needTests ? 'All ' + nWord(needTests, 'piece') + ' of changed information ' + (needTests === 1 ? 'has' : 'have') + ' tests for every rule' : 'Nothing this project changes needs tests') },
+      status: statusById, phases, heldBy: Object.assign({}, tf.held) };
+  }
+  // R11 §1 THE testing truth: every testing number on every screen (Simple and Advanced Testing, the coverage matrix,
+  // the launch gate, the Launch page per-team counts, the approver page, the status report, Home and the audit text).
+  // = projectTruth(...).testing. See testFacts for the rules.
+  function testingTruth(docs, prj, today) {
+    const t = projectTruth(docs, prj, today || null);
+    return t ? t.testing : null;
+  }
+  // R11 §1 the audit line for a recorded run, with the phase's own counts after the run (never a stale local total):
+  // "Recorded the business check for Vendor Onboarding Modernization: 13 results (12 passed, 1 failed). Business
+  // check now 21 of 26 passed."
+  function runAuditText(docs, prj, run) {
+    const project = projOf(docs, prj);
+    if (!project || !run) return 'Recorded a test run';
+    const withRun = Object.assign({}, docs, { testRun: ((docs && docs.testRun) || []).filter(d => d.id !== run.id).concat([{ id: run.id, data: run }]) });
+    const tf = testFacts(withRun, project);
+    const ph = stageOfEnv(run.env) || 'system';
+    const st = tf.stages[ph];
+    const res = (run.results || []).filter(x => x && x.outcome && x.outcome !== 'not-run' && x.outcome !== 'skipped');
+    const cnt = o => res.filter(x => x.outcome === o).length;
+    const parts = [cnt('pass') ? cnt('pass') + ' passed' : '', cnt('fail') ? cnt('fail') + ' failed' : '', cnt('blocked') ? cnt('blocked') + ' blocked' : ''].filter(Boolean);
+    const label = ph === 'uat' ? 'the business check' : 'a try-it-out run';
+    return 'Recorded ' + label + ' for ' + (project.name || 'the project') + ': ' + nWord(res.length, 'result') + (parts.length ? ' (' + parts.join(', ') + ')' : '') + '. ' +
+      (ph === 'uat' ? 'Business check' : 'Try it out') + ' now ' + st.passed + ' of ' + nWord(st.total, 'test') + ' passed.';
   }
 
   // R7 "Steps to launch": the readiness checks as an ordered plain checklist.
@@ -3058,8 +3330,11 @@
     const readyBu = b => { const a = (approvals || []).find(x => x.bu === b); return !a || a.ready !== false; };
     const apprWho = uniq(waiting.filter(readyBu).flatMap(b => elig[b] || Object.keys(people).filter(id => people[id] && people[id].bu === b && id !== owner && id !== lo)));
     const apprActs = [];
-    (bu.sectionStatus || []).filter(x => x.needsApprover && x.sodBlockedBy).forEach(x => apprActs.push(nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else in ' + x.bu + ' must approve'));
-    if (needs.length) apprActs.push('Choose who approves ' + joinList(needs) + "'s part");
+    // R11 §2: one sentence for the parts whose own people can't approve them (they do its steps or recorded its tests)
+    const sodParts = (bu.sectionStatus || []).filter(x => x.needsApprover && x.sodBlockedBy);
+    if (sodParts.length === 1) apprActs.push(((sodParts[0].barred || [])[0] || {}).text || nameOf(docs, sodParts[0].sodBlockedBy) + ' recorded these tests, so someone else must approve');
+    else if (sodParts.length > 1) apprActs.push('In ' + joinList(sodParts.map(x => x.bu)) + ', the only possible approvers carry out the steps or recorded the tests themselves, so someone else must approve each part');
+    if (needs.length) apprActs.push('Choose who approves ' + (needs.length === 1 ? needs[0] + "'s part" : 'the ' + joinList(needs) + ' parts'));
     // R10 §6: nobody is asked to approve before their part's work is done
     const readyOf = b => { const a = (approvals || []).find(x => x.bu === b); return !a || a.ready !== false; };
     const unsignedReady = (bu.unsigned || []).filter(readyOf), unsignedWaiting = (bu.unsigned || []).filter(b => !readyOf(b));
@@ -3077,7 +3352,7 @@
     const gc = ck('grants-closed');
     const blockers = steps.filter(s => !s.done).length;
     steps.push({ key: 'launch', label: 'Launch', done: live, who: live ? [] : uniq([lo]),
-      action: live ? 'Launched' : !gc.pass ? 'Close the open temporary data access requests' : blockers ? 'Waiting for the steps above' : 'Ready: give the final yes and launch' });
+      action: live ? 'Launched' : !gc.pass ? 'Approve or decline the ' + nWord((gc.blocking || []).length || 1, 'access request') + ' waiting for approval' : blockers ? 'Waiting for the steps above' : 'Ready: give the final yes and launch' });
     const first = steps.find(s => !s.done);
     steps.forEach(s => { s.next = s === first; });
     return steps;
@@ -3148,12 +3423,12 @@
     if (open.length) waiting.push({ kind: 'work', count: open.length, items: open.map(w => w.id), text: nWord(open.length, 'task') + ' on ' + (open.length === 1 ? 'its step' : 'its steps') });
     const notYet = sc.dataIds.filter(id => availOf(get(docs, 'dataElement', id), work, docs, ctx) !== 'live');
     if (notYet.length) waiting.push({ kind: 'information', count: notYet.length, items: notYet, text: joinList(notYet.map(id => dataName(docs, id)), 3) });
-    const out = latestAnyStage(docs, project.id);
-    const tests = sc.caseIds.concat(sc.scriptIds);
-    const notPassed = tests.filter(id => out[id] !== 'pass');
+    const pt = partTests(docs, project, bu, sc);
+    const notPassed = pt.ids.filter(id => pt.status[id] !== 'passed');
     if (notPassed.length) waiting.push({ kind: 'tests', count: notPassed.length, items: notPassed, text: nWord(notPassed.length, 'test') + ' to pass' });
+    if (pt.gaps.length) waiting.push({ kind: 'coverage', count: pt.gaps.length, items: pt.gaps.map(g => g.dataId), text: joinList(pt.gaps.map(g => g.name), 3) + ' to get tests' });
     const ready = !waiting.length;
-    return { bu, needed, ready, waiting, waitingOn: waiting.reduce((a, x) => a + x.count, 0), steps: sc.steps.length, tests: { passed: tests.length - notPassed.length, total: tests.length },
+    return { bu, needed, ready, waiting, waitingOn: waiting.reduce((a, x) => a + x.count, 0), steps: sc.steps.length, tests: { passed: pt.passed, total: pt.ids.length, gaps: pt.gaps.length, checks: pt.checks, text: pt.text },
       sentence: ready ? 'Ready for your approval.' : 'Not ready for your approval yet: waiting on ' + joinList(waiting.map(x => x.text)) + '.' };
   }
   // R8 prefilled "What you checked", built from facts, never boilerplate.
@@ -3163,16 +3438,15 @@
     if (!project) return { text: '', facts: {} };
     const sc = sectionScope(docs, project, bu);
     const work = list(docs, 'workItem'), ctx = availCtx(docs);
-    const out = latestAnyStage(docs, project.id);
-    const tests = sc.caseIds.concat(sc.scriptIds);
-    const passed = tests.filter(id => out[id] === 'pass').length;
+    const pt = partTests(docs, project, bu, sc);
+    const tests = pt.ids, passed = pt.passed;
     const have = sc.dataIds.filter(id => availOf(get(docs, 'dataElement', id), work, docs, ctx) === 'live').length;
-    const facts = { changedSteps: sc.steps.length, tests: { passed, total: tests.length }, information: { have, total: sc.dataIds.length },
+    const facts = { changedSteps: sc.steps.length, tests: { passed, total: tests.length, gaps: pt.gaps.length, checks: pt.checks, text: pt.text, notChanged: pt.notChanged.map(x => x.name) }, information: { have, total: sc.dataIds.length },
       tasks: { done: sc.work.filter(w => w.status === 'done').length, total: sc.work.length }, launchTasks: sc.tasks.length };
     const parts = [];
     if (facts.changedSteps) parts.push(nWord(facts.changedSteps, 'changed step') + ' reviewed');
     if (facts.tasks.total) parts.push(facts.tasks.done + ' of ' + nWord(facts.tasks.total, 'task') + ' done');
-    if (tests.length) parts.push(passed + ' of ' + nWord(tests.length, 'test') + ' passed');
+    if (tests.length || pt.gaps.length) parts.push(pt.text);
     if (facts.information.total) parts.push(have + ' of ' + nWord(facts.information.total, 'piece') + ' of information available');
     if (facts.launchTasks) parts.push(nWord(facts.launchTasks, 'launch-day task') + ' reviewed');
     return { text: capFirst(parts.join('; ')), facts };
@@ -3198,13 +3472,33 @@
 
   // R9 §6 per-team test counts: only the tests on the information and steps that team owns (sectionScope).
   function testsPerBU(docs, project, sections) {
-    const out = latestAnyStage(docs, project.id), res = {};
+    const res = {}, tf = testFacts(docs, project);
     sections.forEach(bu => {
-      const sc = sectionScope(docs, project, bu), ids = sc.caseIds.concat(sc.scriptIds);
-      const passed = ids.filter(id => out[id] === 'pass').length, failed = ids.filter(id => out[id] === 'fail').length;
-      res[bu] = { total: ids.length, passed, failed, notRun: ids.length - passed - failed };
+      const pt = partTests(docs, project, bu, null, tf);
+      const c = o => pt.ids.filter(id => pt.status[id] === o).length;
+      const failed = c('failed') + c('fix');
+      res[bu] = { total: pt.ids.length, passed: pt.passed, failed, blocked: c('blocked'), notRun: pt.ids.length - pt.passed - failed,
+        gaps: pt.gaps.map(g => Object.assign({}, g)), gapCount: pt.gaps.length, checks: pt.checks, text: pt.text, notChanged: pt.notChanged.map(x => x.name), notChangedText: pt.notChangedText };
     });
     return res;
+  }
+  // R11 §1 one team's tests and coverage: "N of M" counts tests AND coverage gaps (a piece of changed information with
+  // no tests, or a rule field with no test), and says so plainly. Information the part uses that the project does
+  // not change needs no tests and is named (notChangedText), never counted.
+  function partTests(docs, project, bu, sc, tf) {
+    sc = sc || sectionScope(docs, project, bu);
+    tf = tf || testFacts(docs, project);
+    const ids = sc.caseIds.concat(sc.scriptIds);
+    const status = tf.status;
+    const passed = ids.filter(id => status[id] === 'passed').length;
+    const gaps = tf.coverage.elements.filter(e => !e.covered && sc.dataIds.includes(e.dataId)).map(e => ({ dataId: e.dataId, name: e.name, state: e.state, fields: e.uncoveredFields.slice() }));
+    const notChanged = tf.coverage.notChanged.filter(x => sc.dataIds.includes(x.dataId));
+    const checks = ids.length + gaps.length;
+    const gapText = gaps.length ? nWord(gaps.length, 'piece') + ' of information ' + (gaps.length === 1 ? 'has' : 'have') + ' no tests yet (' + joinList(gaps.map(g => g.name + (g.state === 'fields-missing' ? ': ' + joinList(g.fields, 3) : '')), 3) + ')' : '';
+    const text = !gaps.length ? passed + ' of ' + nWord(ids.length, 'test') + ' passed'
+      : passed + ' of ' + checks + ' checks done: ' + passed + ' of ' + nWord(ids.length, 'test') + ' passed, and ' + gapText;
+    const notChangedText = notChanged.length ? 'Not tested because this project does not change ' + (notChanged.length === 1 ? 'it' : 'them') + ': ' + joinList(notChanged.map(x => x.name), 4) + '.' : '';
+    return { ids, status, passed, gaps, checks, text, notChanged, notChangedText };
   }
   // R9 §13 the one approvals list the launch gate and the approver pages read.
   // [{bu, needed, ready, approved, stale, approver, eligible, suggestion, blockedBy: null|{rule, person, text, fix}, waiting, waitingOn, sentence}]
@@ -3214,7 +3508,7 @@
     if (r.released) {
       const fromCheck = (bu.sectionStatus || []).filter(x => x.approved);
       const rows = fromCheck.length ? fromCheck.map(x => ({ bu: x.bu, approver: x.approver || null }))
-        : [...new Set(list(docs, 'approval').filter(a => a.projectId === project.id).map(a => a.bu))].sort().map(b => {
+        : [...new Set(list(docs, 'approval').filter(a => a.projectId === project.id && a.bu && !a.kind).map(a => a.bu))].sort().map(b => {
           const l = latestBy(list(docs, 'approval').filter(a => a.projectId === project.id && a.bu === b), 'at');
           return l && l.decision === 'approved' ? { bu: b, approver: l.approver || null } : null;
         }).filter(Boolean);
@@ -3228,11 +3522,14 @@
       let blockedBy = null;
       if (!approved && x.needsApprover) {
         const fix = 'Choose who approves ' + x.bu + "'s part";
+        const bar = (x.barred || [])[0];
         blockedBy = x.sodBlockedBy
-          ? { rule: 'separation-of-duties', person: x.sodBlockedBy, text: nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else in ' + x.bu + ' must approve.', fix, suggestion: x.suggestion || null }
+          ? { rule: 'separation-of-duties', reason: bar ? bar.rule : 'recorded-tests', person: x.sodBlockedBy, people: (x.barred || []).map(b => b.person),
+            text: (x.barred || []).map(b => b.text).join(' ') || nameOf(docs, x.sodBlockedBy) + ' recorded these tests, so someone else must approve.', fix, suggestion: x.suggestion || null }
           : { rule: 'no-approver', person: null, text: 'Nobody in ' + x.bu + ' can approve this part yet.', fix, suggestion: x.suggestion || null };
       }
-      const sentence = approved ? 'Approved by ' + nameOf(docs, x.approver) + '.' : x.stale ? 'Changed after approval: ' + x.bu + ' must approve again.'
+      const stx = x.stale ? ((bu.stale || []).find(y => y.bu === x.bu) || {}).text : null;
+      const sentence = approved ? 'Approved by ' + nameOf(docs, x.approver) + '.' : x.stale ? (stx ? 'Changed after approval: ' + stx : 'Changed after approval: ' + x.bu + ' must approve again.')
         : blockedBy ? blockedBy.text + ' ' + blockedBy.fix + '.' : br.sentence;
       return { bu: x.bu, needed: true, ready: br.ready, approved, stale: !!x.stale, approver, approverName: approver ? nameOf(docs, approver) : null, eligible: x.eligible.slice(),
         suggestion: x.suggestion || null, blockedBy, waiting: br.waiting, waitingOn: br.waitingOn || 0, sentence };
@@ -3278,8 +3575,14 @@
       rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, who, reasons: c.reasons.slice(),
       status: { rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, reasons: c.reasons.slice(), who },
       launchSteps: launch, stepsLeft: launch.filter(s => !s.done).length, testing, approvals,
-      cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget, show: hasRates },
-      ev, burndown: burndownStatus(docs, project.id, today, ev),
+      cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget, show: hasRates,
+        method: ev.eacMethod || null },
+      ev, evFlags: (ev.flags || []).slice(), burndown: burndownStatus(docs, project.id, today, ev),
+      // R11 §5 one blocking definition, one lateness per task
+      blocking: blockingOf(docs, project, c.blockers),
+      lateness: Object.fromEntries(c.open.filter(w => c.fc[w.id] && c.fc[w.id].late).map(w => [w.id, lateInfo(docs, w, today, c.fc)])),
+      // R11 §3 launch day on a day off (Launch, Dashboard, status), access counts
+      launchFlag: c.launchFlag || null, grants: grantCounts(docs, project, today),
     };
   }
 
@@ -3551,7 +3854,7 @@
     const testsRun = { passed: 0, failed: 0, runs: 0 };
     runs.forEach(r => { if (!within(dayOfValue(r.at))) return; testsRun.runs++;
       (r.results || []).forEach(x => { if (x && x.outcome === 'pass') testsRun.passed++; else if (x && x.outcome === 'fail') testsRun.failed++; }); });
-    const approvalsGiven = list(docs, 'approval').filter(a => a.projectId === project.id && a.decision === 'approved')
+    const approvalsGiven = list(docs, 'approval').filter(a => a.projectId === project.id && a.bu && !a.kind && a.decision === 'approved')
       .map(a => ({ id: a.id, bu: a.bu || null, approver: a.approver || null, approverName: pn(a.approver), date: dayOfValue(a.date) || dayOfValue(a.at) }))
       .filter(a => within(a.date)).sort(byDate);
     const risksOpened = [], risksClosed = [];
@@ -3682,7 +3985,168 @@
         g.items.length + ' of the ' + all.length + ' late or blocked tasks' }));
   }
 
+  /* ------------------------------------------------------------------ */
+  /* R11 (G1) governance integrity helpers                               */
+  /* ------------------------------------------------------------------ */
+  // R11 §5 one lateness per task: {late, days, pastDue, due, forecast, text: "Late by 6 business days",
+  // dueText: "was due Nov 16" (past dates only) | "due Dec 3"}.
+  function lateInfo(docs, workId, today, fc) {
+    const w = typeof workId === 'string' ? get(docs, 'workItem', workId) : workId;
+    if (!w) return null;
+    const r = (fc || forecastAll(docs, today))[w.id] || {};
+    const days = r.lateDays || 0;
+    const due = isDate(w.due) ? w.due : null;
+    const past = !!(due && isDate(today) && due < today);
+    return { workId: w.id, late: !!r.late, days, pastDue: r.sched === 'late', due, forecast: r.forecast || null,
+      text: r.late ? 'Late by ' + nWord(days, 'business day') : '', dueText: due ? (past ? 'was due ' : 'due ') + fmtDay(due) : '' };
+  }
+  // R11 §5 ONE definition of blocking, used by the header, the report and the risk register: a piece of information
+  // the project's Future steps need that is not available yet AND holds up at least one open task. planned = work
+  // is scheduled to get it. {count, holdsUp, unplanned, items: [{dataId, name, planned, held, text}], text}.
+  function blockingOf(docs, prj, blockers) {
+    const project = projOf(docs, prj);
+    if (!project) return { count: 0, holdsUp: 0, unplanned: 0, items: [], text: 'Nothing blocking' };
+    const items = (blockers || blockersOf(docs, project)).filter(b => b.held > 0).map(b => ({ dataId: b.dataId, name: b.name, planned: b.planned, held: b.held, owner: b.owner,
+      text: b.name + ' holds up ' + nWord(b.held, 'task') + (b.planned ? '; work is planned to get it' : '; no work is planned to get it') }));
+    const holdsUp = items.reduce((a, b) => a + b.held, 0);
+    return { count: items.length, holdsUp, unplanned: items.filter(b => !b.planned).length, items,
+      text: items.length ? items.length + ' blocking (holds up ' + nWord(holdsUp, 'task') + ')' : 'Nothing blocking' };
+  }
+  // R11 §3 temporary data access, one set of words and counts everywhere (Launch, the gate, History):
+  //  waiting = requested (needs a decision; blocks launch), open = approved or active and not past its expiry
+  //  (closes automatically at launch), closed = expired, revoked or denied. Dates are the person's local dates when
+  //  tzOffsetMinutes is given (Date#getTimezoneOffset sign: minutes BEHIND UTC, e.g. 360 for Chicago in winter).
+  const GRANT_MAX_DAYS = 30;
+  function localDay(ts, tzOffsetMinutes) {
+    if (!ts) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(ts))) return String(ts);
+    const ms = Date.parse(ts); if (isNaN(ms)) return null;
+    return iso(ms - (isFinite(+tzOffsetMinutes) ? +tzOffsetMinutes : 0) * 60000 - ((ms - (isFinite(+tzOffsetMinutes) ? +tzOffsetMinutes : 0) * 60000) % DAY + DAY) % DAY);
+  }
+  function grantState(g, today) {
+    if (!g) return 'closed';
+    if ((g.status === 'active' || g.status === 'approved') && isDate(g.expires) && isDate(today) && String(g.expires).slice(0, 10) < today) return 'closed';
+    return g.status === 'requested' ? 'waiting' : g.status === 'active' || g.status === 'approved' ? 'open' : 'closed';
+  }
+  const GRANT_WORDS = { waiting: 'Waiting for approval', open: 'Open', closed: 'Closed' };
+  function grantView(g, today, tzOffsetMinutes) {
+    const state = grantState(g, today);
+    const from = localDay(g && (g.approvedAt || null), tzOffsetMinutes);
+    const to = g && isDate(g.expires) ? String(g.expires).slice(0, 10) : null;
+    const days = from && to ? Math.max(0, diffDays(to, from)) : null;
+    const closedOn = state === 'closed' && g ? localDay(g.closedAt || g.expiredAt || (g.status !== 'denied' && to && isDate(today) && to < today ? to : null) || ((g.log || []).filter(e => e && /expire|revoke|den/i.test(String(e.action || ''))).map(e => e.at).sort().pop()) || null, tzOffsetMinutes) : null;
+    return { state, label: GRANT_WORDS[state], from, to, days, maxDays: GRANT_MAX_DAYS, overMax: days != null && days > GRANT_MAX_DAYS, closedOn,
+      text: state === 'waiting' ? 'Waiting for approval' : state === 'open' ? 'Open' + (to ? ' until ' + fmtDay(to) : '') + (days != null ? ' (' + nWord(days, 'day') + ' of ' + GRANT_MAX_DAYS + ' at most)' : '')
+        : 'Closed' + (closedOn ? ' ' + fmtDay(closedOn) : '') };
+  }
+  function grantCounts(docs, prj, today) {
+    const project = projOf(docs, prj);
+    const gs = project ? list(docs, 'grant').filter(g => g.projectId === project.id) : [];
+    const by = { waiting: [], open: [], closed: [] };
+    gs.forEach(g => by[grantState(g, today)].push(g.id));
+    return { waiting: by.waiting.length, open: by.open.length, closed: by.closed.length, ids: by, blocking: by.waiting.length,
+      text: [by.waiting.length ? nWord(by.waiting.length, 'request') + ' waiting for approval' : '', by.open.length ? by.open.length + ' open (they close at launch)' : ''].filter(Boolean).join(' · ') || 'No temporary access open' };
+  }
+  // R11 §3 the launch guard, evaluated on the person's local wall time `now` ("YYYY-MM-DDTHH:MM", or a date).
+  // {ok, why: [plain reasons], codes: ['window'|'tasks'], windowOpens: "Mon Dec 7, 7:30 AM", openTasks: [...]}.
+  function windowParts(w) {
+    if (!w) return null;
+    if (typeof w === 'object') { const st = String(w.start || ''); return isDate(st) ? { date: st.slice(0, 10), from: st.slice(11, 16) || '' } : null; }
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(String(w).trim());
+    return m ? { date: m[1], from: m[2] ? (m[2].length === 4 ? '0' + m[2] : m[2]) : '' } : null;
+  }
+  function fmtClock(hm) { const m = /^(\d{1,2}):(\d{2})$/.exec(hm || ''); if (!m) return ''; const h = +m[1]; return (h % 12 || 12) + ':' + m[2] + ' ' + (h < 12 ? 'AM' : 'PM'); }
+  function launchGuard(docs, prj, now) {
+    const project = projOf(docs, prj);
+    if (!project) return { ok: false, why: ['the project could not be found'], codes: ['project'], openTasks: [] };
+    const co = project.cutover || {};
+    const why = [], codes = [];
+    const wp = windowParts(co.window);
+    const nowS = String(now || '');
+    const nowDay = isDate(nowS) ? nowS.slice(0, 10) : null, nowHm = (/T(\d{2}:\d{2})/.exec(nowS) || [])[1] || null;
+    let windowOpens = null;
+    if (wp && nowDay) {
+      const opens = wp.date + 'T' + (wp.from || '00:00');
+      const nowKey = nowDay + 'T' + (nowHm || '00:00');
+      if (nowKey < opens) { windowOpens = fmtDayLong(wp.date) + (wp.from ? ', ' + fmtClock(wp.from) : ''); why.push('the launch window opens ' + windowOpens); codes.push('window'); }
+    }
+    // go/no-go tasks are not here: they must be confirmed by their owners and can never be overridden
+    const openTasks = (Array.isArray(co.tasks) ? co.tasks.filter(Boolean) : []).filter(t => !t.done && !t.gonogo);
+    if (openTasks.length) { why.push(nWord(openTasks.length, 'launch-day step') + ' ' + (openTasks.length === 1 ? 'is' : 'are') + ' not done yet: ' + joinList(openTasks.map(t => '“' + (t.task || t.title || 'untitled step') + '”'), 3)); codes.push('tasks'); }
+    return { ok: !why.length, why, codes, windowOpens, openTasks: openTasks.map(t => t.id || t.task || ''),
+      text: why.length ? 'Ready except: ' + why.join('; ') : 'Ready to launch' };
+  }
+  // R11 §2 launch overrides need TWO different people, both with step-up: the project manager AND a sponsor or
+  // approver (project.sponsor when set; otherwise anyone who may approve one of the project's parts, never the
+  // project manager or the launch owner). Sign-offs are approval docs {kind: 'launch-override', projectId, role:
+  // 'pm'|'sponsor', approver, decision: 'approved', stepUp: true, reason, at}. A sign-off taken before the latest
+  // launch-day plan change does not count.
+  function overrideSignerRole(docs, prj, personId) {
+    const project = projOf(docs, prj);
+    if (!project || !personId) return null;
+    if (personId === project.owner) return 'pm';
+    const lo = project.releaseManager || project.owner;
+    if (personId === lo) return null;
+    if (project.sponsor) return personId === project.sponsor ? 'sponsor' : null;
+    const r = readiness(docs, project.id, null);
+    const bu = (r.checks || []).find(c => c.id === 'bu-signoff') || {};
+    const elig = Object.keys(bu.eligible || {}).some(k => (bu.eligible[k] || []).includes(personId));
+    const approved = (bu.sectionStatus || []).some(x => x.approver === personId && x.approved);
+    return elig || approved ? 'sponsor' : null;
+  }
+  function launchOverrideStatus(docs, prj, now) {
+    const project = projOf(docs, prj);
+    if (!project) return { needed: false, ok: false, signoffs: [], missing: [], text: '' };
+    const guard = launchGuard(docs, project, now);
+    const since = [project.cutoverUpdatedAt].concat(((project.cutover || {}).tasks || []).filter(Boolean).map(t => t.updatedAt)).filter(Boolean).map(String).sort().pop() || '';
+    const docsO = list(docs, 'approval').filter(a => a.projectId === project.id && a.kind === 'launch-override' && a.decision === 'approved' && a.stepUp === true && String(a.at || '') > since);
+    const pick = role => latestBy(docsO.filter(a => a.role === role && overrideSignerRole(docs, project, a.approver) === role), 'at');
+    const pm = pick('pm'), sp = pick('sponsor');
+    const signoffs = [pm, sp].filter(Boolean).map(a => ({ role: a.role, by: a.approver, name: nameOf(docs, a.approver), at: a.at, reason: a.reason || '' }));
+    const ok = !!(pm && sp && pm.approver !== sp.approver);
+    const missing = [!pm ? 'pm' : null, !sp ? 'sponsor' : null].filter(Boolean);
+    return { needed: !guard.ok, guard, ok: guard.ok || ok, overridden: !guard.ok && ok, signoffs, missing,
+      text: guard.ok ? '' : ok ? 'Override signed by ' + joinList(signoffs.map(x => x.name)) + '.' : 'An override needs the project manager and a sponsor or approver, both with an extra sign-in check. ' +
+        (missing.length === 2 ? 'Neither has signed.' : (missing[0] === 'pm' ? 'The project manager' : 'A sponsor or approver') + ' still has to sign.') };
+  }
+  // R11 §9 Jira/ADO inbound dependency check: a task marked Done (by sync) while work it depends on is still open.
+  // {flag, open: [{id, title}], text: "Finished before the work it depends on"}.
+  function doneBeforeDeps(docs, workId) {
+    const w = typeof workId === 'string' ? get(docs, 'workItem', workId) : workId;
+    if (!w || w.status !== 'done') return { flag: false, open: [], text: '' };
+    const idx = byId(list(docs, 'workItem'));
+    const open = depIds(w).map(id => idx[id]).filter(d => d && d.status !== 'done').map(d => ({ id: d.id, title: d.title || 'untitled task' }));
+    return { flag: open.length > 0, open, text: open.length ? 'Finished before the work it depends on (' + joinList(open.map(d => '“' + d.title + '”'), 3) + ' ' + (open.length === 1 ? 'is' : 'are') + ' still open)' : '' };
+  }
+  // R11 §7 holiday-aware sprint calendar: working days, the days off inside it, and capacity pro-rated per person
+  // (person.capacity days per 5-day week, default 4). [{id, name, start, end, workingDays, daysOff: [{date, name}],
+  // capacity: {total, people: [{id, name, days}]}, text: "Nov 16–27 · 9 working days (Thanksgiving Day off)"}].
+  function sprintCalendar(docs, prj, today) {
+    const project = projOf(docs, prj);
+    if (!project) return [];
+    syncCalendar(docs);
+    const ppl = personList(docs);
+    const items = list(docs, 'workItem').filter(w => w.projectId === project.id);
+    const involved = [...new Set(items.map(w => w.owner).filter(Boolean))];
+    return sprints(project, today, docs).map(sp => {
+      const daysOff = [];
+      let working = 0;
+      if (isDate(sp.start) && isDate(sp.end)) for (let ms = toMs(sp.start), g = 0; ms <= toMs(sp.end) && g < 400; ms += DAY, g++) {
+        const wd = weekday(ms); if (wd === 0 || wd === 6) continue;
+        const h = holidayName(iso(ms)); if (h) daysOff.push({ date: iso(ms), name: h }); else working++;
+      }
+      const people = involved.map(id => { const p = ppl.find(x => x.id === id) || {}; const cap = p.capacity != null && isFinite(+p.capacity) ? +p.capacity : 4;
+        return { id, name: p.name || 'someone', days: Math.round(cap * working / 5 * 10) / 10 }; });
+      const total = Math.round(people.reduce((a, x) => a + x.days, 0) * 10) / 10;
+      return Object.assign({}, sp, { workingDays: working, daysOff, capacity: { total, people },
+        text: fmtDay(sp.start) + '–' + fmtDay(sp.end) + ' · ' + nWord(working, 'working day') + (daysOff.length ? ' (' + joinList(daysOff.map(d => d.name)) + ' off)' : '') });
+    });
+  }
+
   return {
+    // R11 (G1)
+    testingTruth, runAuditText, approvalBar, partTests, lateInfo, blockingOf, grantState, grantView, grantCounts, localDay, launchGuard,
+    launchOverrideStatus, overrideSignerRole, doneBeforeDeps, sprintCalendar, heldTests, problemFixDone, GRANT_MAX_DAYS,
     // R10.1 stream R
     periodReport, periodWindow, areasOfConcern, PERIOD_PRESETS,
     // R10

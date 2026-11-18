@@ -80,7 +80,13 @@ async function api(method, path, body) {
   await shot('03-wizard-step3');
   await page.click('[data-cx-next]');
   await page.waitForSelector('[data-cx-conn] [data-cx-result]', { timeout: 20000 });
-  ok(/13 changes sent to Jira|changes sent to Jira/.test(await page.textContent('[data-cx-result]')), 'connecting runs the first sync: ' + (await page.textContent('[data-cx-result]')).slice(0, 80));
+  const first = await page.textContent('[data-cx-result]');
+  ok(/13 issues created in Jira/.test(first), 'connecting runs the first sync: ' + first.slice(0, 90));
+  /* R11 §4: the counts in the sentence equal the rows in the sync log */
+  const logRows = await page.$$eval('[data-cx-log] .cx-le', els => els.map(e => e.textContent));
+  const nCreated = Number((/(\d+) issues? created/.exec(first) || [])[1] || 0), nLinked = Number((/(\d+) dependency links? set/.exec(first) || [])[1] || 0);
+  ok(nCreated === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Create VOM-/.test(t)).length && nLinked === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Link VOM-/.test(t)).length,
+    `sentence counts equal the log (${nCreated} created, ${nLinked} links)`);
   ok((await page.locator('[data-cx-sim] [data-cx-item]').count()) === 13, 'all 13 project tasks appear in Simulated Jira');
   ok(/Simulated Jira \(demo\)/.test(await page.textContent('[data-cx-conn]')), 'clearly labelled "Simulated Jira (demo)"');
   const k7 = await page.locator('[data-cx-item]', { hasText: 'Check bank accounts with a small test deposit' }).getAttribute('data-cx-item');
@@ -102,7 +108,31 @@ async function api(method, path, body) {
   const res = await page.textContent('[data-cx-result]');
   ok(new RegExp(`${before.t.tasks.done} → ${after.t.tasks.done} of`).test(res) && res.includes(after.t.label), 'result shows the project status change from the engine: ' + res.slice(0, 120));
   ok((await page.textContent('[data-cx-truth]')).trim() === after.t.label, 'header badge equals projectTruth label');
+  /* R11 §4: exactly one issue changed in Jira, and the log says so */
+  ok(/^1 changed issue since the last sync\.$/.test(await page.locator('[data-cx-log] .cx-le', { hasText: 'Read changes' }).first().locator('.cx-lx').textContent()), 'pull reads exactly "1 changed issue since the last sync"');
+  /* R11 §9: Done in Jira while the work it depends on is open: accepted, flagged in the log and on the task */
+  const w6deps = (w6.deps || []).map(id => after.docs.workItem.find(d => d.id === id)).filter(d => d && d.data.status !== 'done');
+  if (w6deps.length) {
+    ok(/finished before the work it depends on \(flagged\)/.test(res), 'result sentence reports the flag');
+    ok(/Finished before the work it depends on/.test(await page.textContent('[data-cx-log]')), 'sync log row: "Finished before the work it depends on"');
+    ok(/Finished before the work it depends on/.test(await page.locator(`[data-cx-early="W6"]`).textContent().catch(() => '')), 'flag shown on the task in the list');
+  } else ok(!(await page.$('[data-cx-early="W6"]')), 'no flag when its predecessors are done');
   await shot('05-flowed-back');
+  /* R11 §9 (Jordan's VOM-10 case): a task whose predecessors are still open is marked Done in Jira */
+  const waiting = after.docs.workItem.find(d => d.data.projectId === 'vendor-modernization' && d.data.status !== 'done' &&
+    (d.data.deps || []).some(id => { const p = after.docs.workItem.find(x => x.id === id); return p && p.data.status !== 'done'; }));
+  if (!waiting) ok(false, 'the seed has a task waiting on open work');
+  else {
+    const wkey = await page.locator('[data-cx-item]', { hasText: waiting.data.title }).first().getAttribute('data-cx-item');
+    await page.selectOption(`[data-cx-simstatus="${wkey}"]`, 'Done');
+    await page.waitForSelector(`[data-cx-early="${waiting.id}"]`, { timeout: 20000 }).catch(() => {});
+    ok(/Finished before the work it depends on \(.+ still open\)/.test(await page.textContent(`[data-cx-early="${waiting.id}"]`).catch(() => '')), `${wkey} Done with open predecessors: flagged on the task`);
+    ok(/finished before the work it depends on \(flagged\)/.test(await page.textContent('[data-cx-result]')), 'the result sentence reports the flag');
+    ok(await page.locator('[data-cx-log] .cx-le', { hasText: 'Check order' }).count() >= 1, 'sync log row "Check order · Finished early"');
+    const st2 = await api('GET', `ws/${ws}/state`);
+    ok(st2.body.docs.workItem.find(d => d.id === waiting.id).data.status === 'done', 'the Done is accepted, not refused');
+    await shot('05b-finished-early');
+  }
 
   console.log('4. sync log, signed intents, replay protection');
   ok((await page.locator('[data-cx-log] .cx-le').count()) >= 10, 'sync log lists intents and results');

@@ -89,14 +89,14 @@ function parseCSV(text) {
    today), computed with the engine's calendar. On a seed day that is a weekend or holiday, SPI and the buffer are read
    from the engine instead (planned value shifts by a day there; see the doc). */
 const G = {
-  vm: { id: 'vendor-modernization', label: 'Some tasks late', done: 7, total: 13, pct: 48, late: 5, lateSplit: '1 past due, 4 will finish after their due date', blocking: 0,
+  vm: { id: 'vendor-modernization', label: 'Some tasks late', done: 7, total: 13, pct: 48, late: 5, lateSplit: '1 past due, 4 will finish after their due date', blocking: 1,
     who: 7, whoShown: 5, spi: '0.80', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
-    tests: '12/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
-    change: '7 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
-  erp: { id: 'erp-upgrade-readiness', label: 'On track', done: 0, total: 2, pct: 0, late: 0, blocking: 0, who: 2, spi: '—', cpi: '—', cost: '$5,000', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
+    tests: '9/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
+    change: '5 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
+  erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$6,406', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
     tests: '0/20', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '0/8', uat: '0/20',
-    change: '5 new · 6 changed · 1 removed', deadlineBd: 41, forecastBd: 16, buffer: 25 },
-  procs: { 'vendor-onboarding': '5 new · 6 changed · 1 removed', 'invoice-approval': '2 new · 3 changed', 'access-review': '3 changed', 'expense-reimbursement': '1 changed' },
+    change: '4 new · 6 changed · 1 removed', deadlineBd: 41, forecastBd: 16, buffer: 25 },
+  procs: { 'vendor-onboarding': '4 new · 6 changed · 1 removed', 'invoice-approval': '1 new · 3 changed', 'access-review': '3 changed', 'expense-reimbursement': '1 changed' },
 };
 async function goldenNumbers(browser, ymd, at, errors) {
   const E = require('../../api/shared/pmoflow-engine.js');
@@ -150,7 +150,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
   const moreHrefs = await page.$$eval('[data-who-more] [data-who-row]', as => as.map(a => a.getAttribute('href')));
   check('D vm: the 2 extra rows link to the approval (Launch) and to Testing, not the Work tab', moreHrefs.length === 2 && moreHrefs.some(h => /\/release\/vendor-modernization\?bu=Compliance/.test(h)) && moreHrefs.some(h => /\/testing\/vendor-modernization/.test(h)), moreHrefs);
   check('D vm: steps to launch "1 of 7 done", 6 left', (await txt('[data-launch-steps] h3 .n')).toLowerCase() === G.vm.stepsDone && (await attr('[data-launch-steps]', 'data-steps-left')) === '6', [await txt('[data-launch-steps] h3 .n'), await attr('[data-launch-steps]', 'data-steps-left')]);
-  check('D vm: approvals step waits for parts whose work is not done', /Waiting for Compliance to approve its part\. Accounts Payable, IT and Treasury approve their parts once the work on them is done\./.test(await txt('[data-ls="approvals"]')), await txt('[data-ls="approvals"]'));
+  check('D vm: approvals step waits for parts whose work is not done', /Waiting for Compliance to approve its part\. Accounts Payable, IT and Treasury approve their parts once the work on them is done\. Procurement must approve again after changes\./.test(await txt('[data-ls="approvals"]')), await txt('[data-ls="approvals"]'));
   /* Project header, Advanced: % done, EV, money */
   await page.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await page.waitForTimeout(300);
   for (const k of ['vm', 'erp']) {
@@ -190,14 +190,15 @@ async function goldenNumbers(browser, ymd, at, errors) {
   /* New project dialog: the same change phrase */
   await page.goto(ROOT + '/'); await page.waitForSelector('[data-new-project]');
   await page.click('[data-new-project]'); await page.waitForSelector('.overlay #np-from');
-  check('D new-project dialog: Vendor Onboarding "5 new · 6 changed · 1 removed"', (await attr('.overlay #np-from option[value="vendor-onboarding"]', 'data-np-from-change')) === G.procs['vendor-onboarding']);
+  check('D new-project dialog: Vendor Onboarding "4 new · 6 changed · 1 removed"', (await attr('.overlay #np-from option[value="vendor-onboarding"]', 'data-np-from-change')) === G.procs['vendor-onboarding']);
   await page.keyboard.press('Escape'); await page.waitForTimeout(300);
   /* a project before a plan exists: "No plan yet" */
   await page.evaluate(async u => { const { store } = await import(u); await store.save('project', 'prj-golden-noplan', { id: 'prj-golden-noplan', name: 'Expense Golden Check', owner: 'mc', releaseManager: 'mc', resources: ['mc'], processes: ['expense-reimbursement'], status: 'active', target: window.PMOEngine.addBusinessDays(store.state.today, 40), baselines: [] }, 'Created project (e2e golden)'); }, STORE);
   await page.goto(ROOT + '/project/prj-golden-noplan'); await page.waitForSelector('[data-launch-steps]');
   check('D new project: "No plan yet", never "1 of 7 done" or "Information available ✓"', await page.locator('[data-launch-steps][data-no-plan]').count() === 1 && !/of 7 done/.test(await txt('[data-launch-steps]')) && !/Information available/.test(await txt('[data-launch-steps] .done')));
   const plan = await page.evaluate(async u => { const { store } = await import(u); return window.PMOEngine.suggestWorkFromDiff(store.state.docs, 'prj-golden-noplan', store.state.today); }, STORE);
-  check('D new project plan: a task per changed step, tell + train, every owner a person (role in the note)', plan.map(x => x.tag || x.step).join(',') === 'x1,tell,train' && plan.every(x => x.owner === 'mc' && !x.ownerRole) && /role "Employee"/.test(plan[0].note), plan.map(x => [x.title, x.owner, x.note]));
+  /* R11 §4: a role-only step goes to the one person with that title, else it is unassigned with the role shown (never the PM) */
+  check('D new project plan: a task per changed step, tell + train; the role-only step "Needs an owner: Employee", never the PM', plan.map(x => x.tag || x.step).join(',') === 'x1,tell,train' && plan[0].owner === null && plan[0].ownerRole === 'Employee' && /^Needs an owner: Employee\./.test(plan[0].note) && plan.slice(1).every(x => x.owner === 'mc') && (plan.find(x => x.tag === 'tell') || {}).teams && plan.find(x => x.tag === 'tell').teams.length > 0, plan.map(x => [x.title, x.owner, x.ownerRole, x.note, x.teams]));
   for (const w of [1366, 390]) {
     await page.setViewportSize({ width: w, height: 900 });
     for (const u of ['/', '/project/' + G.vm.id, '/testing/' + G.vm.id, '/dashboard']) {
@@ -237,7 +238,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
     const { store } = await import(u);
     return store.list('project').map(p => { const t = window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today);
       const live = p.status === 'live';
-      return { id: p.id, name: p.name, live, show: t.cost.show !== false, t: { label: t.label, forecast: t.forecastFinish, late: t.lateCount, blockers: t.who.filter(x => x.why === 'blocker').length, planned: t.cost.planned, actual: t.cost.actual, cost: t.cost.forecast, total: t.tasks.total,
+      return { id: p.id, name: p.name, live, show: t.cost.show !== false, t: { label: t.label, forecast: t.forecastFinish, late: t.lateCount, blockers: t.blocking.count, planned: t.cost.planned, actual: t.cost.actual, cost: t.cost.forecast, total: t.tasks.total,
         who: live || !t.who[0] ? null : t.who[0].name, steps: live ? 0 : t.stepsLeft } }; });
   }, STORE);
   check('seed has projects', truth.length >= 3, truth.length);
@@ -371,7 +372,9 @@ async function goldenNumbers(browser, ymd, at, errors) {
   const T = await page.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
     return store.list('project').map(p => { const t = E.projectTruth(store.state.docs, p.id, store.state.today);
       return { id: p.id, name: p.name, live: p.status === 'live', label: t.label, late: t.lateCount, lateIds: t.late, forecast: t.forecastFinish, deadline: t.deadline, total: t.tasks.total,
-        who0: t.who[0] ? t.who[0].name : null, who: t.who.map(x => x.name + ': ' + x.what), blockers: t.who.filter(x => x.why === 'blocker').length, steps: t.stepsLeft, testing: t.testing,
+        who0: t.who[0] ? t.who[0].name : null, who: t.who.map(x => x.name + ': ' + x.what), blockers: t.blocking.count, blockerRows: t.who.filter(x => x.why === 'blocker').length,
+        /* R11 §5: a "What's blocking" row is its who row plus the blocking item's own words */
+        whoBox: t.who.filter(x => x.why === 'blocker').map(x => { const b = t.blocking.items.find(i => 'data:' + i.dataId === x.ref); return x.name + ': ' + x.what + (b ? ' · ' + b.text : ''); }), steps: t.stepsLeft, testing: t.testing,
         approvals: (t.approvals || []).map(a => ({ bu: a.bu, needed: a.needed, waitingOn: a.waitingOn })),
         lateSteps: t.late.map(id => { const w = store.get('workItem', id); return w ? w.pid + '/' + w.step : null; }).filter(Boolean),
         steps2: [...new Set(store.list('workItem', w => w.projectId === p.id).map(w => w.pid + '/' + w.step))] }; }); }, STORE);
@@ -429,8 +432,8 @@ async function goldenNumbers(browser, ymd, at, errors) {
     check(`B ${x.name}: header label = truth`, normLabel(hd.label) === x.label, { hd: hd.label, label: x.label });
     check(`B ${x.name}: header late = lateCount`, hd.late === x.late, { hd: hd.late, late: x.late });
     if (x.total) check(`B ${x.name}: header forecast = truth`, normDate(hd.forecast) === normDate(x.forecast), { hd: hd.forecast, f: x.forecast });
-    check(`B ${x.name}: "Who needs to act" = projectTruth.who (in order)`, hd.rows.every(r => x.who.includes(r)) && (hd.who || null) === (x.who0 || null), { rows: hd.rows, who: x.who.slice(0, 5) });
-    check(`B ${x.name}: "What's blocking" = who.filter(blocker)`, hd.blocking === Math.min(3, x.blockers) && (hd.blockingN || 0) === x.blockers, { hd: [hd.blocking, hd.blockingN], blockers: x.blockers });
+    check(`B ${x.name}: "Who needs to act" = projectTruth.who (in order)`, hd.rows.every(r => x.who.includes(r) || x.whoBox.includes(r)) && hd.rows.length === x.who.length && (hd.who || null) === (x.who0 || null), { rows: hd.rows, who: x.who, box: x.whoBox });
+    check(`B ${x.name}: "What's blocking" = projectTruth.blocking (and its who rows)`, hd.blocking === Math.min(3, x.blockers) && (hd.blockingN || 0) === x.blockers && x.blockerRows === x.blockers, { hd: [hd.blocking, hd.blockingN], blockers: x.blockers, blockerRows: x.blockerRows });
     if (hd.stepsLeft != null) check(`B ${x.name}: checklist steps left = stepsLeft = its unticked rows`, hd.stepsLeft === x.steps && hd.unticked === x.steps, { hd: [hd.stepsLeft, hd.unticked], steps: x.steps });
     check(`B ${x.name}: map "Late" badges add up to lateCount`, hd.mapLate === x.late, { mapLate: hd.mapLate, late: x.late });
     await weekendAt(`project ${x.name}`); await onTrackAt(`project ${x.name}`);
@@ -466,7 +469,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
     if (lp.next != null) check(`B ${x.name}: Launch "Tests passed" action = testing.next`, lp.next.trim() === x.testing.next, { shown: lp.next, next: x.testing.next });
     for (const pt of lp.parts) {
       const pb = (x.testing.perBU || {})[pt.bu];
-      if (pt.tests) check(`B ${x.name}: approval card ${pt.bu} tests = perBU`, !!pb && pt.tests === `${pb.passed}/${pb.total}`, { shown: pt.tests, pb });
+      if (pt.tests) check(`B ${x.name}: approval card ${pt.bu} tests = perBU (checks, coverage gaps included)`, !!pb && pt.tests === `${pb.passed}/${pb.checks}` && pb.checks === pb.total + pb.gapCount, { shown: pt.tests, pb });
       const ap = x.approvals.find(a => a.bu === pt.bu);
       if (pt.waiting && ap && typeof ap.waitingOn === 'number') check(`B ${x.name}: approval card ${pt.bu} "Waiting on N" = approvals.waitingOn`, Number(pt.waiting) === ap.waitingOn, { shown: pt.waiting, ap });
     }

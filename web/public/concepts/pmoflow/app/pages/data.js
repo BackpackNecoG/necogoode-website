@@ -11,7 +11,18 @@ export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: 
 export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="How sensitive: ${esc(v.title || v.label)}">${esc(v.label)}</span>` : (isAdv() ? '<span class="badge b-none" title="Sensitivity not set">Sensitivity not set</span>' : ''); };
 /* only http(s) links are rendered as links */
 const safeUrl = u => /^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '#';
-const canEdit = x => !!x && store.state.me === x.owner;
+/* R11 G2 §4: information owned by a role (from a pasted procedure: "Credit Analyst") is checked by whoever holds that
+   role; while nobody in the workspace has it, the owner of a process that uses it can check it */
+const roleHolders = role => store.state.people.filter(p => role && String(p.role || '').trim().toLowerCase() === String(role).trim().toLowerCase());
+const procOwnersOf = x => new Set(store.list('process').filter(p => [...flat(p.asis), ...flat(p.tobe)].some(s => (s.data || []).includes(x.id) || (s.subs || []).some(b => (b.data || []).includes(x.id)))).map(p => p.owner));
+const canEdit = x => {
+  if (!x) return false;
+  const me = store.state.me;
+  if (x.owner) return me === x.owner;
+  const role = x.ownerRole || (eng('dataOwner', [docs(), x.id], null) || {}).role;
+  const holders = roleHolders(role);
+  return holders.length ? holders.some(p => p.id === me) : procOwnersOf(x).has(me);
+};
 const onlyMsg = x => `Only ${dataOwnerName(x)} (the owner) can change this`;
 /* disabled-state attributes for owner-only controls */
 const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(onlyMsg(x))}"`;
@@ -110,7 +121,8 @@ export function render(params) {
   const procCount = new Set([...users, ...asisUsers].map(u => u.pid)).size;
   const testPrj = usingProjects[0];
   const profile = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
-  const drift = profile ? eng('specDrift', [x, profile], []) : [];
+  /* R11 G2 §10: a rule written as text ("Unique per vendor") is a uniqueness rule too: duplicates are flagged */
+  const drift = profile ? eng('specDrift', [withRuleFlags(x), profile], []) : [];
   const fields = x.fields || [];
   const suggested = profile && !fields.length ? rulesFromProfile(profile) : [];
   const noRule = drift.filter(d => d && d.issue === 'unspecified-column');
@@ -150,7 +162,7 @@ export function render(params) {
       <div class="d-ownerrow"><button class="btn primary" data-confirm-all-go>Confirm all</button></div></div>` : '';
 
   const spec = `<div class="card" data-rules><h3>Rules to test <span class="n">${fields.length}</span></h3>
-    ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Name</th><th>Looks like</th><th>Rules</th>${owner ? '<th><span class="d-sr">Actions</span></th>' : ''}</tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td data-fsum>${esc(specSummary(f))}</td><td class="d-rule">${esc(ruleText(f))}</td>
+    ${fields.length ? `<div class="tbl-wrap"><table class="d-spec"><tr><th>Name</th><th>Looks like</th><th>Rules</th>${owner ? '<th><span class="d-sr">Actions</span></th>' : ''}</tr>${fields.map((f, i) => `<tr><td><b>${esc(f.name)}</b></td><td data-fsum>${esc(specSummary(f))}${(() => { const sr = specRules(f); return sr && !specSummary(f).toLowerCase().includes(sr.toLowerCase()) ? `<div class="hint d-specrules" data-spec-rules="${esc(sr)}">Tests check: ${esc(sr)}</div>` : ''; })()}</td><td class="d-rule">${esc(ruleText(f))}</td>
       ${owner ? `<td class="d-acts"><button class="btn sm" data-fedit="${i}" aria-label="Edit rule ${esc(f.name)}">Edit</button><button class="btn sm danger" data-fdel="${i}" aria-label="Delete rule ${esc(f.name)}">Delete</button></td>` : ''}</tr>`).join('')}</table></div>`
       : suggested.length ? `<div class="d-suggest" data-suggest-rules="${suggested.length}"><div class="s">The sample data check found <b>${suggested.length} column${suggested.length === 1 ? '' : 's'}</b>: ${esc(suggested.map(f => f.name).join(', '))}.</div>
         ${owner ? `<button class="btn primary" data-use-columns>Use these columns as the rules to test</button><div class="hint">The smallest and largest values seen become tests at the edges. You can change any rule after.</div>` : `<div class="d-only">${LOCK} ${esc(dataOwnerName(x))} (the owner) can turn them into rules</div>`}</div>`
@@ -180,7 +192,8 @@ export function render(params) {
       <div class="tbl-wrap"><table class="d-prof"><tr><th>Column</th><th>Empty</th><th>Distinct</th><th>Length</th><th>Range</th><th>Top patterns</th><th>Masked examples</th></tr>${(profile.columns || []).map(c => `<tr><td><b>${esc(c.name)}</b>${(c.specials || []).length ? `<div class="hint">special characters ${esc(c.specials.join(' '))}</div>` : ''}</td><td>${esc(c.nulls)}</td><td>${esc(c.distinct)}</td><td>${esc(c.minLen)}–${esc(c.maxLen)}</td><td>${c.min != null ? esc(c.min) + ' – ' + esc(c.max) : '—'}</td>
         <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${simpleCols}`)
       + (!adv ? '' : `<h3 style="margin-top:14px">Differences from the rules <span class="n">${blockingDrift(drift).length}</span></h3>${noRule.length ? `<div class="s" data-norule="${noRule.length}">${noRule.length} column${noRule.length === 1 ? ' has' : 's have'} no rule yet: ${esc(noRule.map(d => d.field).join(', '))}.</div>` : ''}${blockingDrift(drift).length ? blockingDrift(drift).map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : fields.length ? '<div class="s pass">The sample matches the rules.</div>' : ''}`)
-    : '<div class="s">Not checked yet. A check reads a sample of the real data and shows what it looks like, so the rules and tests match reality.</div>'}
+    /* R11 G2 §5: "Not checked yet" is an availability state; the sample card never reuses those words */
+    : '<div class="s" data-no-sample>No sample looked at yet. A check reads a sample of the real data and shows what it looks like, so the rules and tests match reality.</div>'}
     ${testPrj ? `<div style="margin-top:10px"><a class="btn sm" href="${link('/testing/' + testPrj.id + '?de=' + encodeURIComponent(did))}" data-link>Check sample data in ${esc(testPrj.name)} ›</a></div>` : '<div class="hint" style="margin-top:8px">Add a process that uses this to a project to check sample data.</div>'}</div>`;
 
   const dlist = x.discovered || [], open = dlist.filter(d => !d.resolved).length;
@@ -279,6 +292,20 @@ export function buildField(b) {
   if (match) out.matches = match;
   out.rule = [match ? 'Must match ' + match : '', extra].filter(Boolean).join(' · ');
   return { field: out, errs };
+}
+/* R11 G2 §10: "Unique", "Unique per vendor", "Required" written in the free-text rule count as the flags */
+export const withRuleFlags = x => Object.assign({}, x, { fields: (x.fields || []).map(f => Object.assign({}, f, /\bunique\b/i.test(String(f.rule || '')) ? { unique: true } : {}, /(^|[·;,]\s*)required\b/i.test(String(f.rule || '')) ? { required: true } : {})) });
+/* R11 G2 §10: every rule the generated tests use, in words ("digits only · 4–17 digits"), read from the engine's fieldSpec */
+export function specRules(f) {
+  const sp = eng('fieldSpec', [f], null); if (!sp) return '';
+  const unit = sp.type === 'digits' ? 'digits' : 'characters', bits = [];
+  if (sp.type === 'digits') bits.push('digits only');
+  if (sp.length != null) bits.push(`exactly ${sp.length} ${unit}`);
+  else if (sp.minLen != null && sp.maxLen != null) bits.push(`${sp.minLen}–${sp.maxLen} ${unit}`);
+  else if (sp.minLen != null) bits.push(`at least ${sp.minLen} ${unit}`);
+  else if (sp.maxLen != null) bits.push(`at most ${sp.maxLen} ${unit}`);
+  if (sp.aba) bits.push('passes the bank routing check digit');
+  return bits.join(' · ');
 }
 /* plain summary for the spec table, e.g. "9 digits", "Money · $0 – $25,000" */
 export function specSummary(f) {
@@ -478,7 +505,7 @@ export function bind(root, params) {
     const r = await modal({
       title: 'Edit information',
       body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(vals.name)}" /></div>
-        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${personOpts(vals.owner)}</select></div>${availField(vals.avail)}</div>
+        <div class="frow"><div class="field"><label>Owner</label><select name="owner">${vals.owner ? '' : `<option value="" selected>${esc(dataOwnerName(x))} (the role that does the step)</option>`}${personOpts(vals.owner)}</select></div>${availField(vals.avail)}</div>
         <div class="frow"><div class="field"><label>How sensitive</label><select name="sensitivity"><option value="">Not set</option>${Object.entries(SENS).map(([k, v]) => `<option value="${k}" ${k === vals.sensitivity ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
         <div class="field"><label>Where it comes from</label><input name="source" value="${esc(vals.source || '')}" /></div></div>
         <div class="field"><label>Note</label><textarea name="note">${esc(vals.note || '')}</textarea></div>
@@ -500,7 +527,8 @@ export function bind(root, params) {
     const lbl = k => isAdv() ? avOf(k).label : k === 'missing' || k === 'example' ? NOTYET : HAVE;
     if (before !== d.avail && lbl(before) !== lbl(d.avail)) parts.push(`status ${lbl(before)} → ${lbl(d.avail)}`);
     if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} → ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
-    if (x.owner !== d.owner) parts.push(`owner → ${personName(d.owner)}`);
+    if (!d.owner) { delete d.owner; } else if (d.ownerRole && d.owner !== x.owner) delete d.ownerRole;
+    if ((x.owner || '') !== (d.owner || '')) parts.push(`owner → ${d.owner ? personName(d.owner) : dataOwnerName(x)}`);
     await save(d, parts.length ? `Edited '${d.name}': ${parts.join(', ')}` : `Edited information '${d.name}'`);
     return;
     }

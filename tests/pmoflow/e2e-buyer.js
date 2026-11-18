@@ -16,7 +16,7 @@ const ORIGIN = `http://localhost:${PORT}`;
 const SHOTS = '/tmp/pmo-buyer';
 const PUBLIC = path.join(__dirname, '../../web/public');
 const IMG = path.join(PUBLIC, 'pmoflow/img');
-const TEST_IP = '198.51.100.43';   /* one fixed IP per run: the demo sandbox and the lead rate limit are keyed on it */
+const TEST_IP = process.env.PMO_TEST_IP || '198.51.100.43';   /* one fixed IP per run: the demo sandbox and the lead rate limit are keyed on it */
 fs.mkdirSync(SHOTS, { recursive: true });
 
 /* the production mapping (must match the staticwebapp.config.json routes the lead adds) */
@@ -114,7 +114,7 @@ function configChecks() {
   check('pricing.json: Team $45, up to 25 editors', plan('team').perEditorMonthly === 45 && plan('team').maxEditors === 25);
   check('pricing.json: Business $65', plan('business').perEditorMonthly === 65);
   check('pricing.json: Enterprise custom', plan('enterprise').custom === true);
-  check('pricing.json: pilot $7,500 for 90 days, credited', p.pilot.price === 7500 && p.pilot.days === 90 && /credited/.test(p.pilot.note));
+  check('pricing.json: pilot $2,500 for 90 days on one process, credited', p.pilot.price === 2500 && p.pilot.days === 90 && /credited/.test(p.pilot.note));
   check('pricing.json: approvers free', /free/i.test(p.freeSeats.priceLabel) && /approver/i.test(p.freeSeats.name));
   /* no hard-coded price anywhere in the pages: every number comes from pricing.json at runtime */
   const pages = ['index', 'pricing', 'security', 'demo', 'compare'].map(n => [n, fs.readFileSync(path.join(PUBLIC, 'pmoflow', n + '.html'), 'utf8')]);
@@ -231,17 +231,38 @@ async function browserChecks(browser) {
   check('estimator: says approvers are free', /Approvers are free/.test(await page.innerText('.est-out')));
   await page.selectOption('#est-plan', 'team'); await page.fill('#est-editors', String(team.maxEditors + 5));
   check('estimator: Team over its editor cap suggests Business', (await page.innerText('#est-note')).includes(String(team.maxEditors)) && (await page.innerText('#est-note')).includes('Business'));
+  /* R11: 0 editors → the box and the estimate both say 1 */
+  await page.fill('#est-editors', '0');
+  check('estimator: 0 becomes 1 in the input and the estimate', (await page.inputValue('#est-editors')) === '1' && /^1 editor ×/.test((await page.innerText('#est-detail')).trim()), await page.inputValue('#est-editors'));
+  await page.fill('#est-editors', ''); await page.dispatchEvent('#est-editors', 'change');
+  check('estimator: an emptied box is filled with 1 on leaving it', (await page.inputValue('#est-editors')) === '1');
   await page.fill('#est-editors', '1');
   check('estimator: singular editor', /^1 editor ×/.test((await page.innerText('#est-detail')).trim()));
 
   console.log('security content');
   await page.goto(ORIGIN + '/pmoflow/security');
   const sec = (await page.textContent('main')).replace(/\s+/g, ' ');
-  for (const id of ['model', 'access', 'signin', 'roles', 'audit', 'encryption', 'hosting', 'ai', 'roadmap', 'risks'])
+  for (const id of ['model', 'access', 'signin', 'roles', 'audit', 'encryption', 'hosting', 'it', 'continuity', 'ai', 'roadmap', 'risks'])
     check(`security: section #${id}`, await page.locator('#' + id + ' h2').count() === 1);
   check('security: tenant messaging', /never leave your tenant/i.test(sec) && !/no code on our side/i.test(sec));
-  check('security: SOC 2 labelled planned, never claimed', /Planned\s*SOC 2 Type II/.test(sec) && /does not hold any security certification/i.test(sec) &&
+  check('security: SOC 2 labelled planned, never claimed', /Target Q3 2027\s*SOC 2 Type I/.test(sec) && /does not hold any security certification/i.test(sec) &&
     !/(SOC 2|ISO 27001)[^.]{0,40}(certified|compliant|attested)/i.test(sec.replace(/does not hold any security certification today/i, '')));
+  /* R11 §5 */
+  const it = (await page.textContent('#it')).replace(/\s+/g, ' ');
+  check('security: what Team needs from IT (template setup, no relay, browser only)', /runs our template/.test(it) && /only needed when you connect Jira or Azure DevOps/.test(it) && /runs in the browser/.test(it) && !/no Azure install/i.test(it));
+  const cont = (await page.textContent('#continuity')).replace(/\s+/g, ' ');
+  check('security: vendor continuity states the facts (tenant, export formats)', /stay in your tenant/.test(cont) && /BPMN 2\.0/.test(cont) && /CSV/.test(cont) && /JSON/.test(cont));
+  const raw = fs.readFileSync(path.join(PUBLIC, 'pmoflow', 'security.html'), 'utf8') + fs.readFileSync(path.join(PUBLIC, 'pmoflow', 'pricing.html'), 'utf8');
+  /* Founder decisions, Nov 17 2026: escrow is offered on request for Enterprise (customer pays the agent);
+     pen test and SOC 2 carry founder-set TARGET dates. Guards kept: no pending markers, nothing claimed as obtained. */
+  check('security: no founder-pending markers in the published HTML', !/FOUNDER-CONFIRM/i.test(raw));
+  check('security: escrow offered on request for Enterprise, customer pays the agent', /Source code escrow for Enterprise/.test(sec) && /paid by the customer/i.test(sec));
+  check('security: SOC 2 / pen-test dates appear only as founder-set targets, never as achieved', /Target Q1 2027\s*Third-party penetration test/.test(sec) && /Target Q3 2027\s*SOC 2 Type I/.test(sec) && /Not yet obtained/.test(sec));
+  check('security: audit claim is exact (signed head, and what it does not prove)', /signed head/.test(sec) && /not as each change is saved/.test(sec) && !/verified as complete/i.test(sec));
+  check('security: "Request our security packet" goes to the demo form with topic=security', await page.locator('a[href="/pmoflow/demo?topic=security"]').count() >= 1);
+  await page.goto(ORIGIN + '/pmoflow/demo?topic=security');
+  check('demo form: topic=security pre-fills the ask', (await page.textContent('#demo-title')) === 'Request our security packet' && /security packet/.test(await page.inputValue('#f-fix')));
+  await page.goto(ORIGIN + '/pmoflow/security');
   check('security: every Planned item is in roadmap, signin or model', await page.$$eval('.tag.planned', ts => ts.every(t => t.closest('#roadmap, #signin, #model, #status-key'))));
 
   console.log('compare content');

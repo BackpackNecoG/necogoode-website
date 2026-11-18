@@ -132,7 +132,10 @@ test('tolerance: within / finish past deadline / deadline / budget / cost ≥ 5%
   assert.ok(r.change.edits.every(e => e.op === 'remove' || e.auto));
   /* an approval reopens: Treasury approved after W6 was last saved; moving W6 (a Treasury task) reopens it */
   const d3 = JSON.parse(JSON.stringify(docs));
-  d3.approval.push({ id: 'AP-T', data: { id: 'AP-T', projectId: PRJ, bu: 'Treasury', approver: 'lp', decision: 'approved', at: '2098-01-01T00:00:00.000Z', stepUp: true } });
+  /* R11 separation of duties: the approver must be someone allowed to approve Treasury's part */
+  const okApprover = (d3.person || []).map(p => p.id || (p.data && p.data.id)).find(pid => pid && pid !== 'ta' && !E.approvalBar(d3, PRJ, 'Treasury', pid));
+  assert.ok(okApprover, 'someone may approve Treasury');
+  d3.approval.push({ id: 'AP-T', data: { id: 'AP-T', projectId: PRJ, bu: 'Treasury', approver: okApprover, decision: 'approved', at: '2098-01-01T00:00:00.000Z', stepUp: true } });
   d3.workItem.forEach(w => { if (w.data.projectId === PRJ) delete w.data.updatedAt; });
   const before = E.projectTruth(d3, PRJ, TODAY).approvals.find(a => a.bu === 'Treasury');
   assert.equal(before.approved, true);

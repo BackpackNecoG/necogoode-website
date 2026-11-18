@@ -165,6 +165,10 @@ function approversError(prev, next, docs) {
     if (typeof pid !== 'string' || !(docs.person || []).some(d => d.id === pid)) return `Choose a person from the directory to approve the ${bu} part.`;
     if (pid === pm) return `${personName(docs, pid)} is the project manager, so they can't approve the ${bu} part. Choose someone else.`;
     if (pid === launch) return `${personName(docs, pid)} is the launch owner, so they can't approve the ${bu} part. Choose someone else.`;
+    /* R11 §2: nor someone who does steps in this part or recorded its tests */
+    const eng = engine();
+    const bar = eng && typeof eng.approvalBar === 'function' && next.id ? eng.approvalBar(docs, Object.assign({}, next), bu, pid) : null;
+    if (bar && bar.rule !== 'project-manager' && bar.rule !== 'launch-owner') return bar.text + ' Choose someone else.';
   }
   return null;
 }
@@ -194,6 +198,67 @@ function permissionError(type, prev, next, actor, docs) {
     }
   }
   return null;
+}
+
+/* R11 §2 separation of duties, enforced here (never only in the page). The Admin role grants no exemption.
+   testRun: results are recorded under the actor's own name; a manual PASS is refused for a test assigned to someone
+   else, and for a test whose open problem is not fixed yet (CI runs still never count a held test: the engine). */
+function testRunError(prev, next, actor, docs) {
+  const eng = engine();
+  if (!eng || typeof eng.heldTests !== 'function') return null;
+  const newRun = !prev;
+  if ((newRun || (prev && prev.by !== next.by)) && next.by !== actor)
+    return `Test results are recorded under your own name: ${personName(docs, actor)} can't record them as ${personName(docs, next.by)}.`;
+  const key = x => x && (x.caseId || x.scriptId);
+  const before = new Set(((prev && prev.results) || []).filter(x => x && x.outcome === 'pass').map(key));
+  const passes = (Array.isArray(next.results) ? next.results : []).filter(x => x && x.outcome === 'pass' && key(x) && !before.has(key(x))).map(key);
+  if (!passes.length) return null;
+  const flat = Object.fromEntries(Object.entries(docs).map(([t, arr]) => [t, arr]));
+  const project = ((docs.project || []).find(d => d.id === next.projectId) || {}).data || {};
+  const testerOf = {};
+  (docs.testCase || []).forEach(d => { if (d.data && d.data.tester) testerOf[d.id] = d.data.tester; });
+  (Array.isArray(project.uatScripts) ? project.uatScripts : []).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : [])
+    .forEach(x => { if (x && x.id && x.tester) testerOf[x.id] = x.tester; });
+  if (next.source !== 'ci') {
+    const others = passes.filter(k => testerOf[k] && testerOf[k] !== actor);
+    if (others.length) {
+      const who = [...new Set(others.map(k => personName(docs, testerOf[k])))];
+      return `You can only pass tests assigned to you or unassigned ones. ${others.length} of the ${passes.length} selected test${passes.length === 1 ? '' : 's'} ${others.length === 1 ? 'is' : 'are'} assigned to ${who.join(', ')}.`;
+    }
+    const held = eng.heldTests(flat, next.projectId);
+    const blocked = passes.filter(k => held[k]);
+    if (blocked.length) {
+      const titles = [...new Set(blocked.map(k => (((docs.workItem || []).find(d => d.id === held[k]) || {}).data || {}).title || 'an open problem'))];
+      return `A test can't pass while its problem is still open. Fix ${titles.map(t => `“${t}”`).join(', ')} first (mark it fixed), then re-run ${blocked.length === 1 ? 'the test' : 'the tests'}.`;
+    }
+  }
+  return null;
+}
+/* R11 §2 approvals: a decision is the actor's own, with step-up; nobody approves a part they do steps in, recorded
+   tests for, manage or launch. A launch-override sign-off is the actor's own and only in the role they hold. */
+function approvalError(prev, next, actor, docs) {
+  const eng = engine();
+  if (!eng || typeof eng.approvalBar !== 'function') return null;
+  const changed = !prev || prev.decision !== next.decision || prev.approver !== next.approver || prev.at !== next.at;
+  if (!changed || !next.decision) return null;
+  if (next.approver !== actor) return `Approvals are given under your own name: ${personName(docs, actor)} can't approve as ${personName(docs, next.approver)}.`;
+  if (next.decision === 'approved' && next.stepUp !== true) return 'Approving needs the extra sign-in check (step-up).';
+  if (next.kind === 'launch-override') {
+    const role = eng.overrideSignerRole(docs, next.projectId, actor);
+    if (!role) return `${personName(docs, actor)} can't sign a launch override: it needs the project manager and a sponsor or approver of this project.`;
+    if (next.role !== role) return `${personName(docs, actor)} can sign the override only as the ${role === 'pm' ? 'project manager' : 'sponsor or approver'}.`;
+    return null;
+  }
+  if (next.decision !== 'approved') return null;
+  const bar = eng.approvalBar(docs, next.projectId, next.bu, actor);
+  return bar ? bar.text : null;
+}
+/* R11 §3 the person's local wall time for the launch guard ("YYYY-MM-DDTHH:MM"), within a day of their today */
+function localNowOf(body, today) {
+  const v = body && typeof body.localNow === 'string' ? body.localNow : '';
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/.exec(v);
+  if (!m || !isDay(m[1]) || +m[2] > 23 || +m[3] > 59) return today + 'T00:00';
+  return Math.abs(Date.parse(m[1] + 'T12:00:00Z') - Date.parse(today + 'T12:00:00Z')) <= 86400000 ? m[1] + 'T' + m[2] + ':' + m[3] : today + 'T00:00';
 }
 
 const names = docs => {
@@ -266,7 +331,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
   const procDocs = (docs.process || []).filter(d => (project.processes || []).includes(d.id));
   const relId = 'rel-' + projectId.slice(0, 40) + '-' + Date.now().toString(36);
   const approvers = [...new Set((docs.approval || []).map(d => d.data)
-    .filter(a => a.projectId === projectId && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
+    .filter(a => a.projectId === projectId && a.bu && !a.kind && a.decision === 'approved' && a.stepUp === true).map(a => a.approver))];
   const stepUp = stepUpOf(body, actor, at);
   const plan = Object.fromEntries(procDocs.map(pd => [pd.id, (Number(pd.data.version) || 1) + 1]));
 
@@ -335,6 +400,7 @@ async function goLive(wsId, docs, project, actor, today, simulateFailure, body) 
   const team = (project.resources || []).map(pn).join(', ');
   const release = {
     id: relId, kind: 'golive', status: 'succeeded', projectId, at, date: today, by: actor, approvers, stepUp,
+    ...(body && body._override ? { override: body._override } : {}),
     actions: [pipelineAction('golive', projectId, relId, snapshot),
       ...procDocs.map(pd => ({ type: 'sop-publish', target: `SOP library: ${pd.data.name} v${snapshot[pd.id]}`, status: 'simulated-ok',
         detail: `Published the released process as the controlled SOP for ${pd.data.name}; v${snapshot[pd.id] - 1} was archived.` })),
@@ -468,7 +534,7 @@ module.exports = async function (context, req) {
     if (!path && req.url) path = String(req.url).split('?')[0].replace(/^.*\/api\/pmoflow\/?/, '');
     let seg;
     try { seg = String(path).split('/').filter(Boolean).map(decodeURIComponent); } catch (e) { return fail(400, 'bad path'); }
-    const body = parseBody(req);
+    let body = parseBody(req);
     if (body === null) return fail(400, 'body must be JSON');
 
     /* R10: stream-owned route modules (buyer layer, connections, admin). Each exports
@@ -543,6 +609,15 @@ module.exports = async function (context, req) {
         if (type === 'project') {
           const bad = approversError(prev && prev.data, data, st.docs);
           if (bad) return fail(400, bad);
+        }
+        /* R11 §2: separation of duties */
+        if (type === 'testRun') {
+          const bad = testRunError(prev && prev.data, data, actor, st.docs);
+          if (bad) return fail(403, bad);
+        }
+        if (type === 'approval') {
+          const bad = approvalError(prev && prev.data, data, actor, st.docs);
+          if (bad) return fail(403, bad);
         }
         /* R6: a grant's time box starts at approval: an approved or active grant expires within 30 days of it */
         if (type === 'grant') {
@@ -626,6 +701,9 @@ module.exports = async function (context, req) {
           charClasses: c.charClasses || [], specials: c.specials || [], patterns: c.patterns || [], examples: c.examples || [] };
         if (typeof c.min === 'number') o.min = c.min;
         if (typeof c.max === 'number') o.max = c.max;
+        /* a count only (non-empty values repeating an earlier value), never the values: specDrift flags it against a
+           field whose spec is unique (e.g. "Required, unique per vendor") */
+        if (typeof c.duplicates === 'number' && isFinite(c.duplicates)) o.duplicates = Math.max(0, Math.floor(c.duplicates));
         return o;
       });
       const id = 'profile-' + dataId;
@@ -680,6 +758,14 @@ module.exports = async function (context, req) {
       /* R5 [S]: only the release manager (defaults to the project owner) can go live or roll back */
       const rm = project.releaseManager || project.owner;
       if (actorOf(body) !== rm) return fail(403, `Only the release manager (${personName(st.docs, rm)}) can ${action === 'golive' ? 'take' : 'roll back'} ${project.name}${action === 'golive' ? ' live' : ''}.`);
+      /* R11 §2/§3: before the window or with launch-day steps open, launching needs a two-person override (the PM and a
+         sponsor or approver, both with step-up). Nobody, the launch owner or an Admin included, overrides alone. */
+      const eng = engine();
+      if (action === 'golive' && project.status !== 'live' && eng && typeof eng.launchOverrideStatus === 'function' && eng.readiness(st.docs, projectId, today).pass) {
+        const ov = eng.launchOverrideStatus(st.docs, projectId, localNowOf(body, today));
+        if (!ov.ok) return send(409, { error: 'launch locked', reasons: ov.guard.why.map(w => w.charAt(0).toUpperCase() + w.slice(1) + '.').concat([ov.text]) });
+        if (ov.overridden) body = Object.assign({}, body, { _override: { signoffs: ov.signoffs, guard: ov.guard.why } });
+      }
       const r = action === 'golive'
         ? await goLive(wsId, st.docs, project, actorOf(body), today, body.simulateFailure === true, body)
         : await rollback(wsId, st.docs, project, actorOf(body), body, today);
@@ -693,4 +779,4 @@ module.exports = async function (context, req) {
   }
 };
 
-module.exports._internal = { RATE_LIMIT_MSG, dayInput, clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };
+module.exports._internal = { testRunError, approvalError, localNowOf, RATE_LIMIT_MSG, dayInput, clientIpHash, clientToday, approversError, cloneNodes, localProfile, releaseExceptions, describe, grantExpiryError, auditClock, WS_RE, ID_RE };

@@ -88,11 +88,15 @@
     sel.innerHTML = p.plans.filter(function (x) { return x.perEditorMonthly; }).map(function (x) {
       return '<option value="' + esc(x.id) + '"' + (x.highlight ? ' selected' : '') + '>' + esc(x.name) + ' · ' + esc(money(x.perEditorMonthly, p.currency)) + ' per editor / month</option>';
     }).join('');
-    function update() {
+    /* R11: the estimate and the input always agree. Fewer than 1 editor becomes 1 in the box too (an empty box while
+       typing is left alone and filled with 1 when the visitor leaves the field). */
+    function update(e) {
       var pl = planById(p, sel.value);
-      var n = Math.floor(Number(num.value));
+      var raw = String(num.value).trim();
+      var n = Math.floor(Number(raw));
       if (!isFinite(n) || n < 1) { n = 1; }
       if (n > 10000) { n = 10000; }
+      if ((raw !== '' || (e && e.type === 'change')) && String(n) !== raw) num.value = String(n);
       var annual = n * pl.perEditorMonthly * 12;
       out.textContent = money(annual, p.currency) + ' a year';
       detail.textContent = n + ' editor' + (n === 1 ? '' : 's') + ' × ' + money(pl.perEditorMonthly, p.currency) + ' × 12 months';
@@ -103,7 +107,8 @@
     }
     sel.addEventListener('change', update);
     num.addEventListener('input', update);
-    form.addEventListener('submit', function (e) { e.preventDefault(); update(); });
+    num.addEventListener('change', update);
+    form.addEventListener('submit', function (e) { e.preventDefault(); update({ type: 'change' }); });
     update();
   }
 
@@ -138,6 +143,12 @@
     var plan = params.get('plan') || '';
     if (/^[a-z]{2,20}$/.test(plan)) form.elements.plan.value = plan;
     if (plan === 'pilot') { form.elements.interest.value = 'pilot'; var h = $('#demo-title'); if (h) h.textContent = 'Start a pilot'; }
+    /* R11: "Request our security packet" links here with topic=security; it is a demo request with the ask pre-filled */
+    if (params.get('topic') === 'security') {
+      var ht = $('#demo-title'); if (ht) ht.textContent = 'Request our security packet';
+      if (form.elements.fix && !form.elements.fix.value) form.elements.fix.value = 'Please send the PMOFlow security packet.';
+      var sb = form.querySelector('button[type=submit]'); if (sb) sb.textContent = 'Request the packet';
+    }
     var dateEl = form.elements.preferredDate;
     if (dateEl) { var t = new Date(); dateEl.min = t.getFullYear() + '-' + pad(t.getMonth() + 1) + '-' + pad(t.getDate()); }
     var status = $('#form-status');
@@ -190,7 +201,7 @@
           status.textContent = (res.body && res.body.error) || 'Something went wrong. Please try again.';
         })
         .catch(function () { status.textContent = 'We could not send your request. Check your connection and try again.'; })
-        .then(function () { btn.disabled = false; btn.textContent = form.elements.interest.value === 'pilot' ? 'Request a pilot' : 'Book my demo'; });
+        .then(function () { btn.disabled = false; btn.textContent = form.elements.interest.value === 'pilot' ? 'Request a pilot' : params.get('topic') === 'security' ? 'Request the packet' : 'Book my demo'; });
     });
 
     function done(lead) {

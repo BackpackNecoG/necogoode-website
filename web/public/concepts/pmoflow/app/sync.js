@@ -441,7 +441,8 @@
     }
     if (intent.op === 'pull') {
       var since = p.since || '';
-      var ch = Object.keys(sim.items).map(function (k) { return sim.items[k]; }).filter(function (x) { return !since || x.updatedAt > since; })
+      /* R11: PMOFlow's own writes are not "changes since the last sync" (a real relay filters out its service account the same way) */
+      var ch = Object.keys(sim.items).map(function (k) { return sim.items[k]; }).filter(function (x) { return (!since || x.updatedAt > since) && x.updatedBy !== 'PMOFlow sync'; })
         .sort(function (a, b) { return a.updatedAt.localeCompare(b.updatedAt); })
         .map(function (x) { return { key: x.key, title: x.title, description: x.description, status: x.status, assigneeEmail: x.assigneeEmail, due: x.due, updatedAt: x.updatedAt }; });
       var cursor = ch.length ? ch[ch.length - 1].updatedAt : (since || null);
