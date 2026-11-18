@@ -297,7 +297,9 @@ test('readiness: each check fails on its own condition', () => {
   assert.deepEqual(check(r, 'tests-passed').unrun, ['T2']);
 
   d = readyDocs(); d.workItem[5].data.status = 'prog';
-  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'work-done').items, ['W6']);
+  // R15 #8: the Done tasks that depend on the reopened W6 now need someone else to confirm them, so they are listed too
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'work-done').items, ['W6', 'W7', 'W8', 'W10']);
+  assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'work-done').unconfirmed, ['W7', 'W8', 'W10']);
 
   d = readyDocs(); d.dataElement.find(e => e.id === 'D9').data.avail = 'missing';
   assert.deepEqual(check(E.readiness(d, PRJ, TODAY), 'data-live').items, ['D9']);
@@ -1743,7 +1745,7 @@ test('R7 re-approval scope: one owner change stales only the sections it touches
   const fp = bu => E.sectionFingerprint(d, PRJ, bu);
   d.approval.forEach(e => { e.data.fingerprint = fp(e.data.bu); });
   assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
-  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+;v:[^;]+;w:[^;]+$/);   // R14: + the part's tasks (w)
+  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+;v:[^;]+;w:[^;]+;g:[^;]+;x:[^;]+$/);   // R14: + the part's tasks (w)
   // s3 moves from Leo Park (Treasury) to Ana Ruiz (Accounts Payable); the process is stamped as a whole
   d.process[0].data.tobe.find(n => n.id === 's3').owner = 'ar';
   d.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
@@ -3751,4 +3753,225 @@ test('R14 (L2 asks): per-run documents are available; new information is the ste
   const tr = E.teamRouting(d, 'pt');
   assert.ok(tr.noApprover.includes('Operations'), JSON.stringify(tr));
   assert.match(tr.text, /nobody to approve/);
+});
+
+/* ================================ Round 15 (M1): close the R14 review findings ================================ */
+// The BPM reviewer's credit-limit process (fictional Northwind): role steps whose stale named owner is the process
+// owner (Maya), Ana named as the Accounts Receivable approver though she sits in Accounts Payable, and a changed
+// threshold choice whose paths belong to the Controller (Finance).
+function r15Credit() {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const settings = d.workspace.find(w => w.id === 'settings').data;
+  settings.departments = settings.departments.concat([{ id: 'dept-ar', name: 'Accounts Receivable', approvers: ['ar'] }, { id: 'dept-fin', name: 'Finance', approvers: ['dk'] }]);
+  const proc = { id: 'credit', name: 'Credit limit request', owner: 'mc', resources: [], version: 1, released: [],
+    teamDepartments: { 'AR Specialist': 'Accounts Receivable', Controller: 'Finance', 'IT Support': 'IT' },
+    asis: [
+      { id: 'k', type: 'trigger', title: 'Credit request received', owner: 'mc', data: [] },
+      { id: 'a1', type: 'step', title: 'Review credit request', ownerRole: 'AR Specialist', owner: 'mc', data: [] },
+      { id: 'ag', type: 'decision', title: 'Requested limit over $200,000?', threshold: { subject: 'requested limit', op: '>', amount: 200000 }, branches: [
+        { label: 'Yes', nodes: [{ id: 'a2', type: 'step', title: 'Controller approves', ownerRole: 'Controller', data: [] }] },
+        { label: 'No', nodes: [] }] },
+      { id: 'a3', type: 'step', title: 'Update the credit limit in the ERP', ownerRole: 'AR Specialist', owner: 'mc', data: [] },
+      { id: 'a4', type: 'step', title: 'Sync to the ERP', ownerRole: 'IT Support', data: [] },
+    ],
+    tobe: [
+      { id: 'k', type: 'trigger', title: 'Credit request received', owner: 'mc', data: [], from: 'k' },
+      { id: 'c1', type: 'step', title: 'Review credit request in the portal', ownerRole: 'AR Specialist', owner: 'mc', data: [], from: 'a1' },
+      { id: 'cg', type: 'decision', title: 'Requested limit over $250,000?', threshold: { subject: 'requested limit', op: '>', amount: 250000 }, from: 'ag', branches: [
+        { label: 'Yes', nodes: [{ id: 'c2', type: 'step', title: 'Controller approves', ownerRole: 'Controller', data: [], from: 'a2' }] },
+        { label: 'No', nodes: [] }] },
+      { id: 'c3', type: 'step', title: 'Update the credit limit in the ERP', ownerRole: 'AR Specialist', owner: 'mc', data: [], from: 'a3' },
+      { id: 'c4', type: 'step', title: 'Sync to the ERP', ownerRole: 'IT Support', data: [], from: 'a4' },
+    ] };
+  d.process.push({ id: 'credit', data: proc });
+  d.project.push({ id: 'pcr', data: { id: 'pcr', name: 'Credit portal', owner: 'ta', processes: ['credit'], status: 'active', target: E.addBusinessDays(GOLD_DAY, 40) } });
+  return d;
+}
+
+test('R15 #1 one owner truth: plan tasks, scripts and scenarios name the step\'s doer, never the process owner; data owners follow their step', () => {
+  const d = r15Credit();
+  assert.deepEqual(E.stepTaskOwner(d, 'credit', 'c1'), { owner: null, ownerRole: 'AR Specialist', text: 'Needs an owner: AR Specialist' });
+  const sug = E.suggestWorkFromDiff(d, 'pcr', GOLD_DAY).filter(s => s.step === 'c1');
+  assert.deepEqual(sug.map(s => [s.owner, s.ownerRole]), [[null, 'AR Specialist']]);
+  const scripts = E.generateUatScripts(d, 'pcr');
+  assert.ok(scripts.length && scripts.every(s => !JSON.stringify(s).includes('Maya Chen')), JSON.stringify(scripts.map(s => s.when)));
+  assert.equal(scripts.find(s => s.step === 'c1').when, 'AR Specialist performs "Review credit request in the portal"');
+  assert.ok(!JSON.stringify(E.generateScenarios(d, 'pcr')).includes('Maya Chen'));
+  // Karen: outside parties are told, never trained
+  const v = r15Credit(); v.process.find(p => p.id === 'credit').data.tobe[1].ownerRole = 'Vendor';
+  const train = E.suggestWorkFromDiff(v, 'pcr', GOLD_DAY).find(s => s.tag === 'train');
+  assert.ok(train && !/Vendor/.test(train.note), train && train.note);
+  // a data owner follows its step to its new doer
+  const b = r15Credit();
+  b.dataElement.push({ id: 'DCL', data: { id: 'DCL', name: 'Credit limit', ownerRole: 'AR Specialist', avail: 'live' } });
+  b.process.find(p => p.id === 'credit').data.tobe[1].data = ['DCL'];
+  const a = JSON.parse(JSON.stringify(b)); a.process.find(p => p.id === 'credit').data.tobe[1].ownerRole = 'Credit Analyst';
+  assert.deepEqual(E.dataOwnersToFollow(b, a), [{ dataId: 'DCL', set: { owner: null, ownerRole: 'Credit Analyst' }, from: 'AR Specialist', to: 'Credit Analyst' }]);
+});
+
+test('R15 #2 one approver truth: a named department approver is eligible on Launch; Departments, the process page and Launch agree', () => {
+  const d = r15Credit();
+  const pa = E.partApprovers(d, 'pcr', 'Accounts Receivable');
+  assert.deepEqual([pa.eligible, pa.source], [['ar'], 'named']);
+  assert.equal(E.departmentApprovers(d, 'Accounts Receivable').text, 'Approves: Ana Ruiz');
+  const ap = E.projectTruth(d, 'pcr', GOLD_DAY).approvals.find(x => x.bu === 'Accounts Receivable');
+  assert.deepEqual(ap.eligible, pa.eligible, 'Launch reads the same list');
+  // Jordan: a department with named approvers lists only them, never its other members
+  const comp = E.departments(d).find(x => x.name === 'Compliance');
+  const pc = E.partApprovers(d, PRJ, 'Compliance');
+  assert.ok(pc.eligible.every(id => comp.approvers.length ? comp.approvers.includes(id) : true), JSON.stringify([pc.eligible, comp.approvers]));
+  assert.deepEqual(pc.eligible, E.projectTruth(d, PRJ, GOLD_DAY).approvals.find(x => x.bu === 'Compliance').eligible);
+});
+
+test('R15 #3 the sponsor is stored, never computed; with no sponsor a deadline change goes to an Admin who did not ask', () => {
+  const d = r15Credit();
+  assert.equal(E.sponsorOf(d, 'pcr'), null, 'no computed sponsor from the process owner');
+  const da = E.deadlineApprover(d, 'pcr', 'ta');
+  assert.equal(da.role, 'admin'); assert.ok(da.person && da.person !== 'ta', JSON.stringify(da));
+  assert.ok(E.adminsOf(d).includes(da.person));
+  const p = d.project.find(x => x.id === 'pcr').data; p.sponsor = 'ps';
+  assert.deepEqual([E.sponsorOf(d, 'pcr'), E.deadlineApprover(d, 'pcr', 'ta').person], ['ps', 'ps']);
+  assert.equal(E.deadlineApprover(d, 'pcr', 'ps').role, 'admin', 'the sponsor asking: an Admin approves');
+  p.sponsor = 'ta';
+  assert.equal(E.sponsorOf(d, 'pcr'), null, 'the PM is never the sponsor');
+});
+
+test('R15 #4 effort counts in the forecast; a start after the due date or on a day off is a problem; cost tolerance', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const t0 = E.projectTruth(d0, PRJ, GOLD_DAY);
+  const w = d0.workItem.find(e => e.data.status === 'idle' && e.data.start > GOLD_DAY && e.data.projectId === PRJ).data;
+  const d1 = R14set(d0, w.id, { effortDays: 40 });
+  const f = E.forecastAll(d1, GOLD_DAY)[w.id];
+  assert.ok(f.forecast >= E.addBusinessDays(w.start, 39), JSON.stringify(f));
+  const d1b = R14set(d1, w.id, { deps: [] });
+  assert.equal(E.forecastAll(d1b, GOLD_DAY)[w.id].basis.kind, 'effort');
+  assert.ok(E.deadlineBreach(d0, d1, PRJ, GOLD_DAY), 'a 40-day effort edit moves the finish past the deadline');
+  assert.ok(E.explainForecast(d1b, w.id, GOLD_DAY).some(x => /needs 40 business days of effort/.test(x.text)));
+  assert.equal(E.startDateProblem({ start: E.addBusinessDays(w.due, 2), due: w.due }, d0).kind, 'after-due');
+  assert.equal(E.startDateProblem({ start: '2026-12-25', due: '2026-12-31' }, d0).kind, 'day-off');
+  assert.equal(E.startDateProblem({ start: w.start, due: w.due }, d0), null);
+  const c = E.costBreach(d0, R14set(d0, w.id, { effortDays: (w.effortDays || 1) + 10 }), PRJ, GOLD_DAY);
+  assert.ok(c === null || c.pct >= E.COST_TOLERANCE_PCT);
+  assert.equal(E.costBreach(d0, d0, PRJ, GOLD_DAY), null);
+  void t0;
+});
+
+test('R15 #5/#6 a self-assigned test can\'t be passed in Try it out; first completion kept; hours flags', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const tc = d.testCase[0].data; tc.tester = 'dk'; tc.assignedBy = 'dk';
+  const bar = E.canPassTest(d, PRJ, tc.id, 'dk', { env: 'sit' });
+  assert.ok(bar && bar.rule === 'assigner' && /Try it out too/.test(bar.text), JSON.stringify(bar));
+  tc.assignedBy = 'ta';
+  assert.equal(E.canPassTest(d, PRJ, tc.id, 'dk', { env: 'sit' }), null);
+  // first completion
+  const prev = { status: 'prog', firstDoneAt: '2026-11-02', doneAt: undefined };
+  assert.deepEqual(E.keepFirstDone(prev, { status: 'done', doneAt: '2026-11-16' }), { status: 'done', doneAt: '2026-11-02', firstDoneAt: '2026-11-02' });
+  assert.equal(E.keepFirstDone({ status: 'done', doneAt: '2026-11-03' }, { status: 'prog' }).firstDoneAt, '2026-11-03');
+  assert.deepEqual(E.hoursFlags(null, { start: '2026-11-10' }, { date: '2026-11-20', hours: 8 }, GOLD_DAY, 30), { future: true, overDay: true });
+  assert.deepEqual(E.hoursFlags(null, { start: '2026-11-10' }, { date: '2026-11-05', hours: 8 }, GOLD_DAY, 8), { beforeStart: true });
+  assert.equal(E.timeEntryText({ hours: 8, date: '2026-11-30', at: '2026-11-18T10:00:00Z', future: true }), '8 hours on Nov 30 (logged Nov 18, future date)');
+  // the seed never shows an impossible day as ordinary
+  const dk = d.workItem.flatMap(e => (e.data.time || [])).filter(t => t.by === 'dk');
+  const per = {}; dk.forEach(t => { per[t.date] = (per[t.date] || 0) + t.hours; });
+  dk.filter(t => per[t.date] > 24).forEach(t => assert.equal(t.overDay, true));
+});
+
+test('R15 #11 a changed choice routes to its own step\'s team and its paths\' teams, says was → now; unchanged parts never reopen', () => {
+  const d = r15Credit();
+  const df = E.diffProcess(d.process.find(p => p.id === 'credit').data);
+  assert.ok(df.changes.cg.includes('Threshold over $200,000 → over $250,000'), JSON.stringify(df.changes.cg));
+  const secs = E.readiness(d, 'pcr', GOLD_DAY).checks.find(c => c.id === 'bu-signoff').sections;
+  assert.deepEqual(secs, ['Accounts Receivable', 'Finance'], 'the Controller (Finance) approves the changed threshold; IT, untouched, does not');
+  const tell = E.suggestWorkFromDiff(d, 'pcr', GOLD_DAY).find(s => s.tag === 'tell');
+  assert.match(tell.note, /Accounts Receivable/); assert.match(tell.note, /Finance/);
+  // approve Finance and IT-like parts with fingerprints, then change only the threshold: only parts it involves reopen
+  const at = GOLD_DAY + 'T10:00:00.000Z';
+  const fpF = E.sectionFingerprint(d, 'pcr', 'Finance');
+  d.approval.push({ id: 'APF', data: { id: 'APF', projectId: 'pcr', bu: 'Finance', approver: 'dk', decision: 'approved', at, stepUp: true, fingerprint: fpF } });
+  const g = d.process.find(p => p.id === 'credit').data.tobe[2]; g.threshold = { subject: 'requested limit', op: '>', amount: 300000 }; g.title = 'Requested limit over $300,000?';
+  const st = E.readiness(d, 'pcr', GOLD_DAY).checks.find(c => c.id === 'bu-signoff').stale.find(x => x.bu === 'Finance');
+  assert.ok(st && st.details.some(x => /threshold over \$250,000 → over \$300,000/.test(x.label)), JSON.stringify(st));
+  // a no-op save of a task in an approved part does not reopen it
+  const d2 = SEED.seed(GOLD_DAY).docs;
+  const comp = E.readiness(d2, PRJ, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  const w = d2.workItem.find(e => e.data.projectId === PRJ && e.data.step === 's2').data;
+  const later = new Date(Date.parse(GOLD_DAY + 'T23:00:00Z')).toISOString();
+  const d3 = R14set(d2, w.id, { updatedAt: later });
+  const after = E.readiness(d3, PRJ, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.deepEqual(after.stale.map(x => x.bu), comp.stale.map(x => x.bu));
+});
+
+test('R15 (M2 ask) E2E paths respect Stop nodes; skip-aheads are skips, not loops', () => {
+  const d = r15Credit();
+  const proc = d.process.find(p => p.id === 'credit').data;
+  proc.tobe[2].branches[0].nodes.push({ id: 'cx', type: 'end', title: 'Stop: request rejected' });
+  const sc = E.generateScenarios(d, 'pcr');
+  const yes = sc.find(x => /= Yes/.test(x.title));
+  assert.ok(yes && !yes.steps.some(s => s.step === 'c3') && yes.steps.some(s => s.action.startsWith('The process stops here')), JSON.stringify(yes && yes.steps.map(s => s.action)));
+  proc.tobe[2].branches[0].nodes = [{ id: 'c2', type: 'step', title: 'Controller approves', ownerRole: 'Controller', data: [], from: 'a2' }];
+  proc.tobe[2].branches[1].goto = 'c4';
+  const no = E.generateScenarios(d, 'pcr').find(x => /= No/.test(x.title));
+  assert.ok(no && !no.title.includes('loop back') && !no.steps.some(s => s.step === 'c3'), JSON.stringify(no));
+  const scr = E.generateUatScripts(d, 'pcr').find(x => x.step === 'cg' && /No/.test(x.title));
+  assert.match(scr.then, /skips to/);
+});
+
+test('R15 #7 profile → tests (BPM fixture): own shapes, leading zeros, warnings become tests, the majority shape is never rejected, thresholds, data page status', () => {
+  const csv = fs.readFileSync(path.join(ROOT, 'tests', 'pmoflow', 'fixtures', 'r15-credit-sample.csv'), 'utf8');
+  const prof = E.profileCsv(csv);
+  const spec = E.specFromProfile(prof);
+  const de = { id: 'DCR', name: 'Credit request', fields: spec };
+  const tests = E.generateTests(de, prof);   // the default (capped) set: warnings are never cut
+  const by = f => tests.filter(t => t.field === f);
+  // the bank account's tests use its own shape (9 digits-10 digits), never the account number's "NW…"
+  assert.ok(by('bank_account').every(t => !/^NW/.test(t.input) && !/^0NW/.test(t.input)), JSON.stringify(by('bank_account').map(t => t.input)));
+  assert.ok(by('bank_account').some(t => /Leading zero/.test(t.note) && /^0\d{8}-\d{10}$/.test(t.input) && t.expect === 'accept'));
+  assert.ok(by('bank_account').some(t => t.signal === 'shared-account'));
+  assert.ok(by('customer_name').some(t => t.signal === 'near-duplicate'));
+  assert.ok(by('account_number').some(t => t.signal === 'unique'), 'a key whose sample values are all different gets a uniqueness test');
+  // a routing number with a leading zero is a real value
+  assert.equal(E.validate(E.fieldSpec({ name: 'Routing number', type: 'number' }), '021000021'), true);
+  // a score is 0–100
+  assert.equal(E.validate(E.fieldSpec(spec.find(f => f.name === 'risk_score')), '101'), true);
+  assert.ok(E.generateTests(de, prof, { all: true }).some(t => t.field === 'risk_score' && t.input === '101' && t.expect === 'reject'));
+  // never reject the majority shape
+  const all = E.generateTests(de, prof, { all: true });
+  prof.forEach(c => (c.patterns || []).filter(pt => pt.count * 2 > 10).forEach(pt => assert.ok(!all.some(t => t.field === c.name && /Observed shape/.test(t.note) && t.note.includes('(' + pt.count + ' of') && t.expect === 'reject'), c.name)));
+  // thresholds of the process become boundary tests
+  const d = r15Credit();
+  d.dataElement.push({ id: 'DCR', data: Object.assign({ avail: 'live' }, de, { fields: [{ name: 'Requested limit', type: 'currency', min: 0 }] }) });
+  d.process.find(p => p.id === 'credit').data.tobe[1].data = ['DCR'];
+  const tc = E.thresholdCases(d, 'DCR');
+  assert.deepEqual(tc.map(t => [t.input, /takes the “(\w+)” path/.exec(t.note)[1]]), [['250000.00', 'No'], ['250000.01', 'Yes']]);
+  // the data page never says "all match" while a warning stands
+  d.profile.push({ id: 'PR1', data: { id: 'PR1', dataId: 'DCR', at: GOLD_DAY + 'T10:00:00Z', columns: prof, rows: 10 } });
+  const ps = E.dataProfileStatus(d, 'DCR');
+  assert.equal(ps.allMatch, false); assert.ok(ps.warnings.some(w => w.kind === 'shared-account') && ps.warnings.some(w => w.kind === 'near-duplicate'), JSON.stringify(ps));
+  assert.ok(!/all match/i.test(ps.text));
+});
+
+test('R15 #8/#9/#10 unconfirmed Done is not finished; one late-or-blocked count with parts; per-run information is never a blocker', () => {
+  const d0 = SEED.seed(GOLD_DAY).docs;
+  const open = d0.workItem.find(e => e.data.projectId === PRJ && e.data.status !== 'done' && (d0.workItem.some(x => (x.data.deps || []).includes(e.id))));
+  const dep = d0.workItem.find(x => (x.data.deps || []).includes(open.id));
+  const d1 = R14set(d0, dep.id, { status: 'done', doneAt: GOLD_DAY, doneBy: dep.data.owner });
+  const wd = E.readiness(d1, PRJ, GOLD_DAY).checks.find(c => c.id === 'work-done');
+  assert.ok(wd.unconfirmed.includes(dep.id) && !wd.pass);
+  const u = E.unconfirmedDone(d1, dep.id);
+  assert.ok(u.open.some(x => x.id === open.id) && /still open\. Confirm/.test(u.confirmText), JSON.stringify(u));
+  const t = E.projectTruth(d0, PRJ, GOLD_DAY);
+  const lb = t.lateOrBlocked;
+  assert.equal(lb.count, lb.late + lb.held - lb.both);
+  assert.match(lb.text, new RegExp('^' + lb.count + ' tasks? late or blocked: '));
+  assert.equal(t.testing.openIssues.count, t.testing.total - t.testing.passed);
+  // per-run information: never raised as a blocker in the weekly report; raised − resolved + carried in = open
+  const d2 = SEED.seed(GOLD_DAY).docs;
+  d2.dataElement.push({ id: 'DW9', data: { id: 'DW9', name: 'W-9 form', avail: 'missing', perRun: true, createdAt: GOLD_DAY } });
+  d2.process.find(p => p.id === 'vendor-onboarding').data.tobe.find(n => n.id === 's1').data.push('DW9');
+  const r = E.periodReport(d2, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  assert.ok(!r.blockersRaised.some(b => b.dataId === 'DW9') && !r.blockersOpenAtEnd.some(b => b.dataId === 'DW9'));
+  assert.equal(r.blockersOpenAtEnd.length, r.blockersCarriedIn + r.blockersRaised.length - r.blockersResolved.length);
+  // a launched project is 100% done
+  const d3 = SEED.seed(GOLD_DAY).docs; d3.project.find(p => p.id === PRJ).data.status = 'live';
+  assert.equal(E.projectTruth(d3, PRJ, GOLD_DAY).pctDone, 100);
 });

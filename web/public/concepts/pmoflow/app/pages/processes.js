@@ -44,7 +44,7 @@ export function render() {
       <div class="d-pname"><a href="${link('/process/' + p.id)}" data-link><b>${esc(p.name)}</b></a>${adv ? ` <span class="badge b-idle" data-ver>v${esc(p.version || 1)}</span>` : ''}${p.desc ? `<div class="s d-desc">${esc(p.desc)}</div>` : ''}</div>
       <div class="d-pcell" data-col="owner"><span class="d-plbl">Owner</span>${p.owner && store.person(p.owner) ? `${av(p.owner)} ${esc(pname(p.owner))}` : '<span class="hint">Nobody yet</span>'}</div>
       <div class="d-pcell" data-col="steps"><span class="d-plbl">Steps</span><b data-steps="${r.steps}">${r.steps}</b>${r.future ? '' : ' <span class="hint" data-steps-today>today</span>'}</div>
-      <div class="d-pcell" data-col="diff" data-diffcounts="${r.sum.new}/${r.sum.changed}/${r.sum.removed}"><span class="d-plbl">What changed</span>${changeText(r.sum) ? `<span>${esc(changeText(r.sum))}</span>` : '<span class="hint">No changes yet</span>'}</div>
+      <div class="d-pcell" data-col="diff" data-diffcounts="${r.sum.new}/${r.sum.changed}/${r.sum.removed}"><span class="d-plbl">What changed</span>${r.sum.text ? `<span data-diff-text>${esc(r.sum.text)}</span>` : '<span class="hint">No changes yet</span>'}</div>
       <div class="d-pcell" data-col="data"><span class="d-plbl">Information</span>${dataCell(r.data)}</div>
       <div class="d-pcell" data-col="projects"><span class="d-plbl">Projects</span>${r.prjs.length ? r.prjs.map(j => `<a class="chip" href="${link('/project/' + j.id)}" data-link>${esc(j.name)}${j.status === 'live' ? ' · launched' : ''}</a>`).join('') : '<span class="hint">Not in a project</span>'}</div>
     </div>`;

@@ -567,7 +567,13 @@ The process starts when an employee asks to buy something.
        Dave Ortiz records a Compliance test result himself (an Admin makes him an Editor first; results are always
        recorded under the recorder's own name), so nobody left in Compliance may approve. The block is said plainly,
        with a person picker. */
-    const roleApi = (who, role) => st(`const r = await fetch('/api/pmoflow/workspaces/' + encodeURIComponent(store.state.ws) + '/admin/roles/' + a.who, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: a.role, actor: store.state.me }) }); return r.status;`, { who, role });
+    /* R15 (M4): with two Admins a role change is a proposal; a second Admin (Maya) confirms it with the extra sign-in check */
+    const roleApi = (who, role) => st(`const base = '/api/pmoflow/workspaces/' + encodeURIComponent(store.state.ws) + '/admin/roles/';
+      const r = await fetch(base + a.who, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: a.role, actor: store.state.me }) });
+      const j = await r.json().catch(() => ({}));
+      if (r.status !== 200 || j.applied || !j.pendingRole) return r.status;
+      const c = await fetch(base + 'pending/' + j.pendingRole.id + '/confirm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }) });
+      return c.status;`, { who, role });
     await setMe('ta');
     ok(await roleApi('do', 'editor') === 200, 'an Admin makes Dave Ortiz an Editor (so he can record a test result)');
     await setMe('do');
@@ -624,6 +630,15 @@ The process starts when an employee asks to buy something.
     await shot('03-approver-view');
     await page.click('[data-bu-back]'); await page.waitForSelector('#signoff'); await settle(400);
     await signAll();
+    /* R15 #8 (BPM): a Done with no hours on an estimated task is not finished work until someone else confirms it */
+    const unc = (await rd(AR)).checks.find(c => c.id === 'work-done');
+    ok(unc && (unc.unconfirmed || []).length && !unc.pass && /need(s)? someone else to confirm/.test(unc.detail), 'launch waits for unconfirmed Done: ' + (unc && unc.detail));
+    const confRows = await st(`return window.PMOEngine.projectTruth(store.state.docs, a, store.state.today).who.filter(x => x.why === 'confirm').map(x => ({ id: x.workId, person: x.person }));`, AR);
+    for (const cr of confRows) {
+      await setMe(cr.person);
+      await st(`const w = store.get('workItem', a.id); await store.save('workItem', a.id, Object.assign({}, w, { confirmedBy: a.p }), 'Confirmed done (e2e)');`, { id: cr.id, p: cr.person });
+    }
+    await settle(600); await setMe('ta');
     let r2 = await rd(AR);
     ok(r2.pass, 'access-review gate passes: ' + r2.checks.filter(c => c.status === 'fail').map(c => c.id + ': ' + c.detail).join(' | '));
     ok(!(await page.$('[data-bu="IT"] [data-why=bu]')) && !(await page.$('[data-bu="Compliance"] [data-why=bu]')), "no stale “Switch 'Viewing as'” hint on signed sections");

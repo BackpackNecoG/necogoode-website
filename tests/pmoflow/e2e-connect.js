@@ -84,9 +84,16 @@ async function api(method, path, body) {
   ok(/13 issues created in Jira/.test(first), 'connecting runs the first sync: ' + first.slice(0, 90));
   /* R11 §4: the counts in the sentence equal the rows in the sync log */
   const logRows = await page.$$eval('[data-cx-log] .cx-le', els => els.map(e => e.textContent));
-  const nCreated = Number((/(\d+) issues? created/.exec(first) || [])[1] || 0), nLinked = Number((/(\d+) dependency links? set/.exec(first) || [])[1] || 0);
-  ok(nCreated === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Create VOM-/.test(t)).length && nLinked === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Link VOM-/.test(t)).length,
-    `sentence counts equal the log (${nCreated} created, ${nLinked} links)`);
+  const nCreated = Number((/(\d+) issues? created/.exec(first) || [])[1] || 0);
+  /* R15 (PMO R14 disagreement 5): "N dependency links set on M issues": N is the plan's links, M the Link rows in the log */
+  const lm = /(\d+) dependency links? set(?: on (\d+) issues?)? in Jira/.exec(first) || [];
+  const nLinks = Number(lm[1] || 0), nLinkedIssues = Number(lm[2] || lm[1] || 0);
+  const planLinks = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js');
+    const items = store.state.docs.workItem.map(d => d.data).filter(w => w.projectId === 'vendor-modernization'); const ids = new Set(items.map(w => w.id));
+    return items.reduce((n, w) => n + (w.deps || []).map(x => (typeof x === 'string' ? x : x.id)).filter(x => ids.has(x)).length, 0); });
+  ok(nCreated === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Create VOM-/.test(t)).length && nLinkedIssues === logRows.filter(t => /PMOFlow → Jira/.test(t) && /Link VOM-/.test(t)).length,
+    `sentence counts equal the log (${nCreated} created, links on ${nLinkedIssues} issues)`);
+  ok(nLinks === planLinks && planLinks === 6, `"${nLinks} dependency links" equals the plan's ${planLinks} links`);
   ok((await page.locator('[data-cx-sim] [data-cx-item]').count()) === 13, 'all 13 project tasks appear in Simulated Jira');
   ok(/Simulated Jira \(demo\)/.test(await page.textContent('[data-cx-conn]')), 'clearly labelled "Simulated Jira (demo)"');
   const k7 = await page.locator('[data-cx-item]', { hasText: 'Check bank accounts with a small test deposit' }).getAttribute('data-cx-item');
@@ -206,7 +213,8 @@ async function api(method, path, body) {
     ok(E.projectTruth(s1, 'vendor-modernization', today()).forecastFinish === fin0, 'the forecast did not move');
     const pcs = (s1.planChange || []).map(x => x.data).filter(x => x.source === 'sync' && x.status === 'proposed');
     ok(pcs.length === 1 && pcs[0].edits[0].to === late, 'one proposed plan change with the Jira date');
-    ok(pcs[0] && pcs[0].approvers.some(a => (a.roles || [a]).some(r => r.role === 'sponsor')), 'the sponsor approves it');
+    /* R15 (M1 #3): the stored sponsor approves; with no sponsor set, an Admin who is not the requester */
+    ok(pcs[0] && pcs[0].approvers.some(a => (a.roles || [a]).some(r => r.role === 'sponsor' || r.role === 'admin')) && pcs[0].approvers.every(a => a.person !== pcs[0].requestedBy), 'the sponsor (or, with none set, an Admin who is not the requester) approves it');
     ok((await page.inputValue(`[data-cx-simdue="${key}"]`)) === due0, 'Jira shows PMOFlow’s date again until it is approved');
     ok(await overflow(), 'no horizontal overflow at 1366 (date held)');
     await shot('05b-date-held-1366');

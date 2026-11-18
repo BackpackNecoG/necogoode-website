@@ -131,7 +131,7 @@ function peopleHTML() {
     const sel = `<select data-role="${esc(p.id)}" aria-label="Role for ${esc(p.name)}" ${admin ? '' : 'disabled'}>${Object.entries(ROLE_INFO).map(([k, r]) => `<option value="${k}" ${p.role === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>`;
     const dsel = `<select data-assign="${esc(p.id)}" aria-label="Department for ${esc(p.name)}" ${admin ? '' : 'disabled'}><option value="">No department</option>${depts().map(d => `<option value="${esc(d.id)}" ${d.name === p.department ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>`;
     return `<tr data-person-row="${esc(p.id)}"><td><span class="adm-pp">${av(p.id)}<span><b>${esc(p.name)}</b><span class="hint adm-title">${esc(p.title || '')}</span></span></span></td>
-      <td>${sel}</td><td>${dsel}${(() => { const pp = pendings().find(x => x.kind === 'assign' && x.op && x.op.personId === p.id); return pp ? `<div class="hint" data-person-pending="${esc(p.id)}">Waiting: ${esc(pp.text)}</div>` : ''; })()}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
+      <td>${sel}${(() => { const pr = rolePendings().find(x => x.personId === p.id); return pr ? `<div class="hint" data-role-pending-hint="${esc(p.id)}">Waiting: ${esc(pr.text)}</div>` : ''; })()}</td><td>${dsel}${(() => { const pp = pendings().find(x => x.kind === 'assign' && x.op && x.op.personId === p.id); return pp ? `<div class="hint" data-person-pending="${esc(p.id)}">Waiting: ${esc(pp.text)}</div>` : ''; })()}</td><td>${ROLE_INFO[p.role] && ROLE_INFO[p.role].paid ? '<span class="badge b-prog adm-nw">Paid seat</span>' : '<span class="badge b-done adm-nw">Free</span>'}</td></tr>`;
   }).join('');
   const inv = (S.view.settings.invites || []);
   return `${seatsHTML()}
@@ -140,6 +140,7 @@ function peopleHTML() {
       <div class="tbl-wrap"><table class="adm-table"><thead><tr><th>Person</th><th>Role</th><th>Department</th><th>Seat</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="adm-legend">${Object.values(ROLE_INFO).map(r => `<div><b>${r.label}</b> <span class="hint">${esc(r.what)}</span></div>`).join('')}</div>
     </div>
+    ${rolePendingHTML()}
     ${sponsorsHTML()}
     <div class="card" data-invites><h3>Invite someone <span class="n">${inv.length} pending</span></h3>
       <form class="adm-invite" data-invite-form>
@@ -212,6 +213,24 @@ function deptCard(d) {
         <select name="personId" aria-label="Add a person to ${esc(d.name)}" ${admin ? '' : 'disabled'}><option value="">Add a person to ${esc(d.name)}…</option>${ppl.filter(p => p.department !== d.name).map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.department ? ` (now ${esc(p.department)})` : ''}</option>`).join('')}</select>
         <button class="btn sm" type="submit" ${admin ? '' : 'disabled'}>Add</button></form>
     </div>`;
+}
+/* R15 (Jordan): a role change waits for a second Admin, who confirms it with the extra sign-in check; nothing changes until
+   then. The person demoted from Admin may agree to it themselves; nobody confirms their own promotion. */
+const rolePendings = () => (S.view && S.view.pendingRoles) || [];
+function rolePendingHTML() {
+  const list = rolePendings();
+  if (!list.length) return '';
+  const me = store.state.me, admin = isAdmin();
+  return `<div class="card adm-pend" data-pending-roles><h3>Role changes waiting for a second Admin <span class="n">${list.length}</span></h3>
+    <p class="hint">A role decides what someone can change, approve or set up, so one Admin proposes it and another confirms it with the extra sign-in check. Until then nothing changes.</p>
+    ${list.map(p => {
+      const mine = p.by === me, can = (p.canConfirm || []).includes(me);
+      const why = !admin ? 'Only an Admin can confirm.' : mine ? 'You proposed it, so another Admin confirms it.' : !can ? 'It changes your own role, so another Admin confirms it.' : '';
+      const names = (p.canConfirm || []).filter(id => id !== me).map(pname);
+      return `<div class="adm-pitem" data-role-pending="${esc(p.id)}"><div><b>${esc(p.text)}</b><div class="hint">Proposed by ${esc(p.byName || pname(p.by))} · ${esc(fmtTime(p.at))}${mine && names.length ? ` · ${esc(names.join(' or '))} can confirm` : ''}</div>${why ? `<div class="hint" data-role-pending-why>${esc(why)}</div>` : ''}</div>
+        <div class="adm-pacts"><button class="btn sm primary" data-role-confirm="${esc(p.id)}" ${admin && can ? '' : 'disabled'}>Confirm</button>
+        <button class="btn sm" data-role-cancel="${esc(p.id)}" ${admin ? '' : 'disabled'}>${mine ? 'Withdraw' : 'Turn down'}</button></div></div>`;
+    }).join('')}</div>`;
 }
 /* R14 (Jordan): department moves and approver changes wait for a second Admin (step-up); nothing changes until then */
 const pendings = () => (S.view && S.view.pendingDepartments) || [];
@@ -332,6 +351,7 @@ function securityHTML() {
   return `<div class="adm-sec">
     <div class="card" data-sec="now"><h3><span class="adm-dot now"></span>On now, in this workspace</h3><ul class="adm-ul">${li([
       ['Roles', 'Admins manage people, the calendar and settings. Editors make changes. Approvers and viewers are free.'],
+      ['Role changes', 'With two or more Admins, changing anyone’s role is proposed by one Admin and confirmed by another with the extra sign-in check. Nobody confirms their own promotion; an Admin being demoted may agree to it. In a workspace with one Admin, a role change applies at once and History says so. The workspace always keeps at least one Admin.'],
       ['Process and project owners', 'Only a process’s owner and its resources edit it. Only the project manager changes the launch plan.'],
       ['Passing tests', 'You can pass only tests assigned to you or to no one. A test linked to an open problem can’t pass until the problem is fixed.'],
       ['Separate approvers', 'Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.'],
@@ -390,8 +410,24 @@ export function bind(root, params) {
   on('[data-retry]', 'click', () => { S.err = null; S.viewStale = true; refresh(tab); });
 
   /* people */
-  on('[data-role]', 'change', el => act(async () => { S.view = await api('PUT', '/roles/' + encodeURIComponent(el.dataset.role), { role: el.value }); },
-    `${pname(el.dataset.role)} is now ${(ROLE_INFO[el.value] || {}).label || el.value}`));
+  /* R15 (Jordan): with a second Admin, a role change is sent to them to confirm; in a one-Admin workspace it applies at once */
+  on('[data-role]', 'change', el => {
+    let res = null;
+    const who = pname(el.dataset.role), label = (ROLE_INFO[el.value] || {}).label || el.value;
+    act(async () => { res = await api('PUT', '/roles/' + encodeURIComponent(el.dataset.role), { role: el.value }); S.view = res; S.auditStale = true; },
+      () => (res && res.pendingRole ? `Sent to a second Admin to confirm: ${res.pendingRole.text}` : `${who} is now ${label}`));
+  });
+  on('[data-role-confirm]', 'click', async el => {
+    const id = el.dataset.roleConfirm, p = rolePendings().find(x => x.id === id);
+    if (!(await stepUp('confirm this role change'))) { toast('Not confirmed: the extra sign-in check was not completed.'); return; }
+    act(async () => { S.view = await api('POST', '/roles/pending/' + encodeURIComponent(id) + '/confirm', { stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }); S.auditStale = true; },
+      `Confirmed: ${p ? p.text : 'the role change'}`);
+  });
+  on('[data-role-cancel]', 'click', el => {
+    const id = el.dataset.roleCancel, p = rolePendings().find(x => x.id === id);
+    act(async () => { S.view = await api('POST', '/roles/pending/' + encodeURIComponent(id) + '/cancel', {}); S.auditStale = true; },
+      p && p.by === store.state.me ? 'Proposal withdrawn' : 'Proposal turned down');
+  });
   on('[data-invite-form]', 'submit', (el, e) => {
     e.preventDefault();
     const email = el.querySelector('[name=email]').value.trim(), role = el.querySelector('[name=role]').value;

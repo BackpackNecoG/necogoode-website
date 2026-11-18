@@ -87,7 +87,8 @@ async function inviteApprover(email, deptId) {
 }
 export async function addDepartmentFlow(team, err) {
   const known = (eng('departments', [docs()], []) || []).map(d => d.name);
-  const suggest = team && !known.some(n => n.toLowerCase() === String(team).toLowerCase()) ? team : '';
+  /* R15 (Karen 3): the team's own name is offered even when that department exists already (adding it then picks it) */
+  const suggest = team || '';
   const r = await modal({
     title: 'Add a department',
     body: `${err ? `<div class="banner" style="margin:0 0 8px" data-dept-err>${esc(err.msg)}</div>` : ''}<div class="field"><label for="d-dept-name">Department name</label><input id="d-dept-name" name="name" data-dept-name value="${esc(err ? err.value : suggest)}" placeholder="e.g. Credit" autocomplete="off" maxlength="60" /></div>
@@ -100,9 +101,23 @@ export async function addDepartmentFlow(team, err) {
   const again = msg => addDepartmentFlow(team, { msg, value: name, approver, email });
   /* the same plain sentences the server uses, checked here first so a typo never costs a round trip */
   if (!name) return again('Name a department.');
-  const dup = known.find(n => n.toLowerCase() === name.toLowerCase());
-  if (dup) return again(`A department called ${dup} already exists.`);
   if (email && !EMAIL_RE.test(email)) return again('Enter a work email address, like name@northwind.example.');
+  /* R15 (Karen 3): the team's own department, when it exists already, is picked, never an error that keeps the dialog
+     open; another existing name is still refused in plain words (it is a different department) */
+  const dup = known.find(n => n.toLowerCase() === name.toLowerCase());
+  if (dup && dup.toLowerCase() !== String(team || '').toLowerCase()) return again(`A department called ${dup} already exists.`);
+  if (dup) {
+    const d = (eng('departments', [docs()], []) || []).find(x => x.name === dup);
+    let note = '';
+    if (approver && d && !(d.approvers || []).includes(approver)) {
+      try { const res = await store.api('/departments', { op: { kind: 'approvers', id: d.id, approvers: [...new Set((d.approvers || []).concat(approver))] } }); note = res && res.ok === false ? ` ${res.error || ''}` : res && (res.applied === false || res.pending) ? `; ${pname(approver)} as its approver waits for a second Admin to confirm` : `; ${pname(approver)} approves for it`; }
+      catch (e) { note = ` ${(e && e.message) || 'Could not save the approver.'}`; }
+    }
+    const ie = email && d ? await inviteApprover(email, d.id) : '';
+    await store.load();
+    toast(`${dup} is already a department, so it was picked${note}${email ? (ie ? `. ${ie}` : `; invited ${email} to approve for it`) : ''}`);
+    return dup;
+  }
   let res;
   try { res = await store.api('/departments', { op: { kind: 'add', name, approvers: approver ? [approver] : [] } }); }
   catch (e) { return again((e && e.message) || 'Could not add the department.'); }
@@ -385,7 +400,12 @@ export function diffCounts(p) {
 export function stepChangeCounts(p) {
   /* R10 §1: the ONE change count is the engine's changeSummary (same numbers as Home and the new-project dialog) */
   const c = eng('changeSummary', [p], null) || {};
-  return { steps: flat(p && p.tobe).length, new: c.added || 0, changed: c.changed || 0, removed: c.removed || 0, text: c.text || '' };
+  /* R15 (BPM): the diff marks changed choices too ("1 changed" on the card vs 2 CHANGED on the map): say them */
+  const d = eng('diffProcess', [p], { nodes: {} }) || { nodes: {} };
+  const gws = allNodes(p && p.tobe).filter(n => n && n.type === 'decision');
+  const choices = gws.filter(g => (d.nodes || {})[g.id] === 'changed').length, choicesNew = gws.filter(g => (d.nodes || {})[g.id] === 'new').length;
+  const extra = [choicesNew ? `${choicesNew} new choice${choicesNew === 1 ? '' : 's'}` : '', choices ? `${choices} choice${choices === 1 ? '' : 's'} changed` : ''].filter(Boolean).join(' · ');
+  return { steps: flat(p && p.tobe).length, new: c.added || 0, changed: c.changed || 0, removed: c.removed || 0, choices, choicesNew, text: [c.text || '', extra].filter(Boolean).join(' · ') };
 }
 export const changeText = c => [c.new ? `${c.new} new` : '', c.changed ? `${c.changed} changed` : '', c.removed ? `${c.removed} removed` : ''].filter(Boolean).join(' · ');
 /* plain-language profile pattern (R3): '9{8}' -> '8 digits' */
@@ -533,6 +553,28 @@ function changeNote(n, ctx) {
   if (!lines.length) lines.push('same step, new way of working or information');
   return `<div class="was d-was">${lines.map(l => `<div>${esc(l)}</div>`).join('')}</div>`;
 }
+/* R15 (BPM): a changed choice says what it was and what it is now: the question (its threshold), the path names and
+   where each path goes. "Over $250,000?" → "Over $100,000?" reads "was $250,000 → now $100,000". */
+function gwChangeNote(n, ctx) {
+  const a = ctx.cmp ? null : n.from ? ctx.asisById[n.from] : null;
+  const lines = [];
+  if (ctx.cmp) ((ctx.diff.changes || {})[n.id] || []).forEach(t => lines.push(typeof t === 'string' ? t : (t && (t.text || t.detail)) || ''));
+  if (a) {
+    const PI = typeof window !== 'undefined' && window.PMOImport;
+    const tha = PI && PI.thresholdOf ? PI.thresholdOf(a.title) : null, thn = PI && PI.thresholdOf ? PI.thresholdOf(n.title) : null;
+    const money = v => '$' + Number(v).toLocaleString('en-US');
+    if (tha && thn && tha.amount !== thn.amount) lines.push(`threshold: was ${money(tha.amount)} → now ${money(thn.amount)}`);
+    if ((a.title || '') !== (n.title || '')) lines.push(`question: was “${a.title || ''}” → now “${n.title || ''}”`);
+    const la = (a.branches || []).map(b => (b && b.label) || ''), ln = (n.branches || []).map(b => (b && b.label) || '');
+    ln.forEach((l, i) => { if (la[i] != null && la[i] !== l) lines.push(`path: was “${la[i]}” → now “${l}”`); });
+    if (ln.length > la.length) lines.push(`new path: ${ln.slice(la.length).map(x => '“' + x + '”').join(', ')}`);
+    if (la.length > ln.length) lines.push(`path removed: ${la.slice(ln.length).map(x => '“' + x + '”').join(', ')}`);
+    const where = (g, b) => { if (!b) return ''; if ((b.nodes || []).some(x => x.type === 'end')) return 'ends'; if (b.goto) { const t = ctx.byId[b.goto] || ctx.asisById[b.goto]; return 'goes to “' + ((t && t.title) || 'another step') + '”'; } return 'carries on'; };
+    (n.branches || []).forEach((b, i) => { const wa = where(a, (a.branches || [])[i]), wn = where(n, b); if (wa && wn && wa !== wn) lines.push(`“${b.label}” path: was ${wa} → now ${wn}`); });
+  }
+  if (!lines.length) return '';
+  return `<div class="was d-was d-gwwas" data-gw-was="${esc(n.id)}">${lines.map(l => `<div>${esc(l)}</div>`).join('')}</div>`;
+}
 function toolbar(n, ctx) {
   const lbl = esc(n.title || n.type);
   const movable = n.type !== 'trigger' && n.type !== 'end';
@@ -557,9 +599,10 @@ function flowHTML(nodes, ctx, key, counter) {
       const bs = n.branches || [], par = n.type === 'parallel';
       const st = ctx.mode === 'diff' && ctx.diff ? (ctx.diff.nodes || {})[n.id] : null;
       const dchip = st === 'new' || st === 'changed' ? ` <span class="chip diff-${st}">${st === 'new' ? 'NEW' : 'CHANGED'}</span>` : '';
+      const dnote = st === 'changed' && !par ? gwChangeNote(n, ctx) : '';
       /* R14: a jump forward ("if under $50k, skip the review") reads "Skips to", never "Go back to" */
       const gotoLbl = b => { if (!b.goto) return ''; const t = ctx.byId[b.goto]; const fwd = counter.order && counter.order.indexOf(b.goto) > counter.order.indexOf(n.id); return `<div class="d-goto" data-goto="${esc(b.goto)}" data-goto-dir="${fwd ? 'forward' : 'back'}">${fwd ? '↷ Skips to' : '↩ Go back to'} ${t ? '“' + esc(t.title || 'start') + '”' : '<i>missing step</i>'}</div>`; };
-      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(n.title)}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div><div class="conn"></div>
+      parts.push(`<div class="decision ${par ? 'd-parallel' : ''}" data-node="${esc(n.id)}" data-gw="${esc(n.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(n.title)}</span>${dchip}${ctx.edit ? `<span class="d-tools d-inline">${toolbar(n, ctx)}</span>` : ''}</div>${dnote}<div class="conn"></div>
         <div class="branches" style="--bl:${100 / (Math.max(bs.length, 1) * 2)}%;--br:${100 / (Math.max(bs.length, 1) * 2)}%">${bs.map((b, bi) => `<div class="branch"><span class="blabel">${esc(b.label)}</span>
           ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, ctx, n.id + '#' + bi, counter)}${gotoLbl(b)}</div>`
             : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra on this path' : 'Carries on to the next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
@@ -594,6 +637,24 @@ export function actorCanonOf(nodes) {
   return v => (al && al.size ? PI.actorKey(v, al) : String(v || '').trim());
 }
 const keyIn = canon => v => { const k = rKey(v); return k.startsWith('r:') ? 'r:' + canon(k.slice(2)) : k; };
+const APPROVAL_STEP = /^(?:also\s+)?(?:approve|co-approve|sign\s*-?\s*off|authori[sz]e|countersign|give\s+(?:the\s+)?(?:final\s+)?(?:approval|sign-?off))\b|\b(?:sign-?off|approval)$/i;
+function raciWhoList(t) {
+  const PI = typeof window !== 'undefined' && window.PMOImport;
+  return String(t || '').split(/\s*,\s*|\s+and\s+|\s*&\s*/).map(x => x.trim().replace(/^(?:the|a|an|our|your|their)\s+/i, '')).filter(Boolean).map(x => {
+    if (x.split(/\s+/).length > 4) return '';
+    const rn = PI && PI.roleAndName ? PI.roleAndName(x) : { role: x, name: '' };
+    return rn.role ? (rn.name ? `${rn.role} (${rn.name})` : rn.role) : rn.name || '';
+  }).filter(Boolean);
+}
+export function raciDerived(s) {
+  const t = String((s && s.title) || ''), out = { a: false, c: [], i: [] };
+  if (s && (s.approval || APPROVAL_STEP.test(t))) out.a = true;
+  const inf = /\b(?:notify|notifies|inform|informs|tell|tells|copy|copies|cc)\s+(?:in\s+)?(?:the\s+)?(.+?)(?=\s+(?:that|about|of|when|once|with|by|in|on|before|after)\b|[.;:]|$)/i.exec(t);
+  if (inf) out.i = raciWhoList(inf[1]);
+  const con = /\b(?:consults?|consulting|after\s+checking\s+with|with\s+input\s+from|in\s+consultation\s+with)\s+(?:with\s+)?(?:the\s+)?(.+?)(?=\s+(?:that|about|on|before|after|and\s+(?:notif|inform|tell|send|update))\b|[.;:,]|$)/i.exec(t);
+  if (con) out.c = raciWhoList(con[1]);
+  return out;
+}
 export function raciMatrix(nodes, extra) {
   /* R13 #8: every numbered step is a row, waits included (the BPM expert's 10 steps were 9 rows) */
   const steps = flat(nodes);
@@ -605,6 +666,12 @@ export function raciMatrix(nodes, extra) {
     const put = (k, L) => { if (!k || k.length <= 2) return; addCol(k); const c = cells[k] || (cells[k] = []); if (!c.includes(L)) c.push(L); };
     const resp = respKeyOf(s);
     put(resp.startsWith('r:') ? key(resp.slice(2)) : resp, 'R'); if (r.a) put(key(r.a), 'A'); r.c.forEach(x => put(key(x), 'C')); r.i.forEach(x => put(key(x), 'I'));
+    /* R15 (BPM 5): filled from what the step says when nobody set it: an approval or sign-off step is Accountable to
+       whoever does it (the Controller over $250,000); "notify / inform / tell X" makes X Informed; "consult X" / "with
+       input from X" makes X Consulted */
+    const d = raciDerived(s);
+    if (!r.a && d.a && resp) put(resp.startsWith('r:') ? key(resp.slice(2)) : resp, 'A');
+    d.c.forEach(x => put(key(x), 'C')); d.i.forEach(x => put(key(x), 'I'));
     return { s, cells };
   });
   (extra || []).forEach(addCol);
@@ -688,7 +755,7 @@ function lanesHTML(nodes, ctx) {
   rows.forEach(r => {
     if (r.gw) {
       const par = r.gw.type === 'parallel';
-      const where = (r.gw.branches || []).map(b => { const first = (b.nodes || [])[0]; const tgt = b.goto && ctx.byId[b.goto]; return `<span class="blabel">${esc(b.label)}</span> ${first ? esc(first.title) : tgt ? '↩ ' + esc(tgt.title) : (par ? 'nothing extra' : 'continue')}`; }).join('<span class="d-sep">·</span>');
+      const where = (r.gw.branches || []).map(b => { const first = (b.nodes || [])[0]; const tgt = b.goto && ctx.byId[b.goto]; const ord = allNodes(nodes).map(x => x.id); const fwd = tgt && ord.indexOf(b.goto) > ord.indexOf(r.gw.id); return `<span class="blabel">${esc(b.label)}</span> ${first ? esc(first.type === 'end' ? '● ' + (first.title || 'Ends here') : first.title) : tgt ? (fwd ? '↷ Skips to ' : '↩ Goes back to ') + esc(tgt.title) : (par ? 'nothing extra' : 'continue')}`; }).join('<span class="d-sep">·</span>');
       h += `<div class="d-lane-gw" style="grid-column:1/-1" data-node="${esc(r.gw.id)}" data-gw="${esc(r.gw.type)}"><div class="diamond ${par ? 'd-par' : ''}"><span aria-hidden="true">${par ? '⊕' : '◆'}</span> <span class="d-gwt"><small class="d-parlbl d-gwkind" data-gw-label>${par ? 'At the same time' : 'Choice'}</small>${esc(r.gw.title)}</span></div><div class="d-lane-br">${where}</div></div>`;
     } else {
       i++; owners.forEach(o => { h += `<div class="lane-c">${laneKey(r.s) === o ? nodeHTML(r.s, ctx, i) : ''}</div>`; });
@@ -1211,7 +1278,7 @@ export function render(params) {
   const steps = flat(tobe);
   const diff = mode === 'compare' ? cmpDiff(view.A, view.B) : eng('diffProcess', [p], { nodes: {}, removed: [], changes: {} });
   const sum = diffCounts(p);
-  const asisById = {}; flat(asis).forEach(a => asisById[a.id] = a);
+  const asisById = {}; allNodes(asis).forEach(a => { if (a && a.type !== 'trigger' && a.type !== 'end') asisById[a.id] = a; });
   const byId = {}; allNodes(view.nodes).forEach(n => byId[n.id] = n);
   const ctx = { pid, mode: mode === 'compare' ? 'diff' : mode, cmp: mode === 'compare', diff, asisById, byId, readonly: !!rel || mode === 'compare', edit: mode === 'edit' && !rel ? { ver } : null };
   const editing = mode === 'edit' && !rel;
@@ -1636,28 +1703,32 @@ async function stepModal(p, ver, node, opts) {
   return { node: out, next, who: r.form.who };
 }
 
+/* R15 (BPM top 1): where a path goes after its steps: carry on, end here, skip ahead to step N, or go back (a real loop) */
 function branchRow(b, targets) {
+  const ends = !!(b && b.ends && !b.goto);
   return `<div class="d-brow" data-brow><input name="blabel" value="${esc(b ? b.label : '')}" placeholder="Path name, e.g. Yes" aria-label="Path name" data-keep="${b && b.keep != null ? b.keep : ''}" />
-    ${targets ? `<select name="bgoto" aria-label="Then" class="d-goto-sel"><option value="">Then continue</option>${targets.map(t => `<option value="${esc(t.id)}" ${b && b.goto === t.id ? 'selected' : ''}>↩ Go back to ${esc(t.title)}</option>`).join('')}</select>` : ''}
+    ${targets ? `<select name="bgoto" aria-label="Then" class="d-goto-sel"><option value="">Then carry on to the next step</option><option value="__end" data-goto-end ${ends ? 'selected' : ''}>■ End here (this path stops)</option>${targets.map(t => `<option value="${esc(t.id)}" data-goto-dir="${t.fwd ? 'forward' : 'back'}" ${b && b.goto === t.id ? 'selected' : ''}>${t.fwd ? `↷ Skip to step ${t.no}: ${esc(t.title)}` : `↩ Go back to ${esc(t.title)}`}</option>`).join('')}</select>` : ''}
     <button type="button" class="btn sm danger" data-bdel aria-label="Remove path">Remove</button></div>`;
 }
 /* decision (exclusive, optional loop-backs) or parallel gateway (all branches run) */
 async function decisionModal(node, kind, versionNodes) {
   const isNew = !node.title, par = kind === 'parallel';
-  const targets = par ? null : allNodes(versionNodes || []).filter(n => isStep(n) || n.type === 'trigger').filter(n => !flat([node]).some(x => x.id === n.id));
-  const bs = (node.branches && node.branches.length) ? node.branches.map((b, i) => ({ label: b.label, keep: i, goto: b.goto })) : (par ? [{ label: 'Track A' }, { label: 'Track B' }] : [{ label: 'Yes' }, { label: 'No' }]);
+  /* R15: each target knows its step number and whether it lies ahead (a skip) or behind (a loop back) */
+  const order = allNodes(versionNodes || []), at = order.findIndex(x => x.id === node.id);
+  let no = 0; const nums = {}; order.forEach(n => { if (isStep(n)) nums[n.id] = ++no; });
+  const targets = par ? null : order.filter(n => isStep(n) || n.type === 'trigger').filter(n => !flat([node]).some(x => x.id === n.id))
+    .map(n => ({ id: n.id, title: n.type === 'trigger' ? (trigTitle(n) || 'the start') : n.title, no: nums[n.id], fwd: at >= 0 && order.indexOf(n) > at && n.type !== 'trigger' }));
+  const bs = (node.branches && node.branches.length) ? node.branches.map((b, i) => ({ label: b.label, keep: i, goto: b.goto, ends: (b.nodes || []).some(x => x.type === 'end') })) : (par ? [{ label: 'Track A' }, { label: 'Track B' }] : [{ label: 'Yes' }, { label: 'No' }]);
   const what = par ? 'things at the same time' : 'choice';
   const pr = modal({
     title: par ? (isNew ? 'Add things that happen at the same time' : 'Edit: at the same time') : (isNew ? 'Add a choice' : 'Edit choice'),
     body: `<div class="field"><label>${par ? 'What happens at the same time' : 'The question'}</label><input name="title" value="${esc(node.title || '')}" placeholder="${par ? 'e.g. Set up the vendor' : 'e.g. Is the amount over $5,000?'}" /></div>
-      <div class="field"><label>Paths</label><div data-branches class="${par || isAdv() ? '' : 'd-nogoto'}">${bs.map(b => branchRow(b, targets)).join('')}</div><div><button type="button" class="btn sm" data-badd>+ Add path</button></div>
-      <span class="hint">${par ? 'Every path happens; the process continues when all are done.' : 'Only one path is taken.'} At least 2 paths. Removing a path removes the steps on it.</span></div>
-      ${par ? '' : `<details class="d-moreopts" data-more-options${isAdv() || (node.branches || []).some(b => b.goto) ? ' open' : ''}><summary>More options</summary><div class="d-moreopts-b"><label class="d-check"><input type="checkbox" data-show-goto ${isAdv() || (node.branches || []).some(b => b.goto) ? 'checked' : ''} /> A path can go back to an earlier step (e.g. “Incomplete → back to Collect information”)</label></div></details>`}`,
+      <div class="field"><label>Paths</label><div data-branches>${bs.map(b => branchRow(b, targets)).join('')}</div><div><button type="button" class="btn sm" data-badd>+ Add path</button></div>
+      <span class="hint">${par ? 'Every path happens; the process continues when all are done.' : 'Only one path is taken. For each path, pick what happens next: carry on, end here (a rejected or automatically approved request), skip ahead, or go back.'} At least 2 paths. Removing a path removes the steps on it.</span></div>`,
     actions: [{ id: 'save', label: isNew ? 'Add' : 'Save', primary: true }],
   });
   const m = [...document.querySelectorAll('.overlay .modal')].pop();
   const box = m.querySelector('[data-branches]');
-  const sg = m.querySelector('[data-show-goto]'); const syncGoto = () => box.classList.toggle('d-nogoto', !!sg && !sg.checked); if (sg) { sg.onchange = syncGoto; syncGoto(); }
   m.querySelector('[data-badd]').onclick = () => { box.insertAdjacentHTML('beforeend', branchRow(null, targets)); box.lastElementChild.querySelector('input').focus(); };
   box.addEventListener('click', e => { const b = e.target.closest('[data-bdel]'); if (!b) return; if (box.children.length <= 2) { toast('A choice needs at least 2 paths'); return; } b.closest('[data-brow]').remove(); });
   const r = await pr;
@@ -1665,8 +1736,10 @@ async function decisionModal(node, kind, versionNodes) {
   const old = node.branches || [];
   const branches = [...r.root.querySelectorAll('[data-brow]')].map((row, i) => {
     const inp = row.querySelector('input[name=blabel]'), g = row.querySelector('select[name=bgoto]');
-    const b = { label: inp.value.trim() || 'Path ' + (i + 1), nodes: inp.dataset.keep !== '' && old[+inp.dataset.keep] ? old[+inp.dataset.keep].nodes : [] };
-    if (g && g.value && !r.root.querySelector('[data-branches].d-nogoto')) b.goto = g.value;
+    const kept = inp.dataset.keep !== '' && old[+inp.dataset.keep] ? old[+inp.dataset.keep].nodes || [] : [];
+    const b = { label: inp.value.trim() || 'Path ' + (i + 1), nodes: kept.filter(x => x.type !== 'end') };
+    if (g && g.value === '__end') b.nodes.push(kept.find(x => x.type === 'end') || { id: store.newId('n'), type: 'end', title: /reject|declin|den/i.test(b.label) ? 'Stop: request rejected' : 'Ends here' });
+    else if (g && g.value) b.goto = g.value;
     return b;
   });
   return Object.assign({}, node, { type: par ? 'parallel' : 'decision', title: (r.form.title || '').trim() || (par ? 'In parallel' : 'Decision'), branches });
@@ -2207,7 +2280,10 @@ export function bind(root, params) {
     if (!KINDS.some(k => k[0] === pick.action)) return;
     const p0 = cur();
     if (pick.action === 'step') { quickAdd(key, pos); return; }
-    const node = isGw({ type: pick.action }) ? await decisionModal({ id: store.newId('d'), type: pick.action }, pick.action, p0[ver]) : ((await stepModal(p0, ver, { id: store.newId('n'), type: pick.action, data: [], touches: [], subs: [] })) || {}).node;
+    /* R15: the new choice's place in the map, so its paths know which steps lie ahead (skip) and which behind (go back) */
+    const placed = () => { const c = clone(p0[ver] || []); const l = getList(c, key); const nid = store.newId('d'); if (l) l.splice(Math.min(pos, l.length), 0, { id: nid, type: pick.action, branches: [] }); return { nodes: c, id: nid }; };
+    const pl = isGw({ type: pick.action }) ? placed() : null;
+    const node = isGw({ type: pick.action }) ? await decisionModal({ id: pl.id, type: pick.action }, pick.action, pl.nodes) : ((await stepModal(p0, ver, { id: store.newId('n'), type: pick.action, data: [], touches: [], subs: [] })) || {}).node;
     if (!node) return;
     const p = clone(cur()); const list = getList(p[ver] || (p[ver] = []), key);
     if (!list) { toast('That spot no longer exists'); return; }

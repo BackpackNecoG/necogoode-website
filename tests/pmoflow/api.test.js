@@ -354,7 +354,7 @@ test('go-live: refused with 409 + reasons; passes end to end; keeps v1; rollback
   const v1 = find(st, 'process', 'access-review').data;
   /* access-review: finish A4, then Compliance signs off (A4's edit makes any older Compliance approval stale) */
   const a4 = find(st, 'workItem', 'A4').data;
-  await call('PUT', `ws/${ws}/doc/workItem/A4`, { data: Object.assign({}, a4, { status: 'done', doneAt: st.today }), actor: 'ps' });
+  await call('PUT', `ws/${ws}/doc/workItem/A4`, { data: Object.assign({}, a4, { status: 'done', doneAt: st.today, time: [{ by: 'ps', date: st.today, hours: 4 }] /* R15 #8: hours logged, so the Done needs no second person */ }), actor: 'ps' });
   st = await state(ws);
   assert.equal(engine.readiness(st.docs, 'access-review-automation', st.today).pass, false);
   await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do',
@@ -536,7 +536,7 @@ test('R4 go-live: never flips data live; owner confirmation is what counts; chec
   await call('PUT', `ws/${ws}/doc/dataElement/D7`, { actor: 'dk', data: d7 });
   await call('PUT', `ws/${ws}/doc/workItem/A1`, { actor: 'dk', data: Object.assign({}, find(st, 'workItem', 'A1').data, { resolves: 'D7', owner: 'ps', updatedAt: '2020-01-01T00:00:00.000Z' }) });
   const a4 = find(st, 'workItem', 'A4').data;
-  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today }) });
+  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, a4, { status: 'done', doneAt: st.today, time: [{ by: 'ps', date: st.today, hours: 4 }] /* R15 #8: hours logged, so the Done needs no second person */ }) });
   st = await state(ws);
   if (isR4Engine()) {
     assert.equal(engine.effectiveAvail(st.docs, 'D7'), 'pending', 'a finished fix awaits the owner');
@@ -796,7 +796,7 @@ test('R4 seed: owner confirmations, BU touches, sprints', () => {
 async function readyAccessReview(ws, runbookOpts) {
   await addRunbook(ws, runbookOpts);
   const st = await state(ws);
-  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, find(st, 'workItem', 'A4').data, { status: 'done', doneAt: st.today }) });
+  await call('PUT', `ws/${ws}/doc/workItem/A4`, { actor: 'ps', data: Object.assign({}, find(st, 'workItem', 'A4').data, { status: 'done', doneAt: st.today, time: [{ by: 'ps', date: st.today, hours: 4 }] /* R15 #8: hours logged, so the Done needs no second person */ }) });
   const at = new Date(Date.now() + 1500).toISOString();
   await call('PUT', `ws/${ws}/doc/approval/AP9`, { actor: 'do', data: { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
   return state(ws);
@@ -920,7 +920,9 @@ test('R5 status report: not-yet-live count and email recipients', async () => {
   assert.ok(r.body.summary.includes(`${notLive} ${notLive === 1 ? 'piece of information is' : 'pieces of information are'} not available yet`));
   assert.ok(!/connected|sample only|waiting for confirmation/i.test(r.body.summary + r.body.asks.join(' ')), 'Simple words only');
   assert.deepEqual(r.body.recipients.map(x => x.email), ['tom.alvarez@northwind.example', 'maya.chen@northwind.example', 'priya.shah@northwind.example',
-    'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example', 'dave.ortiz@northwind.example']);
+    'leo.park@northwind.example', 'ana.ruiz@northwind.example', 'dev.kumar@northwind.example', 'dave.ortiz@northwind.example',
+    /* R15 (Jordan): an approver asked to approve (again) in the report (Rosa Vega, Procurement) is on the list */
+    'rosa.vega@northwind.example']);
   /* R14 (Jordan E): everyone with an ask is on the list (Dave Ortiz approves Compliance's part) */
   assert.ok(r.body.asks.some(a => /^Dave Ortiz:/.test(a)), r.body.asks.join(' | '));
 });
@@ -1874,7 +1876,7 @@ test('R11 §2/§3 launch overrides need the PM and a sponsor, both with step-up;
   await addRunbook(ws);
   let st = await state(ws);
   const a4 = find(st, 'workItem', 'A4').data;
-  await put(ws, 'workItem', 'A4', 'ps', Object.assign({}, a4, { status: 'done', doneAt: st.today }));
+  await put(ws, 'workItem', 'A4', 'ps', Object.assign({}, a4, { status: 'done', doneAt: st.today, time: [{ by: 'ps', date: st.today, hours: 4 }] /* R15 #8: hours logged, so the Done needs no second person */ }));
   const at = () => new Date(Date.now() + 1000).toISOString();
   let r = await put(ws, 'approval', 'AQ', 'do', { projectId: 'access-review-automation', bu: 'Compliance', approver: 'do', decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -2207,4 +2209,73 @@ test('R14: route-module refusals (403/409) are logged as refused events', async 
   const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events;
   const ref = ev.find(e => e.action === 'refused');
   assert.ok(ref && /^Refused: /.test(ref.summary) && ref.actor === 'ta', JSON.stringify(ev.slice(0, 3)));
+});
+
+/* ================================ R15 (M1) ================================ */
+test('R15 #3/#4/#5/#6 server: the PM changes hands through Change the plan; start dates; self-assigned tests; first Done kept; forecast log is the server\'s', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  // #3 a plain edit of the PM is refused and logged as refused
+  let r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { owner: 'mc' }), 'ta');
+  assert.equal(r.status, 409); assert.match(r.body.error, /Change the plan.*project manager role to Maya Chen/);
+  // #4 a start after the due date, and a start on a day off, are refused
+  const w = (st.docs.workItem || []).map(d => d.data).find(x => x.projectId === prj.id && x.status === 'idle' && x.owner);
+  const addDay = (d, n) => new Date(Date.parse(d + 'T12:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { start: addDay(w.due, 7) }), w.owner);
+  assert.equal(r.status, 400); assert.match(r.body.error, /after the due date/);
+  let sat = w.start; while (new Date(sat + 'T12:00:00Z').getUTCDay() !== 6) sat = addDay(sat, -1);
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { start: sat }), w.owner);
+  assert.equal(r.status, 400); assert.match(r.body.error, /weekend day/);
+  // #5 a test assigned by its own tester can't be passed in Try it out
+  const tc = (st.docs.testCase || []).map(d => d.data).find(c => c.dataId);
+  r = await R14put(ws, 'testCase', tc.id, Object.assign({}, tc, { tester: 'ta' }), 'ta');
+  assert.equal(r.status, 200);
+  r = await R14put(ws, 'testRun', 'run-r15-self', { id: 'run-r15-self', projectId: prj.id, env: 'sit', at: new Date().toISOString(), by: 'ta', results: [{ caseId: tc.id, outcome: 'pass' }] }, 'ta');
+  assert.equal(r.status, 403); assert.match(r.body.error, /assigned the test .* to themselves, so someone else must pass it, in Try it out too/);
+  // #6 Done → reopen → Done keeps the first completion date
+  st = await state(ws);
+  const w2 = (st.docs.workItem || []).map(d => d.data).find(x => x.projectId === prj.id && x.status === 'prog' && x.owner);
+  const today = st.today;
+  r = await R14put(ws, 'workItem', w2.id, Object.assign({}, w2, { status: 'done', doneAt: addDay(today, -2) }), w2.owner, { today });
+  assert.equal(r.status, 200); const first = r.body.doc.data.doneAt;
+  assert.equal(r.body.doc.data.firstDoneAt, first);
+  r = await R14put(ws, 'workItem', w2.id, Object.assign({}, r.body.doc.data, { status: 'prog', doneAt: undefined }), w2.owner, { today });
+  r = await R14put(ws, 'workItem', w2.id, Object.assign({}, r.body.doc.data, { status: 'done', doneAt: today, firstDoneAt: '2020-01-01' }), w2.owner, { today });
+  assert.equal(r.body.doc.data.doneAt, first, 're-Done keeps the first completion date');
+  assert.equal(r.body.doc.data.firstDoneAt, first, 'firstDoneAt is the server\'s');
+  // #6 the forecast log can't be rewritten by a client; a recorded report appends the server's own forecast
+  st = await state(ws);
+  const p2 = find(st, 'project', prj.id).data;
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, p2, { forecastLog: [{ date: '2026-01-01', finish: '2026-01-02' }] }), 'ta');
+  assert.deepEqual((r.body.doc && r.body.doc.data.forecastLog) || p2.forecastLog, p2.forecastLog);
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, p2, { reportLog: (p2.reportLog || []).concat([{ date: today, preset: 'this-week' }]), forecastLog: [] }), 'ta', { today });
+  assert.equal(r.status, 200);
+  const fl = r.body.doc.data.forecastLog;
+  assert.ok(fl.length === (p2.forecastLog || []).filter(x => x.date !== today).length + 1 && fl[fl.length - 1].date === today && fl[fl.length - 1].at, JSON.stringify(fl));
+  // #6 a future-dated entry is flagged
+  st = await state(ws);
+  const w3 = find(st, 'workItem', w2.id).data;
+  r = await R14put(ws, 'workItem', w2.id, Object.assign({}, w3, { time: (w3.time || []).concat([{ by: w3.owner, date: addDay(today, 5), hours: 3 }]) }), w3.owner, { today });
+  assert.equal(r.status, 200); assert.equal(r.body.doc.data.time.slice(-1)[0].future, true);
+});
+
+test('R15 #1 server: a new task made from a role step is the role\'s, never the process owner; a data owner follows its step', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const proc = find(st, 'process', 'vendor-onboarding').data;
+  const s3 = proc.tobe.find(n => n.id === 's3');
+  const p2 = JSON.parse(JSON.stringify(proc));
+  const t3 = p2.tobe.find(n => n.id === 's3'); t3.ownerRole = 'Treasury Analyst'; t3.owner = 'mc';
+  let r = await R14put(ws, 'process', proc.id, p2, 'mc');
+  assert.equal(r.status, 200);
+  // the bank details (owned by Leo, s3's old doer) follow s3 to its new role
+  st = await state(ws);
+  const d2 = find(st, 'dataElement', 'D2').data;
+  assert.equal(d2.ownerRole, 'Treasury Analyst', JSON.stringify(d2)); assert.equal(d2.owner, undefined);
+  // the client fills the process owner in from the step: the server keeps it the role's
+  r = await R14put(ws, 'workItem', 'W-r15-new', { id: 'W-r15-new', projectId: 'vendor-modernization', pid: 'vendor-onboarding', step: 's3', title: 'New bank form', owner: 'mc', status: 'idle', start: st.today, due: st.today, deps: [] }, 'ta');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.doc.data.owner, r.body.doc.data.ownerRole], [undefined, 'Treasury Analyst']);
+  void s3;
 });

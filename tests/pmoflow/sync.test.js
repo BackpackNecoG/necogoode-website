@@ -332,7 +332,8 @@ test('R11 route: "changed issues since the last sync" excludes PMOFlow’s own w
     assert.equal(sum.sent, outRows.length, 'changes sent = PMOFlow → Jira rows in the log');
     assert.equal(sum.created, outRows.filter(e => e.op === 'create').length);
     assert.equal(sum.linked, outRows.filter(e => e.op === 'link').length);
-    assert.match(r.body.sync.sentence, new RegExp(`^${sum.created} issues created in Jira · ${sum.linked} dependency links set in Jira$`));
+    /* R15: the sentence counts the plan's links, and the issues (Link rows) they were set on */
+    assert.match(r.body.sync.sentence, new RegExp(`^${sum.created} issues created in Jira · ${sum.links} dependency links set on ${sum.linked} issues in Jira$`));
     /* the next sync reads nothing: PMOFlow just wrote every issue itself */
     const again = await call('POST', `workspaces/${ws}/connections/${c.id}/sync`, { actor: owner });
     assert.equal(again.body.connection.log.find(e => e.op === 'pull').detail, '0 changed issues since the last sync.');
@@ -371,7 +372,7 @@ const strip = (docs) => JSON.parse(JSON.stringify(docs));
 /* every doc, with the one work item's status / doneAt / updatedAt taken out */
 function without(docs, wid) {
   const d = strip(docs);
-  d.workItem.forEach(x => { if (x.id === wid) { delete x.data.status; delete x.data.doneAt; delete x.data.updatedAt; delete x.data.syncHold; } });
+  d.workItem.forEach(x => { if (x.id === wid) { delete x.data.status; delete x.data.doneAt; delete x.data.firstDoneAt; delete x.data.updatedAt; delete x.data.syncHold; } });
   delete d.connection;
   return d;
 }
@@ -712,7 +713,9 @@ test('R14 L4 #1 (route): the tool date past the deadline becomes a proposed plan
     const pc = pcs[0];
     assert.equal(pc.status, 'proposed');
     assert.deepEqual(pc.edits.map(e => [e.id, e.field, e.from, e.to]), [['W7', 'due', due0, '2027-01-15']]);
-    assert.ok(pc.approvers.some(a => a.role === 'sponsor' || (a.roles || []).some(x => x.role === 'sponsor')), 'the sponsor approves');
+    /* R15 (M1 #3): the stored sponsor approves; with no sponsor set, an Admin who is not the requester */
+    const deciders = ['sponsor', 'admin'];
+    assert.ok(pc.approvers.some(a => deciders.includes(a.role) || (a.roles || []).some(x => deciders.includes(x.role))), 'the sponsor (or, with none set, an Admin) approves: ' + JSON.stringify(pc.approvers));
     assert.ok(pc.approvers.every(a => a.person !== pc.requestedBy), 'the requester never approves');
     assert.equal(pc.fromSync.key, keyOf('W7'));
     assert.equal(pc.fromSync.by, 'dev.kumar@northwind.example');
@@ -730,6 +733,71 @@ test('R14 L4 #1 (route): the tool date past the deadline becomes a proposed plan
     const s3 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: '2026-11-25', actor: pm });
     assert.equal(s3.body.summary.ignored, 1);
     assert.equal(s3.body.summary.planChanges || 0, 0);
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});
+
+/* ---------- R15 M4 #3a (PMO R14 audit): a Jira Done → reopen → Done round trip keeps the first completion date ---------- */
+test('R15: Done, reopened, Done again keeps the first completion date (doneAt never moves later)', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  const k = S.keyOf(conn, 'W11');
+  const pass = today => {
+    const pull = S.simExecute(conn, conn.sim, S.pullIntent(conn, { nonce }), clock());
+    const res = S.applyInbound(conn, docs, pull.changes, { today, now: clock() });
+    conn.cursor = pull.cursor || conn.cursor;
+    res.updates.forEach(u => { docs.workItem.find(d => d.id === u.workItemId).data = u.data; });
+    return res;
+  };
+  S.simEdit(conn.sim, k, { status: 'Done' }, clock()); pass('2026-11-17');
+  assert.equal(wi(docs, 'W11').status, 'done'); assert.equal(wi(docs, 'W11').doneAt, '2026-11-17');
+  assert.equal(wi(docs, 'W11').firstDoneAt, '2026-11-17', 'the first completion date is kept on the task');
+  S.simEdit(conn.sim, k, { status: 'In Progress' }, clock()); pass('2026-11-19');
+  assert.equal(wi(docs, 'W11').status, 'prog'); assert.equal(wi(docs, 'W11').doneAt, undefined, 'not done: no done date');
+  assert.equal(wi(docs, 'W11').firstDoneAt, '2026-11-17', 'reopening keeps the first completion date');
+  S.simEdit(conn.sim, k, { status: 'Done' }, clock()); pass('2026-11-24');
+  assert.equal(wi(docs, 'W11').doneAt, '2026-11-17', 're-Done takes the first completion date back, never the later one');
+  /* a task done in PMOFlow before it was ever synced (W1, done Oct 30 in the seed) keeps its own date too */
+  assert.equal(wi(docs, 'W1').doneAt, '2026-10-30');
+  S.simEdit(conn.sim, S.keyOf(conn, 'W1'), { status: 'In Progress' }, clock()); pass('2026-11-18');
+  assert.equal(wi(docs, 'W1').status, 'prog'); assert.equal(wi(docs, 'W1').firstDoneAt, '2026-10-30');
+  S.simEdit(conn.sim, S.keyOf(conn, 'W1'), { status: 'Done' }, clock()); pass('2026-11-25');
+  assert.equal(wi(docs, 'W1').doneAt, '2026-10-30', 'the reopen round trip never overwrites Oct 30');
+});
+
+/* ---------- R15 M4 #3b (PMO R14 disagreement 5): the "N dependency links" count is the plan's links ---------- */
+test('R15: the first sync says how many dependency links the plan has (6), on how many issues (5)', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r15-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.15' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const items = docs.workItem.filter(d => d.data.projectId === PRJ);
+    const ids = new Set(items.map(d => d.id));
+    const planLinks = items.reduce((n, d) => n + (d.data.deps || []).map(x => (typeof x === 'string' ? x : x.id)).filter(x => ids.has(x)).length, 0);
+    const withLinks = items.filter(d => (d.data.deps || []).length).length;
+    assert.equal(planLinks, 6); assert.equal(withLinks, 5);
+    const owner = docs.project.find(d => d.id === PRJ).data.owner;
+    const r = await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: owner });
+    assert.equal(r.status, 201);
+    const sum = r.body.sync.summary;
+    assert.equal(sum.links, planLinks, 'links set = the plan’s dependency links');
+    assert.equal(sum.linked, withLinks, 'one Link row per issue in the sync log');
+    assert.equal(r.body.sync.sentence, `13 issues created in Jira · ${planLinks} dependency links set on ${withLinks} issues in Jira`);
+    /* the simulated Jira holds exactly the plan's links */
+    const sim = r.body.connection.sim.items;
+    assert.equal(Object.values(sim).reduce((n, it) => n + (it.deps || []).length, 0), planLinks);
+    /* one link removed and one added later: "1 dependency link set in Jira" counts the one added */
+    const w10 = docs.workItem.find(d => d.id === 'W10').data;
+    const put = await call('PUT', `ws/${ws}/doc/workItem/W10`, { actor: w10.owner || owner, data: Object.assign({}, w10, { deps: ['W6', 'W8', 'W9'] }) });
+    assert.equal(put.status, 200, JSON.stringify(put.body));
+    const again = await call('POST', `workspaces/${ws}/connections/${r.body.connection.id}/sync`, { actor: owner });
+    assert.equal(again.body.summary.links, 1); assert.match(again.body.sentence, /(^| · )1 dependency link set in Jira($| · )/);
   } finally {
     await store.deleteWorkspace(ws).catch(() => {});
     if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;

@@ -53,7 +53,12 @@ const plainDetail = t => String(t || '').replace(/\bthe spec(ification)?\b/gi, '
 /* R8 §4: one plain line per profiled column; issues come from the engine's specDrift (matched to the column by name) */
 const normName = t => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const shortIssue = t => plainDetail(t).split(/;\s*/)[0].replace(/\.$/, '').replace(/\b(\d+) of \d+ .+? (has|have|is|are|looks?|repeats?)\b/, '$1 $2').replace(/^(The|Some) /, m => m.toLowerCase());
-export function profileLines(profile, drift, fields) {
+/* R15 (BPM 3/4): the sample's own warnings (names spelled two ways, one bank account on several records, extra spaces),
+   and the engine's dataProfileStatus warnings, are said on the column's line: never "all match the rules" beside them */
+const colSignals = c => [c.nearDuplicates ? `${c.nearDuplicates.records} look like duplicates of each other (same name spelled differently)` : '',
+  c.sharedAccount ? String(c.sharedAccount.text || '') : '', c.whitespace ? `${c.whitespace.count} ${c.whitespace.count === 1 ? 'has' : 'have'} extra spaces` : ''].filter(Boolean);
+export function profileLines(profile, drift, fields, status) {
+  const warns = (status && Array.isArray(status.warnings) ? status.warnings : []).filter(w => w && w.text);
   const rows = +profile.rows || 0; const issues = (drift || []).filter(d => d && d.issue !== 'unspecified-column');
   const used = new Set();
   const lines = (profile.columns || []).map(c => {
@@ -62,9 +67,12 @@ export function profileLines(profile, drift, fields) {
     const parts = [`${filled} value${filled === 1 ? '' : 's'}`];
     if (nulls && !mine.some(d => d.issue === 'required-nulls')) parts.push(`${nulls} empty`);
     mine.forEach(d => parts.push(shortIssue(d.detail)));
+    const sig = colSignals(c).concat(warns.filter(w => normName(w.column) === normName(c.name)).map(w => plainDetail(w.text).replace(/\.$/, '')));
+    const low = parts.join(', ').toLowerCase();
+    [...new Set(sig)].forEach(x => { if (!low.includes(x.toLowerCase())) parts.push(x); });
     const ruled = (fields || []).some(f => normName(f.name) === normName(c.name));
-    if (!mine.length) parts.push(ruled ? 'all match the rules' : (c.patterns || [])[0] ? 'usually ' + humanPat(c.patterns[0].pattern) : 'no rule yet');
-    return { name: c.name, text: parts.join(', '), bad: mine.length > 0 };
+    if (!mine.length && !sig.length) parts.push(ruled ? 'all match the rules' : (c.patterns || [])[0] ? 'usually ' + humanPat(c.patterns[0].pattern) : 'no rule yet');
+    return { name: c.name, text: parts.join(', '), bad: mine.length > 0 || sig.length > 0, warn: sig.length > 0 };
   });
   issues.filter(d => !used.has(d)).forEach(d => lines.push({ name: d.field, text: shortIssue(d.detail), bad: true }));
   return lines;
@@ -193,9 +201,15 @@ export function render(params) {
   const splitFrom = profile && profile.splitFrom ? store.get('dataElement', profile.splitFrom) : null;
   const splitHTML = !profile ? '' : (Array.isArray(profile.split) && profile.split.length ? `<div class="hint d-split" data-profile-split>${profile.split.map(m => `${m.columns.length} column${m.columns.length === 1 ? '' : 's'} went to <a href="${link('/data/' + m.dataId)}" data-link>${esc(m.name)}</a> (${esc(m.columns.join(', '))})`).join('; ')}. The tests for them are made there.</div>` : '')
     + (profile.splitFrom ? `<div class="hint d-split" data-profile-splitfrom>These columns came from a sample uploaded on <a href="${link('/data/' + profile.splitFrom)}" data-link>${esc(splitFrom ? splitFrom.name : 'other information')}</a>.</div>` : '');
-  const simpleCols = profile ? profileLines(profile, drift, fields).map(l => `<div class="row d-profline" data-profline="${esc(l.name)}"><span class="${l.bad ? 'fail' : 'pass'}" aria-hidden="true">●</span><div style="min-width:0"><b>${esc(l.name)}</b>: ${esc(l.text)}</div></div>`).join('') : '';
+  /* R15 (M1 §7): the engine's one status for the sample; its sentence is shown whenever a warning stands */
+  const pstat = profile ? eng('dataProfileStatus', [docs(), did], null) : null;
+  const plines = profile ? profileLines(profile, drift, fields, pstat) : [];
+  const pstatHTML = pstat && pstat.text && !pstat.allMatch ? `<div class="hint fail d-pstat" data-profile-status>${esc(plainDetail(pstat.text))}</div>` : '';
+  /* R15 (BPM): a column that is another piece of information's (risk_score on Customer name) says where it belongs */
+  const otherOf = col => normName(col) === normName(x.name) ? null : store.list('dataElement', d => d.id !== did && normName(d.name) === normName(col))[0] || null;
+  const simpleCols = profile ? pstatHTML + plines.map(l => { const o = otherOf(l.name); return `<div class="row d-profline" data-profline="${esc(l.name)}"><span class="${l.bad ? 'fail' : 'pass'}" aria-hidden="true">●</span><div style="min-width:0"><b>${esc(l.name)}</b>: ${esc(l.text)}${o ? ` <span class="hint" data-profline-belongs="${esc(o.id)}">· this column is <a href="${link('/data/' + o.id)}" data-link>${esc(o.name)}</a></span>` : ''}</div></div>`; }).join('') : '';
   const prof = `<div class="card" style="margin-top:16px" data-profile-card><h3>Check sample data ${profile ? `<span class="n">${esc(profile.rows)} rows · ${esc(fmtTime(profile.at))}</span>` : ''}</h3>
-    ${profile ? (adv ? `<div class="hint d-mask-note" style="margin:-4px 0 8px" data-mask-note>${esc(MASK_NOTE)}</div>${splitHTML}
+    ${profile ? (adv ? `<div class="hint d-mask-note" style="margin:-4px 0 8px" data-mask-note>${esc(MASK_NOTE)}</div>${splitHTML}${pstatHTML}
       <div class="tbl-wrap"><table class="d-prof"><tr><th>Column</th><th>Empty</th><th>Distinct</th><th>Length</th><th>Range</th><th>Top patterns</th><th>Masked examples</th></tr>${(profile.columns || []).map(c => `<tr><td><b>${esc(c.name)}</b>${(c.specials || []).length ? `<div class="hint">special characters ${esc(c.specials.join(' '))}</div>` : ''}</td><td>${esc(c.nulls)}</td><td>${esc(c.distinct)}</td><td>${esc(c.minLen)}–${esc(c.maxLen)}</td><td>${c.min != null ? esc(c.min) + ' – ' + esc(c.max) : '—'}</td>
         <td>${(c.patterns || []).slice(0, 3).map(pt => `<span class="d-pat">${esc(humanPat(pt.pattern))}</span> <span class="hint">×${esc(pt.count)}</span>`).join('<br>') || '—'}</td><td>${(c.examples || []).slice(0, 3).map(e => `<code class="d-code">${esc(e)}</code>`).join(' ') || '—'}</td></tr>`).join('')}</table></div>` : `<div class="hint" style="margin:-4px 0 8px">What a sample of the real data looks like (no real values are stored).</div>${splitHTML}${simpleCols}`)
       + (!adv ? '' : `<h3 style="margin-top:14px">Differences from the rules <span class="n">${blockingDrift(drift).length}</span></h3>${noRule.length ? `<div class="s" data-norule="${noRule.length}">${noRule.length} column${noRule.length === 1 ? ' has' : 's have'} no rule yet: ${esc(noRule.map(d => d.field).join(', '))}.</div>` : ''}${blockingDrift(drift).length ? blockingDrift(drift).map(d => `<div class="row"><span class="fail" aria-hidden="true">●</span><div><div class="t">${esc(d.field)}: ${esc(driftTitle(d))}</div><div class="s">${esc(plainDetail(d.detail))}</div></div></div>`).join('') : fields.length ? '<div class="s pass">The sample matches the rules.</div>' : ''}`)

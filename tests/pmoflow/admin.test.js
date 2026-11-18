@@ -25,6 +25,20 @@ async function newWs() {
   created.push([ws.id, hash]);
   return ws.id;
 }
+/* R15 (Jordan): role changes are two-person with the extra sign-in check. setRole proposes as `by` and, when the change
+   waits for a second Admin, confirms it as another Admin (for a demotion from Admin, the person demoted may confirm). */
+const SU0 = () => ({ method: 'simulated-mfa', at: new Date().toISOString() });
+async function setRole(ws, pid, role, by) {
+  by = by || 'ta';
+  const r = await call('PUT', `workspaces/${ws}/admin/roles/${pid}`, { role, actor: by });
+  if (r.status !== 200 || !r.body.pendingRole) return r;
+  const pend = r.body.pendingRole;
+  for (const c of pend.canConfirm || []) {
+    const ok = await call('POST', `workspaces/${ws}/admin/roles/pending/${pend.id}/confirm`, { actor: c, stepUp: SU0() });
+    if (ok.status === 200) return ok;
+  }
+  return { status: 500, body: { error: 'nobody could confirm ' + JSON.stringify(pend) } };
+}
 test.after(async () => { for (const [id, hash] of created) await store.deleteWorkspace(id, hash).catch(() => {}); });
 
 test('workspace doc type is registered and appears in state', async () => {
@@ -59,14 +73,14 @@ test('roles: only an Admin changes them; last Admin is protected; event recorded
   const deny = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'viewer', actor: 'lp' });
   assert.equal(deny.status, 403);
   assert.match(deny.body.error, /Only an Admin/);
-  const ok = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' });
+  const ok = await setRole(ws, 'ps', 'approver', 'ta');
   assert.equal(ok.status, 200);
   assert.equal(ok.body.people.find(p => p.id === 'ps').role, 'approver');
   assert.equal(ok.body.seats.free, 6);   /* 5 seeded approvers + Priya */
   const bad = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'owner', actor: 'ta' });
   assert.equal(bad.status, 400);
   /* demote mc, then the last admin (ta) cannot demote themself */
-  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/mc`, { role: 'editor', actor: 'ta' })).status, 200);
+  assert.equal((await setRole(ws, 'mc', 'editor', 'ta')).status, 200);
   const last = await call('PUT', `workspaces/${ws}/admin/roles/ta`, { role: 'editor', actor: 'ta' });
   assert.equal(last.status, 409);
   const evs = (await call('GET', `ws/${ws}/events`, null, { ref: 'person:ps' })).body.events;
@@ -78,8 +92,8 @@ test('roles: only an Admin changes them; last Admin is protected; event recorded
 
 test('roleError: viewers and approvers are limited; unknown actors untouched', async () => {
   const ws = await newWs();
-  await call('PUT', `workspaces/${ws}/admin/roles/lp`, { role: 'viewer', actor: 'ta' });
-  await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' });
+  await setRole(ws, 'lp', 'viewer', 'ta');
+  await setRole(ws, 'ps', 'approver', 'ta');
   const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
   assert.match(admin.roleError(docs, 'lp', 'workItem'), /Viewer/);
   assert.equal(admin.roleError(docs, 'lp', 'comment'), null);
@@ -440,7 +454,7 @@ test('R12 audit: a CSV export is verifiable in the app (head and count in a foot
   assert.equal(foot[2], j.head.hash, 'footer carries the head');
   assert.equal(foot[3], j.head.signature);
   /* round trip: parsing gives back exactly the exported entries */
-  const parsed = admin.fromCSV(csv);
+  const parsed = admin.fromCSV(csv, { seeded: j.entries.filter(e => e.seeded).map(e => e.seq) });
   assert.deepEqual(parsed.entries, j.entries.map(e => Object.assign({}, e, { seq: e.seq })));
   assert.match(csv, /"'=HYPERLINK\(""x""\), ""quoted"", line\nbreak"/, 'formula protection in the file');
   assert.match(csv, /,''=already quoted,/);
@@ -570,7 +584,7 @@ test('R13 departments: admin writes keep settings.departments; GET admin lists t
   assert.ok(isFinite(Date.parse(setNow.departments.find(d => d.name === 'Credit').approverSince.ar)), 'approverSince recorded');
   assert.deepEqual(credit.approvers, ['ar']); assert.deepEqual(credit.approverNames, ['Ana Ruiz']);
   /* a role change, an invite, an export checkpoint: none of them wipe the departments */
-  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' })).status, 200);
+  assert.equal((await setRole(ws, 'ps', 'approver', 'ta')).status, 200);
   assert.equal((await call('POST', `workspaces/${ws}/admin/invites`, { email: 'kim@northwind.example', role: 'viewer', actor: 'ta' })).status, 200);
   await call('POST', `workspaces/${ws}/admin/audit/anchor`, { actor: 'ta' });
   const st = (await call('GET', `ws/${ws}/state`)).body.docs;
@@ -716,7 +730,7 @@ test('R14 departments: moving a person is proposed by one Admin and confirmed by
   assert.equal(r.status, 403); assert.match(r.body.error, /second Admin/);
   r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'lp', stepUp: SU() });
   assert.equal(r.status, 403); assert.match(r.body.error, /Admin/);
-  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ar`, { role: 'admin', actor: 'ta' })).status, 200);
+  assert.equal((await setRole(ws, 'ar', 'admin', 'ta')).status, 200);
   r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ar', stepUp: SU() });
   assert.equal(r.status, 403); assert.match(r.body.error, /being moved|their own/);
   r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta' });
@@ -788,7 +802,7 @@ test('R14 departments: no one-click bypass (generic person save, a lone Admin)',
   r = await call('PUT', `ws/${ws}/doc/person/ar`, { actor: 'mc', data: Object.assign({}, ar, { buSince: '2001-01-01T00:00:00.000Z' }) });
   assert.equal(r.status, 409, 'nobody backdates a membership');
   /* with Tom no longer an Admin, Maya is the only one: her proposal says it needs a second Admin */
-  assert.equal((await call('PUT', `workspaces/${ws}/admin/roles/ta`, { role: 'editor', actor: 'mc' })).status, 200);
+  assert.equal((await setRole(ws, 'ta', 'editor', 'mc')).status, 200);
   r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'ar', id: 'dept-compliance' }, actor: 'mc' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.ok(!r.body.pending, 'a lone Admin is never stuck waiting');
@@ -856,4 +870,128 @@ test('R14 audit: refused writes are exported, labelled and verified (JSON and CS
   /* the person filter keeps refusals (who tried) */
   const f = (await call('GET', `workspaces/${ws}/admin/audit`, null, { person: 'ta', item: 'refused' })).body;
   assert.ok(f.entries.some(e => e.action === 'refused'));
+});
+
+/* ---------- R15 M4 #1 (Jordan R14 re-test 2): role changes are two-person with the extra sign-in check ---------- */
+test('R15 roles: promoting to Admin is proposed by one Admin and confirmed by another with the step-up check', async () => {
+  const ws = await newWs();
+  const roleNow = async id => (await call('GET', `workspaces/${ws}/admin`)).body.people.find(p => p.id === id).role;
+  /* Tom proposes Ana as Admin; the client's own text never becomes the sentence */
+  let r = await call('PUT', `workspaces/${ws}/admin/roles/ar`, { role: 'admin', actor: 'ta', summary: 'Fixed typo' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.applied, false, 'not applied: it waits');
+  const pend = r.body.pendingRole;
+  assert.ok(pend && pend.id, 'a pending role change comes back');
+  assert.equal(pend.text, 'Make Ana Ruiz an Admin (now Editor)');
+  assert.equal(pend.by, 'ta'); assert.deepEqual(pend.affected, ['ar']); assert.deepEqual(pend.canConfirm, ['mc']);
+  assert.equal(await roleNow('ar'), 'editor', 'nothing changes until it is confirmed');
+  let g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.equal(g.pendingRoles.length, 1); assert.equal(g.pendingRoles[0].byName, 'Tom Alvarez');
+  /* a second proposal for the same person while one waits is refused */
+  r = await call('PUT', `workspaces/${ws}/admin/roles/ar`, { role: 'viewer', actor: 'mc' });
+  assert.equal(r.status, 409); assert.match(r.body.error, /already waiting/);
+  /* the proposer can't confirm; Ana (not an Admin, and the person promoted) can't; an Editor can't; no step-up, no change */
+  const confirm = (actor, su) => call('POST', `workspaces/${ws}/admin/roles/pending/${pend.id}/confirm`, Object.assign({ actor }, su ? { stepUp: SU0() } : {}));
+  r = await confirm('ta', true); assert.equal(r.status, 403); assert.match(r.body.error, /second Admin/);
+  r = await confirm('ar', true); assert.equal(r.status, 403);
+  r = await confirm('lp', true); assert.equal(r.status, 403); assert.match(r.body.error, /Only an Admin/);
+  r = await confirm('mc', false); assert.equal(r.status, 403); assert.match(r.body.error, /extra sign-in check/);
+  assert.equal(await roleNow('ar'), 'editor', 'still not changed');
+  /* Maya confirms with the check: Ana is an Admin, with the server's time on the role */
+  const t0 = Date.now();
+  r = await confirm('mc', true);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.applied, true);
+  assert.equal(await roleNow('ar'), 'admin');
+  const set = (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings').data;
+  assert.ok(Math.abs(Date.parse(set.roleSince.ar) - t0) < 60000, 'roleSince is the server time of the confirmation');
+  assert.ok(!(set.pendingRoles || []).length, 'nothing waits any more');
+  const evs = (await call('GET', `ws/${ws}/events`, null, { ref: 'person:ar' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes("Proposed changing Ana Ruiz's role from Editor to Admin (waits for a second Admin)"), evs.join(' | '));
+  assert.ok(evs.includes("Changed Ana Ruiz's role from Editor to Admin (proposed by Tom Alvarez, confirmed by Maya Chen with the extra sign-in check)"), evs.join(' | '));
+  assert.ok(!evs.some(s => /Fixed typo/.test(s)), 'History is server-written');
+  /* the confirm of a change that is gone is a plain 404 */
+  assert.equal((await confirm('mc', true)).status, 404);
+});
+
+test('R15 roles: no one-Admin shortcut around the second Admin; withdraw and turn down', async () => {
+  const ws = await newWs();
+  /* Tom tries to demote Maya, the only other Admin: it waits for Maya (the person demoted may agree) */
+  let r = await call('PUT', `workspaces/${ws}/admin/roles/mc`, { role: 'editor', actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.applied, false, 'demoting the other Admin never applies at once');
+  assert.deepEqual(r.body.pendingRole.canConfirm, ['mc']);
+  assert.equal(r.body.pendingRole.text, 'Make Maya Chen an Editor (now Admin)');
+  /* Maya turns it down */
+  r = await call('POST', `workspaces/${ws}/admin/roles/pending/${r.body.pendingRole.id}/cancel`, { actor: 'mc' });
+  assert.equal(r.status, 200);
+  let evs = (await call('GET', `ws/${ws}/events`, null, { ref: 'person:mc' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes("Turned down Tom Alvarez’s proposal to change Maya Chen's role from Admin to Editor"), evs.join(' | '));
+  /* a non-Admin can't propose or withdraw */
+  r = await call('PUT', `workspaces/${ws}/admin/roles/lp`, { role: 'admin', actor: 'lp' });
+  assert.equal(r.status, 403);
+  /* Tom proposes Leo as Viewer, then withdraws it */
+  r = await call('PUT', `workspaces/${ws}/admin/roles/lp`, { role: 'viewer', actor: 'ta' });
+  const pid = r.body.pendingRole.id;
+  assert.equal((await call('POST', `workspaces/${ws}/admin/roles/pending/${pid}/cancel`, { actor: 'lp' })).status, 403);
+  assert.equal((await call('POST', `workspaces/${ws}/admin/roles/pending/${pid}/cancel`, { actor: 'ta' })).status, 200);
+  evs = (await call('GET', `ws/${ws}/events`, null, { ref: 'person:lp' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes("Withdrew the proposal to change Leo Park's role from Editor to Viewer"), evs.join(' | '));
+  assert.equal((await call('GET', `workspaces/${ws}/admin`)).body.people.find(p => p.id === 'lp').role, 'editor');
+  /* the same role again is no change and no proposal */
+  r = await call('PUT', `workspaces/${ws}/admin/roles/lp`, { role: 'editor', actor: 'ta' });
+  assert.equal(r.status, 200); assert.ok(!r.body.pendingRole);
+});
+
+test('R15 roles: in a one-Admin workspace a role change applies at once and History says so', async () => {
+  const ws = await newWs();
+  assert.equal((await setRole(ws, 'mc', 'editor', 'ta')).status, 200);
+  const r = await call('PUT', `workspaces/${ws}/admin/roles/ar`, { role: 'admin', actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.applied, true); assert.ok(!r.body.pendingRole, 'a lone Admin is never stuck waiting');
+  assert.equal(r.body.people.find(p => p.id === 'ar').role, 'admin');
+  const evs = (await call('GET', `ws/${ws}/events`, null, { ref: 'person:ar' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes("Changed Ana Ruiz's role from Editor to Admin (no second Admin in this workspace)"), evs.join(' | '));
+  /* now there are two Admins again, so the next change waits */
+  const r2 = await call('PUT', `workspaces/${ws}/admin/roles/lp`, { role: 'admin', actor: 'ta' });
+  assert.equal(r2.body.applied, false); assert.deepEqual(r2.body.pendingRole.canConfirm, ['ar']);
+  /* the last-Admin rule still holds at confirmation time */
+  const ws2 = await newWs();
+  const p = (await call('PUT', `workspaces/${ws2}/admin/roles/ta`, { role: 'editor', actor: 'mc' })).body.pendingRole;
+  const q = (await call('PUT', `workspaces/${ws2}/admin/roles/mc`, { role: 'editor', actor: 'ta' })).body.pendingRole;
+  assert.equal((await call('POST', `workspaces/${ws2}/admin/roles/pending/${p.id}/confirm`, { actor: 'ta', stepUp: SU0() })).status, 200);
+  const last = await call('POST', `workspaces/${ws2}/admin/roles/pending/${q.id}/confirm`, { actor: 'mc', stepUp: SU0() });
+  assert.equal(last.status, 409); assert.match(last.body.error, /at least one Admin/);
+});
+
+/* ---------- R15 M4 #2 (PMO R14 disagreement 1): system-written entries are never "Older entry" ---------- */
+test('R15 audit labels: entries the system writes today are labelled server-written', async () => {
+  const ws = await newWs();
+  /* a plan change (within tolerance, applied at once) and a Jira connection whose settings change, then disconnect */
+  const pc = await call('POST', `workspaces/${ws}/changes`, { actor: 'lp', change: { projectId: 'vendor-modernization', reason: 'Leo is out next week', category: 'resource',
+    edits: [{ op: 'set', type: 'workItem', id: 'W11', field: 'owner', to: 'ar' }] } });
+  assert.equal(pc.status, 200, JSON.stringify(pc.body));
+  const owner = (await call('GET', `ws/${ws}/state`)).body.docs.project.find(d => d.id === 'vendor-modernization').data.owner;
+  const cn = await call('POST', `workspaces/${ws}/connections`, { projectId: 'vendor-modernization', tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: owner });
+  assert.equal(cn.status, 201, JSON.stringify(cn.body));
+  const cid = cn.body.connection.id;
+  const up = await call('PUT', `workspaces/${ws}/connections/${cid}`, Object.assign({}, cn.body.connection, { actor: owner, notify: { teams: { on: true, channel: 'Vendor team' } } }));
+  assert.ok(up.status < 300, JSON.stringify(up.body));
+  assert.ok((await call('DELETE', `workspaces/${ws}/connections/${cid}`, { actor: owner })).status < 300);
+  const j = (await call('GET', `workspaces/${ws}/admin/audit`)).body;
+  assert.equal(j.verify.ok, true, j.verify.summary);
+  const client = j.entries.filter(e => e.written === 'client');
+  assert.deepEqual(client.map(e => e.action + ': ' + e.summary), [], 'no entry written by the system is labelled "worded by the person"');
+  assert.ok(j.entries.some(e => /\(plan change “/.test(e.summary) && e.action === 'update'), 'the plan-change task edit is in the export');
+  assert.ok(j.entries.some(e => /^Disconnected project /.test(e.summary)), 'the disconnect is in the export');
+  /* the same rule for each sentence shape the server writes under a create/update/delete action */
+  for (const [sm, act] of [['Moved the due date of “Check bank” from Nov 20 to Nov 24 (plan change “Bank portal late”)', 'update'],
+    ['Knock-on from the plan change “Bank portal late” on Vendor Onboarding: W8 Nov 25 → Dec 1', 'update'],
+    ['Signed the launch override as project manager: “Board approved”', 'create'],
+    ['Changed the Jira sync settings for "Vendor Onboarding Modernization"', 'update'],
+    ['Disconnected project "Vendor Onboarding Modernization" from Jira. Tasks stay in PMOFlow.', 'delete']])
+    assert.equal(admin.summaryParts(sm, act).written, 'server', sm);
+  /* seeded demo history is the system's too; a pre-R14 client sentence still says so */
+  assert.equal(admin.summaryParts('Work item "Open W-9" marked done', 'update', { seeded: true }).written, 'server');
+  assert.equal(admin.summaryParts('Fixed typo', 'update').written, 'client');
 });

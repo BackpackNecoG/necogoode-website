@@ -149,7 +149,9 @@ const cyclesOf = prj => Array.isArray(prj.testCycles) ? prj.testCycles : [];
 const testerSel = (name, v, label) => `<select name="${name}" aria-label="${esc(label || 'Tester')}"><option value="">Unassigned</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
 const testerChip = id => id ? `<span class="ts-tester" data-tester="${esc(id)}">${av(id)} ${esc(pname(id))}</span>` : '<span class="hint">Unassigned</span>';
 
-export function render(params) {
+/* R15 #13 (Jordan): the page sits in .rl-page (display: contents) so the phone tap-target rules apply to it only */
+export function render(params) { return `<div class="rl-page" data-page="${'testing'}">${renderPage(params)}</div>`; }
+function renderPage(params) {
   const prjId = params.prj;
   const prj = store.get('project', prjId);
   const projects = store.list('project');
@@ -174,14 +176,14 @@ export function render(params) {
   const covOf = st => st ? { covered: +st.passed || 0, total: +st.total || 0, fails: (+st.failed || 0), blocked: +st.blocked || 0, run: !!st.run } : null;
   const devCov = covOf(stg('system')), uatCov = covOf(stg('uat'));
   const covKpi = (label, cov, attr) => { const full = cov && cov.covered === cov.total && !cov.fails && !cov.blocked;
-    return `<div class="kpi" data-cov="${attr}" data-cov-n="${cov ? `${cov.covered}/${cov.total}` : '0/0'}"><b class="${cov && cov.total ? (full ? 'pass' : 'fail') : ''}">${cov ? `${cov.covered}/${cov.total}` : '0/0'}</b><span>${label}${cov && cov.fails ? ` · ${cov.fails} failed` : ''}${cov && cov.total && !cov.run ? ' · not run yet' : ''}</span></div>`; };
+    return `<div class="kpi" data-cov="${attr}" data-cov-n="${cov ? `${cov.covered}/${cov.total}` : '0/0'}"><b class="${cov && cov.total ? (full ? 'pass' : 'fail') : ''}">${cov ? `${cov.covered}/${cov.total}` : '0/0'}</b><span>${label}${cov && cov.fails ? `, ${cov.fails} failed` : ''}${cov && cov.total && !cov.run ? ' · not run yet' : ''}</span></div>`; };
   const openDefects = store.list('workItem', w => w.projectId === prjId && w.kind === 'defect' && w.status !== 'done').length;
 
   const header = `<section class="hdr"><div>
       <div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · <a href="${link('/project/' + prjId)}" data-link>${esc(prj.name)}</a> · Testing</div>
       <div class="rl-title"><h1>Testing</h1><select class="rl-switch" data-switch aria-label="Project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === prjId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>${!store.advanced && ui.advLocal[prjId] ? '<button class="btn sm rs-link" data-hide-adv>Hide advanced tools</button>' : ''}</div>
       <p>Data tests come from each data element's spec plus a statistical profile of a real extract (counts, lengths and patterns only, never raw values). Process UAT scripts walk every new or changed step and every branch; end-to-end scenarios walk each whole path. Environments: Dev, SIT, UAT and Prod verify. Coverage counts each item's latest result across every run in that environment.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi" data-kpi-cases="${esc(tt.cases != null ? tt.cases : caseIds.length)}"><b>${tt.cases != null ? tt.cases : caseIds.length}</b><span>Data cases${tt.cases != null && caseIds.length > tt.cases ? ` · ${caseIds.length - tt.cases} more not counted` : ''}</span></div><div class="kpi" data-kpi-scripts="${esc(tt.scripts != null ? tt.scripts : sc.list.length)}"><b>${tt.scripts != null ? tt.scripts : sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Try it out · tests passed', devCov, 'dev')}${covKpi('Business sign-off · tests passed', uatCov, 'uat')}<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Open defects</span></div></div></div></section>
+    <div class="hdr-side"><div class="kpis"><div class="kpi" data-kpi-cases="${esc(tt.cases != null ? tt.cases : caseIds.length)}"><b>${tt.cases != null ? tt.cases : caseIds.length}</b><span>Data cases${tt.cases != null && caseIds.length > tt.cases ? ` · ${caseIds.length - tt.cases} more not counted` : ''}</span></div><div class="kpi" data-kpi-scripts="${esc(tt.scripts != null ? tt.scripts : sc.list.length)}"><b>${tt.scripts != null ? tt.scripts : sc.list.length}</b><span>UAT scripts</span></div><div class="kpi" data-kpi-scn><b>${scn.adopted ? scn.list.length : 0}</b><span>Scenarios${scn.adopted ? '' : ' · not adopted'}</span></div>${covKpi('Try it out: information checks passed', devCov, 'dev')}${covKpi('Business check: tests passed', uatCov, 'uat')}${tt.openIssues ? `<div class="kpi" data-open-issues="${esc(tt.openIssues.count)}"><b class="${tt.openIssues.count ? 'fail' : 'pass'}">${tt.openIssues.count}</b><span>of ${esc(tt.total)} tests not passed yet${openDefects ? ` · ${openDefects} problem${openDefects === 1 ? '' : 's'} open` : ''}</span></div>` : `<div class="kpi"><b class="${openDefects ? 'fail' : ''}">${openDefects}</b><span>Problems open</span></div>`}</div></div></section>
     ${tc ? `<div class="ts-strip ${tc.pass ? 'pass' : 'fail'}" data-tests-check="${tc.pass ? 'pass' : 'fail'}"><span class="rl-ic ${tc.pass ? 'pass' : 'fail'}">${tc.pass ? '✓' : '✕'}</span>
       <div><b>Go-live check: ${tc.pass ? 'tests passed' : 'tests not passed yet'}</b>. ${esc(tc.detail || '')}</div><a class="rl-go" href="${link('/release/' + prjId)}" data-link>Readiness gate ›</a></div>` : ''}
     ${traceStrip(prj, des)}`;
@@ -759,9 +761,14 @@ async function createAllTests(prj) {
   if (ui.creating) return;
   ui.creating = true; store.emit();
   let made = 0, covered = 0, noted = [];
+  const failed = [];
   try {
-    const des = testingFacts(prj).des;
+    /* R15 #7 (BPM: the first press made 4 of 9): one piece that can't be done never stops the rest, and a second pass
+       picks up anything the first pass could not finish (a split sample can add columns to a piece done earlier) */
+    for (let pass = 0; pass < 2; pass++) {
+    const des = testingFacts(prj).des.filter(d => pass === 0 || !casesFor(d.id).length);
     for (const d0 of des) {
+      try {
       let d = store.get('dataElement', d0.id) || d0;
       if (!(d.fields || []).length && !latestProfile(d.id) && d.sampleCsv) {
         try { await store.api('/profile/' + d.id, { csv: d.sampleCsv }); await store.load(); } catch (e) { /* fall through: generic test below */ }
@@ -778,9 +785,14 @@ async function createAllTests(prj) {
         await store.save('testCase', id, { id, dataId: d.id, field: d.name, kind: 'valid', input: `A typical ${d.name}`, expect: 'accept', origin: 'user', note: 'Enter a realistic made-up value and check it is saved and shown correctly.', tester: d.owner || undefined, createdAt: new Date().toISOString() }, `Created a basic test for ${d.name}`);
         n++; noted.push(d.name);
       }
-      made += n; if (casesFor(d.id).length) covered++;
+      made += n;
+      } catch (e) { if (pass === 1) failed.push(`${d0.name}: ${e.message || 'could not be saved'}`); }
     }
-    toast(made ? `Created ${plural(made, 'test')}. All ${plural(covered, 'piece', 'pieces')} of information now have tests.` : `All ${plural(covered, 'piece', 'pieces')} of information already have their tests.`);
+    }
+    const all = testingFacts(prj).des;
+    covered = all.filter(d => casesFor(d.id).length).length;
+    if (failed.length) toast(`Created ${plural(made, 'test')}. ${failed.length} could not be added: ${failed.join('; ')}`);
+    else toast(made ? `Created ${plural(made, 'test')}. ${covered === all.length ? 'All' : covered + ' of'} ${plural(all.length, 'piece', 'pieces')} of information now have tests.` : `All ${plural(covered, 'piece', 'pieces')} of information already have their tests.`);
   } finally { ui.creating = false; store.emit(); }
 }
 async function useColumns(dataId) {
@@ -919,6 +931,8 @@ async function generateFor(de, quiet) {
   try {
     let made = [];
     try { made = e.generateTests(de, latestProfile(de.id) || undefined) || []; } catch (err) { toast('Could not generate: ' + err.message); return 0; }
+    /* R15 #7 (BPM): boundary tests at every amount threshold of the process ($250,000 and just over) */
+    try { if (e.thresholdCases) made = made.concat(e.thresholdCases(store.state.docs, de.id) || []); } catch (err) { /* thresholds are extra */ }
     const key = c => [c.field, String(c.input), c.kind].join('\u0001');
     const have = new Set(casesFor(de.id).map(key));
     const t0 = Date.now(); const docs = [];
@@ -1039,17 +1053,22 @@ async function recordRun(prj, opts) {
      ones, and never a test held by an open problem (engine heldTests). Such rows can't be selected for a bulk pass. */
   const heldMap = eng('heldTests', store.state.docs, prj.id) || {};
   /* R12 #4: in a business check, an unassigned test is passed only by the department that owns its part */
-  const deptLock = id => { if (env0 !== 'uat') return ''; const b = eng('canPassTest', store.state.docs, prj.id, id, me); return b && b.rule === 'department' ? b.text : ''; };
+  /* R15 #5 (Jordan): whoever assigned a test (themselves included) can't pass it, in Try it out too */
+  const deptLock = id => { const b = eng('canPassTest', store.state.docs, prj.id, id, me, { env: env0 }); return b && (b.rule === 'assigner' || (env0 === 'uat' && b.rule === 'department')) ? b.text : ''; };
   const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : deptLock(id);
+  /* R15 (Jordan disagreement 6): each row says its latest result, so a new recording never reads as "all 26 not run" */
+  const ledger = ((eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing || {}).status || {};
+  const LAST = { passed: 'Last result: passed', failed: 'Last result: failed', fix: 'Last result: waiting for a fix', blocked: 'Last result: blocked', notRun: 'Not run yet' };
+  const lastHint = id => ledger[id] ? `<small class="hint" data-last-result="${esc(ledger[id])}">${esc(LAST[ledger[id]] || '')}</small>` : '';
   const lockAttr = (id, tester) => { const t = passLock(id, tester); return t ? ` data-pass-locked="${esc(t)}"` : ''; };
   const lockHint = (id, tester) => { const t = passLock(id, tester); return t ? `<small class="hint" data-lock-hint>${esc(t)}</small>` : ''; };
   const pick = (k, label, locked) => locked ? '<span class="ts-pick" aria-hidden="true"></span>' : `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
   /* Simple: no test ids and no "expect accept/reject": the value to try and what should happen, in words */
   const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const nm = opts.simple ? `${d.name}${tok(c.field) !== tok(d.name) ? ' · ' + c.field : ''}` : `${d.name} ${caseLbl(c.id)} · ${c.field}`;
     const exp = opts.simple ? (c.expect === 'reject' ? 'should be rejected' : 'should be accepted') : 'expect ' + c.expect;
-    return `<div class="ts-case" data-row="${esc(k)}"${lockAttr(c.id, c.tester)}><div class="ts-case-t">${pick(k, nm, !!passLock(c.id, c.tester))}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small>${lockHint(c.id, c.tester)}</div>
+    return `<div class="ts-case" data-row="${esc(k)}"${lockAttr(c.id, c.tester)}><div class="ts-case-t">${pick(k, nm, !!passLock(c.id, c.tester))}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small> ${lastHint(c.id)}${lockHint(c.id, c.tester)}</div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
-  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}${lockAttr(s.id, s.tester)}><div class="ts-case-t">${pick(k, s.title, !!passLock(s.id, s.tester))}${lockHint(s.id, s.tester)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
+  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}${lockAttr(s.id, s.tester)}><div class="ts-case-t">${pick(k, s.title, !!passLock(s.id, s.tester))}${lockHint(s.id, s.tester)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''} ${lastHint(s.id)}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
     <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(opts.simple ? plainEnv(x.action) : x.action)}<small>Expected: ${esc(opts.simple ? plainEnv(x.expected) : x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence (required to pass): link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({

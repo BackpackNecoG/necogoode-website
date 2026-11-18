@@ -492,9 +492,19 @@
     else if (f === 'description') { if (v) w.note = v; else delete w.note; }
     else if (f === 'assignee') { var p = personByEmail(docs, v, conn.emailDomain); if (p) w.owner = p.id; }
     else if (f === 'status') {
+      /* R15 (PMO R14): the first completion date is kept. A Done → reopen → Done round trip in the tool takes the first
+         date back (firstDoneAt, kept on the task while it is reopened), so a re-Done never moves doneAt later. */
       var was = w.status; w.status = v;
-      if (v === 'done' && was !== 'done') w.doneAt = today;
-      if (v !== 'done') delete w.doneAt;
+      var isDay = function (d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d); };
+      var first = isDay(w.firstDoneAt) ? w.firstDoneAt : null;
+      if (was === 'done' && isDay(w.doneAt) && (!first || w.doneAt < first)) first = w.doneAt;
+      if (v === 'done') {
+        if (was !== 'done' || !isDay(w.doneAt)) w.doneAt = first || today;
+        w.firstDoneAt = first && first < w.doneAt ? first : w.doneAt;
+      } else {
+        delete w.doneAt;
+        if (first) w.firstDoneAt = first;
+      }
     }
   }
 

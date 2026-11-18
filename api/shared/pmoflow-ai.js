@@ -120,6 +120,8 @@ function statusFacts(docs, projectId, today, engine) {
   /* R9 §13: a cost line needs a budget or day rates for the people doing the work */
   const rated = new Set(list(docs, 'person').filter(p => Number(p.dayRate) > 0).map(p => p.id));
   facts.hasRates = work.some(w => rated.has(w.owner));
+  /* names only (never ids) in the facts; the ids stay server-side for the email list */
+  try { facts.approvalAsks = (engine && engine.approvalAsks ? engine.approvalAsks(docs, projectId, today) : []).map(a => ({ name: a.name, bu: a.bu, what: a.what, reapproval: a.reapproval })); } catch (e) { facts.approvalAsks = []; }
   facts.pendingGrants = list(docs, 'grant').filter(g => g.projectId === projectId && g.status === 'requested')
     .map(g => ({ data: L.label(g.dataId), env: g.env, access: g.access, requestedBy: L.person(g.requestedBy) }));
   /* R8 ONE TRUTH: every number, date, label and blocker comes from engine.projectTruth, never recomputed here */
@@ -361,13 +363,15 @@ function asksOf(f) {
   const hc = f.hypercare;
   const grants = (f.pendingGrants || []).map(g => `Decide on temporary ${g.access} access to ${g.data} for ${ENV_PLAIN[String(g.env).toLowerCase()] || 'testing'}, requested by ${g.requestedBy}`);
   const roll = hc && hc.considerRollback ? [`${hc.owner || 'The support lead'}: a serious problem is open; decide whether to roll back`] : [];
+  /* R15 (Jordan, M3): re-approvals and approvals that can be given now are asks too */
+  const appr = (f.approvalAsks || []).map(a => `${a.name}: ${a.what}`);
   if (sum.source === 'projectTruth' && Array.isArray(sum.who)) {
     const whoLines = sum.who.slice(0, 8).map(w => `${w.person}: ${w.what}`);
     const said = whoLines.join('\n');
     /* a blocker whose name the list does not mention yet (e.g. a planned blocker) is still asked for, once */
     const extra = (f.blockers || []).filter(b => !said.includes(b.name) && !(b.resolver && said.includes(b.resolver)))
       .map(b => b.state === 'pending' ? `${b.owner}: confirm ${b.name} is ready (the fix is done)` : `${b.owner}: make ${b.name} available${b.resolver ? ` by finishing ${q(b.resolver)}` : ''}`);
-    return whoLines.concat(extra, grants, roll);
+    return whoLines.concat(extra, appr.filter(x => !said.includes(x)), grants, roll);
   }
   return (f.blockers || []).map(b => b.state === 'pending'
       ? `${b.owner}: confirm ${b.name} is ready (the fix is done)`
@@ -375,7 +379,7 @@ function asksOf(f) {
     .concat((f.notLive || []).filter(b => b.state === 'example' && !(f.blockers || []).includes(b)).map(b => `${b.owner}: get ${b.name} ready to use`))
     /* R9 §6 (bug B13): a defect is "Fix the problem", never "Settle the open question" */
     .concat((f.openDiscovered || []).map(x => `Fix the problem: ${x.requirement.replace(/[.\s]+$/, '')} (${x.data})`))
-    .concat(grants, roll);
+    .concat(appr, grants, roll);
 }
 function statusRules(f, opts) {
   const s = f.stats || {};
@@ -1070,7 +1074,7 @@ async function run(kind, body, docs, today) {
     const L = labeler(docs);
     const prjDoc = list(docs, 'project').find(p => p.id === projectId);
     let askIds = [];
-    try { const tt = engine && engine.projectTruth ? engine.projectTruth(docs, projectId, today) : null; askIds = tt ? tt.who.map(w => w.person).filter(Boolean) : []; } catch (e) { askIds = []; }
+    try { const tt = engine && engine.projectTruth ? engine.projectTruth(docs, projectId, today) : null; askIds = tt ? tt.who.map(w => w.person).filter(Boolean) : []; askIds = askIds.concat(engine.approvalAsks ? engine.approvalAsks(docs, projectId, today).map(a => a.person) : []); } catch (e) { askIds = []; }
     const recipients = recipientsOf(docs, prjDoc, askIds);
     /* R9 §11: Simple mode never says "Rules-based"; pages show sourceLabel as given */
     const rulesLabel = { source: 'rules', sourceLabel: advanced ? 'Rules-based' : 'Written from the project\'s facts' };
@@ -1108,7 +1112,7 @@ async function run(kind, body, docs, today) {
         'Refer to work, information and people only by the names and titles given; never output identifiers. ' +
         `The headline MUST start with "${sum.label}:" and must not contradict it. The summary MUST start with this exact sentence: "${sum.sentence}" ` +
         'Each ask names the person who needs to act and what to do. Risks marked likelyMitigated go in risks as "Likely resolved: <title>. … close it?". ' +
-        'The asks are summary.who, in that order, each as "<person>: <what>"; add no other ask except pendingGrants. ' +
+        'The asks are summary.who, in that order, each as "<person>: <what>"; add no other ask except approvalAsks ("<name>: <what>") and pendingGrants. ' +
         'A task is "late" (never "past due", "running late" or "behind"); give amounts of lateness in business days. ' +
         'Say a task is "waiting on" another task only when its waitingOn is supplied, and name exactly that task; never because tasks run in parallel. ' +
         'Put every task title inside a sentence in curly quotes, like “Set up the bank details form”. ' +

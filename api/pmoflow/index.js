@@ -259,8 +259,10 @@ function permissionError(type, prev, next, actor, docs) {
    reporter may move it through its states; a process owner may move work between steps when a step is removed; a
    confirmation of someone else's Done is the confirmer's own. */
 /* server stamps: the client's copy may not have them yet (it keeps what it sent), so they never count as a change */
-const WI_SERVER = new Set(['updatedAt', 'createdAt', 'doneBy', 'confirmedAt', 'createdTs', 'assignedTs', 'startedTs', 'doneTs']);
-const normWI = (k, v) => (k === 'time' && Array.isArray(v) ? v.map(t => (t && typeof t === 'object' ? Object.assign({}, t, { at: undefined, backdated: undefined }) : t)) : v);
+const WI_SERVER = new Set(['updatedAt', 'createdAt', 'doneBy', 'confirmedAt', 'createdTs', 'assignedTs', 'startedTs', 'doneTs', 'firstDoneAt']);
+/* R15 #6: the flags the server stamps on an hours entry never count as a change by the client */
+const TIME_STAMPS = { at: undefined, backdated: undefined, future: undefined, overDay: undefined, beforeStart: undefined };
+const normWI = (k, v) => (k === 'time' && Array.isArray(v) ? v.map(t => (t && typeof t === 'object' ? Object.assign({}, t, TIME_STAMPS) : t)) : v);
 function changedKeys(a, b) {
   return [...new Set(Object.keys(a || {}).concat(Object.keys(b || {})))].filter(k => !WI_SERVER.has(k) &&
     JSON.stringify(normWI(k, (a || {})[k] === undefined ? null : a[k])) !== JSON.stringify(normWI(k, (b || {})[k] === undefined ? null : b[k])));
@@ -286,7 +288,7 @@ function workItemError(prev, next, actor, docs) {
   return `Only ${personName(docs, prev.owner)} (the task owner), ${personName(docs, project.owner)} (the project manager) or an Admin can change “${title}”${changed.includes('time') ? ' or log hours on it' : ''}.`;
 }
 /* R14 PMO-1/A3 server stamps on a task: the doer of a Done, the confirmer's time, the time each hours entry was logged */
-function stampWorkItem(prev, data, actor, today) {
+function stampWorkItem(prev, data, actor, today, docs) {
   const wasDone = !!(prev && prev.status === 'done');
   /* R14 PMO-7: exact server times for the report's "since the last report" (the client's day fields stay as they are) */
   const nowTs = new Date().toISOString();
@@ -303,15 +305,33 @@ function stampWorkItem(prev, data, actor, today) {
     else data.confirmedAt = prev.confirmedAt || new Date().toISOString();
   } else delete data.confirmedAt;
   if (Array.isArray(data.time)) {
-    const was = new Map(((prev && Array.isArray(prev.time)) ? prev.time : []).map(t => { const k = JSON.stringify(Object.assign({}, t, { at: undefined, backdated: undefined })); return [k, t]; }));
+    const was = new Map(((prev && Array.isArray(prev.time)) ? prev.time : []).map(t => { const k = JSON.stringify(Object.assign({}, t, TIME_STAMPS)); return [k, t]; }));
     const now = new Date().toISOString();
+    const eng = engine();
+    /* R15 #6 (PMO): hours per person per day across every task, so more than 24 hours in one day is flagged */
+    const dayHours = {};
+    const addH = (who, t) => { if (!who || !t || !isDay(t.date) || !(isFinite(+t.hours) && +t.hours > 0)) return; const k = who + '|' + t.date; dayHours[k] = (dayHours[k] || 0) + +t.hours; };
+    ((docs && docs.workItem) || []).forEach(d => { if (!d || !d.data || d.id === data.id) return; (Array.isArray(d.data.time) ? d.data.time : []).forEach(t => addH((t && t.by) || d.data.owner, t)); });
+    data.time.forEach(t => addH((t && t.by) || data.owner, t));
     data.time = data.time.filter(t => t && typeof t === 'object').map(t => {
-      const k = JSON.stringify(Object.assign({}, t, { at: undefined, backdated: undefined }));
-      if (was.has(k)) { const p = was.get(k); const o = Object.assign({}, t); if (p.at) o.at = p.at; else delete o.at; if (p.backdated) o.backdated = true; else delete o.backdated; return o; }
-      const o = Object.assign({}, t, { at: now });
-      if (isDay(o.date) && o.date < today) o.backdated = true; else delete o.backdated;
+      const k = JSON.stringify(Object.assign({}, t, TIME_STAMPS));
+      const o = Object.assign({}, t, TIME_STAMPS);
+      /* an entry already stored keeps the stamps it was given; only a new entry is stamped now */
+      if (was.has(k)) { const p = was.get(k); ['at', 'backdated', 'future', 'overDay', 'beforeStart'].forEach(x => { if (p[x]) o[x] = p[x]; }); }
+      else {
+        o.at = now; if (isDay(o.date) && o.date < today) o.backdated = true;
+        Object.assign(o, eng && typeof eng.hoursFlags === 'function' ? eng.hoursFlags(null, data, o, today, dayHours[((o.by) || data.owner) + '|' + o.date]) : {});
+      }
+      Object.keys(o).forEach(x => { if (o[x] === undefined) delete o[x]; });
       return o;
     });
+  }
+  /* R15 #6 (PMO): the first completion date is kept; a reopen and re-Done never overwrites it */
+  const eng2 = engine();
+  if (eng2 && typeof eng2.keepFirstDone === 'function') {
+    const k = eng2.keepFirstDone(prev, data);
+    if (k.firstDoneAt) data.firstDoneAt = k.firstDoneAt; else delete data.firstDoneAt;
+    if (data.status === 'done' && k.doneAt) data.doneAt = k.doneAt;
   }
   return data;
 }
@@ -333,6 +353,11 @@ function scheduleError(prev, data, docs, today) {
     const p = eng.dueDateProblem(data.due, docs);
     if (p) return { status: 400, body: { error: p.text, day: p } };
   }
+  /* R15 #4 (PMO): a start after the due date, or on a day off, is refused */
+  if (typeof eng.startDateProblem === 'function' && data.start && (!prev || prev.start !== data.start || prev.due !== data.due)) {
+    const sp = eng.startDateProblem(data, docs);
+    if (sp && (sp.kind === 'after-due' || !prev || prev.start !== data.start)) return { status: 400, body: { error: sp.text, start: sp } };
+  }
   if (data.kind === 'defect') return null;
   const changed = changedKeys(prev, data).filter(k => SCHEDULE_KEYS.includes(k));
   /* reopening or finishing work is never refused for the deadline; only plan moves are */
@@ -345,12 +370,22 @@ function scheduleError(prev, data, docs, today) {
   if (!prev && !(Array.isArray(project.baselines) && project.baselines.length)) return null;
   const after = Object.assign({}, docs, { workItem: (docs.workItem || []).filter(d => d.id !== data.id).concat([{ id: data.id, data }]) });
   const b = eng.deadlineBreach(docs, after, projectId, today);
-  if (!b) return null;
-  return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + b.text, reasons: [b.text], deadline: b } };
+  if (b) return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + b.text, reasons: [b.text], deadline: b } };
+  /* R15 #4 (PMO): an effort edit that raises the expected cost past the tolerance goes through Change the plan too */
+  if (prev && changed.includes('effortDays') && Array.isArray(project.baselines) && project.baselines.length && typeof eng.costBreach === 'function') {
+    const c = eng.costBreach(docs, after, projectId, today);
+    if (c) return { status: 409, body: { error: 'Use “Change the plan” to change this effort, so the sponsor can approve the cost. ' + c.text, reasons: [c.text], cost: c } };
+  }
+  return null;
 }
 /* R14 PMO-S2/S3: the sponsor and the saved plan are the sponsor's controls */
 function projectGuardError(prev, next, actor, docs) {
   if (!prev) return next.sponsor && next.sponsor === next.owner ? { status: 403, body: { error: `${personName(docs, next.owner)} is the project manager, so they can't also be the sponsor. Choose someone else.` } } : null;
+  /* R15 #3 (PMO, Jordan): the project manager role changes hands only through "Change the plan", once the project has
+     work, so the sponsor (or an Admin when no sponsor is set) approves it */
+  const hasWork = (docs.workItem || []).some(w => w.data && w.data.projectId === (next.id || prev.id));
+  if ((prev.owner || null) !== (next.owner || null) && hasWork)
+    return { status: 409, body: { error: `Use “Change the plan” to hand the project manager role to ${next.owner ? personName(docs, next.owner) : 'someone else'}, so the sponsor can approve it.` } };
   if ((prev.sponsor || null) !== (next.sponsor || null)) {
     /* R14 (L4): the one sponsor rule, shared with PUT /workspaces/:ws/admin/sponsor/:projectId */
     if (ADMIN_ROUTES && typeof ADMIN_ROUTES.sponsorError === 'function') {
@@ -392,6 +427,11 @@ function testRunError(prev, next, actor, docs) {
     if (others.length) {
       const who = [...new Set(others.map(k => personName(docs, testerOf[k])))];
       return `You can only pass tests assigned to you or unassigned ones. ${others.length} of the ${passes.length} selected test${passes.length === 1 ? '' : 's'} ${others.length === 1 ? 'is' : 'are'} assigned to ${who.join(', ')}.`;
+    }
+    // R15 #5 (Jordan): whoever assigned a test (themselves included) can't pass it in ANY environment
+    if (next.env !== 'uat' && typeof eng.canPassTest === 'function') {
+      const refused = passes.map(k => eng.canPassTest(flat, next.projectId, k, actor, { env: next.env || 'sit' })).filter(x => x && x.rule === 'assigner');
+      if (refused.length) return refused.length === 1 ? refused[0].text : `${refused[0].text} (${refused.length} of the ${passes.length} selected tests can't be passed by ${personName(docs, actor)}.)`;
     }
     // R12 #4: a business-check pass is the assignee's, or (unassigned) someone's in the department that owns the
     // test's part; passing several at once needs the extra sign-in check (step-up)
@@ -887,7 +927,20 @@ module.exports = async function (context, req) {
           if (cf) return refuse(403, cf);
           const sc = scheduleError(prev && prev.data, data, st.docs, today);
           if (sc) return refuse(sc.status, sc.body);
-          stampWorkItem(prev && prev.data, data, actor, today);
+          stampWorkItem(prev && prev.data, data, actor, today, st.docs);
+          /* R15 #1 (Karen 5, BPM 5): a new task made from a step is the step's doer's (its role), never the process owner
+             that a client filled in from the step's stale named owner */
+          if (!prev && data.pid && data.step) {
+            const eng = engine();
+            const t = eng && typeof eng.stepTaskOwner === 'function' ? eng.stepTaskOwner(st.docs, data.pid, data.step) : null;
+            const proc = ((st.docs.process || []).find(d => d.id === data.pid) || {}).data || {};
+            const raw = eng && typeof eng.flatSteps === 'function' ? (function find(nodes) { for (const n of nodes || []) { if (!n) continue; if (n.id === data.step) return n; for (const b of n.branches || []) { const r = find(b && b.nodes); if (r) return r; } } return null; })(proc.tobe) : null;
+            if (t && t.ownerRole && data.owner && data.owner !== t.owner && ((raw && data.owner === raw.owner) || data.owner === proc.owner)) {
+              if (t.owner) data.owner = t.owner; else delete data.owner;
+              data.ownerRole = t.ownerRole;
+              delete data.assignedTs;
+            }
+          }
         }
         /* R13 #3: only the PM or the test's own department assigns a test; the assigner is stamped (they can't pass it) */
         if (type === 'testCase' && (prev ? prev.data.tester || null : null) !== (data.tester || null)) {
@@ -923,6 +976,24 @@ module.exports = async function (context, req) {
           const bad = grantExpiryError(data, prev && prev.data);
           if (bad) return refuse(400, bad);
         }
+        /* R15 #6 (PMO): the forecast log is the server's: a client value is ignored; when a report is recorded (a new
+           reportLog entry for today) the server appends that day's expected finish itself. reportLog is append-only. */
+        if (type === 'project') {
+          const prevFL = prev && Array.isArray(prev.data.forecastLog) ? prev.data.forecastLog : [];
+          const prevRL = prev && Array.isArray(prev.data.reportLog) ? prev.data.reportLog : [];
+          const nextRL = Array.isArray(data.reportLog) ? data.reportLog : [];
+          const added = nextRL.filter(x => x && x.date === today && !prevRL.some(y => y && y.date === today)).slice(0, 1);
+          const nowIso = new Date().toISOString();
+          if (prevRL.length || added.length) data.reportLog = prevRL.concat(added.map(x => ({ date: today, at: nowIso, preset: x.preset || null }))).slice(-30); else delete data.reportLog;
+          let fl = prevFL.slice();
+          if (added.length) {
+            const eng = engine();
+            let finish = null;
+            try { const t = eng && eng.projectTruth ? eng.projectTruth(st.docs, id, today) : null; finish = t ? t.forecastFinish || null : null; } catch (e) { finish = null; }
+            if (finish) fl = fl.filter(x => x && x.date !== today).concat([{ date: today, finish, at: nowIso }]).slice(-60);
+          }
+          if (fl.length) data.forecastLog = fl; else delete data.forecastLog;
+        }
         /* R5: cutover edits are stamped so approvals taken before them go stale */
         if (type === 'project' && cutoverStructureChanged(prev && prev.data.cutover, data.cutover) &&
           (!data.cutoverUpdatedAt || (prev && prev.data.cutoverUpdatedAt === data.cutoverUpdatedAt))) data.cutoverUpdatedAt = new Date().toISOString();
@@ -936,6 +1007,8 @@ module.exports = async function (context, req) {
           const prevDay = wasDone && isDay(prev.data.doneAt) ? prev.data.doneAt : null;
           if (!isDay(data.doneAt)) data.doneAt = prevDay || today;
           else if (data.doneAt > today && data.doneAt !== prevDay) data.doneAt = today;
+          /* R15 #6: the first completion date wins over a re-Done */
+          if (isDay(data.firstDoneAt)) data.doneAt = data.firstDoneAt; else data.firstDoneAt = data.doneAt;
         }
         /* R14 PMO-A2: a save that changes no field writes nothing and logs nothing */
         if (exists && (() => { const strip = o => JSON.stringify(Object.keys(o || {}).filter(k => k !== 'updatedAt' && !(type === 'workItem' && WI_SERVER.has(k)) && o[k] !== undefined).sort().map(k => [k, type === 'workItem' ? normWI(k, o[k]) : o[k]])); return strip(prev.data) === strip(data); })())
@@ -946,6 +1019,18 @@ module.exports = async function (context, req) {
         if (STAMPED.includes(type) && (!data.updatedAt || (prev && prev.data.updatedAt === data.updatedAt))) data.updatedAt = new Date().toISOString();
         await store.putDoc(wsId, type, id, data);
         const after = Object.assign({}, st.docs, { [type]: (st.docs[type] || []).filter(d => d.id !== id).concat([{ id, data }]) });
+        /* R15 #1 (BPM): information owned by a step's doer follows that step to its new doer (written by the server) */
+        if (type === 'process' && exists) {
+          const eng = engine();
+          const follow = eng && typeof eng.dataOwnersToFollow === 'function' ? eng.dataOwnersToFollow(st.docs, after) : [];
+          for (const f of follow) {
+            const de = ((after.dataElement || []).find(d => d.id === f.dataId) || {}).data; if (!de) continue;
+            const nd = Object.assign({}, de, { updatedAt: new Date().toISOString() });
+            if (f.set.ownerRole) { nd.ownerRole = f.set.ownerRole; delete nd.owner; } else if (f.set.owner) { nd.owner = f.set.owner; delete nd.ownerRole; } else continue;
+            await store.putDoc(wsId, 'dataElement', f.dataId, nd);
+            await store.appendEvent(wsId, { actor, action: 'update', ref: `dataElement:${f.dataId}`, summary: ai.labeler(after).scrub(`Owner of ${de.name || 'information'} follows its step: ${f.from || 'nobody'} → ${f.to || 'nobody'}`).slice(0, 300) });
+          }
+        }
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,
           summary: ai.labeler(after).scrub(type === 'approval' && data.kind === 'launch-override' && !exists
             /* the override sign-off in the server's own words (role from the engine, reason from the record) */

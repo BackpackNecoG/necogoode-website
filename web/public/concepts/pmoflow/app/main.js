@@ -31,11 +31,24 @@ async function loadPage(name) {
 function resolve() {
   const path = location.pathname.slice(BASE.length).replace(/\/+$/, '') || '/';
   const q = Object.fromEntries(new URLSearchParams(location.search));
-  for (const [re, name, fn] of ROUTES) { const m = path.match(re); if (m) return { name, params: Object.assign(fn(m), { q }) }; }
+  for (const [re, name, fn] of ROUTES) {
+    const m = path.match(re);
+    if (m) {
+      const params = Object.assign(fn(m), { q });
+      /* R15: remember the project being worked on, so nav links (Launch, Testing) open it */
+      if (params.prj) { try { sessionStorage.setItem('pmoflow.currentProject', params.prj); } catch (e) { /* storage unavailable */ } }
+      return { name, params };
+    }
+  }
   return { name: null, params: { q } };
 }
 
-function firstProject() { const p = store.list('project')[0]; return p ? p.id : ''; }
+/* R15 (Karen r14): nav links open the project the person is working in, not the sample */
+function firstProject() {
+  let cur = null; try { cur = sessionStorage.getItem('pmoflow.currentProject'); } catch (e) { cur = null; }
+  if (cur && store.get('project', cur)) return cur;
+  const p = store.list('project')[0]; return p ? p.id : '';
+}
 function firstProcess() { const p = store.list('process')[0]; return p ? p.id : ''; }
 
 function renderChrome(active) {

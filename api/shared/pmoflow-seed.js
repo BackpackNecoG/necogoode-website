@@ -360,9 +360,9 @@ function seed(createdAtISODate) {
     reason: 'Business check of bank capture and micro-deposit verification', requestedBy: 'dk', status: 'requested',
     log: [{ at: at(-1, 21), by: 'dk', action: 'requested' }] });
   add('grant', { id: 'G3', projectId: 'vendor-modernization', dataId: 'D1', env: 'dev', access: 'read',
-    reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ta', approvedAt: at(-22, 9),
+    reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ta', approvedAt: at(-22, 16),
     /* R12 #7: within the 30-day cap from approval */
-    expires: bizDay(day, -3), log: [{ at: at(-23, 11), by: 'mc', action: 'requested' }, { at: at(-22, 9), by: 'ta', action: 'approved' }, { at: at(-3, 23), by: 'system', action: 'expired' }] });
+    expires: bizDay(day, -3), log: [{ at: at(-23, 11), by: 'mc', action: 'requested' }, { at: at(-22, 16), by: 'ta', action: 'approved' }, { at: at(-3, 23), by: 'system', action: 'expired' }] });
   add('grant', { id: 'G4', projectId: 'access-review-automation', dataId: 'D7', env: 'dev', access: 'read',
     reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ta', approvedAt: at(-15, 13),
     expires: bizDay(day, 5), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ta', action: 'approved' }] });
@@ -593,6 +593,11 @@ function enrichR6(docs, day, at) {
     const dates = businessDaysFrom(w.start, n).map(x => (x <= until ? x : (until < w.start ? w.start : until)));
     w.time = dates.map((date, i) => ({ by: w.owner, date, hours: (i + effort) % 3 === 0 ? 6 : (i % 2 ? 7 : 8), note: TIME_NOTES[w.kind] || 'Work' }));
   });
+  /* R15 #6 (PMO seed defect: 28 hours in one day): the seed's hours carry the same flags the server stamps, so an
+     impossible day is labelled ("more than 24 hours that day"), never shown as ordinary (golden numbers unchanged) */
+  const perDay = {};
+  docs.workItem.forEach(d => (Array.isArray(d.data.time) ? d.data.time : []).forEach(t => { const k = t.by + '|' + t.date; perDay[k] = (perDay[k] || 0) + (+t.hours || 0); }));
+  docs.workItem.forEach(d => (Array.isArray(d.data.time) ? d.data.time : []).forEach(t => { if (perDay[t.by + '|' + t.date] > 24) t.overDay = true; }));
   enrichR101(docs, day);
 }
 

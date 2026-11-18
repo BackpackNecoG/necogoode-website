@@ -444,7 +444,7 @@ a.d-wi:hover .t{color:var(--accent)}
 .d-moreopts-b{display:flex;flex-direction:column;gap:10px;margin-top:8px}
 .d-moreopts-b.d-kinds{display:grid}
 .d-quickhint{background:#f5f7ff;border:1px solid #e0e7ff;border-radius:8px;padding:6px 10px;color:#3730a3}
-.d-nogoto .d-goto-sel{display:none}
+/* R15: the "Then" choice is always shown (carry on, end here, skip, go back) */
 .field label[for]{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600;color:var(--ink)}
 .modal .field input,.modal .field select{min-height:40px}
 /* data page: rules from the sample data check */
@@ -637,3 +637,8 @@ details.is-data:not([open]) > .is-pop{display:none}
 .d-perrun{background:#ccfbf1;color:#0f766e}
 .d-mask-note{font-size:12px}
 .is-bstep .is-facts .chip{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+/* R15: a changed choice's "was → now" note sits under its diamond */
+.d-gwwas{max-width:min(560px,100%);margin:6px auto 0;text-align:center;overflow-wrap:anywhere}
+.d-brow .d-goto-sel{max-width:100%;min-width:0}
+/* R15: a long step title in the paste preview grows to show all of it (it was cut off at 390 px) */
+.is-draft textarea.is-title{field-sizing:content;min-height:2.8em}

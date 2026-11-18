@@ -124,3 +124,70 @@
   - all unit suites, lint and your e2e suites pass (run e2e-admin alone);
   - check screenshots at 1366 and 390.
 - **Don't commit.** Report in ≤300 words with any cross-stream asks.
+
+## Appendix: R15 engine API (M1; all landed)
+
+All functions are on the shared engine (`E()` in the browser, `require('api/shared/pmoflow-engine.js')` on the server). Existing shapes are unchanged unless listed here.
+
+### 1. One owner truth (Karen 5, BPM 5/8)
+- `E.stepTaskOwner(docs, pid, stepId)` → `{owner: personId|null, ownerRole: string|null, text}`: the doer of a task made from a step. The step's role first (the one person with that title, else nobody: "Needs an owner: AR Specialist"), then the step's named owner. **Never** the process owner or the PM. **M3 ask:** `normalizeSuggestions` in project.js must not fall back to `step.owner || j.owner || me` for a suggestion with no owner; keep it unowned (`owner: null`, `ownerRole` from the suggestion) or use `E.stepTaskOwner`.
+- The server enforces it too: a new workItem created from a step (`pid` + `step`) whose `owner` is that step's raw `owner` (or the process owner) while the step is done by a role is saved with `owner: null, ownerRole: <role>` (or the role's one holder).
+- UAT scripts (`generateUatScripts`) name the step's doer (`stepDoer`): "AR Specialist: …", never the process owner.
+- A data owner follows its step: information whose owner was the step's doer (default owner) follows when that step's owner/role changes (server, on process save). `E.dataOwnersToFollow(docsBefore, docsAfter)` → `[{dataId, from, to, owner|ownerRole}]`.
+
+### 2. One approver truth (BPM 1, Jordan 1)
+- `E.partApprovers(docs, prj, bu)` → `{bu, eligible:[ids], names:[..], source:'named'|'members'|'chosen'|'none', notEligible:[{person, name, rule, text}], text:'Ana Ruiz can approve' | 'Nobody can approve the AR part yet'}`. The ONE list: the department's named approvers when it has any, else its members; plus the project's chosen approver; minus the PM, launch owner, recent joiners and separation-of-duties bars. Departments, the process page and Launch all read it (Launch's `eligibleFor` now does).
+- `E.departmentApprovers(docs, bu)` → `{ids, names, source:'named'|'members'|'none', text:'Approves: Ana Ruiz'}`: the same rule without a project (process page, Departments).
+
+### 3. Stored sponsor and PM (PMO, Jordan)
+- `E.sponsorOf(docs, prj)` → `project.sponsor` when it names a person who is not the PM, else `null`. Never computed from the process owner or department. **M3 ask:** replace `C.sponsorOf`'s fallbacks with this (the API and UI then report the same value).
+- `E.adminsOf(docs)` → admin person ids.
+- `E.deadlineApprover(docs, prj, requester)` → `{person, role:'sponsor'|'admin'|null, text}`: the sponsor when set and not the requester; else an Admin who is not the requester (nor the PM when the PM asked); else `{person:null, text:'Nobody besides … can approve this change. Set the sponsor …'}`. **M3 ask:** route deadline/budget/PM changes with it.
+- Server (doc API): once the project has work, a plain edit of `project.owner` (the PM) is refused 409 `"Use “Change the plan” to hand the project manager role to <name>, so the sponsor can approve it."`. M3's "Hand over the project manager role" plan-change kind applies it (edit `{type:'project', field:'owner', from, to}`), approved via `E.deadlineApprover` (sponsor, else an Admin who did not ask). M4's sync accepts sponsor OR Admin when no sponsor is set.
+
+### 4. Deadline / forecast guard on every task edit (PMO)
+- The forecast now respects effort: an open task can't finish before `start + effortDays` business days (basis `{kind:'effort'}`). So a 40-day effort edit moves the finish and hits the deadline guard (409) like a due-date move.
+- `E.startDateProblem(w, docs)` → `null | {kind:'after-due'|'day-off', text}`; the server refuses (400) a start after the due date or on a day off.
+- `E.costBreach(docsBefore, docsAfter, projectId, today)` → `null | {before, after, pct, text}` when expected cost rises ≥ 5% (`COST_TOLERANCE_PCT`); the server refuses such an effort edit (409 "Use “Change the plan” …").
+
+### 5. Self-assigned tests (Jordan)
+- `E.canPassTest(docs, prj, testId, personId, {env})`: whoever assigned a test can't pass it in ANY environment (Try it out too); the server enforces it for every env.
+
+### 6. Server-owned history fields (PMO)
+- `project.forecastLog` and `project.reportLog` are written by the server only; a client value is ignored. The server appends `{date, finish, at}` (finish = `projectTruth.forecastFinish`) when a report is recorded.
+- `E.keepFirstDone(prev, next)` → next with `firstDoneAt` (server-owned) kept and `doneAt` = the first completion date on a re-Done. The doc API applies it; **M4 ask:** call it in the sync apply path too.
+- Hours: the server stamps `future: true` (dated after today), `overDay: true` (that person has more than 24 hours that day across tasks), `beforeStart: true`. `E.timeEntryText(t)` names them: "8 hours on Nov 30 (logged Nov 18, future date)".
+
+### 7. Profile → tests (BPM)
+- Generated cases cover duplicate / shared-bank / uniqueness warnings (`signal`), routing/bank numbers keep leading zeros, specs never come from another field's shape, a majority shape is never rejected, every CSV column maps to its item, and the first "Add tests" makes all tests.
+- `E.dataProfileStatus(docs, dataId)` → `{allMatch, warnings:[{column, kind, text}], text}`: the data page never says "all match" while a warning stands. **M2:** render `text`.
+- `E.thresholdCases(docs, dataId)` → `[{dataId, field, kind:'boundary', input, expect:'accept', origin:'spec', threshold: gatewayId, note:'At the threshold $250,000 for “Requested limit over $250,000?”: takes the “No” path'}]`: at every amount threshold of the processes using the item and just past it. `generateProjectTests` and Testing's "Add tests" include them. A compound threshold (`threshold.compound`) is never simply inverted on its No path.
+- `generateTests` keeps every warning case (`signal`: `duplicate`, `shared-account`, `near-duplicate`, `unique`), threshold cases and the leading-zero case even under the 6-per-field cap. Valid values use the field's own most common observed shape; `fieldSpec(...).unique` (rule "unique" or `unique: true`) makes a uniqueness test; an identifier whose sample values are all different gets one too; a routing/account/tax number is digits (leading zero valid); a score is 0–100; the majority shape is never "should be rejected".
+- `splitSampleColumns` matches against all information used by the processes that use the item (not only the same steps).
+- Testing's "Add tests" makes every test in one press (two passes; one failing item never stops the rest).
+
+### 8. Unconfirmed Done (BPM, PMO)
+- The "All project work is finished" launch check waits for unconfirmed Done items (`items` lists them).
+- `readiness` check `work-done` adds `unconfirmed: [ids]` (also in `items`).
+- `E.unconfirmedDone(...).open` (open predecessors `[{id, title, owner}]`) and `.confirmText` ("It depends on “W6”, which is still open. Confirm “W7” is done anyway?"). **M3 ask:** show `confirmText` in the Confirm dialog before saving `confirmedBy`.
+
+### 9. Counts
+- `projectTruth.lateOrBlocked = {count, ids, late, heldUp, held, both, blocking, parts, text}`; count = late + held − both; text "10 tasks late or blocked: 0 late tasks and 10 tasks held up by 9 blocking pieces of information". **M3:** show `text` next to "N blocking" so the units agree.
+- Past ranges: `periodReport.overall.budget` and `.concerns` are as of the period end (`overall.costAsOf`, `overall.concernsAsOf` labels).
+- `projectTruth.testing.openIssues = {count, notPassed, problems, failed, notRun, text:'17 of 26 tests not passed yet · 1 problem open'}`: the one "open issues" number.
+- `projectTruth.pctDone` is 100 once launched (`pctEarned` keeps the EV share). Launch's post-launch approvals panel and launch-day card say what happened (no red 0/0, no "complete" with steps open).
+- Launch: "6 steps left before launch. 9 of the 10 checks below are not passed yet." `buReady` waiting text: "information not available yet: X; 1 test to pass; tests to add for X".
+- Reports: `periodReport.started` lists only tasks that have started; "since last report" compares with the snapshot saved on the window's first day (`<= from`); `projectTruth.approvalAsks(…)` / `E.approvalAsks(docs, prj, today)` → `[{person, name, bu, reapproval, what, reason}]` (re-approvals, and parts ready to approve): the status report adds them to its asks and their people to `recipients`.
+
+### 10. Per-run data (Karen 1)
+- `dataElement.perRun: true` ("Collected each run") items make no setup tasks, are never blockers, and are left out of the weekly raised/resolved/open. Only information that was ever not available is "raised". `periodReport.blockersCarriedIn` and `.blockersText` ("6 blockers open at the end (6 raised, 0 resolved)"): open = carried in + raised − resolved.
+
+### 11. Re-approval scope and changed choices (BPM)
+- A changed choice (gateway: title, threshold, branch labels, targets) involves the departments of the step that makes the choice (the step before it) and of the steps in its branches. `diffProcess(...).changes[gatewayId]` now includes `"Threshold over $250,000 → over $300,000"` when `gateway.threshold` changed.
+- A part reopens only when its steps, information or choices changed (or a test it approved was edited/removed, or a test failed after approval); a no-op task save or added tests never reopen it.
+
+### 12. Also
+- Forecast basis `effort` explains itself: "“X” starts Nov 20 and needs 40 business days of effort → Jan 19".
+- Scenarios: an `end` node stops the path ("The process stops here"); a forward `goto` is "Skip to “X”" (never "loop back once"); scripts say "The flow skips to …". `diffProcess` lists forward jumps as "Skips added: …" and only real loops as "Loop-backs".
+- UAT scripts, scenarios and the "Train" task name the step's doer; outside parties (Vendor, Customer…) are told, never trained.
+- Launch and Testing render inside `.rl-page` (display: contents); on a phone every control there is ≥ 32px.

@@ -1,7 +1,8 @@
 /* PMOFlow R10 stream S5: workspace admin routes (people and roles, invites, holiday calendar, hash-chained audit export).
    Loaded by api/pmoflow/index.js through the route-module hook. Handles:
      GET    /workspaces/:ws/admin                      settings with defaults, effective roles, seat counts
-     PUT    /workspaces/:ws/admin/roles/:personId      {role, actor}            Admin only
+     PUT    /workspaces/:ws/admin/roles/:personId      {role, actor}            Admin only. R15: a proposal a second Admin confirms
+     POST   /workspaces/:ws/admin/roles/pending/:id/confirm|cancel  {actor, stepUp}  R15: the second Admin confirms (step-up)
      POST   /workspaces/:ws/admin/invites              {email, role, actor}     Admin only (stored, no email is sent)
      DELETE /workspaces/:ws/admin/invites/:id          {actor}                  Admin only
      POST   /workspaces/:ws/admin/holidays             {date, name, actor}      Admin only
@@ -202,12 +203,19 @@ const canonical = (seq, e) => JSON.stringify([seq, String(e.at || ''), String(e.
    `written` and `note` are derived, never hashed, and moving text between the sentence and the note breaks the chain. */
 const DOC_ACTIONS = ['create', 'update', 'delete'];
 const NOTE_RE = /\s\(note: “([\s\S]*)”\)$/;
-function summaryParts(summary, action) {
+/* R15 (PMO R14 disagreement 1): sentences the server's own routes write under a create/update/delete action. Each one is
+   built by the server, never taken from the request: the generic doc API ("Created/Updated/Deleted …"), a plan change's
+   edits (pmoflow-routes-change: "… (plan change “title”)", "Knock-on from the plan change …"), the launch-override sign-off
+   (index.js), and a connection's settings change and disconnect (pmoflow-routes-connect). Seeded demo history (opts.seeded)
+   is the system's too. Only a pre-R14 doc-API sentence (the person's own text) is labelled 'client'. */
+const SERVER_SENTENCE = [/^(Created|Updated|Deleted) /, / \(plan change “.*”\)$/, /^Knock-on from the plan change “/,
+  /^Signed the launch override as /, /^Changed the .+ sync settings for "/, /^Disconnected project ".*" from .+\. Tasks stay in PMOFlow\.$/];
+function summaryParts(summary, action, opts) {
   const sm = String(summary == null ? '' : summary);
   const m = sm.match(NOTE_RE);
   const text = m ? sm.slice(0, m.index) : sm;
   const docApi = action == null || DOC_ACTIONS.includes(String(action));
-  const written = !docApi || /^(Created|Updated|Deleted) /.test(text) ? 'server' : 'client';
+  const written = !docApi || (opts && opts.seeded) || SERVER_SENTENCE.some(re => re.test(text)) ? 'server' : 'client';
   return { written, text, note: m && written === 'server' ? m[1] : null };
 }
 const KEY_LABEL = { 'app-setting': 'production key', derived: 'development key', ephemeral: 'development key', missing: 'no key' };
@@ -222,8 +230,9 @@ function chainEvents(wsId, events, names) {
     const hash = sha256(prev + '\n' + canonical(seq, Object.assign({}, e, { actorName })));
     const out = { seq, at: e.at, actor: e.actor, actorName, action: e.action, ref: e.ref, summary: e.summary, prevHash: prev, hash };
     /* R14: derived labels (not hashed): who wrote the sentence, and the person's own note when there is one */
-    const sp = summaryParts(e.summary, e.action);
+    const sp = summaryParts(e.summary, e.action, { seeded: !!e.seeded });
     out.written = sp.written; if (sp.note != null) out.note = sp.note;
+    if (e.seeded) out.seeded = true;                         /* R15: the demo's seeded history (a label, not hashed) */
     if (String(e.action) === 'refused') out.refused = true;   /* R14 (Jordan B): a write the server refused, logged by the server */
     prev = hash;
     return out;
@@ -307,8 +316,10 @@ function csvRows(text) {
   return rows;
 }
 const uncell = s => (s.charAt(0) === "'" ? s.slice(1) : s);
-/* A CSV export back into {entries, head, filtered, keySource}, or {error}. */
-function fromCSV(text) {
+/* A CSV export back into {entries, head, filtered, keySource}, or {error}. opts.seeded: the seq numbers of seeded demo
+   history (the CSV has no column for it), so the derived labels match the JSON export. */
+function fromCSV(text, opts) {
+  const seededSeq = new Set(((opts && opts.seeded) || []).map(Number));
   const rows = csvRows(text);
   if (!rows.length || rows[0].join(',') !== CSV_COLS.join(',')) return { error: 'That file isn’t a PMOFlow history export (the first row should be ' + CSV_COLS.join(',') + ').' };
   const entries = []; let head = null, filtered = false, keySource = null, i = 1;
@@ -319,8 +330,10 @@ function fromCSV(text) {
     const e = {}; CSV_COLS.forEach((c, k) => { e[c] = uncell(r[k]); });
     e.seq = Number(e.seq);
     /* R14: the same derived labels as the JSON export (not columns, so files exported before R14 still parse) */
-    const sp = summaryParts(e.summary, e.action);
+    const seeded = seededSeq.has(e.seq);
+    const sp = summaryParts(e.summary, e.action, { seeded });
     e.written = sp.written; if (sp.note != null) e.note = sp.note;
+    if (seeded) e.seeded = true;
     if (e.action === 'refused') e.refused = true;
     entries.push(e);
   }
@@ -379,7 +392,7 @@ function view(docs, s) {
   const settings = { id: s.id, roles: s.roles, anchors: s.anchors,
     invites: s.invites.map(i => Object.assign({}, i, { departmentId: i.departmentId || null, department: i.departmentId ? deptName(i.departmentId) : null })) };
   const bu = Object.fromEntries(((docs && docs.person) || []).map(d => [d.id, d.data && d.data.bu ? String(d.data.bu) : null]));
-  return { settings, calendar: calendarOf(docs).doc, departments: depts, projects: projectSponsors(docs), pendingDepartments: pendingView(docs),
+  return { settings, calendar: calendarOf(docs).doc, departments: depts, projects: projectSponsors(docs), pendingDepartments: pendingView(docs), pendingRoles: pendingRolesView(docs),
     people: effectiveRoles(docs).map(p => Object.assign(p, { department: bu[p.id] || null })),
     seats: seats(docs), roles: ROLES.map(r => ({ id: r, label: ROLE_LABEL[r], paid: PAID.includes(r) })) };
 }
@@ -562,6 +575,33 @@ async function decidePending({ wsId, ws, body, store, send, fail, pid, decision 
     summary: `${t.done} (proposed by ${personName(docs, p.by) || 'an Admin'}, confirmed by ${personName(docs, actor)} with the extra sign-in check)`.slice(0, 300) });
   const d2 = (await store.getState(ws)).docs;
   send(200, { ok: true, applied: true, departments: eng.departments(d2) });
+}
+
+/* ---------- R15 M4 #1 (Jordan R14 re-test 2): two-person, step-up role changes ---------- */
+/* Proposals live in settings.pendingRoles [{id, kind:'role', personId, from, to, by, at, affected, text}]. On confirmation the
+   server stamps settings.roleSince[personId] = server time. Who confirms: an Admin other than the proposer; the person
+   whose role changes only when the change takes Admin away from them (they may agree to it), never when it gives them
+   more rights. With nobody able to confirm (a one-Admin workspace), the change applies at once and History says so. */
+const pendingRolesOf = docs => { const r = settingsOf(docs).rest; return Array.isArray(r.pendingRoles) ? r.pendingRoles.filter(isPlainObject) : []; };
+function roleText(docs, pid, from, to) {
+  const nm = personName(docs, pid) || 'someone';
+  return { text: `Make ${nm} ${/^[AEIOU]/.test(ROLE_LABEL[to]) ? 'an' : 'a'} ${ROLE_LABEL[to]} (now ${ROLE_LABEL[from] || 'no role'})`,
+    change: `${nm}'s role from ${ROLE_LABEL[from] || 'no role'} to ${ROLE_LABEL[to]}` };
+}
+function roleConfirmers(docs, p) {
+  const losesAdmin = p.from === 'admin' && p.to !== 'admin';
+  return admins(docs).map(a => a.id).filter(id => id !== p.by && (id !== p.personId || losesAdmin));
+}
+function pendingRolesView(docs) {
+  return pendingRolesOf(docs).map(p => Object.assign({}, p, { byName: personName(docs, p.by), personName: personName(docs, p.personId), canConfirm: roleConfirmers(docs, p) }));
+}
+async function applyRole(store, wsId, docs, pid, role, at, pendingRoles) {
+  const s = settingsOf(docs);
+  const since = isPlainObject(s.rest.roleSince) ? Object.assign({}, s.rest.roleSince) : {};
+  since[pid] = at;
+  const data = await saveSettings(store, wsId, Object.assign({}, s, { roles: Object.assign({}, s.roles, { [pid]: role }),
+    rest: Object.assign({}, s.rest, { roleSince: since, pendingRoles: (pendingRoles || []).slice(-MAX_PENDING) }) }));
+  return Object.assign({}, docs, { workspace: [{ id: SETTINGS_ID, data }] });
 }
 
 /* ---------- sandbox creation (R11 §2) ---------- */
@@ -761,18 +801,64 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
   const s = settingsOf(docs);
   const log = (ref, summary) => store.appendEvent(wsId, { actor, action: 'admin', ref, summary });
 
+  /* R15 M4 #1 (Jordan R14 re-test 2): a role change is proposed by one Admin and confirmed by a second Admin with the
+     extra sign-in check, like a department move. It applies at once only when no other Admin could confirm it (a
+     one-Admin workspace), and History says so. Every sentence is server-written. */
   if (rest[0] === 'roles' && rest.length === 2 && method === 'PUT') {
     const pid = rest[1];
     if (!ID_RE.test(pid) || !(docs.person || []).some(d => d.id === pid)) { fail(404, 'Choose a person from the directory.'); return true; }
     const role = String(body.role || '');
     if (!ROLES.includes(role)) { fail(400, 'Role must be Admin, Editor, Approver or Viewer.'); return true; }
     const before = roleOf(docs, pid);
+    if (before === role) { send(200, Object.assign(view(docs, s), { applied: true, unchanged: true, pendingRole: null })); return true; }
     if (before === 'admin' && role !== 'admin' && admins(docs).length <= 1) { fail(409, 'The workspace needs at least one Admin. Make someone else an Admin first.'); return true; }
-    s.roles[pid] = role;
-    const data = await saveSettings(store, wsId, s);
+    const pend = pendingRolesOf(docs);
+    const clash = pend.find(p => p.personId === pid);
+    if (clash) { fail(409, `A role change for ${personName(docs, pid)} is already waiting for a second Admin (${clash.text}). Confirm or cancel it first.`); return true; }
+    const at = new Date().toISOString();
+    const t = roleText(docs, pid, before, role);
+    const entry = { id: 'rol-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex'), kind: 'role', personId: pid, from: before, to: role,
+      by: actor, at, status: 'pending', affected: [pid], text: t.text };
+    if (!roleConfirmers(docs, entry).length) {
+      const after = await applyRole(store, wsId, docs, pid, role, at, pend);
+      await log('person:' + pid, `Changed ${t.change} (${admins(docs).length <= 1 ? 'no second Admin in this workspace' : 'no other Admin can confirm it'})`.slice(0, 300));
+      send(200, Object.assign(view(after, settingsOf(after)), { applied: true, pendingRole: null }));
+      return true;
+    }
+    const data = await saveSettings(store, wsId, Object.assign({}, s, { rest: Object.assign({}, s.rest, { pendingRoles: pend.concat([entry]).slice(-MAX_PENDING) }) }));
     const after = Object.assign({}, docs, { workspace: [{ id: SETTINGS_ID, data }] });
-    await log('person:' + pid, `Changed ${personName(docs, pid)}'s role from ${ROLE_LABEL[before]} to ${ROLE_LABEL[role]}`);
-    send(200, view(after, settingsOf(after)));
+    await log('person:' + pid, `Proposed changing ${t.change} (waits for a second Admin)`.slice(0, 300));
+    send(200, Object.assign(view(after, settingsOf(after)), { applied: false, pendingRole: pendingRolesView(after).find(p => p.id === entry.id) }));
+    return true;
+  }
+  /* POST /workspaces/:ws/admin/roles/pending/:id/confirm|cancel  {actor, stepUp}   R15 M4 #1 */
+  if (rest[0] === 'roles' && rest[1] === 'pending' && rest.length === 4) {
+    if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
+    if (!ID_RE.test(rest[2] || '') || !['confirm', 'cancel'].includes(rest[3])) { fail(404, 'unknown route'); return true; }
+    const pend = pendingRolesOf(docs);
+    const p = pend.find(x => x.id === rest[2]);
+    if (!p) { fail(404, 'That role change is no longer waiting (it was confirmed or cancelled).'); return true; }
+    const left = pend.filter(x => x.id !== p.id);
+    const t = roleText(docs, p.personId, p.from, p.to);
+    const byName = personName(docs, p.by) || 'an Admin';
+    if (rest[3] === 'cancel') {
+      const data = await saveSettings(store, wsId, Object.assign({}, s, { rest: Object.assign({}, s.rest, { pendingRoles: left }) }));
+      const after = Object.assign({}, docs, { workspace: [{ id: SETTINGS_ID, data }] });
+      await log('person:' + p.personId, (actor === p.by ? `Withdrew the proposal to change ${t.change}` : `Turned down ${byName}’s proposal to change ${t.change}`).slice(0, 300));
+      send(200, Object.assign(view(after, settingsOf(after)), { cancelled: true }));
+      return true;
+    }
+    const who = roleConfirmers(docs, p);
+    if (actor === p.by) { fail(403, `You proposed this change, so a second Admin confirms it${who.length ? ': ' + who.map(id => personName(docs, id)).join(' or ') : ''}.`); return true; }
+    if (!who.includes(actor)) { fail(403, `${personName(docs, actor) || 'This person'} is the person this change makes an Admin, so another Admin confirms it.`); return true; }
+    const at = new Date().toISOString();
+    if (!stepUpOf(body, at)) { fail(403, 'Confirming a role change needs the extra sign-in check. Confirm again and complete the check.'); return true; }
+    const cur = roleOf(docs, p.personId);
+    if (cur !== p.from) { fail(409, `${personName(docs, p.personId)}'s role changed since this was proposed (now ${ROLE_LABEL[cur]}). Cancel it and propose it again.`); return true; }
+    if (cur === 'admin' && p.to !== 'admin' && admins(docs).length <= 1) { fail(409, 'The workspace needs at least one Admin. Make someone else an Admin first.'); return true; }
+    const after = await applyRole(store, wsId, docs, p.personId, p.to, at, left);
+    await log('person:' + p.personId, `Changed ${t.change} (proposed by ${byName}, confirmed by ${personName(docs, actor)} with the extra sign-in check)`.slice(0, 300));
+    send(200, Object.assign(view(after, settingsOf(after)), { applied: true }));
     return true;
   }
 

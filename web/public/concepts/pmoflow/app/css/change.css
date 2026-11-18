@@ -116,3 +116,6 @@
 .pmo-dayoff-bad{border-color:#f59e0b !important;background:#fffbeb}
 .pmo-daysoff{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}
 .pmo-dayoff-chip{display:inline-block;background:var(--soon-soft,#fef3c7);color:#92400e;border-radius:999px;padding:1px 8px;font-size:12px}
+
+/* R15 (M3 #1): what a shift did (and the days off it stepped over) */
+.chg-shift-note{margin:2px 0 8px}

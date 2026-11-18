@@ -3,7 +3,7 @@
    three big choices, then projects and processes (each labelled, one plain sentence each). */
 import { store } from '../store.js';
 import { esc, fmt, link, go, av, pname, LOCK } from '../ui.js';
-import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, confirmDone, availText, changePhrase, factsHTML, truthOf, WAIT_IC } from './project.js';
+import { eng, docs, today, flatSteps, projectStats, newProject, summaryOf, summaryHTML, whoLineHTML, markDone, confirmDone, availText, changePhrase, factsHTML, truthOf, WAIT_IC, pointNav } from './project.js';
 
 const PRJ_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M7 13h4M7 17h7"/></svg>';
 const PROC_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="5" rx="1.5"/><rect x="7" y="17" width="10" height="5" rx="1.5"/><path d="M12 7v3M12 14v3"/><path d="M12 10l3 2-3 2-3-2z"/></svg>';
@@ -99,6 +99,7 @@ function renderPage() {
 }
 
 export function bind(root) {
+  pointNav();   /* R15 (M3 #4): Launch and Testing open the project you were working in */
   const on = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', e => { e.preventDefault(); fn(el); }));
   on('[data-new-project]', () => newProject());
   on('[data-wdone]', async el => {

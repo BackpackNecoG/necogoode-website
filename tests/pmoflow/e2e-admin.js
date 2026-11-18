@@ -56,10 +56,32 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const daveRole = await page.$eval('[data-role="do"]', el => el.value).catch(() => '');
   ok(daveRole === 'approver' && /Free/.test(daveSeat), `Dave Ortiz (${daveRole || 'not seeded'}): an approver has a free seat`);
   ok(await page.$eval('[data-role="mc"]', el => el.value) === 'admin' && await page.$eval('[data-role="ps"]', el => el.value) === 'editor', 'default roles: process owner Admin, SME Editor');
+  /* R15 (Jordan): a role change is proposed by one Admin and confirmed by another with the extra sign-in check */
   await page.selectOption('[data-role="ps"]', 'approver');
-  ok(await toastSays(/Priya Shah is now Approver/), 'role change confirmed');
+  ok(await toastSays(/Sent to a second Admin to confirm: Make Priya Shah an Approver \(now Editor\)/), 'a role change is sent to a second Admin (two Admins here)');
+  await page.waitForSelector('[data-pending-roles] [data-role-pending]', { timeout: 8000 }).catch(() => {});
+  ok(await page.$eval('[data-role="ps"]', el => el.value) === 'editor' && /Waiting: Make Priya Shah an Approver/.test(await page.textContent('[data-person-row="ps"]')), 'nothing changes until it is confirmed; the row says it is waiting');
+  ok(await page.$eval('[data-pending-roles] [data-role-confirm]', b => b.disabled) && /You proposed it/.test(await page.textContent('[data-pending-roles]')), 'the proposer cannot confirm it, and is told why');
+  ok(Number(await page.textContent('[data-seat-free]')) === free0, 'seats are unchanged while it waits');
+  await shotBoth('roles-pending');
+  /* promoting to Admin waits too (Jordan's one-click promotion) */
+  await page.selectOption('[data-role="ar"]', 'admin');
+  ok(await toastSays(/Sent to a second Admin to confirm: Make Ana Ruiz an Admin \(now Editor\)/), 'promoting to Admin is never one click');
+  await settle(700);
+  ok(await page.$eval('[data-role="ar"]', el => el.value) === 'editor', 'Ana is still an Editor');
+  await setMe('ta'); await settle(900);
+  const roleBtn = re => `[data-pending-roles] [data-role-pending]:has-text("${re}")`;
+  await page.click(`${roleBtn('Make Priya Shah')} [data-role-confirm]`);
+  await page.waitForSelector('.modal [name=code]');
+  await page.fill('.modal [name=code]', '135790'); await page.click('.modal [data-act="verify"]');
+  ok(await toastSays(/Confirmed: Make Priya Shah an Approver \(now Editor\)/), 'a second Admin confirms with the extra sign-in check');
   await settle(900);
-  ok(Number(await page.textContent('[data-seat-free]')) === free0 + 1 && Number(await page.textContent('[data-seat-paid]')) === paid0 - 1, 'approver moves to a free seat');
+  ok(Number(await page.textContent('[data-seat-free]')) === free0 + 1 && Number(await page.textContent('[data-seat-paid]')) === paid0 - 1, 'approver moves to a free seat once confirmed');
+  await page.click(`${roleBtn('Make Ana Ruiz')} [data-role-cancel]`);
+  ok(await toastSays(/Proposal turned down/), 'the second Admin can turn a promotion down');
+  await settle(900);
+  ok(!(await page.$('[data-pending-roles]')) && await page.$eval('[data-role="ar"]', el => el.value) === 'editor', 'nothing waits; Ana stays an Editor');
+  await setMe('mc'); await settle(900);
   await page.fill('#adm-email', 'jordan.lee@northwind.example');
   await page.selectOption('#adm-irole', 'viewer');
   await page.click('[data-invite-form] button[type=submit]');
@@ -258,6 +280,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const log = await page.textContent('.adm-log');
   ok(/Changed Priya Shah's role from Editor to Approver/.test(log) && /Added Christmas Eve/.test(log) && /Invited jordan/.test(log), 'history lists the admin changes');
   ok(/Set the sponsor of “Vendor Onboarding Modernization”: .* → Dave Ortiz/.test(log), 'history lists the sponsor change (server-written)');
+  ok(/Changed Priya Shah's role from Editor to Approver \(proposed by Maya Chen, confirmed by Tom Alvarez with the extra sign-in check\)/.test(log) && /Turned down Maya Chen’s proposal to change Ana Ruiz's role from Editor to Admin/.test(log), 'history lists who proposed and who confirmed a role change (server-written)');
+  /* R15 (PMO R14 disagreement 1): nothing the system wrote in this sandbox (seeded history included) is "Older entry" */
+  ok((await page.$$('[data-entry-client]')).length === 0, 'no entry in this sandbox is labelled "Older entry: worded by the person"');
   ok(await page.locator('[data-entry-note]', { hasText: 'Their note: “Comment added”' }).count() >= 1, 'a person’s own text shows apart, as their note');
   ok(!(await page.$$eval('.adm-log tbody tr', els => els.map(e => e.textContent))).some(t => /^\S.*Comment added/.test(t) && !/Their note/.test(t)), 'their text is never the sentence');
   ok(/Added the Credit department/.test(log) && /Renamed the Credit department to Credit and Collections/.test(log) && /Removed the Credit and Collections department/.test(log), 'history lists the department changes');

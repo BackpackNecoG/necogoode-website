@@ -288,8 +288,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.mouse.up(); await settle();
   const after = await getDoc('workItem', dragId);
   const shift = (a, b) => Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
-  check('drag: start moved +3d', shift(before.start || before.due, after.start) === 3, { before: before.start, after: after.start });
-  check('drag: duration kept (due +3d)', shift(before.due, after.due) === 3, { before: before.due, after: after.due });
+  /* R15: the server refuses a start or due date on a day off (M1 #4), so a drag that ends on a weekend or holiday snaps to
+     the next business day and keeps the bar's length in business days (it was a plain +3 calendar days before) */
+  const want = await page.evaluate(([s, d]) => { const E = window.PMOEngine; const a = E.addBusinessDays(new Date(Date.parse(s + 'T12:00:00Z') + 3 * 864e5).toISOString().slice(0, 10), 0); return { a, b: E.addBusinessDays(a, E.businessDaysBetween(s, d)) }; }, [before.start || before.due, before.due]);
+  check('drag: start moved +3d (to the next business day when that is a day off)', after.start === want.a, { before: before.start, after: after.start, want });
+  check('drag: duration kept in business days', after.due === want.b, { before: before.due, after: after.due, want });
   check('drag: no modal opened by the drag', await page.locator('.overlay').count() === 0);
   await page.waitForSelector('.tl button.tbar');
   check('drag: bar re-rendered at new date', (await page.locator(`.tl [data-bar="${dragId}"]`).getAttribute('aria-label')).includes(await page.evaluate(d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), after.due)));
@@ -299,7 +302,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   for (let k = 1; k <= 5; k++) await page.mouse.move(geo2.x - geo.pxDay * 2 * k / 5, geo2.y);
   await page.mouse.up(); await settle();
   const after2 = await getDoc('workItem', dragId);
-  check('drag left: -2d', shift(after.start, after2.start) === -2 && shift(after.due, after2.due) === -2, { after2 });
+  const want2 = await page.evaluate(([s, d]) => { const E = window.PMOEngine; let a = new Date(Date.parse(s + 'T12:00:00Z') - 2 * 864e5).toISOString().slice(0, 10); if (!E.isBusinessDay(a)) a = E.addBusinessDays(E.addBusinessDays(a, 0), -1); return { a, b: E.addBusinessDays(a, E.businessDaysBetween(s, d)) }; }, [after.start, after.due]);
+  check('drag left: -2d (to the business day before when that is a day off), same length', after2.start === want2.a && after2.due === want2.b, { after2, want2 });
   /* a plain click (no drag) opens the edit modal: the keyboard alternative */
   await page.locator(`.tl [data-bar="${dragId}"]`).focus(); await page.keyboard.press('Enter'); await modalOpen();
   check('Enter on a bar opens the edit modal with its dates', await page.inputValue('.overlay input[name="due"]') === after2.due);
@@ -309,7 +313,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('reload: dragged dates persisted', (await getDoc('workItem', dragId)).due === after2.due);
   await openAct(); await page.waitForSelector('[data-feed="prj-work"] .ev', { timeout: 10000 }).catch(() => {});
   /* R14: the server writes the from → to from the actual diff; the client's words ride along as a note */
-  check('history shows "Rescheduled" with a summary', /Rescheduled .+ on the timeline \(\+3d\)/.test(await page.locator('[data-feed="prj-work"]').innerText()) && /due .+ → .+/i.test(await page.locator('[data-feed="prj-work"]').innerText()));
+  check('history shows "Rescheduled" with a summary', /Rescheduled .+ on the timeline \(\+\d+d\)/ /* R15: +3d, or more when it snapped past a day off */.test(await page.locator('[data-feed="prj-work"]').innerText()) && /due .+ → .+/i.test(await page.locator('[data-feed="prj-work"]').innerText()));
   await page.click('.pmo-tabs a:has-text("Work")'); await page.waitForSelector('table.pmo-work');
 
   /* push an open item's due out by editing it, so baseline variance has something to show (after baseline below) */
@@ -412,7 +416,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const mAfter = await getDoc('workItem', mId);
   check('sprint drag: sets sprintId', mAfter.sprintId === target.id, { mAfter, target });
   check('sprint drag: due moved inside the sprint', mAfter.due >= target.start && mAfter.due <= target.end, { due: mAfter.due, target });
-  check('sprint drag: duration kept', shift(mAfter.start, mAfter.due) === shift(mBefore.start || mBefore.due, mBefore.due), { mBefore, mAfter });
+  /* R15: the length is kept in business days (a calendar-day shift could start it on a weekend, which the server refuses) */
+  const bdl = await page.evaluate(([a, b, c, d]) => [window.PMOEngine.businessDaysBetween(a, b), window.PMOEngine.businessDaysBetween(c, d)], [mAfter.start, mAfter.due, mBefore.start || mBefore.due, mBefore.due]);
+  check('sprint drag: duration kept (business days)', bdl[0] === bdl[1], { mBefore, mAfter, bdl });
   check('sprint drag: card shows in target sprint', await page.locator(`.pmo-spr[data-sprint="${target.id}"] [data-card="${mId}"]`).count() === 1);
   check('history: sprint move summarised', await (async () => { const f = await feedText(); return f.includes('Planned ') && f.includes(target.name); })(), (await feedText()).slice(0, 300));
   /* keyboard alternative + over-capacity: pile one owner's open work into the same sprint */
@@ -866,7 +872,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R7 link process / save plan: hidden for non-PM', await page.locator('.pmo-actions [data-link-proc]').count() === 0 && await page.locator('[data-baseline]').count() === 0);
   await asPersona('Project Manager');
   await page.click('[data-settings]'); await modalOpen();
-  check('R5 settings modal: PM, release manager, program, budget fields', await page.locator('.overlay select[name="owner"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
+  check('R5 settings modal: PM, release manager, program, budget fields', /* R15 (M1 #3): the PM is shown read-only; handing it over is a plan change */ await page.locator('.overlay [data-set-pm][readonly]').count() === 1 && await page.locator('.overlay select[name="owner"]').count() === 0 && await page.locator('.overlay [data-act="handover"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
   await page.selectOption('.overlay select[name="releaseManager"]', 'lp');
   /* R13: once the project has a plan, Settings shows the deadline and budget read-only; they move only through "Change the plan" (sponsor approval) */
   check('R13 settings: deadline and budget are read-only once planned, with a pointer to Change the plan',
@@ -1070,9 +1076,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const rc5 = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const j = store.get('project', prj);
     const em = id => { const n = store.person(id).name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/\s+/); return n[0] + '.' + n[n.length - 1] + '@northwind.example'; };
     const used = new Set(j.processes.flatMap(pid => E.flatSteps((store.get('process', pid) || {}).tobe || []).flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])])));
-    return { to: [...new Set([j.owner, ...j.resources])].map(em), notLive: [...used].filter(d => E.effectiveAvail(store.state.docs, d) !== 'live').length }; }, [STORE, PRJ]);
+    /* R15 (M3 #6, Jordan 10): plus the people asked for a department approval still to give (waiting, or reopened) */
+    const asked = ((E.projectTruth(store.state.docs, prj, store.state.today) || {}).approvals || []).filter(a => a.needed && !a.approved && a.approver && (a.stale || a.ready)).map(a => a.approver);
+    return { to: [...new Set([j.owner, ...j.resources, ...asked])].map(em), asked, notLive: [...used].filter(d => E.effectiveAvail(store.state.docs, d) !== 'live').length }; }, [STORE, PRJ]);
   const mail5 = decodeURIComponent((await page.getAttribute('[data-rep-mail]', 'href')).split('?')[0].replace(/^mailto:/, '')).split(',');
-  check('R5 email draft: recipients are the project resources as first.last@northwind.example', JSON.stringify(mail5.sort()) === JSON.stringify(rc5.to.slice().sort()) && await page.locator('[data-rep-to] [data-rcpt]').count() === rc5.to.length, { mail5, to: rc5.to });
+  check('R5 email draft: recipients are the project resources (R15: and the approvers asked) as first.last@northwind.example', JSON.stringify(mail5.sort()) === JSON.stringify(rc5.to.slice().sort()) && await page.locator('[data-rep-to] [data-rcpt]').count() === rc5.to.length, { mail5, to: rc5.to });
   check('R5 report: "not yet live" count = missing + examples + pending', (await page.innerText('[data-rep-notlive]')).includes(`${rc5.notLive} of`) && /not (connected|available) yet/.test(await page.innerText('[data-prj-rep] .pmo-rep-p')), await page.innerText('[data-prj-rep] .pmo-rep-p'));
   const body5 = new URL(await page.getAttribute('[data-rep-mail]', 'href')).searchParams.get('body');
   check('R5 email body carries the same count', body5.includes(`Information: ${rc5.notLive} of`));
@@ -1199,7 +1207,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.mouse.up(); await settle();
   const scAfter = (await getDoc('project', PRJ)).scenarios.find(x => x.id === sc6.id);
   const liveAfter = await getDoc('workItem', scBar);
-  check('R6 scenario drag: scenario dates move +10d', shift(live0[scBar][0], scAfter.dates[scBar].start) === 10 && shift(live0[scBar][1], scAfter.dates[scBar].due) === 10, { live: live0[scBar], sc: scAfter.dates[scBar] });
+  /* R15: a drag never lands on a day off (the server refuses those dates, M1 #4): +10 calendar days, snapped to the next
+     business day when that is a weekend or holiday, with the bar's length kept in business days */
+  const want10 = await page.evaluate(([st, d]) => { const E = window.PMOEngine; const a = E.addBusinessDays(new Date(Date.parse(st + 'T12:00:00Z') + 10 * 864e5).toISOString().slice(0, 10), 0); return { a, b: E.addBusinessDays(a, E.businessDaysBetween(st, d)) }; }, live0[scBar]);
+  check('R6 scenario drag: scenario dates move +10d (next business day when that is a day off)', scAfter.dates[scBar].start === want10.a && scAfter.dates[scBar].due === want10.b, { live: live0[scBar], sc: scAfter.dates[scBar], want10 });
   check('R6 scenario drag: the live plan is untouched', liveAfter.start === live0[scBar][0] && liveAfter.due === live0[scBar][1], liveAfter);
   check('R6 scenario: moved bar marked', await page.locator(`.tl [data-bar="${scBar}"].pmo-scen-moved`).count() === 1);
   const cmpE = await page.evaluate(async ([u, prj, id]) => { const { store } = await import(u); const j = store.get('project', prj); return window.PMOEngine.compareScenario(store.state.docs, prj, j.scenarios.find(x => x.id === id), store.state.today); }, [STORE, PRJ, sc6.id]);
@@ -2088,6 +2099,72 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await sGo('/portfolio', '.hdr'); check('R14 @390: portfolio, no horizontal overflow', await sNoOverflow()); await sShot('45-r14-portfolio-390', true);
     await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
     await sGo('/portfolio', '.hdr'); await sShot('46-r14-portfolio-simple-390', true);
+  }
+  console.log('R15 M3: one owners group with a picker, Launch opens the current project, report asks and recipients');
+  {
+    await sp.setViewportSize({ width: 1366, height: 900 });
+    await sAs('Project Manager');
+    const K15 = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+      const p = store.list('project').find(j => (E.projectTruth(store.state.docs, j.id, store.state.today).who || []).some(x => x.ref === 'owners:' + j.id)); return p ? p.id : null; }, STORE);
+    check('R15 #3: a project has a "Choose owners" row (Karen repro)', !!K15, K15);
+    if (K15) {
+      await sGo(`/project/${K15}`, '.hdr');
+      const g = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const t = E.projectTruth(store.state.docs, prj, store.state.today);
+        const row = t.who.find(x => x.ref === 'owners:' + prj); const ids = new Set(row.items || []);
+        const covered = t.who.map((x, i) => ({ x, i })).filter(o => o.x.needsOwner && o.x.why !== 'owner' && ids.has(o.x.workId || (/^work:/.test(o.x.ref || '') ? o.x.ref.slice(5) : '')));
+        const grp = document.querySelector('[data-owners-group]');
+        /* a task that holds up other work stays in "What's blocking" (with "Needs an owner" on it); every other row of an
+           unowned task is inside the owners group */
+        const out = covered.filter(o => { const el = document.querySelector(`[data-who-row="${o.i}"]`); return el && !el.closest('[data-owners-group]') && !el.closest('[data-whats-blocking]'); });
+        return { items: (row.items || []).length, grp: !!grp, btn: !!(grp && grp.querySelector('button[data-pick-owners]')), covered: covered.length, outside: out.length, whys: out.map(o => o.x.why + ':' + o.x.ref) }; }, [STORE, K15]);
+      check('R15 #3: "Choose owners" and the per-task "Needs an owner" rows are one group', g.grp && g.btn && g.outside === 0, g);
+      await sShot('48-r15-owners-group-1366', true);
+      await sp.click('[data-pick-owners]'); await sp.waitForSelector('.overlay [data-owner-picker]');
+      const n15 = await sp.locator('.overlay [data-owner-task]').count();
+      check('R15 #3: the row opens an owner picker with every unowned task', n15 === g.items, { n15, items: g.items });
+      await sp.locator('.overlay .modal').screenshot({ path: `${SHOTS}/s-49-r15-owner-picker-1366.png` });
+      const first = await sp.getAttribute('.overlay [data-owner-task]', 'data-owner-task');
+      const who15 = await sp.evaluate(() => { const sel = document.querySelector('.overlay [data-owner-task] select'); return sel.options[1].value; });
+      await sp.selectOption(`.overlay select[name="own_${first}"]`, who15);
+      await sp.click('.overlay [data-act="save"]'); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 15000 }).catch(() => {}); await sSettle();
+      check('R15 #3: picking an owner saves it', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id).owner, [STORE, first])) === who15);
+      /* the Home/Launch link (?owner=none) opens the picker too */
+      await sGo(`/project/${K15}?owner=none`, '.hdr');
+      check('R15 #3: ?owner=none opens the owner picker', await sp.waitForSelector('.overlay [data-owner-picker]', { timeout: 8000 }).then(() => true).catch(() => false));
+      await sp.setViewportSize({ width: 390, height: 844 }); await sp.waitForTimeout(300);
+      check('R15 #3 @390: owner picker, no horizontal overflow', await sNoOverflow());
+      await sp.screenshot({ path: `${SHOTS}/s-50-r15-owner-picker-390.png` });
+      await sAct('cancel'); await sp.setViewportSize({ width: 1366, height: 900 });
+      /* #4 Karen: nav Launch opens the current project, also from another page */
+      const navOk = async () => sp.evaluate(prj => { const a = [...document.querySelectorAll('#nav a')].find(x => x.textContent.trim() === 'Launch'); return !!a && a.getAttribute('href').endsWith('/release/' + encodeURIComponent(prj)); }, K15);
+      await sGo(`/project/${K15}`, '.hdr');
+      check('R15 #4: on a project, nav Launch opens that project', await navOk());
+      await sGo('/portfolio', '.hdr');
+      check('R15 #4: from Portfolio, nav Launch still opens the project you were in', await navOk());
+    }
+    /* M2 #1 (BPM): on the project map a forward jump reads "↷ Skips to", never "Loop back" */
+    const gw = await sp.evaluate(async u => { const { store } = await import(u); const p = store.get('process', 'vendor-onboarding'); if (!p) return null;
+      const tobe = JSON.parse(JSON.stringify(p.tobe)); const gi = tobe.findIndex(n => Array.isArray(n.branches) && n.type !== 'parallel');
+      const after = tobe.slice(gi + 2).find(n => n.type !== 'end' && !Array.isArray(n.branches));
+      if (gi < 0 || !after) return null; tobe[gi].branches[0] = Object.assign({}, tobe[gi].branches[0], { nodes: [], goto: after.id });
+      const prev = store.state.me; store.setMe(p.owner); try { await store.save('process', p.id, Object.assign({}, p, { tobe }), 'E2E R15: a skip-ahead branch'); } finally { store.setMe(prev); } return after.title; }, STORE);
+    if (gw) {
+      await sGo('/project/vendor-modernization', '.canvas.pm');
+      const pt = await sp.evaluate(() => [...document.querySelectorAll('.passthru[data-goto-dir]')].map(e => ({ dir: e.dataset.gotoDir, t: e.textContent })));
+      check('R15 M2 #1: a forward jump reads "↷ Skips to “step”" on the project map, never "Loop back"', pt.some(x => x.dir === 'forward' && x.t.startsWith('↷ Skips to') && x.t.includes(gw)) && !(await sp.innerText('.canvas.pm')).includes('Loop back'), { pt, gw });
+    } else check('R15 M2 #1: the seed has a gateway to give a skip-ahead', false);
+    /* #6 Jordan: approvals still to give are asks, and their people are on the email list */
+    const P6 = 'vendor-modernization';
+    await sGo(`/project/${P6}`, '[data-report]');
+    if (!(await sp.locator('[data-prj-rep] [data-rep-body]').count())) await sp.click('[data-report]');
+    await sp.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 });
+    const r6 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const t = E.projectTruth(store.state.docs, prj, store.state.today);
+      const asked = (t.approvals || []).filter(a => a.needed && !a.approved && a.approver && (a.stale || a.ready));
+      const asks = [...document.querySelectorAll('[data-prj-rep] .pmo-rep-sec.ak li')].map(li => li.textContent);
+      const rc = [...document.querySelectorAll('[data-rep-to] [data-rcpt]')].map(x => x.getAttribute('title'));
+      return { asked: asked.map(a => ({ bu: a.bu, name: store.person(a.approver).name })), asks, rc }; }, [STORE, P6]);
+    check('R15 #6: every approval still to give is an ask', r6.asked.every(a => r6.asks.some(t => t.includes(a.bu) && /approv/i.test(t))), r6);
+    check('R15 #6: and its approver is on the email list', r6.asked.every(a => r6.rc.includes(a.name)), r6);
   }
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();

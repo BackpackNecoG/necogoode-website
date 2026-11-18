@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" id="d1" targetNamespace="http://example.com/bpmn">
+  <collaboration id="c1"><participant id="p1" name="Credit Limit Request" processRef="P1"/></collaboration>
+  <process id="P1" isExecutable="false">
+    <laneSet id="ls1">
+      <lane id="L1" name="Sales rep"><flowNodeRef>s</flowNodeRef><flowNodeRef>t1</flowNodeRef></lane>
+      <lane id="L2" name="AR Specialist (Jordan Lee)"><flowNodeRef>t2</flowNodeRef><flowNodeRef>g1</flowNodeRef><flowNodeRef>t3</flowNodeRef><flowNodeRef>t6</flowNodeRef><flowNodeRef>e1</flowNodeRef><flowNodeRef>e2</flowNodeRef></lane>
+      <lane id="L3" name="Credit Manager (Priya Nair)"><flowNodeRef>t4</flowNodeRef><flowNodeRef>g2</flowNodeRef></lane>
+      <lane id="L4" name="Controller (Sam Wu)"><flowNodeRef>t5</flowNodeRef></lane>
+    </laneSet>
+    <startEvent id="s" name="Request received"/>
+    <task id="t1" name="Enter credit limit request"/>
+    <task id="t2" name="Pull risk score from credit bureau"/>
+    <exclusiveGateway id="g1" name="Requested limit $50,000 or less and risk score 60 or below?"/>
+    <task id="t3" name="Auto-approve and update limit in ERP"/>
+    <task id="t4" name="Review and recommend"/>
+    <exclusiveGateway id="g2" name="Requested limit over $250,000?"/>
+    <userTask id="t5" name="Controller sign-off"/>
+    <task id="t6" name="Update credit limit in ERP and notify customer"/>
+    <endEvent id="e1" name="Limit updated"/>
+    <endEvent id="e2" name="Auto-approved"/>
+    <sequenceFlow id="f1" sourceRef="s" targetRef="t1"/>
+    <sequenceFlow id="f2" sourceRef="t1" targetRef="t2"/>
+    <sequenceFlow id="f3" sourceRef="t2" targetRef="g1"/>
+    <sequenceFlow id="f4" name="Yes" sourceRef="g1" targetRef="t3"/>
+    <sequenceFlow id="f5" name="No" sourceRef="g1" targetRef="t4"/>
+    <sequenceFlow id="f6" sourceRef="t3" targetRef="e2"/>
+    <sequenceFlow id="f7" sourceRef="t4" targetRef="g2"/>
+    <sequenceFlow id="f8" name="Yes" sourceRef="g2" targetRef="t5"/>
+    <sequenceFlow id="f9" name="No" sourceRef="g2" targetRef="t6"/>
+    <sequenceFlow id="f10" sourceRef="t5" targetRef="t6"/>
+    <sequenceFlow id="f11" sourceRef="t6" targetRef="e1"/>
+  </process>
+</definitions>

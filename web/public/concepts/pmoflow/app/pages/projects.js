@@ -3,7 +3,7 @@
    projectTruth (label, sentence, expected finish, late, blocking), the ones that need attention first. */
 import { store } from '../store.js';
 import { esc, fmt, link, pname } from '../ui.js';
-import { summaryOf, summaryHTML, projectStats, factsHTML, whoLineHTML, newProject, isSimple, truthOf } from './project.js';
+import { summaryOf, summaryHTML, projectStats, factsHTML, whoLineHTML, newProject, isSimple, truthOf, pointNav } from './project.js';
 
 const ORDER = { red: 0, amber: 1, none: 2, green: 3, live: 4 };
 
@@ -31,6 +31,7 @@ function renderPage() {
 }
 
 export function bind(root) {
+  pointNav();   /* R15 (M3 #4): Launch and Testing open the project you were working in */
   root.querySelectorAll('[data-new-project]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); newProject(); }));
 }
 /* R13 #15: a marker the phone rules in css/pmo.css scope to (the PMO pages only: #app:has(> .pmo-k3)) */

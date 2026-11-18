@@ -786,3 +786,15 @@ a.rs-part-link .btn,a.rs-part-link .rl-go{align-self:flex-start}
 .rs-passer-list li small{color:#64748b;font-size:12px}
 .rs-passer-list li.rs-other small{color:#b45309;font-weight:600}
 .rl-co-pb{display:block;color:#b91c1c;font-weight:600;font-size:12px;margin-top:2px}
+
+/* R15 #13 (Jordan, third round): on a phone every control on Launch and Testing is at least 32px tall to tap.
+   .rl-page wraps those two pages only and adds no box of its own. Inline links grow by padding, so text keeps its flow. */
+.rl-page { display: contents; }
+@media (max-width: 760px) {
+  .rl-page :is(button, .btn, select, input:not([type=checkbox]):not([type=radio]):not([type=hidden]), textarea, summary) { min-height: 32px; }
+  .rl-page :is(button, .btn) { min-width: 32px; }
+  .rl-page input:is([type=checkbox], [type=radio]) { width: 32px; height: 32px; margin: 0; flex: none; }
+  .rl-page a:not(.btn) { display: inline-block; min-height: 32px; line-height: 32px; }
+  .rl-page :is(p, li, .hint, small, td, span) > a:not(.btn) { display: inline; line-height: inherit; min-height: 0; padding-block: 9px; }
+  .rl-page summary { display: flex; align-items: center; }
+}

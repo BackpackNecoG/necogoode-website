@@ -364,7 +364,9 @@ function dataEvidence(prj) {
 }
 
 /* ---------- render ---------- */
-export function render(params) {
+/* R15 #13 (Jordan): the page sits in .rl-page (display: contents) so the phone tap-target rules apply to it only */
+export function render(params) { return `<div class="rl-page" data-page="${'launch'}">${renderPage(params)}</div>`; }
+function renderPage(params) {
   const prjId = params.prj;
   const projects = store.list('project');
   const prj = store.get('project', prjId);
@@ -439,7 +441,7 @@ export function render(params) {
     ${ui.reasons ? `<div class="banner rl-reasons" data-reasons><b>The launch was refused by the server.</b><ul>${ui.reasons.map(r => `<li>${esc(typeof r === 'string' ? r : (r.label || r.detail || JSON.stringify(r)))}</li>`).join('')}</ul></div>` : ''}
     ${failedRel ? failBanner(prj, failedRel) : ''}
     ${live && releases[0] && isFailedRb(releases[0]) ? rbFailBanner(prj, releases[0]) : ''}
-    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts data-steps-left="${esc(stepsLeftA)}">${live || rd.pass ? esc(countsText(cnt)) : `${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left`}</span></h3>${!live && !rd.pass && truthOf(prj) && truthOf(prj).launchChecks ? `<div class="hint" data-checks-why="${esc(truthOf(prj).launchChecks.notPassed)}">The ${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left cover${stepsLeftA === 1 ? 's' : ''} the ${esc(truthOf(prj).launchChecks.text)} below.</div>` : ''}${checks}</div>`}
+    ${live ? releasedCard(prj, rd, lastGo) + hypercareCard(prj, lastGo) : `<div class="card"><h3>What has to be true before launch<span class="n" data-counts data-steps-left="${esc(stepsLeftA)}">${live || rd.pass ? esc(countsText(cnt)) : `${esc(stepsLeftA)} step${stepsLeftA === 1 ? '' : 's'} left`}</span></h3>${!live && !rd.pass && truthOf(prj) && truthOf(prj).launchChecks ? `<div class="hint" data-checks-why="${esc(truthOf(prj).launchChecks.notPassed)}">${esc(stepsChecksText(stepsLeftA, truthOf(prj).launchChecks))}</div>` : ''}${checks}</div>`}
     ${cutoverCard(prj)}
     ${signoffCard(prj, rd)}
     ${grantsCard(prj)}
@@ -455,6 +457,12 @@ export function render(params) {
   </aside></div>`;
 }
 
+/* R15 #9 (BPM): steps and checks are different units; say each plainly ("2 steps left before launch. 1 check below is
+   not passed yet."), never "2 steps left cover the 1 check" */
+function stepsChecksText(steps, lc) {
+  const n = lc && lc.notPassed != null ? lc.notPassed : 0;
+  return `${steps} step${steps === 1 ? '' : 's'} left before launch. ${n ? `${n} of the ${lc.total} check${lc.total === 1 ? '' : 's'} below ${n === 1 ? 'is' : 'are'} not passed yet.` : 'Every check below has passed.'}`;
+}
 /* Why the current persona can't sign this BU's section (html hint), or '' when they can. */
 function signoffWhy(prj, bu, open) {
   const meId = store.state.me; const me = store.person(meId) || {};
@@ -501,7 +509,7 @@ function signoffCard(prj, rd) {
     const tagged = s.steps.filter(x => x.via !== 'owner');
     let act = '';
     if (!live && nobody) {
-      act = `<div class="rl-noappr" data-no-approver="${esc(s.bu)}"><b>Nobody can approve the ${esc(s.bu)} part yet.</b><span class="hint">A step or what starts the process involves ${esc(s.bu)}, but nobody who can approve belongs to ${esc(s.bu)}.</span>${choosePicker(prj, s.bu)}</div>`;
+      act = `<div class="rl-noappr" data-no-approver="${esc(s.bu)}"><b>Nobody can approve the ${esc(s.bu)} part yet.</b><span class="hint">${esc(noApproverWhy(prj, s.bu))}</span>${choosePicker(prj, s.bu)}</div>`;
     } else if (!live && state !== 'approved') {
       /* a signed, current section needs no action: no stale "Switch 'Viewing as'" hint after sign-off */
       const label = a && a.decision === 'approved' && !byOwner && !byRm ? 'Approve again' : 'Approve this part';
@@ -527,16 +535,33 @@ function signoffCard(prj, rd) {
       ${act}</div>`;
   }).join('');
   const two = approvers.length >= 2;
+  /* R15 #9 (Jordan): after launch the panel says what happened, never a red "0/0 · Two different people ✕" */
+  if (live) {
+    const rel = (store.list('release', r => r.projectId === prj.id && !isRollback(r) && !failedAny(r)) || []).sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))[0] || null;
+    const ov = rel && rel.override;
+    return `<div class="card" id="signoff" data-signoff-live><h3>Approvals<span class="n">${approved.length ? `${approved.length} approved before launch` : 'at launch'}</span></h3>
+      <div class="rl-two ${ov ? '' : 'ok'}"><span class="rl-ic ${ov ? 'warn' : 'pass'}">${ov ? '!' : ICON.pass}</span><div><b>${ov ? 'Launched with a two-person override' : 'Approved before launch'}</b>${approvers.length ? ` · ${approvers.map(av).join('')}` : ''}<div class="hint">${ov ? `The launch summary lists what was overridden${(ov.signoffs || []).length ? ` and who signed (${esc((ov.signoffs || []).map(x => x.name).filter(Boolean).join(' and '))})` : ''}.` : 'Every team that needed to approve did so, each with the extra sign-in check.'}</div></div></div>
+      ${cards ? `<div class="rl-bus">${cards}</div>` : ''}</div>`;
+  }
   return `<div class="card" id="signoff"><h3>Approvals<span class="n">${approved.length}/${sections.length} approved</span></h3>
     <div class="rl-two ${two ? 'ok' : ''}"><span class="rl-ic ${two ? 'pass' : 'fail'}">${two ? ICON.pass : ICON.fail}</span>
-      <div><b>Two different people</b> · ${approvers.length} different approver${approvers.length === 1 ? '' : 's'} ${approvers.map(av).join('')}<div class="hint">Launch needs at least two different people to approve, each with the extra sign-in check. The project manager (${esc(pname(prj.owner))})${rm && rm !== prj.owner ? ` and the launch owner (${esc(pname(rm))})` : ''} can't be one of them. Each team can approve its part at any time.</div></div></div>
+      <div><b>Two different people</b> · ${approvers.length} different approver${approvers.length === 1 ? '' : 's'} ${approvers.map(av).join('')}<div class="hint">Launch needs at least two different people to approve, each with the extra sign-in check. The project manager (${esc(pname(prj.owner))})${rm && rm !== prj.owner ? ` and the launch owner (${esc(pname(rm))})` : ''} can't be one of them.</div></div></div>
     ${exc.length && !Object.values(staleBy).some(x => x.length) ? `<div class="rl-exc"><b>Changes after approval</b> · approve the part again to clear them.</div>` : ''}
     <div class="rl-bus">${cards || '<div class="empty">No owned or listed steps in the future versions yet.</div>'}</div></div>`;
 }
 
+/* R15 #2: why nobody can approve a part, in the engine's words (named approvers, members, chosen, and who is barred) */
+function noApproverWhy(prj, bu) {
+  const pa = eng('partApprovers', prj.id, bu);
+  if (pa && pa.notEligible && pa.notEligible.length) return pa.notEligible.map(x => x.text).join(' ');
+  return `A step or what starts the process involves ${bu}, but nobody is named to approve for ${bu} and nobody belongs to it yet.`;
+}
 /* R7 deadlock fix: who may approve a team's part. Its members plus anyone chosen in project.approvers {bu: personId},
    never the project manager or the launch owner. */
 export function eligibleFor(prj, bu) {
+  /* R15 #2: ONE approver list (E.partApprovers): Departments, the process page and Launch agree */
+  const pa = eng('partApprovers', prj.id, bu);
+  if (pa && Array.isArray(pa.eligible)) return pa.eligible.slice();
   const ex = new Set([prj.owner, rmOf(prj)].filter(Boolean));
   const low = String(bu || '').toLowerCase();
   const ids = store.state.people.filter(p => p.bu && String(p.bu).toLowerCase() === low && !ex.has(p.id)).map(p => p.id);
@@ -636,6 +661,11 @@ function cutoverCard(prj) {
   /* R13 #13: the card reads the gate (E().launchDayCard): a step on a day off or outside the window is never "Ready" */
   const ldc = !live ? eng('launchDayCard', prj.id, store.state.today) : null;
   const notReady = need.length || (ldc && !ldc.ready);
+  /* R15 #9 (Jordan): after a launch with launch-day steps still open (an override), never "complete ✓" */
+  const openAtLaunch = live ? (Array.isArray(c.tasks) ? c.tasks.filter(t => t && !t.done) : []) : [];
+  if (live && openAtLaunch.length) return `<div class="card" id="cutover" data-launch-day-card="open-at-launch"><h3>Launch-day plan<span class="n">${openAtLaunch.length} step${openAtLaunch.length === 1 ? '' : 's'} not done</span></h3>
+    <div class="rl-co-st warn"><span class="rl-ic warn">!</span><span>Launched with ${openAtLaunch.length} launch-day step${openAtLaunch.length === 1 ? '' : 's'} not done (the launch was overridden): ${esc(openAtLaunch.map(t => t.task || 'untitled step').join(', '))}. Tick ${openAtLaunch.length === 1 ? 'it' : 'them'} off when done.</span></div>
+    ${runbookTable(prj, { checklist: live })}</div>`;
   const row = (label, html, key) => `<div class="rl-co-r" data-co="${key}"><span class="lbl">${esc(label)}</span><div>${html || '<span class="hint">Not set</span>'}</div></div>`;
   return `<div class="card" id="cutover" data-launch-day-card="${notReady ? 'not-ready' : 'ready'}"><h3>Launch-day plan<span class="n">${need.length ? 'incomplete' : notReady ? 'not ready' : 'complete'}</span></h3>
     <div class="rl-co-st ${notReady ? 'fail' : 'pass'}"><span class="rl-ic ${notReady ? 'fail' : 'pass'}">${notReady ? ICON.fail : ICON.pass}</span>

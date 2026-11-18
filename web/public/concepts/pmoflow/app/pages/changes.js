@@ -91,6 +91,21 @@ export function bindDayOff(scope) {
   });
 }
 
+/* R15 (M3 #4, Karen): the nav's Launch and Testing open the project you are working in, not the first project. The nav
+   is drawn by main.js from the first project; once a project page is open, its links point here instead. */
+const LAST_PRJ = 'pmoflow.currentProject';
+export function rememberProject(prj) {
+  try { if (prj) sessionStorage.setItem(LAST_PRJ, prj); } catch (e) { /* storage unavailable */ }
+  pointNav(prj);
+}
+export function pointNav(prj) {
+  try { prj = prj || sessionStorage.getItem(LAST_PRJ); } catch (e) { /* storage unavailable */ }
+  if (!prj || !store.get('project', prj)) return;
+  document.querySelectorAll('#nav a[href]').forEach(a => {
+    const m = /\/(release|testing)\/[^/?#]*$/.exec(a.getAttribute('href') || '');
+    if (m) a.setAttribute('href', link('/' + m[1] + '/' + encodeURIComponent(prj)));
+  });
+}
 /* ---------------------------------------------------------------- small views */
 const projectOf = id => store.get('project', id);
 const tasksOf = prj => store.list('workItem', w => w.projectId === prj).sort((a, b) => String(a.due || '').localeCompare(String(b.due || '')) || String(a.title).localeCompare(String(b.title)));
@@ -108,7 +123,7 @@ function crossWho(x, approvers, status) {
   if (!approvers) return x.owner ? `${esc(pname(x.owner))} (its project manager) is told` : 'its project manager is told';
   const a = C().crossApprover(x, approvers);
   if (!a) return status === 'applied' ? 'no separate approval' : 'nobody else approves for it';
-  const role = C().rolesOf(a).filter(r => r.projectId === x.projectId).map(r => r.role === 'linkedSponsor' ? 'its sponsor' : 'its project manager');
+  const role = C().rolesOf(a).filter(r => r.projectId === x.projectId).map(r => r.role === 'linkedSponsor' ? 'its sponsor' : r.role === 'linkedAdmin' ? 'an Admin, as it has no sponsor' : 'its project manager');
   /* Jordan R13: the applied record says what happened, not what was asked */
   const verb = status === 'applied' ? (a.decision === 'approved' ? 'approved it' : 'decided') : status === 'rejected' ? (a.decision === 'rejected' ? 'rejected it' : 'was asked') : 'approves too';
   return `${esc(pname(a.person))} (${esc([...new Set(role)].join(' and ') || 'approver')}) ${verb}`;
@@ -150,9 +165,17 @@ function editsListHTML(c) {
   }
   const ed = (c.edits || []);
   if (!ed.length) return '<div class="hint">No edits.</div>';
-  /* R14: the knock-on re-dating of a task (start + due) is one line; editText says it is a knock-on */
+  /* R14: the knock-on re-dating of a task (start + due) is one line. R15 (M3 #1): it reads as a schedule, "Nov 18 – Nov 24
+     → Dec 24 – Dec 31", with why it moves; an in-progress task keeps its start ("started, so only the due date moves") */
   const shown = ed.filter(e => !(e.knock && e.field === 'start' && ed.some(x => x.knock && x.id === e.id && x.field === 'due')));
-  return `<ul class="chg-edits" data-chg-edits>${shown.map(e => `<li class="${e.auto ? 'auto' : ''}" ${e.knock ? 'data-chg-knock' : ''}>${esc(C().editText(e, store.state.docs, E()))}${e.auto && !e.knock ? ' <small class="hint">(automatic)</small>' : ''}</li>`).join('')}</ul>`;
+  const knockLine = e => {
+    const st = ed.find(x => x.knock && x.id === e.id && x.field === 'start');
+    const w = store.get('workItem', e.id) || {};
+    const s0 = st ? st.from : w.start, s1 = st ? st.to : w.start;
+    const started = !st && w.status && w.status !== 'idle';
+    return `“${esc(e.label || w.title || 'a task')}”: ${esc(fmt(s0))} – ${esc(fmt(e.from))} → <b>${esc(fmt(s1))} – ${esc(fmt(e.to))}</b> <small class="hint">(knock-on: ${started ? 'already started, so only the due date moves' : 'it waits on the moved work, same length'})</small>`;
+  };
+  return `<ul class="chg-edits" data-chg-edits>${shown.map(e => `<li class="${e.auto ? 'auto' : ''}" ${e.knock ? `data-chg-knock="${esc(e.id)}"` : ''}>${e.knock && e.field === 'due' ? knockLine(e) : esc(C().editText(e, store.state.docs, E()))}${e.auto && !e.knock ? ' <small class="hint">(automatic)</small>' : ''}</li>`).join('')}</ul>`;
 }
 function decisionsHTML(c) {
   /* R14 (L4): a change filed by sync names the tool, the issue and who changed it there */
@@ -300,7 +323,7 @@ export async function openChangeWizard(projectId, preset) {
   const open = tasks.filter(w => w.status !== 'done');
   const S = {
     step: 0, kinds: new Set(preset.kinds || (preset.taskId ? ['dates'] : [])), reason: preset.reason || '', category: preset.category || '', title: '',
-    dates: {}, owners: {}, removes: new Set(), adds: [], picks: new Set((preset.suggestions || []).map(s => s.id)), budget: '', target: '',
+    dates: {}, owners: {}, removes: new Set(), adds: [], picks: new Set((preset.suggestions || []).map(s => s.id)), budget: '', target: '', pm: preset.pm || '', shiftNote: '',
     errors: [], built: null, im: null, need: null, busy: false,
   };
   /* R14: several tasks' new dates at once (auto-schedule, a refused batch) */
@@ -338,6 +361,7 @@ export async function openChangeWizard(projectId, preset) {
       if (mb.querySelector('[name="sg"]')) S.picks = new Set([...mb.querySelectorAll('[name="sg"]:checked')].map(x => x.value));
       if (mb.querySelector('[name="budget"]')) S.budget = val('budget');
       if (mb.querySelector('[name="target"]')) S.target = val('target');
+      if (mb.querySelector('[name="pm"]')) S.pm = val('pm');
     }
   }
   function editsOf() {
@@ -351,6 +375,7 @@ export async function openChangeWizard(projectId, preset) {
     if (S.kinds.has('scope')) sugg.filter(s => S.picks.has(s.id)).forEach(s => ed.push({ op: 'add', type: 'workItem', id: s.id, data: s, fromProcess: true }));
     if (S.kinds.has('budget') && S.budget !== '') ed.push({ op: 'set', type: 'project', id: projectId, field: 'budget', to: Number(S.budget) });
     if (S.kinds.has('deadline') && S.target) ed.push({ op: 'set', type: 'project', id: projectId, field: 'target', to: S.target });
+    if (S.kinds.has('pm') && S.pm) ed.push({ op: 'set', type: 'project', id: projectId, field: 'owner', to: S.pm });
     return ed;
   }
 
@@ -365,6 +390,7 @@ export async function openChangeWizard(projectId, preset) {
     const parts = [];
     if (S.kinds.has('dates')) parts.push(`<section class="chg-ed" data-ed="dates"><h4>Move dates</h4><div class="hint">Tick the tasks that move, then set their new dates.</div>
       <div class="chg-shift"><label>Shift the ticked tasks by <input type="number" name="shift" value="5" min="-60" max="120" step="1" aria-label="Business days to shift" /> business days</label><button class="btn sm" data-shift>Shift</button></div>
+      ${S.shiftNote ? `<div class="hint chg-shift-note" data-shift-note role="status">${esc(S.shiftNote)}</div>` : ''}
       ${open.map(w => { const d = S.dates[w.id] || { start: w.start, due: w.due }; return `<div class="chg-trow ${d.on ? 'on' : ''}"><label class="chg-pick"><input type="checkbox" name="dt_on" value="${esc(w.id)}" ${d.on ? 'checked' : ''}/> ${taskLine(w)}</label>
         <span class="chg-dates"><label>Start <input type="date" name="st_${esc(w.id)}" value="${esc(d.start || '')}" data-dayoff /></label><label>Due <input type="date" name="du_${esc(w.id)}" value="${esc(d.due || '')}" data-dayoff /></label></span></div>`; }).join('') || '<div class="hint">No open tasks.</div>'}${daysOffSoonHTML(store.state.today)}</section>`);
     if (S.kinds.has('owner')) parts.push(`<section class="chg-ed" data-ed="owner"><h4>Change owner</h4>${open.map(w => `<div class="chg-trow"><span class="chg-pick">${taskLine(w)}</span><select name="ow_${esc(w.id)}" aria-label="Owner of ${esc(w.title)}">${people(S.owners[w.id] || w.owner, w.owner ? '' : (w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner'))}</select></div>`).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
@@ -377,6 +403,15 @@ export async function openChangeWizard(projectId, preset) {
     if (S.kinds.has('scope')) parts.push(`<section class="chg-ed" data-ed="scope"><h4>Change scope</h4>${sugg.length ? `<div class="hint">Suggested tasks for the steps that changed in the process. Untick any you don’t need.</div>${sugg.map(s => `<label class="chg-trow chg-pick"><input type="checkbox" name="sg" value="${esc(s.id)}" ${S.picks.has(s.id) ? 'checked' : ''}/> ${taskLine(s)}</label>`).join('')}`
       : '<div class="hint">The linked processes have no new changes without work. To add tasks by hand, also tick “Add or remove work”.</div>'}</section>`);
     if (S.kinds.has('budget')) parts.push(`<section class="chg-ed" data-ed="budget"><h4>Change budget</h4><div class="field"><label>New budget (USD) <small class="hint">now ${esc(money(((j.budget || {}).planned)))}</small></label><input type="number" name="budget" min="0" step="100" value="${esc(S.budget !== '' ? S.budget : ((j.budget || {}).planned ?? ''))}" /></div></section>`);
+    if (S.kinds.has('pm')) {
+      /* R15 (M1 #3): the project manager role changes hands only through a plan change; the sponsor (or, with none set,
+         an Admin) approves it, never the outgoing or the incoming project manager */
+      const sp = C().sponsorOf(store.state.docs, j);
+      const cands = store.state.people.filter(p => p.id !== j.owner && p.id !== sp);
+      parts.push(`<section class="chg-ed" data-ed="pm"><h4>Hand over the project manager role</h4><div class="field"><label for="chg-pm">New project manager <small class="hint">now ${esc(pname(j.owner))}</small></label>
+        <select id="chg-pm" name="pm"><option value="">Choose a person</option>${cands.map(p => `<option value="${esc(p.id)}" ${S.pm === p.id ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
+        <div class="hint" data-pm-who>${esc(sp ? `${pname(sp)} (the sponsor) approves the hand-over.` : 'No sponsor is set, so an Admin approves the hand-over.')} ${esc(pname(j.owner))} stays on the team.</div></section>`);
+    }
     if (S.kinds.has('deadline')) parts.push(`<section class="chg-ed" data-ed="deadline"><h4>Change deadline</h4><div class="field"><label>New deadline <small class="hint">now ${esc(fmt(j.target))}</small></label><input type="date" name="target" value="${esc(S.target || j.target || '')}" data-dayoff /></div></section>`);
     return parts.join('') || '<div class="hint">Go back and pick what’s changing.</div>';
   }
@@ -403,8 +438,22 @@ export async function openChangeWizard(projectId, preset) {
     const sh = mb.querySelector('[data-shift]');
     if (sh) sh.addEventListener('click', e => {
       e.preventDefault(); const n = Math.round(Number(val('shift')) || 0); if (!n) return;
-      mb.querySelectorAll('[name="dt_on"]:checked').forEach(cb => { const w = store.get('workItem', cb.value); if (!w) return;
-        mb.querySelector(`[name="st_${CSS.escape(w.id)}"]`).value = E().addBusinessDays(w.start, n); mb.querySelector(`[name="du_${CSS.escape(w.id)}"]`).value = E().addBusinessDays(w.due, n); });
+      /* R15 (Jordan 5): start and due move by exactly n business days on the workspace's calendar, and the dialog says
+         which days off it stepped over (a holiday is why a 10-business-day move can span 11 weekdays) */
+      if (E().isBusinessDay) E().isBusinessDay(store.state.today, store.state.docs);   /* the workspace's own days off */
+      const ticked = [...mb.querySelectorAll('[name="dt_on"]:checked')].map(cb => store.get('workItem', cb.value)).filter(Boolean);
+      if (!ticked.length) { S.shiftNote = 'Tick the tasks to shift first.'; collect(); return draw(); }
+      const skipped = new Map();
+      const offs = E().holidays ? E().holidays(store.state.docs, { fromYear: +String(store.state.today).slice(0, 4) - 1, years: 4 }).filter(h => !h.worked && h.weekday !== 'Sat' && h.weekday !== 'Sun') : [];
+      ticked.forEach(w => {
+        const ns = E().addBusinessDays(w.start, n), nd = E().addBusinessDays(w.due, n);
+        mb.querySelector(`[name="st_${CSS.escape(w.id)}"]`).value = ns; mb.querySelector(`[name="du_${CSS.escape(w.id)}"]`).value = nd;
+        [[w.start, ns], [w.due, nd]].forEach(([a, b]) => { const lo = a < b ? a : b, hi = a < b ? b : a; offs.filter(h => h.date > lo && h.date <= hi).forEach(h => skipped.set(h.date, h)); });
+      });
+      const sk = [...skipped.values()].sort((a, b) => a.date.localeCompare(b.date));
+      S.shiftNote = `Moved ${plural(ticked.length, 'task')} by ${plural(Math.abs(n), 'business day')} ${n > 0 ? 'later' : 'earlier'} (start and due date alike).` +
+        (sk.length ? ` Days off skipped: ${sk.slice(0, 4).map(h => `${h.weekday} ${fmt(h.date)} (${h.name})`).join(', ')}${sk.length > 4 ? ' and more' : ''}.` : '');
+      collect(); draw();
     });
     const at = mb.querySelector('[data-add-task]');
     if (at) at.addEventListener('click', e => { e.preventDefault(); collect(); const s0 = E().addBusinessDays(store.state.today, 0); S.adds.push({ id: store.newId('wi'), owner: store.state.me, start: s0, due: E().addBusinessDays(s0, 3), effortDays: 1 }); draw(); });
@@ -473,6 +522,7 @@ export function bind(root, params) {
   if (!C()) { ensureAssets().then(() => window.dispatchEvent(new Event('pmo:route'))).catch(() => {}); return; }
   ensureAssets().catch(() => {});
   bindChangesSection(root, params.prj);
+  rememberProject(params.prj);
   bindActivity(root);
   const focus = params.q && params.q.change;
   if (focus && focus !== scrolledTo) requestAnimationFrame(() => { const el = root.querySelector(`[data-chg="${CSS.escape(focus)}"]`); if (el) { scrolledTo = focus; openIds.add(focus); el.scrollIntoView({ block: 'start' }); } });

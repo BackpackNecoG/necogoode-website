@@ -158,13 +158,13 @@ async function r11(browser, ip, errors) {
     ok(+stepsCell === flat(pK.asis).length && +stepsCell === 9, `processes list: ${stepsCell} steps straight after save (Today map)`);
     const dc = await page.getAttribute(`[data-prow="${pidK}"] [data-datacounts]`, 'data-datacounts');
     const unc = mine.filter(d => !d.perRun);
-    ok(dc && +dc.split('/')[4] === unc.length && mine.length - unc.length === 2, 'processes list: information counted at once, as "not checked yet" (the W-9 and certificate are collected each run): ' + dc);
+    ok(dc && +dc.split('/')[4] === unc.length && mine.length - unc.length === 3, 'processes list: information counted at once, as "not checked yet" (R15: the W-9, certificate and the vendor\'s bank details are collected each run): ' + dc);
     ok(/not checked yet/i.test(await page.textContent(`[data-prow="${pidK}"]`)), 'processes list says "not checked yet"');
     /* §5: one label per state on the process page */
     await nav(`/process/${pidK}?mode=asis`);
     const labels = await page.$$eval('[data-block-label]', els => els.map(e => e.getAttribute('data-block-label')));
     const sideAvail = await page.$$eval('[data-side-data] [data-avail]', els => els.map(e => e.textContent.replace(/\s*›\s*$/, '').trim()));
-    ok(!labels.includes('Not available yet') && sideAvail.every(x => x === 'Not checked yet' || x === 'Collected each run') && sideAvail.filter(x => x === 'Collected each run').length === 2, `"Not checked yet" items never also read "Not available yet" (${[...new Set(labels.concat(sideAvail))].join(', ') || 'none'})`);
+    ok(!labels.includes('Not available yet') && sideAvail.every(x => x === 'Not checked yet' || x === 'Collected each run') && sideAvail.filter(x => x === 'Collected each run').length === 3, `"Not checked yet" items never also read "Not available yet" (${[...new Set(labels.concat(sideAvail))].join(', ') || 'none'})`);
     /* process page and import agree on the step owner */
     const whoTexts = await page.$$eval('#canvas .node[data-step] [data-who]', els => els.map(e => e.textContent.trim()));
     ok(whoTexts[0] === 'Buyer', 'process page step owner = the role from the procedure: ' + whoTexts[0]);
@@ -173,7 +173,8 @@ async function r11(browser, ip, errors) {
     const uncN = await page.$$eval('#canvas [data-unchecked-n]', els => els.reduce((a, e) => a + +e.dataset.uncheckedN, 0));
     const uncWant = flat(pK.asis).reduce((a, x) => a + (x.data || []).filter(id => unc.some(d => d.id === id)).length, 0);
     ok(uncN === uncWant && uncN >= unc.length && !cardTxt.some(t => /not available yet/i.test(t)), `map cards: ${uncN} "not checked yet", none "not available yet"`);
-    const sK = flat(pK.asis).find(x => (x.data || []).length);
+    /* R15: a step with information that is checked once (step 1's W-9, certificate and bank details are collected each run) */
+    const sK = flat(pK.asis).find(x => (x.data || []).some(id => unc.some(d => d.id === id)));
     await nav(`/process/${pidK}/step/${sK.id}`);
     const kTxt = await page.textContent('[data-kpi-info]');
     ok(/not checked yet/.test(kTxt) && !/not available yet/i.test(kTxt), 'step page counts "not checked yet", never "not available yet": ' + kTxt.replace(/\s+/g, ' ').trim());
@@ -903,6 +904,188 @@ async function r14(browser, errors) {
   await ctx.close();
 }
 
+/* ---------------------------------------------------------------- R15 M2: the R14 reviewers' repros
+   (market-review/r14 expert-bpm.md, karen.md). Fixtures: tests/pmoflow/fixtures/r15-* (fictional). */
+const FIX15 = f => fs.readFileSync(require('path').join(__dirname, 'fixtures', f), 'utf8');
+async function r15(browser, errors) {
+  const ip = `198.51.100.${(Math.random() * 250 | 0) + 1}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r15 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r15 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const ws = () => page.evaluate(() => localStorage.getItem('pmoflow.ws'));
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const putDoc = (type, id, data, summary) => page.evaluate(async ([type, id, data, summary]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/${type}/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, actor: 'mc', summary }) })).status, [type, id, data, summary]);
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const paste = async text => {
+    await nav('/import'); await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const saveDraft = async name => {
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', name);
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    return page.url().match(/process\/([^?/]+)/)[1];
+  };
+  const gwOf = (nodes, re) => allNodes(nodes).find(n => n.type === 'decision' && re.test(n.title || ''));
+  try {
+    await nav('/'); await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+
+    console.log('# R15 BPM top 1: the auto-approve path ends; "go to step 5" carries on; step 9 keeps its verb');
+    await paste(FIX15('r15-credit-sop.txt'));
+    const ttl = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
+    ok(ttl.includes('Update the credit limit in the ERP and notify the sales rep and the customer'), 'step 9 keeps its verb: ' + ttl[ttl.length - 1]);
+    ok(ttl.includes('Review the request and recommend approve or reject'), '"recommends" reads "recommend"');
+    const gotos = await page.$$eval('.is-draft select[data-goto]', els => els.map(e => ({ v: e.value, path: e.dataset.goto, lbl: e.selectedOptions[0] ? e.selectedOptions[0].textContent : '' })));
+    ok(gotos.some(g => g.v === '__end' && /ends here/i.test(g.lbl)), 'the preview\'s auto-approve path is set to "ends here": ' + JSON.stringify(gotos));
+    ok(!gotos.some(g => g.v && g.v !== '__end'), 'no path jumps ("Otherwise, go to step 5" is the next step): ' + JSON.stringify(gotos));
+    await shot('r15-import-credit');
+    const pid = await saveDraft('Northwind credit limit (R15)');
+    let st = await state();
+    const proc = st.docs.process.find(d => d.id === pid).data;
+    const auto = gwOf(proc.asis, /50,000 or less/);
+    const yes = auto && auto.branches.find(b => b.label === 'Yes');
+    ok(yes && yes.nodes.length === 2 && yes.nodes[1].type === 'end' && !yes.goto, 'saved: the Yes path is "Update the limit in the ERP" then the end: ' + JSON.stringify(yes && yes.nodes.map(n => n.type + ':' + n.title)));
+    /* the engine's E2E paths read the saved map: none that takes the auto-approve path, and none that takes the
+       reject path, may reach the Credit Manager's review or "Update the credit limit" (M1 owns generateScenarios) */
+    await nav(`/process/${pid}?mode=asis`);
+    ok(await page.isVisible('#canvas .node.end'), 'the map shows where the path ends');
+    const endTxt = (await page.$$eval('#canvas .node.end', els => els.map(e => e.textContent.trim()))).join(' | ');
+    ok(/approved automatically/.test(endTxt) && /rejected/.test(endTxt), 'the ends read "Done: approved automatically" and "Stop: request rejected": ' + endTxt);
+    ok(!(await page.$('#canvas [data-goto-dir]')), 'no "Skips to"/"Go back to" label on the credit map (no jumps)');
+    await shot('r15-map-credit');
+
+    console.log('# R15 BPM 5: the RACI fills A, C and I (the Controller is A over $250,000)');
+    await nav(`/process/${pid}?mode=raci`);
+    const raci = await page.evaluate(() => { const hs = [...document.querySelectorAll('[data-raci-colh]')].map(h => h.textContent.trim()); return [...document.querySelectorAll('[data-raci-row]')].map(r => ({ t: r.querySelector('th').textContent.replace(/^\d+/, '').trim(), cells: [...r.querySelectorAll('td')].map((td, i) => [hs[i], td.dataset.raciVal]).filter(x => x[1]) })); });
+    const signRow = raci.find(r => /^Sign off/.test(r.t));
+    ok(signRow && signRow.cells.some(([h, v]) => /Controller/.test(h) && /A/.test(v)), 'the Controller is A on the over-$250,000 sign-off: ' + JSON.stringify(signRow));
+    const lastRow = raci.find(r => /notify the sales rep/.test(r.t));
+    ok(lastRow && lastRow.cells.some(([h, v]) => /Sales rep/i.test(h) && /I/.test(v)) && lastRow.cells.some(([h, v]) => /Customer/i.test(h) && /I/.test(v)), 'the sales rep and the customer are I on the last step: ' + JSON.stringify(lastRow));
+    ok(raci.some(r => r.cells.some(([, v]) => /A/.test(v))) && raci.filter(r => r.cells.some(([, v]) => /[ACI]/.test(v.replace(/^R\/?/, '')))).length >= 3, 'more than R is filled: ' + raci.map(r => r.cells.map(c => c[1]).join('')).join(' · '));
+    await shot('r15-raci');
+
+    console.log('# R15 BPM 2: a changed choice shows "was → now"; the card counts what the diff marks');
+    st = await state();
+    const p0 = st.docs.process.find(d => d.id === pid).data;
+    let k = 0; const idm = {};
+    const fork = ns => ns.map(n => { const c = JSON.parse(JSON.stringify(n)); c.id = 'f' + (++k) + '-' + n.id; idm[n.id] = c.id; if (n.type !== 'trigger' && n.type !== 'end') c.from = n.id; if (c.branches) c.branches = n.branches.map(b => Object.assign({}, b, { nodes: fork(b.nodes || []) })); return c; });
+    const tobe = fork(p0.asis);
+    allNodes(tobe).forEach(n => (n.branches || []).forEach(b => { if (b.goto) b.goto = idm[b.goto] || b.goto; }));
+    const big = gwOf(tobe, /250,000/); big.title = 'Requested limit over $300,000?'; big.threshold = { subject: 'requested limit', op: '>', amount: 300000 };
+    ok(await putDoc('process', pid, Object.assign({}, p0, { tobe }), 'R15 test: Future map with the Controller threshold raised') === 200, 'Future map saved with the threshold raised');
+    await nav(`/process/${pid}?mode=diff`);
+    const was = (await page.textContent(`[data-gw-was="${big.id}"]`).catch(() => '')) || '';
+    ok(/was \$250,000 → now \$300,000/.test(was), 'the changed choice says "was $250,000 → now $300,000": ' + was);
+    const chips = (await page.$$('#canvas .chip.diff-changed')).length;
+    await shot('r15-diff-choice');
+    await nav('/processes');
+    const card = await page.$eval(`[data-prow="${pid}"] [data-col=diff]`, e => ({ c: e.dataset.diffcounts, t: e.textContent })).catch(() => ({ c: '', t: '' }));
+    const nums = (card.t.match(/(\d+) changed|(\d+) choices? changed/g) || []).map(x => +x.match(/\d+/)[0]).reduce((a, b) => a + b, 0);
+    ok(/1 choice changed/.test(card.t) && nums === chips, `the card says what the diff marks (${chips} CHANGED): ${card.t.trim()}`);
+
+    console.log('# R15 BPM top 1: the choice editor offers "end here" and "skip to step N"');
+    await nav(`/process/${pid}?mode=edit`);
+    await page.click(`[data-ed="edit"][data-id="${big.id}"]`); await page.waitForSelector('.overlay [data-brow]');
+    const opts = await page.$$eval('.overlay [data-brow] >> nth=1', () => []).catch(() => []);
+    void opts;
+    const labels = await page.$$eval('.overlay [data-brow] select[name=bgoto] option', os => os.map(o => o.textContent.trim()));
+    ok(labels.some(l => /^■ End here/.test(l)), 'a path can end here: ' + labels.slice(0, 3).join(' | '));
+    ok(labels.some(l => /^↷ Skip to step \d+: Update the credit limit/.test(l)), 'a later step reads "Skip to step N": ' + labels.filter(l => /Skip/.test(l)).join(' | '));
+    ok(labels.some(l => /^↩ Go back to Review the request/.test(l)), 'an earlier step reads "Go back to"');
+    ok(await page.isVisible('.overlay [data-brow] select[name=bgoto]'), 'the "Then" choice is shown without opening More options');
+    await shot('r15-choice-editor');
+    await page.selectOption('.overlay [data-brow] >> nth=1 >> select[name=bgoto]', '__end');
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }), act('save')]); await settle();
+    st = await state();
+    let bigNow = gwOf(st.docs.process.find(d => d.id === pid).data.tobe, /300,000/);
+    ok(bigNow && bigNow.branches[1].nodes.some(n => n.type === 'end') && !bigNow.branches[1].goto, '"End here" saves an end on that path');
+    await page.click(`[data-ed="edit"][data-id="${big.id}"]`); await page.waitForSelector('.overlay [data-brow]');
+    ok(await page.$eval('.overlay [data-brow] >> nth=1 >> select[name=bgoto]', e => e.value) === '__end', 'reopened, the path still says "End here"');
+    const skipTo = await page.$$eval('.overlay [data-brow] >> nth=1 >> select[name=bgoto] option', os => (os.find(o => /Skip to step \d+: Update the credit limit/.test(o.textContent)) || {}).value);
+    await page.selectOption('.overlay [data-brow] >> nth=1 >> select[name=bgoto]', skipTo);
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }), act('save')]); await settle();
+    st = await state();
+    bigNow = gwOf(st.docs.process.find(d => d.id === pid).data.tobe, /300,000/);
+    ok(bigNow && bigNow.branches[1].goto === skipTo && !bigNow.branches[1].nodes.some(n => n.type === 'end'), 'switching to "Skip to" removes the end and saves the jump');
+    await nav(`/process/${pid}?mode=tobe`);
+    ok(/↷ Skips to “Update the credit limit/.test((await page.textContent(`#canvas [data-goto="${skipTo}"]`).catch(() => '')) || ''), 'the map labels the jump "Skips to", never "Loop back"');
+    await shot('r15-map-skip');
+
+    console.log('# R15 Karen: "(COI)" once; "AP verifies…" is an AP step; per-vendor fields are collected each run');
+    await paste(FIX15('r15-vendor-sop.txt'));
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(nds.filter(n => /insurance|coi/i.test(n)).length === 1, 'one certificate of insurance: ' + nds.join(', '));
+    const runs = await page.$$eval('[data-nd]', els => els.filter(e => e.querySelector('[data-perrun]')).map(e => e.querySelector('[data-nd-name]').value));
+    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].every(n => runs.includes(n)), 'routing numbers, tax ID, bank account and credit limit read "Collected each run": ' + runs.join(', '));
+    ok(!runs.includes('Supplier list'), 'the approved supplier list is not per run');
+    const vt = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
+    ok(vt.includes('Verify the bank letter by calling the bank at a number we look up ourselves, not the number on the letter'), 'AP\'s check is its own step');
+    await shot('r15-import-vendor');
+
+    console.log('# R15 Karen 3: "Add department" closes after a successful add, also when the department exists already');
+    const addDept = async team => {
+      await page.selectOption(`[data-apr-sel="${team}"]`, '__add_department__');
+      await page.waitForSelector('.overlay [data-dept-name]');
+      const v = await page.inputValue('.overlay [data-dept-name]');
+      await act('add');
+      await page.waitForSelector(`[data-apr-team="${team}"][data-apr-dept="${team}"]`, { timeout: 10000 }).catch(() => {});
+      await settle();
+      return v;
+    };
+    const v1 = await addDept('Operations');
+    ok(v1 === 'Operations' && !(await page.$('.overlay [data-dept-name]')), 'first add: offered "Operations", the dialog closed');
+    ok(await page.$eval('[data-apr-team="Operations"]', e => e.dataset.aprDept).catch(() => '') === 'Operations', 'Operations approves Operations\'s part');
+    await page.selectOption('[data-apr-sel="Operations"]', ''); await page.waitForSelector('[data-apr-team="Operations"][data-apr-dept=""]', { timeout: 10000 }).catch(() => {}); await settle();
+    const v2 = await addDept('Operations');
+    ok(v2 === 'Operations' && !(await page.$('.overlay [data-dept-name]')) && !(await page.$('.overlay [data-dept-err]')), 'second add of an existing department: offered "Operations", no error, the dialog closed');
+    ok(await page.$eval('[data-apr-team="Operations"]', e => e.dataset.aprDept).catch(() => '') === 'Operations', 'the existing department is picked');
+    await shot('r15-add-dept');
+    const pidV = await saveDraft('Northwind vendor onboarding (R15)');
+    st = await state();
+    const byName = n => (st.docs.dataElement.find(d => d.data.name === n) || {}).data || {};
+    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].every(n => byName(n).perRun === true), 'saved as collected each run');
+    void pidV;
+
+    console.log('# R15 BPM 3/4: the data page never says "all match" while a warning stands');
+    const cn = st.docs.dataElement.find(d => d.data.name === 'Customer name');
+    const csv = FIX15('r15-credit-sample.csv');
+    const pst = await page.evaluate(async ([id, csv]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/profile/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csv, actor: 'mc' }) })).status, [cn.id, csv]);
+    ok(pst === 200, 'sample uploaded on Customer name: ' + pst);
+    await nav(`/data/${cn.id}`);
+    const lines = await page.$$eval('[data-profline]', els => els.map(e => [e.dataset.profline, e.textContent.trim(), !!e.querySelector('.fail')]));
+    const cnl = lines.find(l => /customer_name/i.test(l[0]));
+    ok(cnl && /look like duplicates/.test(cnl[1]) && cnl[2] && !/all match/.test(cnl[1]), 'customer_name names its near-duplicates, never "all match": ' + JSON.stringify(cnl));
+    const rs = lines.find(l => /risk_score/i.test(l[0]));
+    ok(!rs || await page.$('[data-profline="risk_score"] [data-profline-belongs]') !== null, 'a column left here that is another item (risk_score) says where it belongs');
+    const rule = await page.evaluate(async () => { const m = await import('/concepts/pmoflow/app/pages/data.js');
+      const prof = { rows: 4, columns: [{ name: 'bank_account', nulls: 0, sharedAccount: { text: 'One account number is on 2 records: check for a shared or fraudulent bank account' }, patterns: [] }] };
+      return m.profileLines(prof, [], [{ name: 'bank_account' }], { allMatch: false, warnings: [] }); });
+    ok(rule[0] && !/all match/.test(rule[0].text) && rule[0].bad && /shared/.test(rule[0].text), 'a ruled column with a shared bank account is a warning, never "all match": ' + JSON.stringify(rule));
+    await shot('r15-data-warn');
+
+    console.log('# R15 at 390 px');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await paste(FIX15('r15-credit-sop.txt')); await overflow('R15 import credit @390'); await shot('r15-phone-import');
+    await nav(`/process/${pid}?mode=diff`); await overflow('R15 diff @390'); await shot('r15-phone-diff');
+    await nav(`/process/${pid}?mode=edit`);
+    await page.click(`[data-ed="edit"][data-id="${big.id}"]`); await page.waitForSelector('.overlay [data-brow]');
+    await overflow('R15 choice editor @390'); await page.screenshot({ path: `${OUT}/r15-phone-choice.png` }); await act('cancel');
+    await nav(`/process/${pid}?mode=raci`); await overflow('R15 RACI @390'); await shot('r15-phone-raci');
+    await nav(`/data/${cn.id}`); await overflow('R15 data @390'); await shot('r15-phone-data');
+    void ws;
+  } catch (e) {
+    fail++; failures.push('r15 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r15 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r15-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
@@ -910,6 +1093,7 @@ async function r14(browser, errors) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R15 === '1') { await r15(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R14 === '1') { await r14(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R13 === '1') { await r13(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R12 === '1') { await r12(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
@@ -2563,7 +2747,9 @@ async function r14(browser, errors) {
       ok(!flat(vp.asis).some(n => n.owner && n.owner !== me) && flat(vp.asis).filter(n => n.ownerRole).length >= 8, 'R10 §2: owners come only from the text (roles), never a seed person');
       ok(!/\d+\s+steps?/.test(vp.desc || ''), 'R10: the saved description has no step count');
       ok(await page.isVisible('[data-touches] [data-touch="Procurement"]') && await page.isVisible('[data-touches] [data-touch="Treasury"]'), 'R10: "Teams involved" on the saved process lists the teams from the text');
-      const bank = des.find(d => d.name === 'Bank details' && used.includes(d.id));
+      /* R15 (Karen): the vendor's bank details are collected each run now; the vendor master is checked once */
+      const bank = des.find(d => d.name === 'Vendor master record' && used.includes(d.id)) || des.find(d => !d.perRun && used.includes(d.id));
+      ok(!!(des.find(d => d.name === 'Bank details' && used.includes(d.id)) || {}).perRun, 'R15: the vendor\'s bank details are collected each run');
       if (bank) {
         await nav(`/data/${bank.id}`);
         ok(/Not checked yet/.test(await page.textContent('#app')) && !/Connected/.test(await page.textContent('.hdr')) && await page.isVisible('[data-unchecked] [data-confirm-live]'), 'R10: pasted information reads "Not checked yet" (never "Connected") and its owner can confirm it');
@@ -2783,6 +2969,7 @@ async function r14(browser, errors) {
   if (process.env.SKIP_R12 !== '1') await r12(browser, ip, errors);
   if (process.env.SKIP_R13 !== '1') await r13(browser, errors);
   if (process.env.SKIP_R14 !== '1') await r14(browser, errors);
+  if (process.env.SKIP_R15 !== '1') await r15(browser, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

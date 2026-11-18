@@ -122,7 +122,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const newDue = await page.inputValue(`${wiz} input[name="du_W6"]`);
   await next();
   ok(await page.isVisible('[data-chg-verdict="approval"]'), 'preview: needs approval');
-  ok(/Tom Alvarez \(project manager and project manager of ERP Upgrade Readiness\) and Maya Chen \(sponsor\)/.test(await page.textContent('[data-chg-verdict]')) && /past the .* deadline/.test(await page.textContent('[data-chg-verdict]')), 'R13 #3: names the PM once (both roles) and the sponsor for the deadline breach, and why');
+  ok(/Tom Alvarez \(project manager and project manager of ERP Upgrade Readiness\) and Maya Chen \((?:sponsor|Admin, as no sponsor is set)\)/.test(await page.textContent('[data-chg-verdict]')) && /past the .* deadline/.test(await page.textContent('[data-chg-verdict]')), 'R13 #3: names the PM once (both roles) and the sponsor for the deadline breach, and why');
   ok(/needs the sponsor’s approval/.test(await page.textContent('[data-chg-verdict]')), 'R13 #3: says a change past the deadline needs the sponsor');
   ok(/^This moves the expected finish from \w{3} \d+ to \w{3} \d+ \(\d+ business days? after the \w{3} \d+ deadline\)/.test(await page.textContent('[data-chg-preview-sentence]')), 'the sentence says the finish moves past the deadline');
   const knock = Number(await page.textContent(`${wiz} [data-imp-knock] .n`));
@@ -143,7 +143,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await page.waitForSelector('[data-chg-status="proposed"]', { timeout: 15000 }); await settle(500);
   d = await docs();
   ok(d.workItem.find(x => x.id === 'W6').data.due !== newDue, 'nothing applied while waiting');
-  ok(/Waiting for Tom Alvarez \(project manager and project manager of ERP Upgrade Readiness\) and Maya Chen \(sponsor\)/.test(await page.textContent('[data-chg-waiting]')), 'the log says who it waits for, once per person: ' + await page.textContent('[data-chg-waiting]'));
+  ok(/Waiting for Tom Alvarez \(project manager and project manager of ERP Upgrade Readiness\) and Maya Chen \((?:sponsor|Admin, as no sponsor is set)\)/.test(await page.textContent('[data-chg-waiting]')), 'the log says who it waits for, once per person: ' + await page.textContent('[data-chg-waiting]'));
   /* while it waits, ERP's own log shows it (proposed on another project) */
   await page.goto(`${ROOT}/project/${ERP}/changes`); await page.waitForSelector('[data-chg-log]'); await settle(700);
   ok(await page.isVisible(`[data-chg-from="${PRJ}"]`) && /Proposed on Vendor Onboarding Modernization/.test(await page.textContent('[data-chg-from]')), 'ERP’s log shows the pending change from the vendor project');
@@ -244,7 +244,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await page.click(`${wiz} [data-w="submit"]`);
   ok(await toastSays(/Plan change applied|Sent for approval/), 'plan updated from the process change');
   await settle(1200);
-  /* R13 #3: Tom asked, so if it needs approval the sponsor gives it (Tom never approves his own change) */
+  /* R15 (M1 #3): the sponsor is stored; the seed sets none, so Maya Chen decides as the Admin who did not ask (the
+     assertions accept either wording: the sponsor, or "Admin, as no sponsor is set").
+     R13 #3: Tom asked, so if it needs approval the sponsor gives it (Tom never approves his own change) */
   if (await page.$(`[data-chg-status="proposed"]`)) {
     await setMe('mc'); await page.waitForSelector('[data-chg-approve]'); await page.click('[data-chg-approve]'); await stepUpOk();
     ok(await toastSays(/Approved and applied/), 'the sponsor approves the scope change');
@@ -283,7 +285,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await next();
   ok(await page.isVisible('[data-chg-verdict="approval"]'), 'a business day passes; past the deadline it needs approval');
   const v13 = await page.textContent('[data-chg-verdict]');
-  ok(/Maya Chen \(sponsor/.test(v13) && !/Tom Alvarez \(/.test(v13), 'R13 #3: Tom asked, so only the sponsor approves (never the requester): ' + v13);
+  ok(/Maya Chen \((?:sponsor|Admin, as no sponsor is set)/.test(v13) && !/Tom Alvarez \(/.test(v13), 'R13 #3: Tom asked, so only the sponsor approves (never the requester): ' + v13);
   await page.click(`${wiz} [data-w="submit"]`);
   ok(await toastSays(/Sent for approval: Maya Chen/), 'sent to the sponsor');
   await page.waitForSelector('[data-chg-status="proposed"]'); await settle(400);
@@ -321,6 +323,71 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await shotBoth('log', null);
   await expand();
   await shotBoth('entry-open', null);
+
+  console.log('R15 (M3): re-plan by real scheduling, exact shifts, the project manager hand-over');
+  await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); await store.reset(); });
+  await setMe('ta');
+  await open();
+  await page.click('[data-chg-open]'); await page.waitForSelector(wiz);
+  await page.check(`${wiz} input[name="kind"][value="dates"]`);
+  await page.fill('#chg-reason', 'The bank portal vendor slipped two weeks');
+  await next();
+  /* Jordan 5: a 10-business-day shift moves start and due by exactly 10 business days (and says which days off it skipped) */
+  const w6r = (await docs()).workItem.find(x => x.id === 'W6').data;
+  await page.check(`${wiz} input[name="dt_on"][value="W6"]`);
+  await page.fill(`${wiz} input[name="shift"]`, '10');
+  await page.click(`${wiz} [data-shift]`); await settle(300);
+  const sh = await page.evaluate(w => { const st = document.querySelector('.chg-wiz [name="st_W6"]').value, du = document.querySelector('.chg-wiz [name="du_W6"]').value;
+    return { st, du, ns: PMOEngine.businessDaysBetween(w.start, st), nd: PMOEngine.businessDaysBetween(w.due, du), note: (document.querySelector('[data-shift-note]') || {}).textContent || '' }; }, w6r);
+  ok(sh.ns === 10 && sh.nd === 10, `R15 Jordan 5: start and due both move exactly 10 business days (${w6r.start}→${sh.st}, ${w6r.due}→${sh.du})`);
+  ok(/by 10 business days later/.test(sh.note), 'the dialog says what the shift did: ' + sh.note);
+  const offIn = await page.evaluate(([a, b]) => (PMOEngine.holidays(null, { fromYear: +a.slice(0, 4), years: 2 }) || []).filter(h => !h.worked && h.date > a && h.date <= b && h.weekday !== 'Sat' && h.weekday !== 'Sun').map(h => h.name), [w6r.start, sh.du]);
+  ok(!offIn.length || offIn.every(n => sh.note.includes(n)), 'the days off the shift stepped over are named: ' + JSON.stringify(offIn));
+  await next();
+  /* PMO re-test 9: the knock-ons keep finish-to-start order, in-progress W8 keeps its start, and none shows late */
+  const kn = await page.evaluate(async () => {
+    const lines = [...document.querySelectorAll('.chg-wiz [data-chg-knock]')].map(li => li.textContent);
+    const late = [...document.querySelectorAll('.chg-wiz [data-imp-knock] li b.fail')].length;
+    return { lines, late };
+  });
+  ok(kn.lines.some(t => /Check bank accounts with a small test deposit/.test(t) && /same length/.test(t)), 'knock-on line reads as a schedule: ' + kn.lines[0]);
+  ok(kn.lines.some(t => /Save new vendors in the ERP automatically/.test(t) && /already started, so only the due date moves/.test(t)), 'the in-progress task keeps its start (only its due date moves)');
+  ok(kn.late === 0, 'no knock-on task is shown late on the impact screen');
+  await page.click(`${wiz} [data-w="submit"]`);
+  ok(await toastSays(/Sent for approval|Plan change applied/), 'sent');
+  await page.waitForSelector('[data-chg-status]'); await settle(400);
+  await setMe('mc');
+  await page.waitForSelector('[data-chg-approve]', { timeout: 15000 }).catch(() => {});
+  if (await page.$('[data-chg-approve]')) { await page.click('[data-chg-approve]'); await stepUpOk(); ok(await toastSays(/Approved and applied|Waiting for the next approver/), 'approved'); }
+  await setMe('ta');
+  if (await page.$('[data-chg-approve]')) { await page.click('[data-chg-approve]'); await stepUpOk(); await toastSays(/Approved and applied/); }
+  await settle(600);
+  const after15 = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); const d = store.state.docs; const fc = PMOEngine.forecastAll(d, store.state.today);
+    const t = id => d.workItem.find(x => x.id === id).data; const c = store.list('planChange').find(x => x.status === 'applied' && /bank portal vendor slipped/.test(x.reason));
+    return { applied: !!c, w6: t('W6'), w7: t('W7'), w8: t('W8'), w10: t('W10'), late: ['W7', 'W8', 'W10'].filter(id => fc[id].late), knock: c ? (c.impact.knockOn || []).filter(k => !k.lateAfter).map(k => k.id) : [] }; });
+  ok(after15.applied, 'R15: the re-plan is applied');
+  ok(after15.w7.start > after15.w6.due && after15.w7.due > after15.w6.due && after15.w10.start > after15.w8.due, `finish-to-start holds: W6 due ${after15.w6.due}, W7 ${after15.w7.start}–${after15.w7.due}, W8 due ${after15.w8.due}, W10 starts ${after15.w10.start}`);
+  ok(after15.late.length === 0, 'after approval, nothing the impact screen said would not be late is late: ' + JSON.stringify(after15.late));
+  await shotBoth('r15-replan', null);
+  /* M1 #3: the project manager role changes hands only through Change the plan */
+  await page.goto(`${ROOT}/project/${PRJ}`); await page.waitForSelector('[data-settings]', { timeout: 30000 }); await settle(500);
+  await page.click('[data-settings]'); await page.waitForSelector('.overlay [data-set-pm]');
+  ok(await page.$eval('.overlay [data-set-pm]', el => el.readOnly), 'R15: settings show the project manager read-only');
+  ok(!(await page.$('.overlay select[name="owner"]')), 'no plain project-manager picker in settings');
+  ok(/Not set|Maya Chen/.test(await page.$eval('.overlay [data-set-sponsor]', el => el.value)) && !/default approver/.test(await page.$eval('.overlay [data-set-sponsor]', el => el.value)), 'the sponsor is the stored one (never a computed default approver)');
+  await page.click('.overlay [data-act="handover"]'); await page.waitForSelector(wiz);
+  ok(await page.isChecked(`${wiz} input[name="kind"][value="pm"]`), '“Hand over the role” opens Change the plan on the hand-over');
+  await page.fill('#chg-reason', 'Tom moves to the ERP program');
+  await next();
+  await page.selectOption(`${wiz} select[name="pm"]`, 'lp');
+  await next();
+  const v15 = await page.textContent('[data-chg-verdict]');
+  ok(/Needs approval from Maya Chen/.test(v15) && /project manager changes \(Tom Alvarez → Leo Park\)/.test(v15) && !/Tom Alvarez \(project manager\)/.test(v15), 'the hand-over goes to the sponsor/Admin, never either project manager: ' + v15);
+  await page.setViewportSize({ width: 390, height: 844 }); await settle(300);
+  ok(await noOverflow(), 'hand-over preview: no horizontal overflow at 390');
+  await page.screenshot({ path: `${SHOTS}/r15-handover-390.png` });
+  await page.setViewportSize({ width: 1440, height: 1000 }); await settle(200);
+  await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
 
   ok(errors.length === 0, 'zero console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();

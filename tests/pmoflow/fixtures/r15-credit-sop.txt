@@ -1,0 +1,9 @@
+Credit Limit Request Procedure (as-is)
+1. Sales rep receives a credit limit request from the customer by email and enters the customer name, account number, requested limit and bank account into the request form.
+2. Sales rep attaches the latest credit report and sends the request to AR.
+3. AR Specialist (Jordan Lee) checks the customer's payment history and pulls the risk score from the credit bureau.
+4. If the requested limit is $50,000 or less and the risk score is 60 or below, the request is auto-approved and AR Specialist updates the limit in the ERP. Otherwise, go to step 5.
+5. Credit Manager (Priya Nair) reviews the request and recommends approve or reject.
+6. If the requested limit is over $250,000, Controller (Sam Wu) must sign off before the limit is changed; otherwise the Credit Manager approves.
+7. If rejected, AR Specialist emails the customer the reason and closes the request.
+8. AR Specialist updates the credit limit in the ERP and notifies the sales rep and the customer.

@@ -32,6 +32,7 @@
     { id: 'scope', label: 'Change scope (the process changed)' },
     { id: 'budget', label: 'Change budget' },
     { id: 'deadline', label: 'Change deadline' },
+    { id: 'pm', label: 'Hand over the project manager role' },
   ];
   const CATEGORIES = [
     { id: 'client', label: 'Client request' },
@@ -42,12 +43,12 @@
     { id: 'other', label: 'Other' },
   ];
   const STATUS_LABEL = { proposed: 'Waiting for approval', approved: 'Approved', applied: 'Applied', rejected: 'Rejected' };
-  const ROLE_LABEL = { pm: 'project manager', sponsor: 'sponsor', linkedPm: 'project manager of another project', linkedSponsor: 'sponsor of another project' };
+  const ROLE_LABEL = { pm: 'project manager', sponsor: 'sponsor', admin: 'Admin, as no sponsor is set', linkedPm: 'project manager of another project', linkedSponsor: 'sponsor of another project', linkedAdmin: 'Admin for another project' };
   /* "Within tolerance": the deadline is unaffected, the budget is unchanged, expected cost moves by less than 5%,
      and no department approval reopens. */
   const COST_TOLERANCE_PCT = 5;
   const TASK_FIELDS = ['start', 'due', 'owner', 'effortDays', 'title', 'deps'];
-  const PROJECT_FIELDS = ['target', 'budget'];
+  const PROJECT_FIELDS = ['target', 'budget', 'owner'];
   const ID_RE = /^[\w.-]{1,64}$/;
   const MAX_EDITS = 120, MAX_LIST = 60;
 
@@ -68,25 +69,25 @@
   function joinAnd(arr) { return arr.length <= 1 ? (arr[0] || '') : arr.slice(0, -1).join(', ') + ' and ' + arr[arr.length - 1]; }
   function budgetOf(project) { return project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) ? +project.budget.planned : null; }
 
-  /* The project's sponsor: project.sponsor when set, else the owner of its first linked process (when that is not the
-     project manager), else (R13) the approvers of the project manager's department (workspace.departments), else nobody.
-     `exclude` (R13 #3): people who may not stand as sponsor here (the requester): the next default approver stands in. */
+  /* R15 (M1 #3, M3 #2): the project's sponsor is STORED: project.sponsor when it names a person who is not the project
+     manager (the engine's sponsorOf), else nobody. It is never computed from the process owner or a department, so the API
+     and every page report the same value. `exclude`: people who may not stand as sponsor here (the requester). */
   function sponsorOf(docs, projectOrId, exclude) {
     const project = typeof projectOrId === 'string' ? get(docs, 'project', projectOrId) : projectOrId;
     if (!project) return null;
     const no = new Set((exclude || []).filter(Boolean));
-    const ok = id => id && !no.has(id) && get(docs, 'person', id);
-    /* R14 (L4): a sponsor equal to the project manager is ignored (as if unset): the PM is never the sponsor */
-    if (ok(project.sponsor) && project.sponsor !== project.owner) return project.sponsor;
-    for (const pid of project.processes || []) {
-      const p = get(docs, 'process', pid);
-      if (p && p.owner !== project.owner && ok(p.owner)) return p.owner;
+    const s = project.sponsor;
+    return s && s !== project.owner && !no.has(s) && get(docs, 'person', s) ? s : null;
+  }
+  /* R15: who approves a deadline, budget or project-manager change: the engine's deadlineApprover (the sponsor when set
+     and not the requester, else an Admin who is neither the requester nor the PM). {person, role:'sponsor'|'admin'|null, text} */
+  function deciderOf(docs, project, requester, exclude, eng) {
+    const en = eng || engineOf();
+    if (en && typeof en.deadlineApprover === 'function') {
+      try { const d = en.deadlineApprover(docs, project.id, requester, { exclude: exclude || [] }); if (d) return d; } catch (e) { /* fall through */ }
     }
-    const pm = get(docs, 'person', project.owner);
-    const deps = departmentsOf(docs);
-    const mine = pm && pm.bu ? deps.find(d => String(d.name || '').toLowerCase() === String(pm.bu).toLowerCase()) : null;
-    const hit = mine ? (mine.approvers || []).find(id => id !== project.owner && ok(id)) : null;
-    return hit || null;
+    const sp = sponsorOf(docs, project, [requester].concat(exclude || []));
+    return sp ? { person: sp, role: 'sponsor', text: personName(docs, sp) + ' (the sponsor) approves.' } : { person: null, role: null, text: 'Set the sponsor in the project’s settings first.' };
   }
   /* R13 #1 (K1's shape): workspace.departments = [{id, name, approvers: [personId]}], on any workspace doc */
   function departmentsOf(docs) {
@@ -100,9 +101,9 @@
   /* R12 #13: an approver's role in words: "project manager", "sponsor", "project manager of ERP Upgrade Readiness".
      R13 #3: every role a person decides in, once: "project manager and project manager of ERP Upgrade Readiness". */
   function oneRoleText(r, docs) {
-    if (r.role === 'linkedPm' || r.role === 'linkedSponsor') {
+    if (r.role === 'linkedPm' || r.role === 'linkedSponsor' || r.role === 'linkedAdmin') {
       const p = r.projectId ? get(docs, 'project', r.projectId) : null;
-      return (r.role === 'linkedPm' ? 'project manager' : 'sponsor') + (p && p.name ? ' of ' + p.name : ' of another project');
+      return (r.role === 'linkedPm' ? 'project manager' : r.role === 'linkedSponsor' ? 'sponsor' : 'Admin') + (p && p.name ? ' of ' + p.name : ' of another project');
     }
     return ROLE_LABEL[r.role] || String(r.role || '');
   }
@@ -131,6 +132,7 @@
       return 'Added “' + (d.title || 'untitled task') + '” (' + personName(docs, d.owner) + ', ' + day(d.start, eng) + ' – ' + day(d.due, eng) + ')';
     }
     if (e.op === 'remove') return 'Removed “' + (e.label || (e.from && e.from.title) || 'a task') + '”';
+    if (e.type === 'project' && e.field === 'owner') return 'Project manager ' + personName(docs, e.from) + ' → ' + personName(docs, e.to);
     if (e.type === 'project') return FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng);
     if (e.field === 'title') return 'Renamed ' + valueText('title', e.from) + ' → ' + valueText('title', e.to);
     return '“' + (e.label || 'a task') + '”: ' + FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng) + (e.knock ? ' (knock-on: it waits on the moved work)' : '');
@@ -149,6 +151,7 @@
       if ((e.op === 'add' || e.op === 'remove') && !e.auto) k.add(source === 'process' || e.fromProcess ? 'scope' : 'work');
       if (e.type === 'project' && e.field === 'target') k.add('deadline');
       if (e.type === 'project' && e.field === 'budget') k.add('budget');
+      if (e.type === 'project' && e.field === 'owner') k.add('pm');
     });
     return KINDS.map(x => x.id).filter(x => k.has(x));
   }
@@ -171,6 +174,8 @@
     if (t) parts.push('Move the deadline to ' + day(t.to, eng));
     const b = edits.find(e => e.type === 'project' && e.field === 'budget');
     if (b) parts.push('Set the budget to ' + money(b.to));
+    const pm = edits.find(e => e.type === 'project' && e.field === 'owner');
+    if (pm) parts.push('Hand the project manager role to ' + personName(docs, pm.to));
     const s = parts.slice(0, 2).join(', ') + (parts.length > 2 ? ' and more' : '');
     return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Plan change';
   }
@@ -238,6 +243,12 @@
         if (!PROJECT_FIELDS.includes(e.field)) { errors.push('That project detail cannot be changed here.'); return; }
         let to = e.to, from;
         if (e.field === 'target') { if (!isDay(to)) { errors.push('Pick a real deadline date.'); return; } from = project.target || null; }
+        else if (e.field === 'owner') {
+          /* R15 (M1 #3): handing over the project manager role is a plan change the sponsor (or an Admin) approves */
+          from = project.owner || null;
+          if (!get(docs, 'person', to)) { errors.push('Pick the new project manager.'); return; }
+          if (to !== from && project.sponsor && to === project.sponsor) { errors.push(personName(docs, to) + ' is the sponsor, so they can’t also be the project manager. Pick someone else, or ask an Admin to change the sponsor first.'); return; }
+        }
         else { to = +to; if (!(to >= 0) || !isFinite(to) || to > 1e9) { errors.push('Enter the budget as a number of dollars.'); return; } from = budgetOf(project); }
         const out = { op: 'set', type: 'project', id: projectId, field: e.field, from, to, label: project.name || 'the project' };
         const i = edits.findIndex(x => x.op === 'set' && setKey(x) === setKey(out));
@@ -322,7 +333,11 @@
         const mine = pe.filter(x => x.id === e.id);
         if (!mine.length) return e;
         const d = clone(e.data);
-        mine.forEach(x => { if (x.field === 'budget') d.budget = Object.assign({}, d.budget || {}, { planned: x.to }); else d[x.field] = x.to; });
+        mine.forEach(x => {
+          if (x.field === 'budget') d.budget = Object.assign({}, d.budget || {}, { planned: x.to });
+          else if (x.field === 'owner') { d.owner = x.to; d.resources = [...new Set([x.to].concat(d.resources || [], x.from ? [x.from] : []))]; }   /* both stay on the team */
+          else d[x.field] = x.to;
+        });
         return { id: e.id, data: d };
       });
     }
@@ -339,8 +354,8 @@
         else if (!same(w[e.field] === undefined ? null : w[e.field], e.from)) out.push('“' + (e.label || 'a task') + '” ' + (FIELD_LABEL[e.field] || e.field) + ' changed');
       } else if (e.op === 'set' && e.type === 'project') {
         const p = get(docs, 'project', e.id);
-        const cur = !p ? undefined : e.field === 'budget' ? budgetOf(p) : (p.target || null);
-        if (!p || !same(cur, e.from)) out.push((e.field === 'budget' ? 'the budget' : 'the deadline') + ' changed');
+        const cur = !p ? undefined : e.field === 'budget' ? budgetOf(p) : e.field === 'owner' ? (p.owner || null) : (p.target || null);
+        if (!p || !same(cur, e.from)) out.push((e.field === 'budget' ? 'the budget' : e.field === 'owner' ? 'the project manager' : 'the deadline') + ' changed');
       } else if (e.op === 'add') {
         if (get(docs, 'workItem', e.id)) out.push('a task with the same id already exists');
       } else if (e.op === 'remove') {
@@ -404,9 +419,11 @@
     reopened.forEach(r => touch(r.approver, 'approves ' + r.bu + '’s part again'));
     const deadlineMoved = !same(projectB && projectB.target, projectA && projectA.target);
     const budgetMoved = !same(budgetOf(projectB), budgetOf(projectA));
-    if (projectA && projectA.owner) touch(projectA.owner, 'project manager');
+    const pmMoved = !!(projectB && projectA && projectB.owner !== projectA.owner);
+    if (pmMoved && projectB.owner) touch(projectB.owner, 'hands over the project manager role');
+    if (projectA && projectA.owner) touch(projectA.owner, pmMoved ? 'becomes the project manager' : 'project manager');
     const sponsor = sponsorOf(docsAfter, projectId);
-    if (sponsor && (deadlineMoved || budgetMoved)) touch(sponsor, 'sponsor');
+    if (sponsor && (deadlineMoved || budgetMoved || pmMoved)) touch(sponsor, 'sponsor');
     /* R12 #13: knock-ons into OTHER projects, one entry per project, with that project's own finish before/after */
     const crossMap = new Map();
     knockOn.filter(k => k.projectId && k.projectId !== projectId).forEach(k => {
@@ -431,6 +448,8 @@
       misses: { before: !!(tb.deadline && tb.forecastFinish && tb.forecastFinish > tb.deadline), after: !!(ta.deadline && ta.forecastFinish && ta.forecastFinish > ta.deadline) },
       cost: { before: costB, after: costA, delta: costDelta, pct: costPct, basisBefore: tb.ev && tb.ev.EAC != null ? 'eac' : 'estimate', basisAfter: ta.ev && ta.ev.EAC != null ? 'eac' : 'estimate' },
       budget: { before: budgetOf(projectB), after: budgetOf(projectA), moved: budgetMoved },
+      pm: { before: projectB ? projectB.owner || null : null, after: projectA ? projectA.owner || null : null, moved: pmMoved,
+        beforeName: projectB && projectB.owner ? personName(docsBefore, projectB.owner) : null, afterName: projectA && projectA.owner ? personName(docsAfter, projectA.owner) : null },
       label: { before: tb.label, after: ta.label },
       late: { before: tb.lateCount, after: ta.lateCount },
       tasks: { before: tb.tasks.total, after: ta.tasks.total },
@@ -452,11 +471,22 @@
     return out;
   }
 
-  /* R14 (PMO-9) knock-on re-dating. The tasks whose expected finish the change pushes later (they wait on moved work)
-     get their start and due moved by the same number of business days, as automatic edits ({auto, knock}), so an
-     approved re-plan does not leave them "late by 22 business days". A task late before stays exactly as late; a task
-     on time stays on time. Earlier finishes never pull dates in. Recomputed from `docs` every time (idempotent): the
-     knock edits of the input are dropped first. */
+  /* R14 (PMO-9) knock-on re-dating, R15 (M3 #1) by real scheduling. The open tasks the change pushes (every task that
+     waits on edited work, directly or through other tasks, and every task whose expected finish moves later) are
+     re-dated as automatic edits ({auto, knock}) so that, once applied:
+       - finish-to-start: a task starts the business day after the work it waits on is due (plus the link's lag) and is
+         due after it; start-to-start and finish-to-finish links hold the same way;
+       - a task that has not started keeps its length: start and due move by the same number of business days;
+       - a task already in progress keeps its start (only its due date moves);
+       - no re-dated task is late by the engine's own rule (forecastAll), so the impact screen's "not late" holds;
+       - dates only move later (an earlier finish never pulls a task in) and always land on business days.
+     The task the person edited is never re-dated. Recomputed from `docs` every time (idempotent): the knock edits of the
+     input are dropped first. */
+  function depsOf(w) {
+    return ((w && w.deps) || []).map(d => typeof d === 'string' ? { id: d, type: 'FS', lag: 0 }
+      : d && d.id ? { id: d.id, type: /^(SS|FF)$/.test(d.type) ? d.type : 'FS', lag: isFinite(+d.lag) ? Math.round(+d.lag) : 0 } : null).filter(Boolean);
+  }
+  const maxDay = (a, b) => (!isDay(a) ? (isDay(b) ? b : null) : !isDay(b) ? a : a > b ? a : b);
   function withKnockOn(change, docs, today, opts) {
     opts = opts || {};
     const eng = E(opts.engine);
@@ -465,18 +495,81 @@
     const after = applyToDocs(docs, c0, opts.at || null);
     const fb = eng.forecastAll(docs, today), fa = eng.forecastAll(after, today);
     const touched = new Set(base.filter(e => e.type === 'workItem').map(e => e.id));
-    const out = [];
-    list(after, 'workItem').forEach(w => {
-      if (w.status === 'done' || touched.has(w.id) || !fb[w.id] || !fa[w.id]) return;
-      const from = fb[w.id].forecast, to = fa[w.id].forecast;
-      if (!isDay(from) || !isDay(to) || !(to > from) || !isDay(w.due)) return;
-      const n = eng.businessDaysBetween(from, to);
-      if (!(n > 0)) return;
-      const label = w.title || 'untitled task';
-      if (isDay(w.start)) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'start', from: w.start, to: eng.addBusinessDays(w.start, n), label, auto: true, knock: true });
-      out.push({ op: 'set', type: 'workItem', id: w.id, field: 'due', from: w.due, to: eng.addBusinessDays(w.due, n), label, auto: true, knock: true });
-    });
-    return Object.assign({}, change, { edits: base.concat(out) });
+    const work = list(after, 'workItem');
+    const idx = {}; work.forEach(w => { idx[w.id] = w; });
+    const open = w => w && w.status !== 'done';
+    const notStarted = w => !w.status || w.status === 'idle';
+    const bizDay = d => (isDay(d) ? eng.addBusinessDays(d, 0) : null);
+    /* the tasks the change can push: waiting on edited work (transitively), or expected to finish later than before */
+    const cand = new Set();
+    const succ = {}; work.forEach(w => depsOf(w).forEach(d => { (succ[d.id] = succ[d.id] || []).push(w.id); }));
+    const reach = id => (succ[id] || []).forEach(x => { if (!cand.has(x) && !touched.has(x)) { cand.add(x); reach(x); } });
+    touched.forEach(reach);
+    work.forEach(w => { if (!touched.has(w.id) && fb[w.id] && fa[w.id] && isDay(fa[w.id].forecast) && (!isDay(fb[w.id].forecast) || fa[w.id].forecast > fb[w.id].forecast)) { cand.add(w.id); reach(w.id); } });
+    [...cand].forEach(id => { if (!open(idx[id]) || !isDay(idx[id].due)) cand.delete(id); });
+    /* pass 1: forward through the links, in dependency order, on the planned dates */
+    let plan = {}, memo = {}, visiting = {};
+    const floor = {};                 /* pass 2's findings: the earliest due date the engine accepts for a task */
+    const finishOf = id => {          /* when a predecessor is planned to be finished: its (new) due, or its forecast if later */
+      const p = idx[id];
+      if (!p) return null;
+      if (cand.has(id)) { place(id); return plan[id].due; }
+      return maxDay(bizDay(p.due), fa[id] && fa[id].forecast);
+    };
+    const startOf = id => { const p = idx[id]; if (!p) return null; if (cand.has(id)) { place(id); return plan[id].start; } return isDay(p.start) ? p.start : null; };
+    function place(id) {
+      if (memo[id] || visiting[id]) return;
+      visiting[id] = true;
+      const w = idx[id];
+      let start = isDay(w.start) ? w.start : null, due = w.due;
+      let needStart = null, needDue = floor[id] || null;
+      depsOf(w).forEach(d => {
+        const p = idx[d.id];
+        if (!p || d.id === id || visiting[d.id] || (p.status === 'done' && !(fa[d.id] && fa[d.id].unconfirmed))) return;
+        if (d.type === 'FF') { const f = finishOf(d.id); if (f) needDue = maxDay(needDue, eng.addBusinessDays(f, d.lag)); return; }
+        if (d.type === 'SS') { const s = startOf(d.id); if (s) needStart = maxDay(needStart, eng.addBusinessDays(s, d.lag)); return; }
+        const f = finishOf(d.id); if (f) needStart = maxDay(needStart, eng.addBusinessDays(f, 1 + d.lag));
+      });
+      if (notStarted(w) && start) {
+        const n = Math.max(0, needStart && needStart > start ? eng.businessDaysBetween(start, needStart) : 0, needDue && needDue > due ? eng.businessDaysBetween(due, needDue) : 0);
+        if (n > 0) { start = eng.addBusinessDays(start, n); due = eng.addBusinessDays(due, n); }
+      } else {
+        /* in progress (or no start date): the start stays; the due date leaves room after what it waits on */
+        const span = start ? Math.max(1, eng.businessDaysBetween(start, w.due)) : 1;
+        const want = maxDay(needDue, needStart && !start ? eng.addBusinessDays(needStart, span) : null);
+        if (want && want > due) due = want;
+      }
+      plan[id] = { start, due };
+      visiting[id] = false;
+      memo[id] = true;
+    }
+    const forward = () => { plan = {}; memo = {}; visiting = {}; cand.forEach(place); };
+    forward();
+    /* pass 2: the engine has the last word on lateness (data it waits on, a start date already passed, today): any
+       re-dated task the engine still expects after its due date moves on until it is not late (a few rounds at most) */
+    const build = () => {
+      const out = [];
+      work.forEach(w => {
+        const p = plan[w.id]; if (!p) return;
+        const label = w.title || 'untitled task';
+        if (isDay(w.start) && p.start && p.start !== w.start) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'start', from: w.start, to: p.start, label, auto: true, knock: true });
+        if (p.due !== w.due) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'due', from: w.due, to: p.due, label, auto: true, knock: true });
+      });
+      return out;
+    };
+    for (let round = 0; round < 8; round++) {
+      const f1 = eng.forecastAll(applyToDocs(docs, Object.assign({}, change, { edits: base.concat(build()) }), opts.at || null), today);
+      let moved = false;
+      Object.keys(plan).forEach(id => {
+        const r = f1[id], p = plan[id];
+        if (!r || !r.late || !isDay(r.forecast) || !(r.forecast > bizDay(p.due))) return;
+        floor[id] = maxDay(floor[id], r.forecast);
+        moved = true;
+      });
+      if (!moved) break;
+      forward();                      /* the tasks after a moved one follow it */
+    }
+    return Object.assign({}, change, { edits: base.concat(build()) });
   }
   /* R14 (PMO list 7): a change still waiting for a decision shows its impact on TODAY's plan (the stored impact is the
      one at the time it was proposed); applied and rejected changes keep the impact they recorded. */
@@ -492,7 +585,7 @@
   /* R14 (PMO list 4): who decides for another project the change moves: the approver entry holding a role for it */
   function crossApprover(x, approvers) {
     const pid = x && (x.projectId || x);
-    return ((approvers || []).find(a => hasRole(a, 'linkedPm', pid)) || (approvers || []).find(a => hasRole(a, 'linkedSponsor', pid))) || null;
+    return ((approvers || []).find(a => hasRole(a, 'linkedPm', pid)) || (approvers || []).find(a => hasRole(a, 'linkedSponsor', pid)) || (approvers || []).find(a => hasRole(a, 'linkedAdmin', pid))) || null;
   }
   function crossRoleText(a, pid, docs) {
     return joinAnd(rolesOf(a).filter(r => r.projectId === pid).map(r => oneRoleText(r, docs)));
@@ -521,6 +614,7 @@
     else head += bufferPhrase(f.after, dl.after, im.buffer.after, still, eng);
     const rest = [];
     if (im.budget.moved) rest.push('sets the budget to ' + money(im.budget.after) + ' (was ' + money(im.budget.before) + ')');
+    if (im.pm && im.pm.moved) rest.push('hands the project manager role from ' + (im.pm.beforeName || 'the project manager') + ' to ' + (im.pm.afterName || 'someone else'));
     if (im.cost.delta != null && Math.abs(im.cost.delta) >= 1) rest.push((im.cost.delta > 0 ? 'raises' : 'lowers') + ' the expected cost by ' + money(Math.abs(im.cost.delta)) + ' (' + Math.abs(im.cost.pct).toFixed(1) + '%)');
     if (im.approvalsReopen.length) rest.push('reopens ' + joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval' : 'approvals'));
     (im.crossProjects || []).forEach(x => rest.push('moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name));
@@ -551,6 +645,8 @@
     if (im.deadline.moved) reasons.push('The deadline moves (' + day(im.deadline.before) + ' → ' + day(im.deadline.after) + ').');
     else if (pastDeadline) reasons.push('The expected finish moves past the ' + day(im.deadline.after) + ' deadline.');
     if (im.budget.moved) reasons.push('The budget changes (' + money(im.budget.before) + ' → ' + money(im.budget.after) + ').');
+    const pmMoved = !!(im.pm && im.pm.moved);
+    if (pmMoved) reasons.push('The project manager changes (' + personName(docs, im.pm.before) + ' → ' + personName(docs, im.pm.after) + ').');
     if (im.cost.pct != null && Math.abs(im.cost.pct) >= COST_TOLERANCE_PCT) reasons.push('The expected cost changes by ' + Math.abs(im.cost.pct).toFixed(1) + '% (more than ' + COST_TOLERANCE_PCT + '%).');
     if (im.approvalsReopen.length) reasons.push(joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval reopens' : 'approvals reopen') + '.');
     /* R12 #13: a knock-on into another project needs that project's manager too */
@@ -564,17 +660,23 @@
     const requester = opts.requester || change.requestedBy || null;
     const breach = im.deadline.moved || pastDeadline;
     if (within || !project) { cross.forEach((x, i) => { reasons[crossAt[i]] = crossLine(x, null); }); return { within, reasons, approvers: [], blocked: '' }; }
-    if (breach) reasons.push('A change past the deadline needs the sponsor’s approval.');
     const need = [];      /* [{role, person|null, projectId?}] before merging */
     const missing = [];
+    /* R15 (M1 #3): the stored sponsor decides; with no sponsor, an Admin who did not ask (never the PM, nor either PM of a
+       hand-over) */
+    const pmEx = pmMoved ? [im.pm.before, im.pm.after].filter(Boolean) : [];
+    const decider = [];
     const sponsorFor = (prj, role, pid) => {
-      const sp = sponsorOf(docs, prj, [requester]);
-      if (sp) need.push(pid ? { role, person: sp, projectId: pid } : { role, person: sp });
+      const d = deciderOf(docs, prj, requester, pid ? [] : pmEx, opts.engine);
+      if (d && d.person) { const r = d.role === 'admin' ? (pid ? 'linkedAdmin' : 'admin') : role; need.push(pid ? { role: r, person: d.person, projectId: pid } : { role: r, person: d.person }); if (!pid) decider.push(d); }
       else missing.push(pid ? 'a sponsor for ' + (prj.name || 'the other project') : 'a sponsor for ' + (project.name || 'the project'));
     };
-    /* this project's manager, or the sponsor for them when they asked */
-    if (project.owner && get(docs, 'person', project.owner) && project.owner !== requester) need.push({ role: 'pm', person: project.owner });
-    if (breach || im.budget.moved || !need.length) sponsorFor(project, 'sponsor');
+    /* this project's manager (never for a hand-over of their own role), or the sponsor for them when they asked */
+    if (!pmMoved && project.owner && get(docs, 'person', project.owner) && project.owner !== requester) need.push({ role: 'pm', person: project.owner });
+    if (breach || im.budget.moved || pmMoved || !need.length) sponsorFor(project, 'sponsor');
+    if (breach || im.budget.moved || pmMoved) reasons.push(decider[0] && decider[0].role === 'admin'
+      ? (pmMoved ? 'A new project manager' : breach ? 'A change past the deadline' : 'A budget change') + ' needs the sponsor’s approval; no sponsor is set, so an Admin approves.'
+      : (pmMoved ? 'A new project manager' : breach ? 'A change past the deadline' : 'A budget change') + ' needs the sponsor’s approval.');
     /* each other project's manager, or its sponsor when its manager asked */
     cross.forEach(x => {
       const other = get(docs, 'project', x.projectId);
@@ -592,7 +694,7 @@
     cross.forEach((x, i) => { reasons[crossAt[i]] = crossLine(x, crossApprover(x, approvers)); });
     const blocked = !approvers.length || missing.length
       ? 'Nobody besides ' + (requester ? personName(docs, requester) : 'the requester') + ' can approve this change: ' + (project.name || 'the project') + ' needs ' + joinAnd([...new Set(missing.length ? missing : ['a sponsor'])]) +
-        ' who did not ask for it. Set the sponsor in the project’s settings, then propose it again.'
+        ' who did not ask for it. Ask an Admin to set the sponsor (Admin › People › Project sponsors), then propose it again.'
       : '';
     return { within, reasons, approvers, blocked };
   }
@@ -634,7 +736,7 @@
   }
   function pendingHere(c, projectId) {
     return (c.status === 'proposed' || c.status === 'approved') && c.projectId !== projectId &&
-      (((c.impact || {}).crossProjects || []).some(x => x.projectId === projectId) || (c.approvers || []).some(a => (hasRole(a, 'linkedPm', projectId) || hasRole(a, 'linkedSponsor', projectId))));
+      (((c.impact || {}).crossProjects || []).some(x => x.projectId === projectId) || (c.approvers || []).some(a => (hasRole(a, 'linkedPm', projectId) || hasRole(a, 'linkedSponsor', projectId) || hasRole(a, 'linkedAdmin', projectId))));
   }
   /* R12 #13: the entry written into another project's log when a change with a knock-on there is applied */
   function linkedEntry(change, docsBefore, docsAfter, otherId, today, opts) {
@@ -661,7 +763,7 @@
       reason: clean('A plan change on ' + srcName + ' moves ' + plural(tasks.length, 'task') + ' here: ' + (change.reason || ''), 200),
       linkedFrom: { projectId: change.projectId, changeId: change.id, projectName: srcName },
       knockOn: tasks.map(t => ({ id: t.id, title: t.title, owner: t.owner || null, from: t.from, to: t.to, lateAfter: !!t.lateAfter })),
-      approvers: (change.approvers || []).filter(a => hasRole(a, 'linkedPm', otherId) || hasRole(a, 'linkedSponsor', otherId)).map(a => clone(a)),
+      approvers: (change.approvers || []).filter(a => hasRole(a, 'linkedPm', otherId) || hasRole(a, 'linkedSponsor', otherId) || hasRole(a, 'linkedAdmin', otherId)).map(a => clone(a)),
       tolerance: { within: false, reasons: ['A plan change on ' + srcName + ' moves work in this project.'] },
       impact: im,
       requestedBy: change.requestedBy || null, requestedAt: change.requestedAt || null, decidedBy: change.decidedBy || null, decidedAt: change.decidedAt || null,
@@ -794,7 +896,7 @@
   }
 
   return {
-    KINDS, CATEGORIES, STATUS_LABEL, ROLE_LABEL, COST_TOLERANCE_PCT, LOG_COLUMNS,
+    KINDS, CATEGORIES, STATUS_LABEL, deciderOf, ROLE_LABEL, COST_TOLERANCE_PCT, LOG_COLUMNS,
     buildChange, applyToDocs, conflicts, impact, needsApproval, withKnockOn, liveImpact, crossApprover, requesterText, syncSourceText, pendingApprovers, waitingText, sponsorOf, roleText, rolesOf, hasRole, offDayError, linkedEntry, pendingHere,
     editText, changesOf, changesForTask, snapshot, baselineOf, queueFor, logRows, toCSV, processRef, processDrift, sentenceOf,
   };

@@ -88,6 +88,19 @@ async function notify(store, wsId, docs, toIds, actor, text, ref, at) {
   return sent;
 }
 
+/* R15 (M3 #5): History sentences for the doc writes a plan change makes are worded the way the server words every doc
+   write ("Created …", "Updated …", "Deleted …"), so History and the audit export label them as written by the system,
+   never "Older entry: worded by the person". One line per task: its edits after the task's name, the knock-on note once. */
+function taskSummary(mine, docs, E) {
+  const add = mine.find(x => x.op === 'add');
+  if (add) return 'Created work item ' + C.editText(add, docs, E).replace(/^Added /, '');
+  const label = (mine[0] && mine[0].label) || 'a task';
+  const pre = '“' + label + '”: ', KNOCK = ' (knock-on: it waits on the moved work)';
+  const knock = mine.some(x => x.knock);
+  const parts = mine.map(x => { let t = C.editText(x, docs, E); if (t.startsWith(pre)) t = t.slice(pre.length); return t.endsWith(KNOCK) ? t.slice(0, -KNOCK.length) : t; });
+  return 'Updated work item “' + label + '”: ' + parts.join('; ') + (knock ? KNOCK : '');
+}
+
 /* Apply: write every edit through the doc store, two Saved plans, the log entry, notifications. */
 async function applyChange(store, wsId, docs, change, actor, today) {
   const E = engine();
@@ -105,7 +118,7 @@ async function applyChange(store, wsId, docs, change, actor, today) {
     if (e.type !== 'workItem') continue;
     if (e.op === 'remove') {
       await store.deleteDoc(wsId, 'workItem', e.id);
-      log.push({ ref: 'workItem:' + e.id, action: 'delete', summary: C.editText(e, docs, E) + tag });
+      log.push({ ref: 'workItem:' + e.id, action: 'delete', summary: 'Deleted work item “' + (e.label || 'a task') + '”' + tag });
     }
   }
   const written = new Set();
@@ -116,7 +129,7 @@ async function applyChange(store, wsId, docs, change, actor, today) {
     if (!data) continue;
     await store.putDoc(wsId, 'workItem', e.id, data);
     const mine = change.edits.filter(x => x.type === 'workItem' && x.id === e.id);
-    log.push({ ref: 'workItem:' + e.id, action: e.op === 'add' ? 'create' : 'update', summary: mine.map(x => C.editText(x, docs, E)).join('; ') + tag });
+    log.push({ ref: 'workItem:' + e.id, action: e.op === 'add' ? 'create' : 'update', summary: taskSummary(mine, docs, E) + tag });
   }
   /* project: deadline/budget edits plus the two Saved plans, in one save */
   const pAfter = getDoc(after, 'project', change.projectId) || project;
@@ -130,7 +143,7 @@ async function applyChange(store, wsId, docs, change, actor, today) {
     proj.baselines.splice(i, 1);
   }
   await store.putDoc(wsId, 'project', change.projectId, proj);
-  change.edits.filter(e => e.type === 'project').forEach(e => log.push({ ref: 'project:' + change.projectId, action: 'update', summary: C.editText(e, docs, E) + tag }));
+  change.edits.filter(e => e.type === 'project').forEach(e => log.push({ ref: 'project:' + change.projectId, action: 'update', summary: `Updated project “${project.name}”: ` + C.editText(e, docs, E) + tag }));
   log.push({ ref: 'project:' + change.projectId, action: 'baseline', summary: `Saved the plan “${blBefore.label}” and “${blAfter.label}” (automatic, plan change)` });
   const afterDocs = Object.assign({}, after, { project: (after.project || []).map(d => (d.id === change.projectId ? { id: d.id, data: proj } : d)) });
   const doc = Object.assign({}, change, {
@@ -150,7 +163,7 @@ async function applyChange(store, wsId, docs, change, actor, today) {
     await store.putDoc(wsId, 'planChange', lid, trimmed(entry));
     linked.push({ projectId: x.projectId, changeId: lid });
     const moved = (entry.knockOn || []).slice(0, 3).map(k => `“${k.title}” ${E.fmtDay(k.from)} → ${E.fmtDay(k.to)}`).join('; ');
-    log.push({ ref: 'project:' + x.projectId, action: 'update', summary: `Knock-on from the plan change “${change.title}” on ${project.name}: ${moved || 'expected dates move'}`.slice(0, 300) });
+    log.push({ ref: 'project:' + x.projectId, action: 'update', summary: `Updated project “${x.name}”: Knock-on from the plan change “${change.title}” on ${project.name}: ${moved || 'expected dates move'}`.slice(0, 300) });
     log.push({ ref: 'planChange:' + lid, action: 'apply', summary: `Recorded the knock-on of “${change.title}” (${project.name}) in ${x.name}’s plan changes`.slice(0, 300) });
     if (x.owner) await notify(store, wsId, docs, [x.owner], actor, `A plan change on ${project.name} moves ${x.taskCount === 1 ? 'a task' : (x.taskCount || x.tasks.length) + ' tasks'} in ${x.name}: “${change.title}”.`, 'project:' + x.projectId, at);
   }

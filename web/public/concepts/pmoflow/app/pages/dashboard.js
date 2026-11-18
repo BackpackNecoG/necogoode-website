@@ -6,6 +6,7 @@ import { esc, fmt, link, av, pname, toast } from '../ui.js';
 import { today, projectStats, rag, ragBadge, RAG_RULE, rerender, gateInfo, financials, money,
   earnedValue, fmtIdx, idxCls, projectItems, truthOf, summaryPill, summaryOf, blockingInfo, evFlagsHTML, eng, launchLeft } from './project.js';
 import { byProgram, workloadList, burnOrNote, likelyResolved } from './portfolio.js';
+import { pointNav } from './changes.js';
 
 const KEY = 'pmoflow.dashboard';
 const ALL = 'all';
@@ -175,6 +176,7 @@ function renderPage() {
 }
 
 export function bind(root) {
+  pointNav();   /* R15 (M3 #4): Launch and Testing open the project you were working in */
   const on = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', e => { e.preventDefault(); fn(el); }));
   on('[data-adv-on]', () => store.setAdvanced(true));
   const move = (id, d) => update(l => { const i = l.widgets.indexOf(id), k = i + d; if (i < 0 || k < 0 || k >= l.widgets.length) return; l.widgets.splice(i, 1); l.widgets.splice(k, 0, id); });

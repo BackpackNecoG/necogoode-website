@@ -930,3 +930,20 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 }
 .pmo-rep-rangeerr{display:block;flex:1 1 100%;color:var(--late);font-size:12.5px;font-weight:600;margin-top:4px}
 .pmo-rep-rangeerr[hidden]{display:none}
+
+/* R15 (M3 #3): the owners group (one "Choose owners" button with the tasks it covers) and the owner picker */
+.pmo-own-grp{border-top:1px solid #f1f2f5}
+.pmo-who-list .pmo-own-grp:first-child{border-top:0}
+.pmo-own-btn{width:100%;background:none;border:0;border-radius:8px;font:inherit;text-align:left;cursor:pointer;border-top:0}
+.pmo-own-btn:hover,.pmo-own-btn:focus-visible{background:#f7f8fb}
+.pmo-own-go{margin-left:auto;font-size:12.5px;font-weight:600;color:var(--accent);white-space:nowrap}
+.pmo-own-sub{margin:0 0 6px 38px;border-left:2px solid #eef0f4;padding-left:8px}
+.pmo-own-sub .pmo-who-row{min-height:40px;padding:6px 2px}
+.pmo-own-sub .pmo-who-row:first-child{border-top:0}
+.pmo-own-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.pmo-own-item{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:8px 0;border-top:1px solid #f1f2f5}
+.pmo-own-item:first-child{border-top:0}
+.pmo-own-t{display:flex;flex-direction:column;min-width:0;flex:1 1 200px}
+.pmo-own-t b{overflow-wrap:anywhere}
+.pmo-own-item select{flex:1 1 200px;max-width:100%;min-height:36px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;font:inherit}
+.pmo-confirm-open{margin:8px 0 0;padding-left:20px}

@@ -825,6 +825,65 @@ test('R14 Jordan 7: Visio decisions are choices (grouped shapes included); nothi
   fs.writeFileSync('/tmp/pmo-design/r14-jordan-decision.vsdx', vsdxJordanDecision());
 });
 
+/* ---------- R15 M2: the R14 reviewers' repros (market-review/r14 expert-bpm.md, karen.md) ---------- */
+const FIX = f => fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8');
+/* BPM expert (R14) top 1: "the auto-approve Yes branch still flows into Credit Manager review"; step 9 lost its verb */
+test('R15 BPM-1: an auto-approve path ends there; "go to step 5" is just carrying on; step 9 keeps its verb', () => {
+  const r = I.parseSop(FIX('r15-credit-sop.txt'));
+  const t = tops(r);
+  const auto = t.find(n => n.type === 'decision' && /50,000 or less/.test(n.title));
+  assert.ok(auto, t.map(n => n.type + ':' + n.title).join(' | '));
+  const yes = auto.branches.find(b => b.label === 'Yes');
+  assert.deepEqual(yes.nodes.map(n => [n.type, n.title, n.ownerRole || '']), [['step', 'Update the limit in the ERP', 'AR Specialist'], ['end', 'Done: approved automatically', '']]);
+  assert.equal(yes.goto, undefined, 'the auto-approved path never flows on into the review');
+  const no = auto.branches.find(b => b.label === 'No');
+  assert.ok(!no.nodes.length && no.goto == null, '"Otherwise, go to step 5" is the next step: no jump at all: ' + JSON.stringify(no));
+  assert.deepEqual(auto.threshold, { subject: 'requested limit', op: '<', amount: 50000, compound: true }, 'two conditions: the No path is not "over $50,000"');
+  /* RACI (BPM 5): the Controller is Accountable on the over-$250,000 path */
+  const big = t.find(n => n.type === 'decision' && /250,000/.test(n.title));
+  assert.deepEqual([big.branches[0].nodes[0].title, big.branches[0].nodes[0].raci], ['Sign off before the limit is changed', { a: 'Controller (Sam Wu)' }]);
+  const rev = t.find(n => n.ownerRole === 'Credit Manager' && n.type === 'step');
+  assert.equal(rev.title, 'Review the request and recommend approve or reject');
+  const last = t[t.length - 1];
+  assert.equal(last.title, 'Update the credit limit in the ERP and notify the sales rep and the customer');
+  assert.deepEqual(last.raci && last.raci.i, ['Sales rep', 'Customer']);
+  /* the reject path still stops */
+  const rej = t.find(n => n.type === 'decision' && /^Rejected\?$/.test(n.title));
+  assert.equal(rej.branches[0].nodes[rej.branches[0].nodes.length - 1].type, 'end');
+  /* "stop" and "reject" lines end their path too */
+  const s2 = I.parseSop(`1. Buyer checks the quote.
+2. If the quote is incomplete, the buyer rejects the request.
+3. If the vendor is on the blocked list, stop.
+4. Buyer raises the purchase order.`);
+  const ds = tops(s2).filter(n => n.type === 'decision');
+  assert.deepEqual(ds.map(d => d.branches[0].nodes.map(n => n.type)), [['step', 'end'], ['end']]);
+});
+
+/* Karen (R14) 9 / new finding: the duplicate COI; "AP verifies the bank letter…" was a note on a Vendor step; routing
+   numbers, tax ID, bank account and credit limit became setup tasks although they are collected for each vendor */
+test('R15 Karen: "(COI)" is one item; "AP verifies…" is an AP step; per-vendor fields are collected each run', () => {
+  const r = I.parseSop(FIX('r15-vendor-sop.txt'));
+  const names = r.newData.map(x => x.name);
+  assert.deepEqual(names.filter(n => /insurance|coi/i.test(n)), ['Certificate of insurance'], names.join(', '));
+  const ln = r.lines.find(l => l.num === 4);
+  const four = ln.nodes.map(id => walk(r.nodes).find(n => n.id === id));
+  assert.deepEqual(four.map(n => n.ownerRole), ['Vendor', 'AP']);
+  assert.equal(four[1].title, 'Verify the bank letter by calling the bank at a number we look up ourselves, not the number on the letter');
+  assert.ok(!/AP verifies/.test(four[0].note || ''), 'no longer a note on the Vendor step');
+  assert.deepEqual(four[1].touches, ['AP']);
+  const by = n => r.newData.find(x => x.name === n) || {};
+  ['W-9', 'Certificate of insurance', 'Bank letter', 'Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].forEach(n => assert.equal(by(n).perRun, true, n + ' is collected each run: ' + JSON.stringify(by(n))));
+  assert.ok(!by('Supplier list').perRun && !by('Vendor request form').perRun, 'a shared list and the request form are not per run');
+  const spend = tops(r).find(n => n.type === 'decision');
+  assert.deepEqual(spend.branches[1].nodes.map(n => [n.title, n.ownerRole]), [['Approve', 'Purchasing manager']], '"Purchasing manager approval is enough" is the Purchasing manager approving');
+  assert.equal(r.linesText, '9 lines → 11 steps, 1 choice');
+});
+
+test('R15: thresholds written "$50,000 or less" / "$1M or more"', () => {
+  assert.deepEqual(I.thresholdOf('Requested limit is $50,000 or less?'), { subject: 'requested limit', op: '<', amount: 50000 });
+  assert.deepEqual(I.thresholdOf('Spend $1M or more?'), { subject: 'spend', op: '>', amount: 1000000 });
+});
+
 test('the web copy is byte-identical', () => {
   const a = fs.readFileSync(path.join(__dirname, '../../api/shared/pmoflow-import.js'));
   const b = fs.readFileSync(path.join(__dirname, '../../web/public/concepts/pmoflow/app/import.js'));

@@ -33,10 +33,18 @@ async function call(method, p, body, query) {
   await fn(ctx, req);
   return ctx.res;
 }
-async function newWs() {
+/* R15 (M1 #3): the sponsor is STORED (project.sponsor), never computed. The routing tests below were written when the
+   sponsor fell back to the process owner (Maya Chen); they now store that sponsor explicitly, so their expectations are
+   unchanged. `opts.noSponsor` keeps the seed as it is (no sponsor: an Admin decides). */
+const SPONSOR = 'mc';
+async function newWs(opts) {
   const hash = 'test-chg-' + rnd();
   const ws = await store.createWorkspace(hash, { id: 'tstchg' + rnd() + rnd() });
   created.push([ws.id, hash]);
+  if (!(opts && opts.noSponsor)) {
+    const st = await store.getState(ws.id);
+    for (const p of st.docs.project) if (p.data.owner !== SPONSOR) await store.putDoc(ws.id, 'project', p.id, Object.assign({}, p.data, { sponsor: SPONSOR }));
+  }
   return ws;
 }
 test.after(async () => { for (const [id, hash] of created) await store.deleteWorkspace(id, hash).catch(() => {}); });
@@ -46,7 +54,9 @@ const task = (docs, id) => (docs.workItem.find(d => d.id === id) || {}).data;
 const proj = docs => docs.project.find(d => d.id === PRJ).data;
 /* the server's "today" is its own UTC day (the client's when sent): use the same day for engine expectations */
 const TODAY = new Date().toISOString().slice(0, 10);
-const seedDocs = () => seed(TODAY).docs;
+const seedDocs = opts => { const d = seed(TODAY).docs; if (!(opts && opts.noSponsor)) d.project.forEach(p => { if (p.data.owner !== SPONSOR) p.data.sponsor = SPONSOR; }); return d; };
+/* a workspace role for a person (Admin › People): settings.roles */
+const setRole = (docs, id, role) => { const w = docs.workspace.find(x => x.id === 'settings'); w.data.roles = Object.assign({}, w.data.roles, { [id]: role }); };
 const preview = (docs, edits, extra) => {
   const { change, errors } = C.buildChange(Object.assign({ projectId: PRJ, reason: 'Test', edits }, extra || {}), docs);
   assert.deepEqual(errors, []);
@@ -508,16 +518,18 @@ test('R13 #3: the requester is never an approver; their roles pass to the sponso
   assert.equal(n2.within, false);
   assert.ok(!people(n2.approvers).includes('ta'));
   assert.deepEqual(people(n2.approvers), ['mc']);
-  /* the sponsor asks to move the deadline: the PM approves, and the project's next default approver stands in as sponsor */
-  const r3 = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs).target, 5) }]);
-  const n3 = C.needsApproval(r3.change, r3.im, docs, { requester: 'mc' });
+  /* the sponsor asks to move the deadline: the PM approves, and (R15: never a computed default approver) an Admin who
+     did not ask and is not the PM stands in for the sponsor. Dave Ortiz is made an Admin for this. */
+  const d3s = JSON.parse(JSON.stringify(docs)); setRole(d3s, 'do', 'admin');
+  const r3 = preview(d3s, [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(d3s).target, 5) }]);
+  const n3 = C.needsApproval(r3.change, r3.im, d3s, { requester: 'mc' });
   assert.ok(!people(n3.approvers).includes('mc'));
   assert.equal(n3.approvers[0].person, 'ta');
-  assert.equal(n3.approvers.length, 2, 'a stand-in sponsor: ' + JSON.stringify(n3.approvers));
-  assert.ok(rolesOf(n3.approvers[1]).includes('sponsor'));
-  /* nobody but the requester could approve: blocked, with a reason */
+  assert.equal(n3.approvers.length, 2, 'a stand-in for the sponsor: ' + JSON.stringify(n3.approvers));
+  assert.deepEqual([n3.approvers[1].person, rolesOf(n3.approvers[1]).join()], ['do', 'admin']);
+  /* nobody but the requester could approve (no sponsor, and the only other Admin is demoted): blocked, with a reason */
   const d4 = JSON.parse(JSON.stringify(docs));
-  d4.process.forEach(p => { p.data.owner = 'ta'; });
+  d4.project.forEach(p => { delete p.data.sponsor; }); setRole(d4, 'mc', 'editor');
   const r4 = preview(d4, [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(d4).target, 5) }]);
   const n4 = C.needsApproval(r4.change, r4.im, d4, { requester: 'ta' });
   assert.deepEqual(n4.approvers, []);
@@ -556,7 +568,11 @@ test('R13 #3 routes: a PM’s deadline-breach request waits for the sponsor; the
 test('R13 #3 routes: a change only the requester could approve is refused with the reason', async () => {
   const ws = await newWs();
   const docs0 = await docsOf(ws.id);
-  for (const p of docs0.process) await store.putDoc(ws.id, 'process', p.id, Object.assign({}, p.data, { owner: 'ta' }));
+  /* R15: no sponsor stored and no other Admin (Maya is made an Editor): only Tom could approve */
+  const p0 = docs0.project.find(p => p.id === PRJ).data; const st = Object.assign({}, p0); delete st.sponsor;
+  await store.putDoc(ws.id, 'project', PRJ, st);
+  const set = docs0.workspace.find(w => w.id === 'settings').data;
+  await store.putDoc(ws.id, 'workspace', 'settings', Object.assign({}, set, { roles: Object.assign({}, set.roles, { mc: 'editor' }) }));
   const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Client moved go-live',
     edits: [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs0).target, 5) }] } });
   assert.equal(r.status, 409); assert.match(r.body.error, /sponsor/);
@@ -698,4 +714,150 @@ test('R14 (L4): a sync-filed change names the tool and issue; a sponsor equal to
   assert.ok(rows[1].includes('Jira VOM-7 (ana@northwind.example)'), JSON.stringify(rows[1]));
   const d2 = JSON.parse(JSON.stringify(docs)); proj(d2).sponsor = proj(d2).owner;
   assert.notEqual(C.sponsorOf(d2, PRJ), proj(d2).owner);
+});
+
+/* ================= R15 (stream M3) ================= */
+/* PMO R14 re-test 9 / Jordan disagreement 5: re-plan by real scheduling. Every open, re-dated task respects its
+   finish-to-start predecessors (it starts after the predecessor is due and keeps its length), in-progress tasks keep their
+   starts, and nothing the impact screen lists as "not late" is late once the change is applied. */
+const fsBroken = (docs, ids) => {
+  const out = [];
+  const all = docs.workItem.map(d => d.data);
+  ids.forEach(id => {
+    const w = all.find(x => x.id === id); if (!w || w.status === 'done') return;
+    (w.deps || []).forEach(d => {
+      const pid = typeof d === 'string' ? d : d && d.id; const type = typeof d === 'object' && d && d.type ? d.type : 'FS';
+      const p = all.find(x => x.id === pid);
+      if (!p || p.status === 'done' || type !== 'FS') return;
+      if (!(w.due > p.due)) out.push(`${id} due ${w.due} is not after ${pid} due ${p.due}`);
+      if (w.status === 'idle' && !(w.start > p.due)) out.push(`${id} starts ${w.start}, not after ${pid} due ${p.due}`);
+    });
+  });
+  return out;
+};
+const replan = (docs, edits) => {
+  const { change } = preview(docs, edits);
+  const ch = C.withKnockOn(change, docs, TODAY, { engine: E });
+  const after = C.applyToDocs(docs, ch, '2099-01-01T00:00:00.000Z');
+  return { ch, after, im: C.impact(docs, after, PRJ, TODAY, { change: ch, engine: E }) };
+};
+
+test('R15 M3 #1: a knock-on keeps finish-to-start dependencies and durations; in-progress tasks keep their starts', () => {
+  const docs = seedDocs();
+  const w6 = task(docs, 'W6');
+  const { ch, after } = replan(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'start', to: addBiz(w6.start, 25) }, { op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(w6.due, 25) }]);
+  /* W7 waits on W6, W10 waits on W6 and W8: none starts before (or is due before) the work it waits on */
+  assert.deepEqual(fsBroken(after, ['W7', 'W8', 'W10']), []);
+  /* not started: start and due move by the same number of business days (the length is kept) */
+  ['W7', 'W10'].forEach(id => {
+    const b = task(docs, id), a = task(after, id);
+    assert.equal(E.businessDaysBetween(a.start, a.due), E.businessDaysBetween(b.start, b.due), id + ' keeps its length');
+  });
+  /* W8 is in progress: its start never moves */
+  assert.equal(task(docs, 'W8').status, 'prog');
+  assert.equal(task(after, 'W8').start, task(docs, 'W8').start, 'the in-progress task keeps its start');
+  assert.ok(!ch.edits.some(e => e.knock && e.id === 'W8' && e.field === 'start'), 'no start edit for the in-progress task');
+  /* every knock-on date is a business day */
+  ch.edits.filter(e => e.knock).forEach(e => assert.ok(E.isBusinessDay(e.to, after), e.id + ' ' + e.field + ' ' + e.to));
+});
+
+test('R15 M3 #1: after approval no task the impact screen said would not be late shows as late', async () => {
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const w6 = task(docs0, 'W6');
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'Bank portal vendor delayed',
+    edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'start', to: addBiz(w6.start, 25) }, { op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(w6.due, 25) }] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.change;
+  const im = c.impact;
+  const notLate = (im.knockOn || []).filter(k => !k.lateAfter).map(k => k.id);
+  assert.ok(notLate.includes('W7') && notLate.includes('W10'), 'the screen says W7 and W10 are not late: ' + JSON.stringify(im.knockOn.map(k => [k.id, k.lateAfter])));
+  const endsLate = new Set((im.endsLate || []).map(x => x.id));
+  for (const a of c.approvers) { const d = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: a.person, decision: 'approve', stepUp: STEP() }); assert.equal(d.status, 200, JSON.stringify(d.body)); }
+  const docs = await docsOf(ws.id);
+  assert.equal(C.changesOf(docs, PRJ).find(x => x.id === c.id).status, 'applied');
+  const fa = E.forecastAll(docs, TODAY);
+  (im.knockOn || []).filter(k => !k.lateAfter && !endsLate.has(k.id)).forEach(k => assert.ok(!fa[k.id].late, `${k.id} (“${k.title}”) shows late after approval: due ${task(docs, k.id).due}, expected ${fa[k.id].forecast}`));
+  assert.deepEqual(fsBroken(docs, ['W7', 'W8', 'W10']), []);
+  assert.equal(task(docs, 'W8').start, task(docs0, 'W8').start, 'in-progress W8 keeps its start');
+});
+
+test('R15 M3 #1 (Jordan 5): a 10-business-day shift moves the start and the due date by exactly 10 business days', () => {
+  const docs = seedDocs();
+  ['W7', 'W10', 'W11'].forEach(id => {
+    const w = task(docs, id);
+    if (!w || w.status === 'done') return;
+    const { ch, after } = replan(docs, [{ op: 'set', type: 'workItem', id, field: 'start', to: addBiz(w.start, 10) }, { op: 'set', type: 'workItem', id, field: 'due', to: addBiz(w.due, 10) }]);
+    const a = task(after, id);
+    assert.equal(E.businessDaysBetween(w.start, a.start), 10, id + ' start ' + w.start + ' → ' + a.start);
+    assert.equal(E.businessDaysBetween(w.due, a.due), 10, id + ' due ' + w.due + ' → ' + a.due);
+    assert.ok(!ch.edits.some(e => e.knock && e.id === id), 'the knock-on never re-dates the task the person moved');
+  });
+});
+
+test('R15 M3 #5 (PMO disagreement 1): History entries a plan change writes are labelled as written by the system', async () => {
+  const admin = require(path.join(API, 'shared/pmoflow-routes-admin.js'));
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const w6 = task(docs0, 'W6');
+  /* dates (with knock-ons into another project), an owner, a new task, a removed task and the budget, in one change */
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'Re-plan',
+    edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(w6.due, 25) }, { op: 'set', type: 'workItem', id: 'W12', field: 'owner', to: 'ar' },
+      { op: 'add', type: 'workItem', id: 'wiR15a', data: { title: 'Call the bank', owner: 'dk', start: addBiz(TODAY, 1), due: addBiz(TODAY, 3), effortDays: 1 } },
+      { op: 'remove', type: 'workItem', id: 'W11' }, { op: 'set', type: 'project', id: PRJ, field: 'budget', to: 99000 }] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.change;
+  for (const a of c.approvers || []) { const d = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: a.person, decision: 'approve', stepUp: STEP() }); assert.equal(d.status, 200, JSON.stringify(d.body)); }
+  const evs = (await store.listEvents(ws, { limit: 200 })).filter(e => /plan change|Plan change|Knock-on|knock-on/.test(e.summary || ''));
+  assert.ok(evs.length >= 6, evs.map(e => e.summary).join(' | '));
+  const client = evs.filter(e => admin.summaryParts(e.summary, e.action).written !== 'server');
+  assert.deepEqual(client.map(e => e.action + ': ' + e.summary), [], 'no plan-change entry reads "Older entry: worded by the person"');
+});
+
+test('R15 M3 #2: the sponsor is the stored one; with none set, an Admin who did not ask decides (never a computed sponsor)', () => {
+  const docs = seedDocs({ noSponsor: true });
+  assert.equal(C.sponsorOf(docs, PRJ), null, 'no project.sponsor: nobody is the sponsor');
+  assert.equal(C.sponsorOf(docs, PRJ), E.sponsorOf(docs, PRJ), 'the change module and the engine report the same sponsor');
+  const r = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs).target, 5) }]);
+  const need = C.needsApproval(r.change, r.im, docs, { requester: 'lp' });
+  assert.deepEqual(need.approvers.map(a => [a.person, rolesOf(a).join()]), [['ta', 'pm'], ['mc', 'admin']]);
+  assert.equal(C.roleText(need.approvers[1], docs), 'Admin, as no sponsor is set');
+  assert.ok(need.reasons.some(x => /no sponsor is set, so an Admin approves/.test(x)), need.reasons.join(' | '));
+  const withSp = seedDocs();
+  assert.equal(C.sponsorOf(withSp, PRJ), 'mc'); assert.equal(E.sponsorOf(withSp, PRJ), 'mc');
+});
+
+test('R15 M3 #2: handing over the project manager role is a plan change the sponsor approves (never either PM)', async () => {
+  const docs = seedDocs();
+  /* the sponsor can't also become the PM */
+  const bad = C.buildChange({ projectId: PRJ, reason: 'Tom moves on', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'owner', to: 'mc' }] }, docs);
+  assert.ok(bad.errors.some(e => /Maya Chen is the sponsor/.test(e)), bad.errors.join(' | '));
+  const r = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'owner', to: 'lp' }]);
+  assert.deepEqual(r.change.kinds, ['pm']);
+  assert.equal(r.change.title, 'Hand the project manager role to Leo Park');
+  assert.equal(C.editText(r.change.edits[0], docs, E), 'Project manager Tom Alvarez → Leo Park');
+  assert.equal(r.im.pm.moved, true);
+  assert.match(r.im.sentence, /hands the project manager role from Tom Alvarez to Leo Park/);
+  const need = C.needsApproval(r.change, r.im, docs, { requester: 'ta' });
+  assert.equal(need.within, false);
+  assert.deepEqual(need.approvers.map(a => [a.person, rolesOf(a).join()]), [['mc', 'sponsor']]);
+  /* with no sponsor and the incoming PM as the only other Admin, nobody may decide: blocked */
+  const d2 = seedDocs({ noSponsor: true });
+  const r2 = preview(d2, [{ op: 'set', type: 'project', id: PRJ, field: 'owner', to: 'mc' }]);
+  const n2 = C.needsApproval(r2.change, r2.im, d2, { requester: 'ta' });
+  assert.deepEqual(n2.approvers, []); assert.match(n2.blocked, /sponsor/);
+  /* routes: proposed, the sponsor approves, the project's PM is the new one (both stay on the team), History says so */
+  const ws = await newWs();
+  const p = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Tom moves to the ERP program', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'owner', to: 'lp' }] } });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.equal(p.body.change.status, 'proposed');
+  assert.deepEqual(p.body.change.approvers.map(a => a.person), ['mc']);
+  const ok = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: 'mc', decision: 'approve', stepUp: STEP() });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.change.status, 'applied');
+  const after = proj(await docsOf(ws.id));
+  assert.equal(after.owner, 'lp'); assert.equal(after.sponsor, 'mc');
+  assert.ok(after.resources.includes('lp') && after.resources.includes('ta'));
+  const evs = await store.listEvents(ws, { limit: 60 });
+  assert.ok(evs.some(e => e.ref === 'project:' + PRJ && /Project manager Tom Alvarez → Leo Park/.test(e.summary)), 'History');
 });

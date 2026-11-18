@@ -2,7 +2,8 @@
    /project/:prj?mode=map|timeline|work
    Also exports small PMO helpers reused by home.js and portfolio.js. */
 import { store } from '../store.js';
-import { renderChangesSection, bindChangesSection, taskChangesHTML, openChangeWizard, ensureAssets as ensureChangeAssets, bindDayOff, dayOffText, daysOffSoonHTML } from './changes.js';
+import { renderChangesSection, bindChangesSection, taskChangesHTML, openChangeWizard, ensureAssets as ensureChangeAssets, bindDayOff, dayOffText, daysOffSoonHTML, rememberProject, pointNav } from './changes.js';
+export { pointNav };
 import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, bindComments, bindHistory, commentsPanel, historyPanel } from '../ui.js';
 
 /* ---------------------------------------------------------------- shared helpers */
@@ -146,7 +147,7 @@ function normTruth(t, j) {
     src: 'engine', k, label, sentence,
     /* R9 §1: `who` is the one ranked list (header, What's blocking, Who needs to act, Up next, home card) */
     who: (Array.isArray(t.who) ? t.who : Array.isArray(st.who) ? st.who : [])
-      .map(w => ({ person: personOf(w.person) || null, name: w.name || null, action: String(w.what || w.action || ''), why: String(w.why || ''), href: String(w.href || '/project/' + j.id), ref: w.ref || null,
+      .map(w => ({ person: personOf(w.person) || null, name: w.name || null, action: String(w.what || w.action || ''), why: String(w.why || ''), href: String(w.href || '/project/' + j.id), ref: w.ref || null, workId: w.workId || null,
         needsOwner: !!w.needsOwner || (!personOf(w.person) && /^Needs an owner/.test(String(w.name || ''))) }))
       .filter(w => w.action),
     /* R10 §2: "% done" is projectTruth.pctDone (EV ÷ budget), the same share earned value uses */
@@ -342,7 +343,9 @@ export const summaryHTML = (sm, cls) => `<div class="pmo-sum ${cls || ''}" data-
 export function whoActs(j, n) {
   if (!j || j.status === 'live') return [];
   const seen = new Set();
-  return truthOf(j).who.filter(x => { const k = x.person || x.name || x.action; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, n || 3);
+  /* R15 (M3 #3): a task the "Choose owners" row covers is not listed again on its own */
+  const t = truthOf(j), covered = ownersCovered(t);
+  return t.who.filter(x => { if (covered(x)) return false; const k = x.person || x.name || x.action; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, n || 3);
 }
 export const whoName = x => x.person ? pname(x.person) : (x.name && x.name !== '—' ? x.name : 'Nobody yet');
 const WHY_LBL = { confirm: 'Confirm', hold: 'Confirm', owner: 'Owners', blocker: 'Blocking', 'past-due': 'Late', delaying: 'Late', late: 'Late', deadline: 'Deadline', info: 'Information', problem: 'Problem', approval: 'Approval', test: 'Tests', plan: 'Plan' };
@@ -414,13 +417,62 @@ export function blockingHTML(j) {
   /* box who rows beyond the first 3 blocking items still belong to `who`: they go to the list, in who order */
   const overflow = inBox.filter(o => !bl.slice(0, 3).some(b => 'data:' + b.dataId === o.x.ref));
   const listed = rest.concat(overflow).sort((p, q) => p.i - q.i);
+  /* R15 (M3 #3, Karen): the "Choose owners for N tasks" row and the per-task "Needs an owner" rows are ONE group: the
+     row opens the owner picker, and the tasks it covers are listed inside it (each still its own `who` entry) */
+  const ownersO = listed.find(o => o.x.why === 'owner' && /^owners:/.test(o.x.ref || ''));
+  const ownerIds = new Set(ownersO ? (rawWho(t).find(x => x.ref === ownersO.x.ref) || {}).items || [] : []);
+  const subOf = o => { const id = o.x.workId || (/^work:/.test(o.x.ref || '') ? o.x.ref.slice(5) : null); return o.x.needsOwner && id && ownerIds.has(id); };
+  const subs = ownersO ? listed.filter(o => o !== ownersO && subOf(o)) : [];
+  if (subs.length) { const gone = new Set(subs); for (let k = listed.length - 1; k >= 0; k--) if (gone.has(listed[k])) listed.splice(k, 1); }
   const restTop = listed.slice(0, Math.max(0, 5 - shownInBox));
-  const row = o => whoRowHTML(o.x, o.i);
+  const row = o => o === ownersO ? ownersGroupHTML(j, o, subs) : whoRowHTML(o.x, o.i);
   return `<section class="card pmo-blocking ${bl.length || t.late ? 'has' : who.length ? 'calm' : 'clear'}" data-who-acts><h3>Who needs to act${who.length ? ` <span class="n" data-who-count>${who.length}</span>` : ''}</h3>
     ${bl.length ? `<div class="pmo-bl-box" data-whats-blocking><div class="pmo-bl-h">What’s blocking <span class="n" data-blocking-count>${B.count}</span>${B.holdsUp ? ` <span class="hint" data-holds-up="${B.holdsUp}">holds up ${plural(B.holdsUp, 'task')}</span>` : ''}</div>${boxLines.join('')}${bl.length > 3 ? `<div class="hint">+${bl.length - 3} more</div>` : ''}</div>` : ''}
     ${restTop.length ? `<div class="pmo-who-list">${restTop.map(row).join('')}</div>` : ''}
     ${!who.length ? '<div class="pmo-bl-none">✓ Nobody needs to act right now.</div>' : listed.length > restTop.length ? `<details class="pmo-who-more" data-who-more><summary>+${listed.length - restTop.length} more</summary><div class="pmo-who-list">${listed.slice(restTop.length).map(row).join('')}</div></details>` : ''}
     ${!t.total && who[0] && who[0].why === 'plan' ? `<div class="s" data-nowork>No tasks planned yet${isPM(j) ? ' — <button class="btn sm primary" data-suggest>✦ Suggest a plan</button>' : '.'}</div>` : ''}</section>`;
+}
+/* projectTruth's own `who` entries (with the engine's extra fields, e.g. the owners row's `items`) */
+const rawWho = t => { const r = t && t.raw; return (r && (Array.isArray(r.who) ? r.who : r.status && Array.isArray(r.status.who) ? r.status.who : [])) || []; };
+/* R15 (M3 #3): the per-task "Needs an owner" rows the owners row ("Choose owners for N tasks") covers */
+export function ownersCovered(t) {
+  const row = rawWho(t).find(x => x.why === 'owner' && /^owners:/.test(x.ref || ''));
+  const ids = new Set((row && row.items) || []);
+  return x => { const id = x.workId || (/^work:/.test(x.ref || '') ? x.ref.slice(5) : null); return !!(row && x.needsOwner && x.why !== 'owner' && id && ids.has(id)); };
+}
+/* R15 (M3 #3): the owners group: one button that opens the owner picker, with the per-task rows it covers inside */
+function ownersGroupHTML(j, o, subs) {
+  return `<div class="pmo-own-grp" data-owners-group>
+    <button type="button" class="pmo-who-row pmo-own-btn" data-pick-owners="${esc(j.id)}" data-who-row="${o.i}" data-who-why="owner"><span class="av pmo-av-none" aria-hidden="true">?</span>
+      <span class="pmo-who-b"><b data-who-name>${esc(whoName(o.x))}</b><span class="s">${esc(o.x.action)}</span></span><span class="pmo-why-tag why-owner">${esc(whyLabel('owner'))}</span><span class="pmo-own-go">Choose ›</span></button>
+    ${subs.length ? `<div class="pmo-own-sub" data-owners-sub>${subs.map(x => whoRowHTML(x.x, x.i)).join('')}</div>` : ''}</div>`;
+}
+/* R15 (M3 #3, Karen): "Choose owners for N tasks" opens this picker: every open task with no owner, one choice each
+   (people who hold the task's role first). The project manager assigns; others see who does. */
+export async function pickOwners(j) {
+  const t = truthOf(j);
+  const row = rawWho(t).find(x => x.ref === 'owners:' + j.id);
+  const ids = row && Array.isArray(row.items) ? row.items : [];
+  const tasks = ids.map(id => store.get('workItem', id)).filter(w => w && w.status !== 'done' && !(w.owner && store.person(w.owner)));
+  if (!tasks.length) { toast('Every open task has an owner.'); return; }
+  const pm = isPM(j);
+  const opts = w => {
+    const role = String(w.ownerRole || '').trim().toLowerCase();
+    const ppl = store.state.people.slice().sort((a, b) => (role && String(b.role || '').toLowerCase().includes(role) ? 1 : 0) - (role && String(a.role || '').toLowerCase().includes(role) ? 1 : 0) || a.name.localeCompare(b.name));
+    return `<option value="">${esc(w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner')}</option>` + ppl.map(p => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.role)}</option>`).join('');
+  };
+  const body = `<p class="hint" style="margin:0">${pm ? `Pick who does each task. ${plural(tasks.length, 'task')} ${tasks.length === 1 ? 'has' : 'have'} no owner yet.` : `Only ${esc(pname(j.owner))} (project manager) assigns owners. These tasks have none yet:`}</p>
+    <div class="pmo-own-list" data-owner-picker>${tasks.map(w => `<div class="pmo-own-item" data-owner-task="${esc(w.id)}"><div class="pmo-own-t"><b>${esc(w.title)}</b><span class="hint">${esc(workStepTitle(w))} · due ${esc(fmt(w.due))}</span></div>
+      ${pm ? `<select name="own_${esc(w.id)}" aria-label="Owner of ${esc(w.title)}">${opts(w)}</select>` : `<span class="pmo-noowner">${esc(ownerText(w))}</span>`}</div>`).join('')}</div>`;
+  const r = await modal({ title: `Choose owners for ${plural(tasks.length, 'task')}`, body, actions: pm ? [{ id: 'save', label: 'Save owners', primary: true }] : [] });
+  if (r.action !== 'save') return;
+  const picks = tasks.map(w => [w, r.form['own_' + w.id]]).filter(([, v]) => v && store.person(v));
+  if (!picks.length) { toast('No owner picked'); return; }
+  let ok = 0;
+  for (const [w, v] of picks) {
+    try { await psave('workItem', w.id, Object.assign({}, store.get('workItem', w.id) || w, { owner: v, updatedAt: stamp() }), `Assigned “${w.title}” to ${pname(v)}`); ok++; } catch (e) { /* psave said why */ }
+  }
+  if (ok) toast(`${plural(ok, 'owner')} saved`);
 }
 /* My open tasks on a project, each with a big one-tap ✓. */
 export function myTasksHTML(j, fc) {
@@ -473,6 +525,16 @@ export function taskFlagsHTML(w, j) {
 /* R14 (PMO-1): someone other than the doer confirms a Done (the server stamps confirmedAt and refuses the doer) */
 export async function confirmDone(id) {
   const w = store.get('workItem', id); if (!w || w.status !== 'done') return;
+  /* R15 (M1 #8, PMO re-test 1): the confirmer sees the work it waits on that is still open before confirming */
+  const uc = eng('unconfirmedDone', null, docs(), w);
+  const open = uc && Array.isArray(uc.open) ? uc.open : [];
+  if (open.length) {
+    const r = await modal({ title: 'Confirm it’s done?', body: `<div data-confirm-open><p style="margin:0">${esc(uc.confirmText || `“${w.title}” waits on work that is still open.`)}</p>
+      <ul class="pmo-confirm-open">${open.slice(0, 6).map(o => `<li data-confirm-open-item="${esc(o.id)}">“${esc(o.title || 'a task')}”</li>`).join('')}</ul>
+      <p class="hint" style="margin:6px 0 0">Confirming counts “${esc(w.title)}” as finished even though ${open.length === 1 ? 'that task is' : 'those tasks are'} not done yet.</p></div>`,
+      actions: [{ id: 'confirm', label: 'Confirm anyway', primary: true }] });
+    if (r.action !== 'confirm') { rerender(); return; }
+  }
   try { await psave('workItem', id, Object.assign({}, w, { confirmedBy: store.state.me }), `Confirmed “${w.title}” is done`); toast(`Confirmed: “${w.title}”`); }
   catch (e) { /* psave said why */ }
 }
@@ -581,16 +643,24 @@ export function deadlineBreach(j, next) {
   if (was && was > j.target && !(now > was)) return null;
   return { before: was, after: now, target: j.target };
 }
+/* R15 (M1 #3): who approves a deadline, budget or project-manager change, in words: the stored sponsor, else an Admin
+   who did not ask (E.deadlineApprover through PMOChange.deciderOf). Never a computed "default approver". */
+export function deciderHTML(j) {
+  const C = window.PMOChange;
+  const d = C && C.deciderOf ? C.deciderOf(docs(), j, store.state.me, [], window.PMOEngine) : null;
+  if (d && d.person && d.role === 'admin') return `an Admin, <b>${esc(pname(d.person))}</b> (no sponsor is set),`;
+  if (d && d.person) return `the sponsor, <b>${esc(pname(d.person))}</b>,`;
+  return 'the sponsor (ask an Admin to set one)';
+}
 /* "This needs Change the plan": what happened, who approves, one button that opens the wizard with the same dates */
 export async function offerChangePlan(j, w, serverMsg, breach, many) {
   if (!j) { toast(serverMsg || 'Use Change the plan.'); return; }
   if (many && many.breach) breach = { before: many.breach.finishBefore, after: many.breach.finishAfter, target: many.breach.target };
   try { await ensureChangeAssets(); } catch (e) { /* the wizard says so itself */ }
-  const sp = window.PMOChange && window.PMOChange.sponsorOf ? window.PMOChange.sponsorOf(docs(), j, [store.state.me]) : null;
   const what = breach && (w || many) ? `${many ? esc(many.what || 'These moves') : `Moving “${esc(w.title)}”`} would move the expected finish from <b>${esc(fmt(breach.before))}</b> to <b>${esc(fmt(breach.after))}</b>, past the <b>${esc(fmt(breach.target))}</b> deadline.`
     : esc(serverMsg || 'This change would move the expected finish past the deadline.');
   const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal><p style="margin:0">${what}</p>
-      <p class="hint" style="margin:8px 0 0">Nothing was saved. A change that moves the finish past the deadline goes through <b>Change the plan</b>, so ${sp ? `the sponsor, <b>${esc(pname(sp))}</b>,` : 'the sponsor'} can approve it. You fill in why; we show the impact first.</p></div>`,
+      <p class="hint" style="margin:8px 0 0">Nothing was saved. A change that moves the finish past the deadline goes through <b>Change the plan</b>, so ${deciderHTML(j)} can approve it. You fill in why; we show the impact first.</p></div>`,
     actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
   if (r.action !== 'change') return;
   const cur = w && w.id ? store.get('workItem', w.id) : null;
@@ -882,6 +952,18 @@ function nodeHTML(n, pid, prj, idx, dp) {
       <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diff}${trig ? '' : av(n.owner)}</div></div>
     <div class="nb">${body}</div></div>`;
 }
+/* R15 (M2 #1): a branch that jumps forward reads "↷ Skips to “step”"; only a real loop reads "↩ Goes back to “step”"
+   (the same words as the process map) */
+function nodeOrder(pid) {
+  const out = []; const walk = ns => (ns || []).forEach(x => { if (!x) return; out.push(x); (x.branches || []).forEach(b => walk(b && b.nodes)); });
+  walk((store.get('process', pid) || {}).tobe); return out;
+}
+function gotoFwd(pid, fromId, toId) { const ids = nodeOrder(pid).map(x => x.id); return ids.indexOf(toId) > ids.indexOf(fromId); }
+function gotoText(pid, fromId, toId) {
+  const t = nodeOrder(pid).find(x => x.id === toId);
+  const name = t ? '“' + esc(t.title || 'start') + '”' : 'a missing step';
+  return gotoFwd(pid, fromId, toId) ? '↷ Skips to ' + name : '↩ Goes back to ' + name;
+}
 function flowHTML(nodes, pid, prj, dp, counter) {
   counter = counter || { n: 0 };
   const parts = []; let run = [];
@@ -904,7 +986,7 @@ function flowHTML(nodes, pid, prj, dp, counter) {
       const gchip = gk === 'new' ? ' <span class="chip diff-new" data-gw-diff="new">NEW</span>' : gk === 'changed' ? ' <span class="chip diff-changed" data-gw-diff="changed">CHANGED</span>' : '';
       parts.push(`<div class="decision" data-gateway="${esc(n.id)}"><div class="diamond">${par ? '⫴' : '◆'} ${esc(n.title)}${par ? ' <small style="font-weight:500">(all run)</small>' : ''}${gchip}</div><div class="conn"></div>
         <div class="branches" style="--bl:${100 / (Math.max(1, br.length) * 2)}%;--br:${100 / (Math.max(1, br.length) * 2)}%">${br.map(b => `<div class="branch"><span class="blabel">${esc(b.label)}</span>
-          ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, pid, prj, dp, counter)}</div>` : `<div class="passthru">${b.goto ? '↩ Loop back' : 'Continue → next step'}</div>`}</div>`).join('')}</div></div>`);
+          ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, pid, prj, dp, counter)}</div>` : `<div class="passthru" ${b.goto ? `data-goto-dir="${gotoFwd(pid, n.id, b.goto) ? 'forward' : 'back'}"` : ''}>${b.goto ? gotoText(pid, n.id, b.goto) : 'Continue → next step'}</div>`}</div>`).join('')}</div></div>`);
     } else {
       const idx = (n.type === 'trigger' || n.type === 'end') ? '' : (++counter.n);
       parts.push(nodeHTML(n, pid, prj, idx, dp));
@@ -1279,7 +1361,16 @@ function bindTimeline(root, j, sc, D) {
       const w0 = bar.getBoundingClientRect().width;
       try { bar.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
       let tip = null, lastDd = null, confNote = '';
-      const dates = () => resize ? [s0, maxDate([s0, addDays(w.due, dd)])] : [addDays(s0, dd), addDays(w.due, dd)];
+      /* R15: a bar never lands on a day off (the server refuses a start or due date on one): a drag that ends on a weekend
+         or holiday snaps to the nearest business day in the drag direction, and a moved bar keeps its length in business days */
+      const isOff = d => !!(E() && E().isBusinessDay && !E().isBusinessDay(d, docs()));
+      const snap = (d, dir) => !isOff(d) ? d : dir < 0 ? addBiz(addBiz(d, 0), -1) : addBiz(d, 0);
+      const bizLen = E() && E().businessDaysBetween ? E().businessDaysBetween(s0, w.due) : null;
+      const dates = () => {
+        if (resize) return [s0, maxDate([s0, snap(addDays(w.due, dd), dd)])];
+        const a = snap(addDays(s0, dd), dd);
+        return [a, bizLen != null && bizLen >= 0 ? addBiz(a, bizLen) : addDays(w.due, dd)];
+      };
       const move = ev => {
         const dx = ev.clientX - x0;
         if (!moved && Math.abs(dx) < 4) return;
@@ -1769,7 +1860,10 @@ async function moveToSprint(j, id, spId) {
   while (isWeekend(due) && due < sp.end) due = addDays(due, 1);
   const dd = dayDiff(due, w.due);
   if (!dd && w.sprintId === sp.id) { rerender(); return; }
-  const next = Object.assign({}, w, { sprintId: sp.id, start: addDays(s0, dd), due, updatedAt: stamp() });
+  /* R15: same length in business days, and the start never lands on a day off (the server refuses one) */
+  const len = E() && E().businessDaysBetween ? E().businessDaysBetween(s0, w.due) : null;
+  const start = len != null && len >= 0 ? addBiz(due, -len) : addDays(s0, dd);
+  const next = Object.assign({}, w, { sprintId: sp.id, start, due, updatedAt: stamp() });
   await psave('workItem', w.id, next, `Planned “${w.title}” in ${sp.name} (${fmt(sp.start)} – ${fmt(sp.end)})${dd ? `, moved ${dd > 0 ? '+' : ''}${dd}d, same duration` : ', dates unchanged'}`);
   toast(`Moved to ${sp.name}`);
 }
@@ -1855,11 +1949,28 @@ export function reportText(j, d) {
     [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
   const period = Array.isArray(d.sections) ? `\n${(d.periodHeading || 'THIS PERIOD').toUpperCase()}\n${d.periodSummary ? d.periodSummary + '\n' : ''}` +
     d.sections.map(x => x.items.length ? `${x.heading}\n` + x.items.map(i => '- ' + i).join('\n') : x.empty ? '- ' + x.empty : '').filter(Boolean).join('\n') + '\n' : '';
-  return `${reportSubject(j, d)}${d.window ? ` (${windowWords(d.window)})` : ` (${fmt(today())})`}\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${overall}${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', d.asks)}${period}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
+  return `${reportSubject(j, d)}${d.window ? ` (${windowWords(d.window)})` : ` (${fmt(today())})`}\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${overall}${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', reportAsks(j, d))}${period}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
 }
-/* R5: the email draft goes to the project's resources (the PM is always one), as first.last@northwind.example. */
+/* R15 (M3 #6, Jordan 10): department approvals still to give (waiting, or reopened by a change after approval), from
+   projectTruth.approvals: [{bu, person, stale, text}]. A launched project has none. */
+export function approvalAsks(j) {
+  if (!j || j.status === 'live') return [];
+  const t = truthOf(j);
+  return ((t.raw && t.raw.approvals) || []).filter(a => a && a.needed && !a.approved && a.approver && store.person(a.approver) && (a.stale || a.ready))
+    .map(a => ({ bu: a.bu, person: a.approver, stale: !!a.stale,
+      text: a.stale ? `${pname(a.approver)}: approve ${a.bu}’s part again (it changed after approval)` : `${pname(a.approver)}: approve ${a.bu}’s part` }));
+}
+/* the report's asks: the engine's, plus every approval still to give that they don't already name */
+export function reportAsks(j, d) {
+  const base = Array.isArray(d && d.asks) ? d.asks.slice() : [];
+  const said = base.map(x => String(txt(x)).toLowerCase());
+  approvalAsks(j).forEach(a => { const bu = String(a.bu).toLowerCase(); if (!said.some(x => x.includes(bu) && /approv/.test(x))) base.push(a.text); });
+  return base;
+}
+/* R5: the email draft goes to the project's resources (the PM is always one), as first.last@northwind.example.
+   R15 (M3 #6): and to everyone the asks name for an approval (they are asked to act). */
 export function reportRecipients(j) {
-  const ids = [...new Set([j.owner, ...(j.resources || [])])].filter(id => store.person(id));
+  const ids = [...new Set([j.owner, ...(j.resources || []), ...approvalAsks(j).map(a => a.person)])].filter(id => store.person(id));
   return ids.map(id => ({ id, name: pname(id), email: emailOf(id) })).filter(x => x.email);
 }
 /* the period picker: preset chips (Simple), plus a custom date range in Advanced */
@@ -1942,9 +2053,9 @@ function reportPanelHTML(j, r) {
       <div class="pmo-sline pmo-rep-facts" data-rep-facts>${overallAsOf(d) && overallAsOf(d) !== 'as of today' ? '<span class="hint" data-rep-facts-today>Today:</span>' : ''}${factsHTML(j, { cost: true })}</div>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-fact hint" data-rep-notlive>Information: ${esc(notLiveText(dataNotLive(j)))}.</div>
-      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', d.asks, 'ak')}</div>
+      <div class="pmo-rep-grid">${list('Highlights', d.highlights, 'hl')}${list('Risks', d.risks, 'rk')}${list('Asks', reportAsks(j, d), 'ak')}</div>
       ${periodHTML(d)}</div>
-      <div class="pmo-rep-to" data-rep-to><span class="lbl">Email to</span>${to.map(x => `<span class="chip" data-rcpt="${esc(x.email)}" title="${esc(x.name)}">${esc(x.email)}</span>`).join('') || '<span class="hint">No project resources yet.</span>'}<span class="hint">project resources (fictional addresses)</span></div>
+      <div class="pmo-rep-to" data-rep-to><span class="lbl">Email to</span>${to.map(x => `<span class="chip" data-rcpt="${esc(x.email)}" title="${esc(x.name)}">${esc(x.email)}</span>`).join('') || '<span class="hint">No project resources yet.</span>'}<span class="hint">project resources${approvalAsks(j).length ? ' and the approvers it asks' : ''} (fictional addresses)</span></div>
       <div class="pmo-rep-acts"><button class="btn sm primary" data-rep-print>Print / PDF</button><a class="btn sm" data-rep-mail href="${esc(mail)}" data-subject="${esc(subject)}">Email draft</a><button class="btn sm" data-rep-regen>Refresh</button></div>`;
   }
   return `<section class="card pmo-prj-rep" data-prj-rep><h3 class="pmo-h3row">Status report · ${esc(j.name)} <button class="btn sm" data-rep-close aria-label="Close the status report">Close</button></h3>${periodPickerHTML(range)}${body}</section>`;
@@ -1977,6 +2088,8 @@ async function rememberReport(j, d) {
   const fl = (Array.isArray(cur.forecastLog) ? cur.forecastLog : []).filter(x => x && x.date !== today());
   /* R13: keep the exact time too, so "since last report" can compare to the minute */
   const at = new Date().toISOString();
+  /* R15 (M1 #6): reportLog and forecastLog are written by the server when the report is recorded; a client value is
+     ignored there, so they are only sent for older servers */
   const next = Object.assign({}, cur, { lastReportAt: today(), lastReportAtTime: at, reportLog: log.concat([{ date: today(), at, preset: d.window ? d.window.preset : null }]).slice(-30),
     forecastLog: t.forecast ? fl.concat([{ date: today(), finish: t.forecast }]).slice(-60) : fl });
   try { await store.save('project', cur.id, next, `Generated a status report (${d.window ? d.window.short : fmt(today())})`); } catch (e) { /* the report still shows */ }
@@ -2385,9 +2498,8 @@ async function saveBaseline(j) {
   if (bls.length) {
     const last = bls[bls.length - 1];
     await ensureChangeAssets().catch(() => {});
-    const sp = window.PMOChange && window.PMOChange.sponsorOf ? window.PMOChange.sponsorOf(docs(), j, [store.state.me]) : null;
     const r0 = await modal({ title: 'Save plan', body: `<div data-rebaseline><p style="margin:0">This project already has a saved plan: <b>${esc(last.label || 'Saved plan')}</b>${last.at ? ` (${esc(fmt(String(last.at).slice(0, 10)))})` : ''}. Progress and SPI are measured against it.</p>
-      <p class="hint" style="margin:8px 0 0">To re-plan, use <b>Change the plan</b>: you say why, see the impact, and ${sp ? `the sponsor, <b>${esc(pname(sp))}</b>,` : 'the sponsor'} approves it if it moves the deadline or the budget. When it is applied, the plan before and after is saved automatically.</p></div>`,
+      <p class="hint" style="margin:8px 0 0">To re-plan, use <b>Change the plan</b>: you say why, see the impact, and ${deciderHTML(j)} approves it if it moves the deadline or the budget. When it is applied, the plan before and after is saved automatically.</p></div>`,
       actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
     if (r0.action === 'change') openChangeWizard(j.id, { kinds: ['dates'] });
     return;
@@ -2425,9 +2537,13 @@ function normalizeSuggestions(j, list) {
       x.deps = items.map((y, k) => (y.resolves && k !== i && !x.resolves && used.includes(y.resolves)) ? 'S:' + k : null).filter(Boolean);
     }
     x.gateway = Array.isArray((nodeOf(x.pid, x.step) || {}).branches);
+    /* R15 (M1 #1, Karen 5): a suggestion with no owner stays unowned or takes the step's doer (E.stepTaskOwner: the step's
+       role holder, else its named owner); never the process owner, the PM or me */
     if (!x.owner || !store.person(x.owner)) {
-      const step = stepOf(x.pid, x.step), dEl = x.resolves && store.get('dataElement', x.resolves);
-      x.owner = (dEl && dEl.owner) || (step && step.owner) || j.owner || store.state.me;
+      const dEl = x.resolves && store.get('dataElement', x.resolves);
+      const so = !dEl && x.pid && x.step ? eng('stepTaskOwner', null, docs(), x.pid, x.step) : null;
+      x.owner = (dEl && dEl.owner && store.person(dEl.owner) ? dEl.owner : null) || (so && so.owner) || null;
+      if (!x.owner && !x.ownerRole && so && so.ownerRole) x.ownerRole = so.ownerRole;
     }
     x.effortDays = Number(x.effortDays) > 0 ? Number(x.effortDays) : 2;
     x.kind = KIND_LBL[x.kind] ? x.kind : 'build';
@@ -2757,8 +2873,8 @@ async function editSettings(j, err, prefill) {
   if (!isPM(j)) { toast(pmOnly(j, 'change project settings')); return; }
   const cur0 = store.get('project', j.id) || j;
   const v = Object.assign({ name: j.name, desc: j.desc || '', target: j.target, owner: j.owner, releaseManager: j.releaseManager && j.releaseManager !== j.owner ? j.releaseManager : '', sponsor: j.sponsor || '', program: j.program || '', budget: j.budget && j.budget.planned != null ? j.budget.planned : '' }, prefill || {});
-  /* R13 #3: the sponsor approves plan changes past the deadline or budget; unset, the project's default approver does */
-  const dflt = window.PMOChange ? window.PMOChange.sponsorOf(docs(), Object.assign({}, j, { sponsor: null })) : null;
+  /* R15 (M1 #3): the sponsor is stored (project.sponsor), never computed; unset, an Admin approves (E.deadlineApprover) */
+  const sp0 = window.PMOChange ? window.PMOChange.sponsorOf(docs(), cur0) : (cur0.sponsor && cur0.sponsor !== cur0.owner ? cur0.sponsor : null);
   const fin = financials(j);
   /* R13: once there is a plan, the deadline and budget only move through "Change the plan" (sponsor approval) */
   const locked = projectItems(j.id).length > 0;
@@ -2768,17 +2884,21 @@ async function editSettings(j, err, prefill) {
     <div class="field"><label for="ps-name">Name</label><input id="ps-name" name="name" maxlength="100" value="${esc(v.name)}" /></div>
     <div class="field"><label for="ps-desc">Description</label><textarea id="ps-desc" name="desc" maxlength="600">${esc(v.desc)}</textarea></div>
     <div class="field"><label for="ps-target">Deadline</label><input id="ps-target" type="date" name="target" value="${esc(v.target || '')}" ${locked ? 'readonly aria-readonly="true"' : ''} />${locked ? lockHint : ''}</div>
-    ${roleFields(v, store.state.me)}
-    <div class="field"><label for="ps-sponsor">Sponsor</label><input id="ps-sponsor" data-set-sponsor readonly aria-readonly="true" value="${esc(cur0.sponsor && cur0.sponsor !== cur0.owner && store.person(cur0.sponsor) ? pname(cur0.sponsor) : dflt ? pname(dflt) + ' (default approver)' : 'Not set')}" />
-      <div class="hint" data-sponsor-locked>Approves plan changes that move the deadline, push the finish past it, or change the budget. The project manager doesn’t choose the sponsor: an Admin sets it in <b>Admin › People › Project sponsors</b>.</div></div>
+    <div class="frow"><div class="field"><label for="ps-pm">Project manager</label><input id="ps-pm" data-set-pm readonly aria-readonly="true" value="${esc(pname(cur0.owner))}" />
+        <div class="hint" data-pm-locked>Handing this role to someone else is a plan change the sponsor approves: use <b>Hand over the role</b> below.</div></div>
+      <div class="field"><label for="pf-rm">Launch owner</label><select id="pf-rm" name="releaseManager"><option value="" ${v.releaseManager ? '' : 'selected'}>Same as the project manager</option>${peopleOpts(v.releaseManager, store.state.me)}</select><div class="hint">The only person who can go live or roll back.</div></div></div>
+    <div class="field"><label for="ps-sponsor">Sponsor</label><input id="ps-sponsor" data-set-sponsor readonly aria-readonly="true" value="${esc(sp0 ? pname(sp0) : 'Not set')}" />
+      <div class="hint" data-sponsor-locked>Approves plan changes that move the deadline, push the finish past it, change the budget or hand over the project manager role.${sp0 ? '' : ' <b>Until a sponsor is set, an Admin approves them.</b>'} The project manager doesn’t choose the sponsor: an Admin sets it in <b>Admin › People › Project sponsors</b>.</div></div>
     ${pmoHtml}
     <div class="hint ${costOver(j) ? 'pmo-set-over' : ''}" data-set-fin>${fin.known ? `Expected cost ${esc(money(fin.forecast))}${fin.planned ? (costOver(j) ? ` · <b class="fail" data-set-over>${esc(money(fin.forecast - fin.planned))} over the ${esc(money(fin.planned))} budget</b>` : ` · within the ${esc(money(fin.planned))} budget`) : ''}` : esc(costUnknownText(j))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
-  const r = await modal({ title: 'Project settings', body, actions: [{ id: 'save', label: 'Save settings', primary: true }] });
+  const r = await modal({ title: 'Project settings', body, actions: [{ id: 'handover', label: 'Hand over the role' }, { id: 'save', label: 'Save settings', primary: true }] });
+  if (r.action === 'handover') { openChangeWizard(j.id, { kinds: ['pm'] }); return; }
   if (r.action !== 'save') return;
   const f = r.form;
   const cur = store.get('project', j.id) || j;
-  /* R14 (PMO-S2): the sponsor never changes from here (the PM can't pick one, least of all himself) */
-  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: f.owner || cur.owner, releaseManager: f.releaseManager || '', sponsor: cur.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
+  /* R14 (PMO-S2): the sponsor never changes from here (the PM can't pick one, least of all himself).
+     R15 (M1 #3): nor does the project manager: that is a plan change ("Hand over the role") */
+  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: cur.owner, releaseManager: f.releaseManager || '', sponsor: cur.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
   if (!vals.name) return editSettings(cur, 'Give the project a name.', vals);
   if (!vals.target) return editSettings(cur, 'Set a deadline.', vals);
   const bud = budgetOf(vals.budget);
@@ -2991,6 +3111,7 @@ export function workCSVRows(j, list) {
 }
 
 /* ---------------------------------------------------------------- bind */
+let ownersOpened = null;
 export function bind(root, params) {
   if (bulk && bulk.projectId === params.prj) return;
   const j = store.get('project', params.prj);
@@ -3006,6 +3127,11 @@ export function bind(root, params) {
   on('[data-add-work]', () => editWork(cur(), null));
   on('[data-edit-work]', el => editWork(cur(), store.get('workItem', el.dataset.editWork)));
   on('[data-confirm-done]', el => { el.disabled = true; confirmDone(el.dataset.confirmDone); });
+  on('[data-pick-owners]', () => pickOwners(cur()));
+  /* R15 (M3 #3): the "Choose owners" link from Home and Launch (?owner=none) opens the picker, once per visit */
+  if (params.q && params.q.owner === 'none' && ownersOpened !== j.id) { ownersOpened = j.id; setTimeout(() => pickOwners(cur()), 30); }
+  if (!(params.q && params.q.owner === 'none')) ownersOpened = null;
+  rememberProject(j.id);
   on('[data-del-work]', el => { const w = store.get('workItem', el.dataset.delWork); if (w) deleteWork(cur(), w); });
   on('[data-wgroup]', el => { workGroup = el.dataset.wgroup; rerender(); });
   on('tr[data-tg]', el => { const k = el.dataset.tg; folded.has(k) ? folded.delete(k) : folded.add(k); rerender(); });

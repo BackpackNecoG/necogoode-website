@@ -111,7 +111,9 @@ async function runSync(ctx, conn, st, opts) {
   const entry = (e) => { const x = Object.assign({ id: 'log-' + crypto.randomBytes(5).toString('hex'), at: nowIso() }, e); entries.push(x); return x; };
   const before = truthSummary(docs, conn.projectId, today);
   /* sent = created + updated + linked; each one is exactly one "PMOFlow → tool" row in the sync log */
-  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0, held: 0, planChanges: 0 };
+  /* R15 (PMO R14 disagreement 5): links = dependency links set (the plan's count); linked = issues they were set on (one
+     Link row each); unlinked = links removed */
+  const sum = { sent: 0, created: 0, updated: 0, linked: 0, links: 0, unlinked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0, held: 0, planChanges: 0 };
 
   const exec = (intent) => {
     const signed = sign(intent, secretFor(wsId, conn));
@@ -125,7 +127,9 @@ async function runSync(ctx, conn, st, opts) {
       const { signed, result } = exec(it);
       if (result.ok) {
         S.recordResult(conn, signed, result, docs); sum.sent++;
-        if (it.op === 'create') sum.created++; else if (it.op === 'link') sum.linked++; else sum.updated++;
+        if (it.op === 'create') sum.created++;
+        else if (it.op === 'link') { sum.linked++; sum.links += ((it.payload || {}).dependsOn || []).length; sum.unlinked += ((it.payload || {}).remove || []).length; }
+        else sum.updated++;
       }
       const changed = it.op === 'update' ? ` (${(it.changed || []).map(f => S.FIELD_LABELS[f].toLowerCase()).join(', ')})` : '';
       entry({ dir: 'out', op: it.op, key: result.key || it.ref.key || null, workItemId: it.ref.workItemId, title: it.ref.title || '',
@@ -280,7 +284,8 @@ function syncSentence(conn, sum) {
   const T = S.TOOLS[conn.tool], tool = T.name, noun = n => `${T.itemNoun}${n === 1 ? '' : 's'}`, parts = [];
   if (sum.created) parts.push(`${sum.created} ${noun(sum.created)} created in ${tool}`);
   if (sum.updated) parts.push(`${sum.updated} ${noun(sum.updated)} updated in ${tool}`);
-  if (sum.linked) parts.push(`${sum.linked} dependency link${sum.linked === 1 ? '' : 's'} set in ${tool}`);
+  if (sum.links) parts.push(`${sum.links} dependency link${sum.links === 1 ? '' : 's'} set${sum.linked !== sum.links ? ` on ${sum.linked} ${noun(sum.linked)}` : ''} in ${tool}`);
+  if (sum.unlinked) parts.push(`${sum.unlinked} dependency link${sum.unlinked === 1 ? '' : 's'} removed in ${tool}`);
   if (sum.sent && !(sum.created || sum.updated || sum.linked)) parts.push(`${sum.sent} change${sum.sent === 1 ? '' : 's'} sent to ${tool}`);
   if (sum.received) parts.push(`${sum.received} task${sum.received === 1 ? '' : 's'} updated from ${tool}`);
   /* R13 #5: an out-of-order Done is one of the held ones; say how many of them finished early */

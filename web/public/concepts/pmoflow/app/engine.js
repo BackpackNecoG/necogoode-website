@@ -140,14 +140,21 @@
     }
     return ch;
   }
-  function gatewayChanges(a, n) {
+  function gatewayChanges(a, n, pa, pn) {
     const ch = [];
     if ((a.type || '') !== (n.type || '')) ch.push('Gateway type ' + (a.type || '(none)') + ' → ' + (n.type || '(none)'));
     const t = textChange('Title', a.title, n.title); if (t) ch.push(t);
     const lab = g => (g.branches || []).map(b => b && b.label || '');
     setDiff('Branches', lab(a), lab(n)).forEach(x => ch.push(x));
-    const gt = g => (g.branches || []).filter(b => b && b.goto).map(b => (b.label || '') + ' ↺ ' + b.goto);
-    setDiff('Loop-backs', gt(a), gt(n)).forEach(x => ch.push(x));
+    // R15: a jump to a later step is a skip ahead ("Skips"), only a jump back is a loop
+    const gt = (g, nodes, fwd) => (g.branches || []).filter(b => b && b.goto && (!nodes || gotoForward(nodes, g.id, b.goto) === fwd)).map(b => (b.label || '') + (fwd ? ' → ' : ' ↺ ') + b.goto);
+    setDiff('Loop-backs', gt(a, pa, false), gt(n, pn, false)).forEach(x => ch.push(x));
+    if (pa || pn) setDiff('Skips', gt(a, pa, true), gt(n, pn, true)).forEach(x => ch.push(x));
+    // R15 (BPM): a changed threshold says was → now
+    const th = g => g && g.threshold && isFinite(+g.threshold.amount) ? (g.threshold.op === '<' ? 'under ' : g.threshold.op === '<=' ? 'at most ' : g.threshold.op === '>=' ? 'at least ' : 'over ') + '$' + Math.round(+g.threshold.amount).toLocaleString('en-US') : '';
+    if (th(a) !== th(n)) ch.push(th(a) && th(n) ? 'Threshold ' + th(a) + ' → ' + th(n) : th(n) ? 'Threshold added: ' + th(n) : 'Threshold removed: ' + th(a));
+    const ends = g => (g.branches || []).filter(b => b && (b.nodes || []).some(x => x && x.type === 'end')).map(b => b.label || '');
+    setDiff('Paths that end', ends(a), ends(n)).forEach(x => ch.push(x));
     return ch;
   }
 
@@ -172,7 +179,7 @@
       changes[n.id] = ch;
     };
     flatSteps(process && process.tobe).forEach(n => classify(n, n.from && asis[n.from], 'step', (a, x) => stepChanges(a, x, nm)));
-    flatGateways(process && process.tobe).forEach(n => classify(n, n.from && asisG[n.from], 'gateway', gatewayChanges));
+    flatGateways(process && process.tobe).forEach(n => classify(n, n.from && asisG[n.from], 'gateway', (a, x) => gatewayChanges(a, x, process.asis, process.tobe)));
     const removed = asisSteps.concat(asisGw).filter(a => !used.has(a.id));
     return { nodes, removed, changes };
   }
@@ -497,6 +504,8 @@
           const r = calc(rid);
           if (r.forecast) consider(addBusinessDays(r.forecast, dur), { kind: 'data', ref: dataId, resolver: rid, from: r.forecast, dur });
         });
+        // R15 #4 (PMO): the effort has to fit: an open task can't finish before its start plus its effort
+        if (hasEffort(w) && isDate(w.start)) consider(addBusinessDays(addBusinessDays(w.start, 0), dur - 1), { kind: 'effort', from: w.start, dur });
         if (isDate(today)) {
           if (w.status === 'idle' && isDate(w.start) && w.start < today && (hasEffort(w) || (isDate(w.due) && w.due < today)))
             consider(addBusinessDays(today, dur), { kind: 'late-start', from: today, dur });
@@ -562,6 +571,7 @@
         case 'data': return 'Needs ' + ((data[b.ref] && data[b.ref].name) || 'a data element') + ', which ' + t(b.resolver) + ' makes available (forecast ' + fmtDay(b.from) + ') → +' + bd(b.dur) + ' effort → ' + fmtDay(r.forecast);
         case 'late-start': return t(id) + ' has not started and its start date (' + fmtDay(it.start) + ') has passed → today (' + fmtDay(b.from) + ') + ' + bd(b.dur) + ' effort → ' + fmtDay(r.forecast);
         case 'today': return t(id) + ' is still open past its due date → no earlier than today, ' + fmtDay(r.forecast);
+        case 'effort': return t(id) + ' starts ' + fmtDay(b.from) + ' and needs ' + bd(b.dur) + ' of effort → ' + fmtDay(r.forecast);
         default: return (i === 0 ? t(id) + ' is planned to finish on its due date, ' : 'Due ') + fmtDay(r.forecast);
       }
     }).map(text => ({ text }));
@@ -1165,10 +1175,21 @@
       joinList(st.data.map(dn).sort(), 6), joinList(st.touches, 6)]; });
     // R14 (BPM-9): the part's tasks as approved (title, due, owner, status), so "Changed after approval" can say from → to
     const wv = {}; (sectionScope(docs, project, bu).work || []).forEach(w => { wv[w.id] = [w.title || '', w.due || '', (w.owner && people[w.owner] && people[w.owner].name) || (w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner'), w.status || 'idle']; });
-    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)), k, titles, v: vals, w: wv };
+    // R15 #11: the part's choices as approved (title, threshold, paths, which paths end), so a changed choice reopens
+    // only the parts it involves and says was → now; R15: each approved test's content, so an edited or removed
+    // test reopens the part but an added one does not
+    const gv = {};
+    linkedProcesses(docs, project).forEach(p => gatewayInvolvement(p).forEach(gi => {
+      if (!gatewayBus(p, gi, stepBus).includes(bu)) return;
+      const g = gi.gateway;
+      gv[p.id + '/' + g.id] = [g.title || '', thresholdText(g), (g.branches || []).map(b => (b && b.label) || '').join(' / '),
+        (g.branches || []).filter(b => b && (b.nodes || []).some(x => x && x.type === 'end')).map(b => b.label || '').join(' / '), (g.branches || []).map(b => (b && b.goto) || '').join('/')];
+    }));
+    const xv = {}; testsOut.forEach(c => { xv[c.id] = hashStr(JSON.stringify(c)).slice(0, 6); });
+    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)), k, titles, v: vals, w: wv, g: gv, x: xv };
   }
-  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c + (parts.k != null ? ';k:' + parts.k : '') + (parts.v ? ';v:' + encodeURIComponent(JSON.stringify(parts.v)) : '') + (parts.w ? ';w:' + encodeURIComponent(JSON.stringify(parts.w)) : ''); }
-  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtckvw]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c + (parts.k != null ? ';k:' + parts.k : '') + (parts.v ? ';v:' + encodeURIComponent(JSON.stringify(parts.v)) : '') + (parts.w ? ';w:' + encodeURIComponent(JSON.stringify(parts.w)) : '') + (parts.g ? ';g:' + encodeURIComponent(JSON.stringify(parts.g)) : '') + (parts.x ? ';x:' + encodeURIComponent(JSON.stringify(parts.x)) : ''); }
+  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtckvwgx]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
   function fpVals(v) { try { return v ? JSON.parse(decodeURIComponent(v)) : null; } catch (e) { return null; } }
   const FROM_TO = { name: 0, owner: 1, 'time limit': 2, system: 3, information: 4, 'teams involved': 5 };
   function fpSteps(k) { const out = {}; String(k || '').split(',').filter(Boolean).forEach(x => { const i = x.indexOf('='); if (i > 0) out[decodeURIComponent(x.slice(0, i))] = x.slice(i + 1).split('.'); }); return out; }
@@ -1204,6 +1225,28 @@
     return project ? fpString(sectionParts(docs, project, bu)) : '';
   }
 
+  // R15 #11 (BPM): a choice (gateway) involves the step that makes it (the step just before it) and the steps on its
+  // paths. [{gateway, status, decider, steps}] for every gateway of a process's Future (status 'new'|'changed'|'same').
+  function gatewayInvolvement(p) {
+    const diff = diffProcess(p), out = [];
+    const walk = (seq, before) => {
+      let prev = before;
+      (seq || []).forEach(n => {
+        if (!n) return;
+        if (isGateway(n)) {
+          // a parallel gateway makes no choice: only its paths' steps are involved
+          out.push({ gateway: n, status: diff.nodes[n.id] || 'same', decider: n.type === 'parallel' ? null : prev || null, steps: flatSteps((n.branches || []).flatMap(b => (b && b.nodes) || [])) });
+          (n.branches || []).forEach(b => walk(b && b.nodes, prev));
+          return;
+        }
+        if (isStep(n)) prev = n;
+      });
+    };
+    walk(p && p.tobe, null);
+    return out;
+  }
+  function gatewayBus(p, gi, stepBus) { return [...new Set([gi.decider].concat(gi.steps).filter(Boolean).flatMap(st => stepBus(st, p)))]; }
+  function thresholdText(g) { return g && g.threshold && isFinite(+g.threshold.amount) ? (g.threshold.op === '<' ? 'under ' : g.threshold.op === '<=' ? 'at most ' : g.threshold.op === '>=' ? 'at least ' : 'over ') + '$' + Math.round(+g.threshold.amount).toLocaleString('en-US') : ''; }
   // R8 approval sections: teams owning a new/changed Future step (or a trigger that changed), plus teams that own
   // launch-day tasks. Unchanged teams need no approval.
   function sectionBus(docs, project, people) {
@@ -1224,6 +1267,8 @@
       });
       // R13 #10: removing a Today step (a control) needs the team that owned it to approve
       (diff.removed || []).filter(a => a && isStep(a)).forEach(a => stepBus(a, p).forEach(b => set.add(b)));
+      // R15 #11: a new or changed choice needs the teams of the step that makes it and of the steps on its paths
+      gatewayInvolvement(p).filter(gi => gi.status === 'new' || gi.status === 'changed').forEach(gi => gatewayBus(p, gi, stepBus).forEach(b => set.add(b)));
     });
     // Launch-day tasks run by the PM or launch owner themselves (no explicit task.bu) add no section: they cannot approve it.
     const lead = [project.owner, project.releaseManager].filter(Boolean);
@@ -1464,9 +1509,12 @@
 
     // work-done
     const open = work.filter(w => w.status !== 'done');
-    checks.push({ id: 'work-done', label: 'All work items done', pass: open.length === 0,
-      detail: open.length ? open.length + ' of ' + nWord(work.length, 'work item') + ' ' + isAre(open.length) + ' still open: ' + joinList(open.map(w => w.title || 'untitled item'), 5) + '.'
-        : 'All ' + nWord(work.length, 'work item') + ' ' + isAre(work.length) + ' done.', items: open.map(w => w.id) });
+    // R15 #8 (BPM): a Done that still needs someone else to confirm it is not finished work
+    const unconfW = work.filter(w => w.status === 'done' && unconfirmedReasons(w, byId(list(docs, 'workItem'))).length);
+    const wDetail = [open.length ? open.length + ' of ' + nWord(work.length, 'work item') + ' ' + isAre(open.length) + ' still open: ' + joinList(open.map(w => w.title || 'untitled item'), 5) + '.' : '',
+      unconfW.length ? nWord(unconfW.length, 'task') + ' marked Done ' + (unconfW.length === 1 ? 'needs' : 'need') + ' someone else to confirm ' + (unconfW.length === 1 ? 'it' : 'them') + ': ' + joinList(unconfW.map(w => w.title || 'untitled item'), 5) + '.' : ''].filter(Boolean);
+    checks.push({ id: 'work-done', label: 'All work items done', pass: open.length === 0 && unconfW.length === 0,
+      detail: wDetail.length ? wDetail.join(' ') : 'All ' + nWord(work.length, 'work item') + ' ' + isAre(work.length) + ' done.', items: open.map(w => w.id).concat(unconfW.map(w => w.id)), unconfirmed: unconfW.map(w => w.id) });
 
     // data-live: examples-only data fails here (it needs a live source before go-live).
     const av = availMap(docs);
@@ -1657,6 +1705,11 @@
         if (!(w.updatedAt && String(w.updatedAt) > t && workBus(w).includes(bu))) return;
         const o = wasW[w.id], nowV = [w.title || '', w.due || '', (w.owner && people[w.owner] && people[w.owner].name) || (w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner'), w.status || 'idle'];
         const ch = o ? [['name', 0, x => '“' + x + '”'], ['due', 1, x => x ? fmtDay(x) : 'none'], ['owner', 2, x => x], ['status', 3, x => STW[x] || x]].filter(([, i]) => o[i] !== nowV[i]).map(([k, i, f]) => k + ' ' + f(o[i]) + ' → ' + f(nowV[i])) : [];
+        // R15 #11 (BPM: IT reopened with nothing changed): a save that changed none of the approved values, or only
+        // moved the task forward (started, finished), never reopens the part
+        const ORD = { idle: 0, prog: 1, review: 2, done: 3 };
+        if (o && !ch.length) return;
+        if (o && ch.length === 1 && o[3] !== nowV[3] && (ORD[nowV[3]] || 0) > (ORD[o[3]] || 0)) return;
         out.push({ ref: 'workItem:' + w.id, label: ch.length ? '“' + (w.title || 'untitled item') + '” ' + ch.join(', ') : (w.title || 'untitled item'), fromTo: ch });
       });
       // R8: a failed or blocked test result recorded after the approval stales only the sections that test covers.
@@ -1669,7 +1722,28 @@
       if (a.fingerprint) {
         // R7 exact scope: compare the section's own content with what was approved.
         const was = fpParse(a.fingerprint), now = sectionParts(docs, project, bu);
+        // R15 #11: a changed choice the part is involved in, was → now
+        const wg = fpVals(was.g);
+        if (wg) {
+          Object.keys(now.g).forEach(key => {
+            const o = wg[key], nw = now.g[key];
+            if (!o) return;
+            if (JSON.stringify(o) === JSON.stringify(nw)) return;
+            const bits = [];
+            if (o[0] !== nw[0]) bits.push('“' + o[0] + '” → “' + nw[0] + '”');
+            if (o[1] !== nw[1]) bits.push('threshold ' + (o[1] || 'none') + ' → ' + (nw[1] || 'none'));
+            if (o[2] !== nw[2]) bits.push('paths ' + (o[2] || 'none') + ' → ' + (nw[2] || 'none'));
+            if (o[3] !== nw[3]) bits.push('paths that end ' + (o[3] || 'none') + ' → ' + (nw[3] || 'none'));
+            if (o[4] !== nw[4]) bits.push('where its paths go');
+            out.push({ ref: 'section:' + bu + '#g:' + key, label: 'the choice “' + (nw[0] || 'a choice') + '” changed: ' + bits.join(', ') });
+          });
+        }
+        // R15 #11: tests reopen a part only when one it approved was edited or removed (an added test never does)
+        const wx = fpVals(was.x);
+        const tChanged = wx ? Object.keys(wx).some(id => now.x[id] !== wx[id]) : false;
         ['s', 'd', 't'].forEach(k => {
+          if (k === 't' && was.x != null && !tChanged) return;
+          if (k === 't' && was.x == null) return;
           if (was[k] == null || was[k] === now[k]) return;
           const sc = k === 's' ? partStepChanges(was.k, now, docs, was.v) : [];
           if (sc.length) sc.forEach(x => out.push({ ref: 'section:' + bu + '#s:' + x.key, label: x.text }));
@@ -1810,6 +1884,9 @@
     const people = personMap(docs);
     const data = byId(list(docs, 'dataElement'));
     const pname = id => (people[id] && people[id].name) || 'the step owner';
+    // R15 #1 (Karen 5, BPM 5): a script names the step's doer (its role, or the role's one holder), never the process owner
+    const doer = st => { const d = stepDoerIn(people, st); return d.owner ? (people[d.owner].name || 'the step owner') : d.role || pname(st && st.owner); };
+    const doerKey = st => { const d = stepDoerIn(people, st); return d.owner || (d.role ? 'role:' + d.role.toLowerCase() : st && st.owner) || ''; };
     const dname = d => (data[d] && data[d].name) || 'the required data';
     const out = [], ids = new Set();
     const push = sc => { let id = sc.id, k = 2; while (ids.has(id)) id = sc.id + '-' + k++; ids.add(id); out.push(Object.assign(sc, { id })); };
@@ -1826,7 +1903,7 @@
         const title = s.title || 'Untitled step';
         const subs = (s.subs || []).filter(x => x && x.title);
         const stepsArr = (subs.length ? subs : [{ title, data: s.data || [] }]).map(x => ({
-          action: pname(s.owner) + ': ' + x.title + ((x.data || []).length ? ' using ' + joinList(x.data.map(dname)) : '') + (s.system ? ' in ' + s.system : ''),
+          action: doer(s) + ': ' + x.title + ((x.data || []).length ? ' using ' + joinList(x.data.map(dname)) : '') + (s.system ? ' in ' + s.system : ''),
           expected: (x.data || []).length ? joinList(x.data.map(dname)) + ' ' + ((x.data || []).length === 1 ? 'is' : 'are') + ' recorded correctly' : '"' + x.title + '" is completed and recorded',
         }));
         // Plain-English verification of what changed vs as-is (names, not ids).
@@ -1834,12 +1911,12 @@
         const verify = [];
         if (st === 'new') verify.push('this new step runs as designed');
         if (was && was.title !== s.title) verify.push('the old step "' + (was.title || '') + '" is replaced');
-        if (was && was.owner !== s.owner) verify.push(pname(s.owner) + ' now owns the step instead of ' + pname(was.owner));
+        if (was && doerKey(was) !== doerKey(s)) verify.push(doer(s) + ' now owns the step instead of ' + doer(was));
         if (was) { const added = (s.data || []).filter(d => !(was.data || []).includes(d)); if (added.length) verify.push(joinList(added.map(dname)) + ' ' + (added.length === 1 ? 'is' : 'are') + ' now used'); }
         if (s.sla) verify.push('the step completes within ' + s.sla);
         push({ id: 'uat-' + p.id + '-' + s.id, pid: p.id, step: s.id, title,
           given: sd.length ? capFirst(joinList(sd.map(dname))) + (sd.length > 1 ? ' are' : ' is') + ' available in UAT' : 'The process has reached "' + title + '"',
-          when: pname(s.owner) + ' performs "' + title + '"',
+          when: doer(s) + ' performs "' + title + '"',
           then: 'The step completes' + (s.system ? ' in ' + s.system : '') + (s.sla ? ' within ' + s.sla : '') + ' and its output is recorded' + (verify.length ? '; verify that ' + joinList(verify) : ''),
           steps: stepsArr, data: sd });
       });
@@ -1849,14 +1926,16 @@
         const bSteps = flatSteps(b.nodes);
         const first = bSteps[0];
         const bd = [...new Set(bSteps.flatMap(stepData))];
-        const then = b.goto ? 'The flow returns to "' + (titles[b.goto] || 'an earlier step') + '"' : first ? 'The flow continues to "' + (first.title || 'the next step') + '"' : 'The flow continues to the next step';
+        const ends = (b.nodes || []).some(x => x && x.type === 'end');
+        const then = b.goto ? (gotoForward(p.tobe, g.id, b.goto) ? 'The flow skips to "' + (titles[b.goto] || 'a later step') + '"' : 'The flow returns to "' + (titles[b.goto] || 'an earlier step') + '"')
+          : first ? 'The flow continues to "' + (first.title || 'the next step') + '"' + (ends ? ' and then stops' : '') : ends ? 'The process stops here; no later step runs' : 'The flow continues to the next step';
         push({ id: 'uat-' + p.id + '-' + g.id + '-' + slug(b.label || String(i + 1)), pid: p.id, step: g.id,
           title: (g.title || 'Gateway') + ' → ' + label,
           given: 'The process reaches "' + (g.title || 'the gateway') + '"',
           when: g.type === 'parallel' ? 'Branch "' + label + '" runs in parallel' : 'The outcome is "' + label + '"',
           then,
           steps: [{ action: 'Drive the process to "' + (g.title || 'the gateway') + '" with ' + (g.type === 'parallel' ? 'branch "' + label + '" running' : 'the outcome "' + label + '"'), expected: then }]
-            .concat(bSteps.map(x => ({ action: pname(x.owner) + ': ' + (x.title || 'next step'), expected: '"' + (x.title || 'The step') + '" is completed and recorded' }))),
+            .concat(bSteps.map(x => ({ action: doer(x) + ': ' + (x.title || 'next step'), expected: '"' + (x.title || 'The step') + '" is completed and recorded' }))),
           data: bd });
       }));
     });
@@ -2088,7 +2167,11 @@
       else if (/^number$/i.test(fmt)) type = 'number';
       else type = 'text';
     }
-    const sp = { name: f.name, type, mask, aba: /routing/i.test(String(f.name || '')), required: f.required === true || (f.required == null && /required/i.test(String(f.rule || '')) && !/optional/i.test(String(f.rule || ''))) };
+    const sp = { name: f.name, type, mask, aba: /routing/i.test(String(f.name || '')), required: f.required === true || (f.required == null && /required/i.test(String(f.rule || '')) && !/optional/i.test(String(f.rule || ''))),
+      unique: f.unique === true || /\bunique\b/i.test(String(f.rule || '')) };
+    // R15 #7 (BPM): a routing, account or tax number is a string of digits, never a quantity, so a leading zero
+    // (021000021) is a real value
+    if ((type === 'number') && / (routing|aba|account|acct|iban|tax|ein|tin|ssn|zip|postal|phone|code|id) /.test(' ' + tokens(f.name) + ' ')) { sp.type = 'digits'; type = 'digits'; f = Object.assign({}, f, { min: null, max: null }); }
     if (mask) { sp.maskShape = shapeOf(mask.replace(/#/g, '9')); sp.length = chars(mask).length; }
     else if (f.length != null) sp.length = +f.length;
     else { const m = /(\d+)\s*digits?/i.exec(fmt); if (m) sp.length = +m[1]; }
@@ -2359,7 +2442,9 @@
       // One of each kind first (valid, invalid, boundary, edge; spec before profile), then the rest in order.
       const ranked = arr.slice().sort((a, b) => (TEST_RANK[a.tc.kind] - TEST_RANK[b.tc.kind]) || ((a.tc.origin === 'profile') - (b.tc.origin === 'profile')) || a.i - b.i);
       const picked = [], kinds = new Set();
-      ranked.forEach(x => { if (picked.length < max && !kinds.has(x.tc.kind + (x.tc.expect || ''))) { picked.push(x); kinds.add(x.tc.kind + (x.tc.expect || '')); } });
+      // R15 #7 (BPM): a warning the sample raised (duplicate, shared bank account, uniqueness) always gets its test
+      ranked.forEach(x => { if (x.tc.signal || x.tc.threshold || x.tc.note === 'Leading zero') picked.push(x); });
+      ranked.forEach(x => { if (picked.length < max && !picked.includes(x) && !kinds.has(x.tc.kind + (x.tc.expect || ''))) { picked.push(x); kinds.add(x.tc.kind + (x.tc.expect || '')); } });
       ranked.forEach(x => { if (picked.length < max && !picked.includes(x)) picked.push(x); });
       picked.forEach(x => keep.add(x.i));
     });
@@ -2399,7 +2484,20 @@
     };
     for (const f of de.fields || []) {
       const sp = fieldSpec(f);
-      const valid = validSample(sp);
+      // R15 #7 (BPM): a value of this field's own most common observed shape (never another field's shape, e.g. an
+      // "NW…" account number for a bank account); digits are shifted so it never repeats a real row value
+      const col0 = columnFor(f, cols);
+      const own = (() => {
+        if (!col0 || sp.values || sp.mask || sp.aba || sp.type === 'number' || sp.type === 'currency' || sp.type === 'date') return null;
+        const top0 = (col0.patterns || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0))[0];
+        if (!top0 || (+top0.count || 0) * 2 <= colRows(col0, profile)) return null;
+        let v = expandPattern(top0.pattern).replace(/[0-9]/g, c => String((+c + 2) % 10));   // +2: never the shape case's value
+        if (sp.regex) v = fitRegex(sp, v) || v;
+        return validate(sp, v) ? v : null;
+      })();
+      const valid = own || validSample(sp);
+      // R15 #7: a score is 0–100 even when the sample had a 101
+      if (sp.type === 'number' && / (score|rating|percent|pct|percentage) /.test(' ' + tokens(f.name) + ' ') && (sp.maxVal == null || sp.maxVal > 100)) sp.maxVal = 100;
       const ok = s => (validate(sp, s) ? 'accept' : 'reject');
       add(f, 'valid', valid, ok(valid), 'spec', 'Valid value built from the spec');
 
@@ -2413,13 +2511,15 @@
         if (chars(valid).length > 1) add(f, 'boundary', chars(valid).slice(0, -1).join(''), 'reject', 'spec', 'One shorter than length ' + sp.length);
         add(f, 'boundary', valid + (sp.type === 'digits' ? '1' : 'a'), 'reject', 'spec', 'One longer than length ' + sp.length);
       } else if (!sp.values && sp.type !== 'file' && sp.type !== 'date') {
+        // R15 #7: lengths are built from the field's own shape when the sample shows one
+        const lenOf = n => { if (!own) return strOfLen(sp, n); const c = chars(own); if (c.length >= n) return c.slice(0, n).join(''); const last = c[c.length - 1] || 'a'; return own + (RE_DIGIT.test(last) ? '1234567890' : 'abcdefghij').repeat(Math.ceil((n - c.length) / 10)).slice(0, n - c.length); };
         if (sp.minLen != null) {
-          add(f, 'boundary', strOfLen(sp, sp.minLen), ok(strOfLen(sp, sp.minLen)), 'spec', 'Minimum length ' + sp.minLen);
-          if (sp.minLen > 1) add(f, 'boundary', strOfLen(sp, sp.minLen - 1), 'reject', 'spec', 'One below minimum length');
+          add(f, 'boundary', lenOf(sp.minLen), ok(lenOf(sp.minLen)), 'spec', 'Minimum length ' + sp.minLen);
+          if (sp.minLen > 1) add(f, 'boundary', lenOf(sp.minLen - 1), 'reject', 'spec', 'One below minimum length');
         }
         if (sp.maxLen != null) {
-          add(f, 'boundary', strOfLen(sp, sp.maxLen), ok(strOfLen(sp, sp.maxLen)), 'spec', 'Maximum length ' + sp.maxLen);
-          add(f, 'boundary', strOfLen(sp, sp.maxLen + 1), 'reject', 'spec', 'One above maximum length');
+          add(f, 'boundary', lenOf(sp.maxLen), ok(lenOf(sp.maxLen)), 'spec', 'Maximum length ' + sp.maxLen);
+          add(f, 'boundary', lenOf(sp.maxLen + 1), 'reject', 'spec', 'One above maximum length');
         }
       }
 
@@ -2427,7 +2527,7 @@
       const wt = wrongType(sp);
       if (wt != null) add(f, 'invalid', wt, ok(wt), 'spec', 'Wrong type for ' + sp.type);
       const hi = sp.length != null ? sp.length : sp.maxLen;
-      if (hi != null && !sp.values && sp.type !== 'file') add(f, 'invalid', strOfLen(sp, hi + 5), 'reject', 'spec', 'Too long');
+      if (hi != null && !sp.values && sp.type !== 'file') add(f, 'invalid', own ? own + (RE_DIGIT.test(chars(own).slice(-1)[0] || '') ? '12345' : 'abcde') : strOfLen(sp, hi + 5), 'reject', 'spec', 'Too long');
       if (sp.required) add(f, 'invalid', '', 'reject', 'spec', 'Empty but required');
 
       // Routing numbers: ABA checksum-valid values and a checksum-invalid one.
@@ -2454,6 +2554,9 @@
         else { add(f, 'valid', y, 'accept', 'spec', say + ' (later)', { [cr.other]: x }); add(f, 'invalid', x, 'reject', 'spec', say + ' (earlier)', { [cr.other]: y }); }
       }
 
+      // R15 #7 (BPM): a field the rules say is unique gets its uniqueness test, with or without a sample
+      const setupU = 'Setup: first save a record with this value, then enter it on a second record.';
+      if (sp.unique && validate(sp, valid)) add(f, 'invalid', valid, 'reject', 'spec', 'Must be unique: the same value on a second record is rejected. ' + setupU, { duplicateOf: 'another record', setup: setupU, signal: 'unique' });
       // Profile edge cases
       const col = columnFor(f, cols);
       if (!col) continue;
@@ -2483,8 +2586,11 @@
         // rules reject is a "should be rejected" test); the test links to the sample row it came from.
         // R12 #11: a shape whose real values the rules accept is never a "should be rejected" test
         if (pt.valid === true && ok(input) !== 'accept') return;
-        // R14 (BPM-2): a shape most rows have is never "should be rejected" (unless the checked rules reject its real values)
+        // R14 (BPM-2): a shape most rows have is never "should be rejected"
         const majority = (+pt.count || 0) * 2 > colRows(col, profile);
+        // R15 #7 (BPM TC29): not even when the rules reject it: most real values can't be wrong, so the rules are
+        // checked instead (the data page shows it as a warning), and no test says to reject them
+        if (majority && (pt.valid === false || ok(input) === 'reject')) return;
         const bad = pt.valid === true ? false : pt.valid === false ? true : majority ? false : outlier(pt);
         const expect = bad ? 'reject' : ok(input);
         const before = out.length;
@@ -2499,7 +2605,8 @@
       }
       const numericCol = (col.patterns || []).some(p => /^9/.test(p.pattern));
       if (sp.type === 'digits' || sp.type === 'number' || sp.type === 'currency' || numericCol) {
-        const input = sp.aba ? abaFrom('0' + valid.slice(1, 8)) : sp.type === 'digits' || sp.mask ? '0' + chars(valid).slice(1).join('') : '0' + valid;
+        // R15 #7: the leading zero replaces the first digit of a valid value of the field's own shape (021000021)
+        const input = sp.aba ? abaFrom('0' + valid.slice(1, 8)) : sp.type === 'digits' || sp.mask || /^\d/.test(valid) ? '0' + chars(valid).slice(1).join('') : '0' + valid;
         add(f, 'edge', input, ok(input), 'profile', 'Leading zero');
       }
       if ((col.charClasses || []).includes('unicode') && !sp.values && sp.type !== 'file') {
@@ -2514,9 +2621,12 @@
       const setup = 'Setup: first save a record with this value, then enter it on a second record.';
       if (col.sharedAccount && validate(sp, valid)) {
         add(f, 'invalid', valid, 'reject', 'profile', 'Same bank account number as another vendor (' + nWord(col.sharedAccount.records, 'record') + ' share ' + nWord(col.sharedAccount.accounts, 'account number') + ' in the sample). ' + setup, { duplicateOf: 'another record', setup, signal: 'shared-account' });
-      } else if ((+col.duplicates > 0 && (sp.unique || sp.sem === 'id' || /\b(id|tax|ein|account|number)\b/i.test(f.name))) && validate(sp, valid)) {
+      } else if ((+col.duplicates > 0 && (sp.unique || sp.sem === 'id' || / (id|tax|ein|account|number|no|code) /.test(' ' + tokens(f.name) + ' '))) && validate(sp, valid)) {
         add(f, 'invalid', valid, 'reject', 'profile', 'Same value as another record (' + nWord(col.duplicateRecords || col.duplicates, 'record') + ' share a value in the sample). ' + setup, { duplicateOf: 'another record', setup, signal: 'duplicate' });
       }
+      // R15 #7 (BPM): an identifier whose sample values are all different is a key: a repeat is rejected
+      if (!sp.unique && !col.sharedAccount && !(+col.duplicates > 0) && sp.sem === 'id' && +col.distinct > 1 && +col.distinct === (+col.rows || 0) - (+col.nulls || 0) && validate(sp, valid))
+        add(f, 'invalid', valid, 'reject', 'profile', 'Every value in the sample is different (' + col.distinct + ' records), so the same value on a second record is rejected. ' + setup, { duplicateOf: 'another record', setup, signal: 'unique' });
       if (col.nearDuplicates && (sp.sem === 'name' || sp.sem === 'text' || sp.sem === 'person')) {
         const v2 = String(valid).toUpperCase() + (/\binc\b/i.test(valid) ? '' : ' Inc.');
         add(f, 'invalid', v2, 'reject', 'profile', 'Looks like an existing record spelled differently (' + nWord(col.nearDuplicates.records, 'record') + ' in ' + nWord(col.nearDuplicates.groups, 'group') + ' in the sample): stop it as a possible duplicate. Setup: first save a record named “' + valid + '”.', { duplicateOf: 'a similar record', setup: 'Setup: first save a record named “' + valid + '”.', signal: 'near-duplicate' });
@@ -2573,7 +2683,7 @@
     return ids.map(id => {
       const d = get(docs, 'dataElement', id) || { id, name: 'Information', fields: [] };
       const prof = latestBy(list(docs, 'profile').filter(x => x.dataId === id), 'at');
-      if ((d.fields || []).length) return { dataId: id, cases: generateTests(d, prof || undefined, opts) };
+      if ((d.fields || []).length) return { dataId: id, cases: generateTests(d, prof || undefined, opts).concat(thresholdCases(docs, id).filter(c => !generateTests(d, prof || undefined, { all: true }).some(x => x.field === c.field && x.input === c.input))) };
       if (prof && columnsOf(prof).length) return { dataId: id, cases: generateTests(Object.assign({}, d, { fields: specFromProfile(prof) }), prof, opts) };
       const name = d.name || 'Information';
       const sample = (d.samples || []).find(x => String(x || '').trim()) || 'Provided';
@@ -2594,7 +2704,9 @@
       const present = (c.rows != null ? +c.rows : 0) - (+c.nulls || 0);
       const cls = c.charClasses || [];
       let type = 'text';
-      if (c.min != null && c.max != null && isFinite(+c.min) && isFinite(+c.max)) type = pats.length && pats.every(p => /\.(9\{2\}|99)$/.test(p)) ? 'currency' : 'number';
+      const idLike = / (routing|aba|account|acct|iban|tax|ein|tin|ssn|zip|postal|phone|code|id|number|no) /.test(' ' + tokens(c.name) + ' ') && !/ (amount|limit|total|balance|score|count|qty) /.test(' ' + tokens(c.name) + ' ');
+      if (idLike && cls.length === 1 && cls[0] === 'digits') type = 'digits';   // R15 #7: never a quantity
+      else if (c.min != null && c.max != null && isFinite(+c.min) && isFinite(+c.max)) type = pats.length && pats.every(p => /\.(9\{2\}|99)$/.test(p)) ? 'currency' : 'number';
       else if (pats.length && pats.every(p => p === '9{4}-9{2}-9{2}')) type = 'date';
       else if (cls.length === 1 && cls[0] === 'digits') type = 'digits';
       const f = { name: String(c.name), type, required: (+c.nulls || 0) === 0 && (c.rows == null || present > 0), origin: 'profile' };
@@ -2836,7 +2948,8 @@
     // R10 §6: train the people who do the changed steps, and tell the affected teams (once per project)
     if (anyChange) {
       const ends = stepTasks.slice();
-      const people = [...changedPeople].map(id => nameOf(docs, id)), roles = [...changedRoles];
+      // R15 (Karen): outside parties (Vendor, Customer, Requester…) are told, never trained
+      const people = [...changedPeople].map(id => nameOf(docs, id)), roles = [...changedRoles].filter(r => !isGenericActor(r.replace(/^(the|a|an)\s+/i, '')));
       // R11 §4 "Tell affected teams" names the process's own teams: each changed step's team (its owner's team, else
       // its role), plus the teams it touches.
       // R12 #1: the approving departments of the changed steps (process.teamDepartments), plus any team not mapped yet
@@ -2852,6 +2965,9 @@
       // R13 #10: the teams whose Today steps are removed are told too
       df.removed.filter(a => a && isStep(a)).forEach(a => hs.stepTeamsOf(a, p).map(t => hs.deptOf(t, p) || t)
         .forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); }));
+      // R15 #11: a changed choice tells the teams of the step that makes it and of the steps on its paths
+      gatewayInvolvement(p).filter(gi => gi.status === 'new' || gi.status === 'changed').forEach(gi => [gi.decider].concat(gi.steps).filter(Boolean)
+        .forEach(st => hs.stepTeamsOf(st, p).map(t => hs.deptOf(t, p) || t).forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); })));
       });
       // R13 #10: a "tell-removed" task (from deleting a step) already tells its teams; the plan's tell task skips them
       const toldAlready = own.filter(w => w.tag === 'tell-removed').flatMap(w => Array.isArray(w.teams) ? w.teams : []);
@@ -3072,6 +3188,12 @@
 
   // End-to-end scenarios: one per path through each linked to-be process. Decision branches expand into separate
   // paths; parallel branches are all walked in one path; a `goto` loop is followed once. Max 25 paths per process.
+  // R15: a branch's goto to a node later in the map is a skip ahead; to an earlier node (or itself) it is a loop back
+  function gotoForward(nodes, gatewayId, targetId) {
+    const order = allNodes(nodes).map(n => n && n.id);
+    const g = order.indexOf(gatewayId), t = order.indexOf(targetId);
+    return g >= 0 && t > g;
+  }
   // the import module's rule (pmoflow-import.thresholdsDisjoint), kept here so the engine stays standalone
   function thresholdsDisjointE(a, b) {
     if (!a || !b || a.op === b.op) return false;
@@ -3087,6 +3209,7 @@
     const people = personMap(docs);
     const data = byId(list(docs, 'dataElement'));
     const pname = id => (people[id] && people[id].name) || 'The step owner';
+    const doerName = st => { const d = stepDoerIn(people, st); return d.owner ? (people[d.owner].name || 'The step owner') : d.role || pname(st && st.owner); };
     const out = [];
     linkedProcesses(docs, project).forEach(p => {
       const top = p.tobe || [];
@@ -3112,6 +3235,8 @@
         const n = fr.seq[fr.i];
         const next = st => { const c = st.slice(); const t = c[c.length - 1]; c[c.length - 1] = { seq: t.seq, i: t.i + 1 }; return c; };
         if (!n) return walk(next(stack), trail, labels, looped, guard + 1);
+        // R15 (BPM top 1): a Stop / end node ends the path there (a rejected request never reaches later steps)
+        if (n.type === 'end') { paths.push({ trail: stack.length > 1 ? trail.concat([{ end: n }]) : trail, labels }); return; }
         if (isGateway(n)) {
           const brs = (n.branches || []).filter(Boolean);
           if (n.type === 'parallel') {
@@ -3123,7 +3248,8 @@
           if (!options.length) options = brs.map((b, k) => ({ b, k })).filter(o => !o.b.goto);
           // R14 (BPM-5, L2): a path never takes two choices no amount can meet together ("under $50k" then "above $250k")
           const condOf = o => { const th = n.threshold; if (!th || !isFinite(+th.amount)) return null; const lb_ = String(o.b.label || '').trim().toLowerCase();
-            return /^(yes|y|true)$/.test(lb_) ? th : /^(no|n|false)$/.test(lb_) ? Object.assign({}, th, { op: th.op === '<' ? '>' : '<' }) : null; };
+            // R15 (M2): a compound choice ("$50,000 or less and risk 60 or below") is not simply inverted on its No path
+            return /^(yes|y|true)$/.test(lb_) ? th : /^(no|n|false)$/.test(lb_) && !th.compound ? Object.assign({}, th, { op: th.op === '<' ? '>' : '<' }) : null; };
           options = options.filter(o => { const c = condOf(o); return !c || !trail.some(t => t.cond && thresholdsDisjointE(t.cond, c)); });
           options.forEach(o => {
             const tr = trail.concat([{ gateway: n, label: o.b.label || 'branch ' + (o.k + 1), cond: condOf(o) }]);
@@ -3135,6 +3261,8 @@
               const loc = locate(top, o.b.goto, []);
               if (!loc) return walk(next(stack), tr2, lb, lp, guard + 1);
               const st2 = loc.map(f => ({ seq: f.seq, i: f.i }));
+              // R15: a jump to a later step is a skip ahead, not a loop
+              if (gotoForward(top, n.id, o.b.goto)) return walk(st2, tr2.concat([{ skipTo: o.b.goto }]), lb, lp, guard + 1);
               return walk(st2, tr2.concat([{ loopTo: o.b.goto }]), lb.concat(['loop back once']), lp, guard + 1);
             }
             walk(stack.concat([{ seq: o.b.nodes || [], i: 0 }]), tr, lb, looped, guard + 1);
@@ -3149,9 +3277,11 @@
       paths.forEach((pt, k) => {
         const stepsArr = [];
         pt.trail.forEach(e => {
-          if (e.step) stepsArr.push({ step: e.step.id, title: e.step.title || 'Untitled step', action: pname(e.step.owner) + ': ' + (e.step.title || 'untitled step'),
+          if (e.step) stepsArr.push({ step: e.step.id, title: e.step.title || 'Untitled step', action: doerName(e.step) + ': ' + (e.step.title || 'untitled step'),
             expected: (e.step.data || []).length ? joinList(e.step.data.map(d => (data[d] && data[d].name) || 'the required data')) + ((e.step.data || []).length === 1 ? ' is' : ' are') + ' recorded correctly' : '"' + (e.step.title || 'The step') + '" is completed and recorded' });
           else if (e.gateway) stepsArr.push({ step: e.gateway.id, title: e.gateway.title || 'Gateway', action: e.parallel ? 'Run all branches of "' + (e.gateway.title || 'the gateway') + '" (' + e.label + ')' : 'At "' + (e.gateway.title || 'the decision') + '", choose "' + e.label + '"', expected: 'The flow follows "' + e.label + '"' });
+          else if (e.end) stepsArr.push({ step: e.end.id, title: e.end.title || 'Stop', action: 'The process stops here' + (e.end.title && !/^(end|stop)$/i.test(e.end.title) ? ' (' + e.end.title + ')' : ''), expected: 'No later step runs' });
+          else if (e.skipTo) stepsArr.push({ step: e.skipTo, title: titles[e.skipTo] || 'a later step', action: 'Skip to "' + (titles[e.skipTo] || 'a later step') + '"', expected: 'The steps in between do not run' });
           else if (e.loopTo) stepsArr.push({ step: e.loopTo, title: titles[e.loopTo] || 'an earlier step', action: 'Return to "' + (titles[e.loopTo] || 'an earlier step') + '"', expected: 'The flow repeats from "' + (titles[e.loopTo] || 'an earlier step') + '" once' });
         });
         const sd = [...new Set(pt.trail.filter(e => e.step).flatMap(e => stepData(e.step)))];
@@ -3257,8 +3387,12 @@
   function unconfirmedDone(docs, workOrId) {
     const w = typeof workOrId === 'string' ? get(docs, 'workItem', workOrId) : workOrId;
     const reasons = w ? unconfirmedReasons(w, byId(list(docs, 'workItem'))) : [];
-    return { flag: reasons.length > 0, reasons, doer: w ? doerOf(w) : null,
-      text: reasons.length ? 'Needs someone else to confirm it is done: ' + joinList(reasons.map(r => UNCONF_TEXT[r])) : '' };
+    // R15 #8 (PMO): the confirmer sees the open work it depends on before confirming
+    const idx = byId(list(docs, 'workItem'));
+    const open = w ? depIds(w).map(id => idx[id]).filter(x => x && x.status !== 'done').map(x => ({ id: x.id, title: x.title || 'untitled task', owner: x.owner || null })) : [];
+    return { flag: reasons.length > 0, reasons, doer: w ? doerOf(w) : null, open,
+      text: reasons.length ? 'Needs someone else to confirm it is done: ' + joinList(reasons.map(r => UNCONF_TEXT[r])) : '',
+      confirmText: open.length ? 'It depends on ' + joinList(open.map(x => q(x.title)), 3) + ', which ' + (open.length === 1 ? 'is' : 'are') + ' still open. Confirm “' + ((w && w.title) || 'this task') + '” is done anyway?' : '' };
   }
   function unconfirmedSet(work) { const idx = byId(work); return new Set(work.filter(w => unconfirmedReasons(w, idx).length).map(w => w.id)); }
   function scheduledFraction(w, today) {
@@ -3711,16 +3845,20 @@
     const sc = (Array.isArray(project.uatScripts) ? project.uatScripts : []).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []).find(x => x && x.id === testId);
     return (sc && sc.tester) || null;
   }
-  function canPassTest(docs, prj, testId, personId) {
+  // R15 #5 opts.env: in Try it out ('dev'|'sit'|'system') only the separation rules apply (an assigned test is its
+  // assignee's; whoever assigned a test can't pass it, themselves included); the department rule is the business check's.
+  function canPassTest(docs, prj, testId, personId, opts) {
     const project = projOf(docs, prj); if (!project || !personId) return { rule: 'unknown', text: 'Sign in to record test results.' };
+    const sys = opts && opts.env && stageOfEnv(opts.env) === 'system';
     const tc = get(docs, 'testCase', testId);
     const scr = tc ? null : (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, project.id)).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []).find(x => x && x.id === testId);
     const label = tc ? dataName(docs, tc.dataId) + (tc.field ? ': ' + tc.field : '') : scr ? (scr.title || 'business check script') : 'this test';
     const who = testAssignee(docs, project, testId);
     // R13 #3: whoever assigned a test can't pass it (self-assign then pass is two duties in one person)
     const by = (tc || scr || {}).assignedBy || null;
-    if (who && by && by === personId) return { rule: 'assigner', text: nameOf(docs, personId) + ' assigned the test “' + label + '”, so someone else must pass it.' };
+    if (who && by && by === personId) return { rule: 'assigner', text: nameOf(docs, personId) + ' assigned the test “' + label + '”' + (who === personId ? ' to themselves' : '') + ', so someone else must pass it' + (sys ? ', in Try it out too' : '') + '.' };
     if (who) return who === personId ? null : { rule: 'assignee', text: 'The test “' + label + '” is assigned to ' + nameOf(docs, who) + ', so only they can pass it.' };
+    if (sys) return null;
     const depts = testDepartments(docs, project, testId);
     if (!depts.length) return null;
     const p = personMap(docs)[personId];
@@ -3859,7 +3997,10 @@
             : 'All ' + nWord(needTests, 'piece') + ' of changed information ' + (needTests === 1 ? 'has' : 'have') + ' tests for every rule') : 'Nothing this project changes needs tests') },
       // R14 (BPM-1) the ledger in words, so "Try it out" and "Business check" never look like two different totals
       ledgerText: nWord(total, 'test') + ': ' + nWord(tf.caseIds.length, 'information check') + ' and ' + nWord(tf.scriptIds.length, 'step check') + '. Try it out runs the ' + nWord(tf.caseIds.length, 'information check') + '; the business check runs all ' + total + '.',
-      status: statusById, phases, heldBy: Object.assign({}, tf.held) };
+      status: statusById, phases, heldBy: Object.assign({}, tf.held),
+      // R15 #9 (PMO "19 open issues" vs 9 of 26): open issues in the ledger's own terms
+      openIssues: { count: total - passed, notPassed: total - passed, problems: n(c.defects), failed, notRun,
+        text: (total - passed ? (total - passed) + ' of ' + nWord(total, 'test') + ' not passed yet' : 'All ' + nWord(total, 'test') + ' passed') + (n(c.defects) ? ' · ' + nWord(n(c.defects), 'problem') + ' open' : '') } };
   }
   // R11 §1 THE testing truth: every testing number on every screen (Simple and Advanced Testing, the coverage matrix,
   // the launch gate, the Launch page per-team counts, the approver page, the status report, Home and the audit text).
@@ -4001,12 +4142,17 @@
         if ((diff.nodes[st.id] === 'new' || diff.nodes[st.id] === 'changed') && stepBus(st, p).includes(bu)) { steps.push({ pid: p.id, s: st }); stepKeys.add(p.id + '/' + st.id); }
       });
     });
+    // R15 #11: the part's changed choices (the choice's own step or a step on its paths is in this part)
+    const gateways = [], gwKeys = new Set();
+    linkedProcesses(docs, project).forEach(p => gatewayInvolvement(p).forEach(gi => {
+      if ((gi.status === 'new' || gi.status === 'changed') && gatewayBus(p, gi, stepBus).includes(bu)) { gateways.push({ pid: p.id, g: gi.gateway }); gwKeys.add(p.id + '/' + gi.gateway.id); }
+    }));
     const dataIds = [...new Set(steps.flatMap(x => stepData(x.s)))];
     const changed = new Set(changedInformation(docs, project).map(x => x.dataId));
     const caseIds = list(docs, 'testCase').filter(c => changed.has(c.dataId) && dataIds.includes(c.dataId)).map(c => c.id);
     const scripts = (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, project.id)).filter(sc => {
       if (!sc) return false;
-      if (stepKeys.has(sc.pid + '/' + sc.step)) return true;
+      if (stepKeys.has(sc.pid + '/' + sc.step) || gwKeys.has(sc.pid + '/' + sc.step)) return true;
       const p = get(docs, 'process', sc.pid);
       const g = p && flatGateways(p.tobe).find(x => x.id === sc.step);
       return !!g && flatSteps((g.branches || []).flatMap(b => (b && b.nodes) || [])).some(x => stepKeys.has(sc.pid + '/' + x.id));
@@ -4016,9 +4162,9 @@
     // so its approval request waits until that work is done too
     const retired = new Set();
     linkedProcesses(docs, project).forEach(p => (diffProcess(p).removed || []).filter(r => r && isStep(r) && stepBus(r, p).includes(bu)).forEach(r => retired.add(p.id + '/' + r.id)));
-    const work = list(docs, 'workItem').filter(w => w.projectId === project.id && (stepKeys.has(w.pid + '/' + w.step) || (w.retires && retired.has(w.pid + '/' + w.retires)) ||
+    const work = list(docs, 'workItem').filter(w => w.projectId === project.id && (stepKeys.has(w.pid + '/' + w.step) || gwKeys.has(w.pid + '/' + w.step) || (w.retires && retired.has(w.pid + '/' + w.retires)) ||
       (w.tag === 'tell-removed' && Array.isArray(w.teams) && w.teams.some(t => sameTeam(t, bu)))));
-    return { steps, dataIds, caseIds, scriptIds: scripts, tasks, work };
+    return { steps, gateways, dataIds, caseIds, scriptIds: scripts, tasks, work };
   }
   // R8 "Approve my part" appears only when that team's own items are complete: the work on its changed steps is done,
   // the information those steps use is available, and its tests passed. {bu, ready, waiting:[{kind, text}], sentence}.
@@ -4034,14 +4180,15 @@
     const open = sc.work.filter(w => w.status !== 'done');
     if (open.length) waiting.push({ kind: 'work', count: open.length, items: open.map(w => w.id), text: nWord(open.length, 'task') + ' on ' + (open.length === 1 ? 'its step' : 'its steps') });
     const notYet = sc.dataIds.filter(id => availOf(get(docs, 'dataElement', id), work, docs, ctx) !== 'live');
-    if (notYet.length) waiting.push({ kind: 'information', count: notYet.length, items: notYet, text: joinList(notYet.map(id => dataName(docs, id)), 3) });
+    // R15 (Karen): each kind of wait in its own plain words ("information not available yet: Routing numbers")
+    if (notYet.length) waiting.push({ kind: 'information', count: notYet.length, items: notYet, text: 'information not available yet: ' + joinList(notYet.map(id => dataName(docs, id)), 3) });
     const pt = partTests(docs, project, bu, sc);
     const notPassed = pt.ids.filter(id => pt.status[id] !== 'passed');
     if (notPassed.length) waiting.push({ kind: 'tests', count: notPassed.length, items: notPassed, text: nWord(notPassed.length, 'test') + ' to pass' });
-    if (pt.gaps.length) waiting.push({ kind: 'coverage', count: pt.gaps.length, items: pt.gaps.map(g => g.dataId), text: joinList(pt.gaps.map(g => g.name), 3) + ' to get tests' });
+    if (pt.gaps.length) waiting.push({ kind: 'coverage', count: pt.gaps.length, items: pt.gaps.map(g => g.dataId), text: 'tests to add for ' + joinList(pt.gaps.map(g => g.name), 3) });
     const ready = !waiting.length;
     return { bu, needed, ready, waiting, waitingOn: waiting.reduce((a, x) => a + x.count, 0), steps: sc.steps.length, tests: { passed: pt.passed, total: pt.ids.length, gaps: pt.gaps.length, checks: pt.checks, text: pt.text },
-      sentence: ready ? 'Ready for your approval.' : 'Not ready for your approval yet: waiting on ' + joinList(waiting.map(x => x.text)) + '.' };
+      sentence: ready ? 'Ready for your approval.' : 'Not ready for your approval yet: waiting on ' + waiting.map(x => x.text).join('; ') + '.' };
   }
   // R8 prefilled "What you checked", built from facts, never boilerplate.
   // {text: "3 changed steps reviewed; 12 of 12 tests passed", facts: {...}}
@@ -4164,6 +4311,13 @@
     });
   }
 
+  // R15 (M3, Jordan): the approvals someone can give now, as report asks: a re-approval (stale) always, a pending part
+  // once it is ready; the same rule as personQueue. [{person, name, bu, reapproval, what, reason}]
+  function approvalAsks(docs, prj, today) {
+    const t = projectTruth(docs, prj, today); if (!t) return [];
+    return (t.approvals || []).filter(a => a.needed && (a.ready || a.stale) && !a.approved && !a.blockedBy && a.approver).map(a => ({ person: a.approver, name: nameOf(docs, a.approver), bu: a.bu, reapproval: !!a.stale,
+      what: 'Approve ' + a.bu + "'s part" + (a.stale ? ' again' : ''), reason: a.stale ? a.sentence : null }));
+  }
   // R8 ONE TRUTH: every number, date and label a page, report, CSV, dashboard or portfolio shows for a project.
   // R9: one late list, the ranked `who`, stepsLeft, testing (one count + perBU + next), approvals, EV/SPI note.
   // projectSummary, testingSummary and launchSteps return parts of this object. Dates are YYYY-MM-DD; bufferDays,
@@ -4200,7 +4354,8 @@
     return {
       projectId: project.id, name: project.name || '', today: today || null,
       tasks: { total: c.items.length, done: c.items.length - c.open.length, open: c.open.length },
-      pctDone: ev.pct, behindEffort: c.behindEffort,
+      // R15 #9 (Jordan): once launched the project is 100% done (never "Launched 89%" next to "4/4 done")
+      pctDone: r.released || project.status === 'live' ? 100 : ev.pct, pctEarned: ev.pct, behindEffort: c.behindEffort,
       // R10 §6: no work yet and not live: every screen says "No plan yet" instead of a step count
       noPlan: !c.items.length && !r.released && project.status !== 'live',
       launch: launchDate(docs, project),
@@ -4227,9 +4382,14 @@
       // R14 (BPM): ONE "late or blocked" task count for the header and the report: late tasks plus open tasks held up
       // by blocking information, each task once
       lateOrBlocked: (() => { const b = blockingOf(docs, project, c.blockers); const ids = new Set(c.late); b.items.forEach(x => x.heldIds.forEach(i => ids.add(i)));
+        // R15 #9 (BPM): count = |late ∪ held up|, with its parts in the same unit (tasks) and the blocking pieces named
         const n = ids.size, held = [...ids].filter(i => !c.late.includes(i)).length;
-        return { count: n, ids: [...ids], late: c.late.length, heldUp: held,
-          text: n ? nWord(n, 'task') + ' late or blocked (' + [c.late.length ? c.late.length + ' late' : '', held ? held + ' held up by missing information' : ''].filter(Boolean).join(', ') + ')' : 'Nothing late or blocked' }; })(),
+        const allHeld = new Set(); b.items.forEach(x => x.heldIds.forEach(i => allHeld.add(i)));
+        const both = c.late.filter(i => allHeld.has(i)).length;
+        const parts = [nWord(c.late.length, 'late task'), nWord(allHeld.size, 'task') + ' held up by ' + nWord(b.count, 'blocking piece', 'blocking pieces') + ' of information'];
+        return { count: n, ids: [...ids], late: c.late.length, heldUp: held, held: allHeld.size, both, blocking: b.count,
+          parts: { late: c.late.length, held: allHeld.size, both, blockingPieces: b.count },
+          text: n ? nWord(n, 'task') + ' late or blocked: ' + parts.join(' and ') + (both ? ' (' + both + ' ' + (both === 1 ? 'is' : 'are') + ' both)' : '') : 'Nothing late or blocked' }; })(),
       lateness: Object.fromEntries(c.open.filter(w => c.fc[w.id] && c.fc[w.id].late).map(w => [w.id, lateInfo(docs, w, today, c.fc)])),
       // R11 §3 launch day on a day off (Launch, Dashboard, status), access counts
       launchFlag: c.launchFlag || null, grants: grantCounts(docs, project, today),
@@ -4500,7 +4660,8 @@
       const f = factsOf(w);
       if (inWin(f.doneTs, f.done)) completed.push(row(w, f.done, { due: w.due || null }));
       if (inWin(f.assignedTs, f.assigned)) assigned.push(row(w, f.assigned, { due: w.due || null }));
-      if (inWin(f.startedTs, f.started)) started.push(row(w, f.started));
+      // R15 (M3, PMO): a task listed under STARTED has started (never one that is Not started now)
+      if (inWin(f.startedTs, f.started) && w.status && w.status !== 'idle') started.push(row(w, f.started));
     });
     // blockers: information not available yet (projectTruth's list) and problems (defect tasks)
     const raised = [], resolved = [], openAtEnd = [];
@@ -4511,6 +4672,8 @@
     const infoIds = new Set(infoBlockers.map(b => b.dataId));
     used.forEach(id => {
       const d = get(docs, 'dataElement', id); if (!d) return;
+      // R15 #10 (Karen 1): information collected each run is never a project blocker
+      if (d.perRun) return;
       // R14 (Karen 7): a blocker is raised when the information went missing, else when it was added, else when the
       // first task it holds up was planned; never "0 raised" while it blocks work created in the period
       const heldBy = items.filter(w => { const st = findStep(docs, w.pid, w.step); return st && stepData(st).includes(id); });
@@ -4521,7 +4684,10 @@
       const b = { kind: 'information', id: 'data:' + id, dataId: id, title: (d.name || 'some information') + ' is not available yet', name: d.name || 'some information',
         owner: dataOwnerOf(docs, d) || null, raisedAt: since };
       b.ownerName = pn(b.owner);
-      if (within(since)) raised.push(Object.assign({}, b, { date: since }));
+      // R15 #10: only information that was (or still is) not available is a blocker raised; information that was
+      // available from the start never counts, so raised − resolved = open for the week
+      const everBlocked = infoIds.has(id) || !!liveAt || !!dayOfValue(d.unavailableSince);
+      if (everBlocked && within(since)) raised.push(Object.assign({}, b, { date: since }));
       if (liveAt && (since || res) && within(liveAt)) resolved.push(Object.assign({}, b, { title: (d.name || 'Some information') + ' is available', date: liveAt }));
       const openThen = infoIds.has(id) ? (!since || since <= to) : (!!liveAt && liveAt > to && !!since && since <= to);
       if (nowOpen ? infoIds.has(id) : openThen) {
@@ -4620,7 +4786,8 @@
     // forecast finish when the window opened vs at its end (and now): saved snapshots, else a baseline, else not tracked
     const snaps = (Array.isArray(project.forecastLog) ? project.forecastLog : []).map(s => ({ date: dayOfValue(s && s.date), finish: dayOfValue(s && s.finish) }))
       .filter(s => s.date && s.finish).sort((a, b) => a.date.localeCompare(b.date));
-    const before = snaps.filter(s => s.date < from).pop() || null;
+    // R15 (M3, PMO "Dec 7 vs Dec 8 → Dec 10"): the snapshot saved at the last report (on the window's first day) counts
+    const before = snaps.filter(s => win.preset === 'since-last-report' ? s.date <= from : s.date < from).pop() || null;
     let thenF = null, thenSource = 'not-tracked', thenNote = null;
     if (before) { thenF = before.finish; thenSource = 'snapshot'; thenNote = 'saved ' + fmtDayLong(before.date); }
     else {
@@ -4678,7 +4845,8 @@
         : 'Expected finish moved ' + bdw(slipDays) + (slipDays > 0 ? ' later ' : ' earlier ') + win.noun + ' (' + fmtDay(thenF) + ' → ' + fmtDay(endF) + ')';
     }
     // overall: projectTruth as of today, plus the common areas of concern
-    const cost = t.cost || {};
+    // R15 #9 (PMO): a past range's cost and concerns are as of the period end too (never today's next to "as of Nov 6")
+    const cost = (tEnd || t).cost || {};
     const money0 = n => '$' + Math.round(+n || 0).toLocaleString('en-US');
     let budgetText = null;
     if (cost.planned != null && cost.forecast != null) budgetText = cost.overBudget
@@ -4686,13 +4854,14 @@
       : 'Within budget: expected cost ' + money0(cost.forecast) + ' against the ' + money0(cost.planned) + ' budget';
     else if (cost.show && cost.forecast != null) budgetText = 'Expected cost ' + money0(cost.forecast) + ' (no budget set)';
     else if (cost.unknown) budgetText = cost.unknownText + (cost.planned != null ? ' (budget ' + money0(cost.planned) + ')' : '');
-    const concerns = areasOfConcern(docs, project, t);
+    const concerns = tEnd ? areasOfConcern(docsAsOf(docs, project.id, to, factsOf), projOf(docsAsOf(docs, project.id, to, factsOf), project.id), tEnd) : areasOfConcern(docs, project, t);
     const desc = String(project.desc || project.description || '').trim(), purpose = String(project.purpose || '').trim();
     const h = tEnd || t;
     const overall = {
       name: project.name || '', description: desc || null, purpose: purpose || null, needsPurpose: !desc && !purpose,
-      // R14 (PMO-8): the headline is "as of" the period's end; budget, asks and concerns are always "as of today"
+      // R14 (PMO-8): the headline is "as of" the period's end; R15 #9: budget and concerns too; asks stay "as of today"
       asOf: { date: tEnd ? to : String(today).slice(0, 10), past: !!tEnd, label: tEnd ? 'as of ' + fmtDayLong(to) : 'as of today', todayLabel: 'as of today' },
+      costAsOf: tEnd ? 'as of ' + fmtDayLong(to) : 'as of today', concernsAsOf: tEnd ? 'as of ' + fmtDayLong(to) : 'as of today',
       label: h.label, rag: h.rag, sentence: h.sentence, reasons: h.reasons.slice(), lateText: h.lateText, lateCount: h.lateCount,
       forecastFinish: h.forecastFinish, deadline: h.target, bufferDays: h.bufferDays,
       schedule: h.forecastFinish && h.target ? (h.forecastFinish > h.target ? 'Behind schedule: expected ' + fmtDay(h.forecastFinish) + ', ' + bdw(h.bufferDays) + ' after the ' + fmtDay(h.target) + ' deadline'
@@ -4717,6 +4886,9 @@
       projectId: project.id, today: String(today).slice(0, 10), window: win, from, to,
       completed: completed.sort(byDate), assigned: assigned.sort(byDate), started: started.sort(byDate),
       blockersRaised: raised.sort(byDate), blockersResolved: resolved.sort(byDate), blockersOpenAtEnd: openAtEnd,
+      // R15 #10 (Karen 1): open at the end = carried in + raised − resolved, said with its parts
+      blockersCarriedIn: Math.max(0, openAtEnd.length - raised.length + resolved.length),
+      blockersText: (() => { const ci = Math.max(0, openAtEnd.length - raised.length + resolved.length); return nWord(openAtEnd.length, 'blocker') + ' open at the end' + (openAtEnd.length || raised.length || resolved.length ? ' (' + [ci ? ci + ' from before' : '', raised.length + ' raised', resolved.length + ' resolved'].filter(Boolean).join(', ') + ')' : ''); })(),
       behindAtEnd, behindText, behindPastDue: core.pastDue.length, behindFinishAfterDue: core.finishAfterDue.length,
       testsRun, approvalsGiven, risksOpened: risksOpened.sort(byDate), risksClosed: risksClosed.sort(byDate),
       spendInPeriod: spend, forecastFinishThen: thenF, forecastFinishThenSource: thenSource, forecastFinishThenNote: thenNote,
@@ -4956,7 +5128,11 @@
     const sib = new Set();
     list(docs, 'process').forEach(p => [p.tobe, p.asis].forEach(nodes => flatSteps(nodes).forEach(st => { const ds = stepData(st); if (ds.includes(dataId)) ds.forEach(x => sib.add(x)); })));
     sib.delete(dataId);
-    const others = [...sib].map(id => get(docs, 'dataElement', id)).filter(Boolean);
+    // R15 (M2, BPM risk_score): then any information used in the processes that use this piece
+    const wider = new Set();
+    list(docs, 'process').forEach(p => { const all = [p.tobe, p.asis].flatMap(nodes => flatSteps(nodes).flatMap(stepData)); if (all.includes(dataId)) all.forEach(x => wider.add(x)); });
+    wider.delete(dataId); sib.forEach(x => wider.delete(x));
+    const others = [...sib].concat([...wider]).map(id => get(docs, 'dataElement', id)).filter(Boolean);
     const tk = x => tokens(x).split(' ').filter(w => w && !['the', 'a', 'of', 'and', 'details', 'info', 'information', 'data', 'record'].includes(w));
     const same = (a, b) => { const x = tk(a), y = tk(b); return x.length && y.length && (x.every(w => y.includes(w)) || y.every(w => x.includes(w))); };
     const mine = c => target && ((target.fields || []).some(f => f && columnFor(f, [{ name: c }])) || same(c, target.name));
@@ -5036,7 +5212,9 @@
     if (!t) return '';
     const h = isFinite(+t.hours) ? +t.hours : 0;
     const logged = t.at && isDate(String(t.at).slice(0, 10)) ? String(t.at).slice(0, 10) : null;
-    return nWord(h, 'hour') + (isDate(t.date) ? ' on ' + fmtDay(t.date) : '') + (logged ? ' (logged ' + fmtDay(logged) + (t.backdated ? ', backdated' : '') + ')' : t.backdated ? ' (backdated)' : '');
+    // R15 #6: flags the server stamps on an entry, in plain words
+    const flags = [t.backdated ? 'backdated' : '', t.future ? 'future date' : '', t.overDay ? 'more than 24 hours that day' : '', t.beforeStart ? 'before the task started' : ''].filter(Boolean);
+    return nWord(h, 'hour') + (isDate(t.date) ? ' on ' + fmtDay(t.date) : '') + (logged ? ' (logged ' + fmtDay(logged) + (flags.length ? ', ' + flags.join(', ') : '') + ')' : flags.length ? ' (' + flags.join(', ') + ')' : '');
   }
   // R11 §7 holiday-aware sprint calendar: working days, the days off inside it, and capacity pro-rated per person
   // (person.capacity days per 5-day week, default 4). [{id, name, start, end, workingDays, daysOff: [{date, name}],
@@ -5063,7 +5241,205 @@
     });
   }
 
+  // R15 #4 a start date must be a working day on or before the due date. null | {kind:'after-due'|'day-off', text}
+  function startDateProblem(w, docs) {
+    if (docs) syncCalendar(docs);
+    if (!w || !isDate(w.start)) return null;
+    const st = String(w.start).slice(0, 10);
+    if (isDate(w.due) && st > String(w.due).slice(0, 10)) return { kind: 'after-due', text: 'The start (' + fmtDayLong(st) + ') is after the due date (' + fmtDayLong(w.due) + '). Pick a start on or before the due date.' };
+    if (offMs(toMs(st))) { const h = holidayName(st); return { kind: 'day-off', text: fmtDayLong(st) + ' is ' + (h ? h + ', a day off' : 'a weekend day') + '. Start on a working day, such as ' + fmtDayLong(addBusinessDays(st, 0)) + '.' }; }
+    return null;
+  }
+  // R15 #4 the change module's cost tolerance on a plain task edit: null | {before, after, pct, text} when the project's
+  // expected cost rises by 5% or more
+  const COST_TOLERANCE_PCT = 5;
+  function costBreach(docsBefore, docsAfter, projectId, today) {
+    const a = projectTruth(docsBefore, projectId, today), b = projectTruth(docsAfter, projectId, today);
+    if (!a || !b || !a.cost || !b.cost) return null;
+    const x = a.cost.forecast, y = b.cost.forecast;
+    if (x == null || y == null || !(x > 0) || !(y > x)) return null;
+    const pct = (y - x) / x * 100;
+    if (pct < COST_TOLERANCE_PCT) return null;
+    const m = n => '$' + Math.round(n).toLocaleString('en-US');
+    return { before: x, after: y, pct: Math.round(pct * 10) / 10, text: 'This raises the expected cost from ' + m(x) + ' to ' + m(y) + ' (' + (Math.round(pct * 10) / 10) + '%, more than ' + COST_TOLERANCE_PCT + '%).' };
+  }
+  // R15 #6 the first completion date is kept: a reopen and re-Done (Jira round trip) never overwrites it.
+  // Returns a copy of next with firstDoneAt (server-owned) and, when done again, doneAt = the first completion date.
+  function keepFirstDone(prev, next) {
+    const out = Object.assign({}, next || {});
+    const first = (prev && (prev.firstDoneAt || (prev.status === 'done' && isDate(prev.doneAt) ? prev.doneAt : null))) || null;
+    // (the first Done's own date is settled by the caller: the server clamps it to the person's today first)
+    if (first) out.firstDoneAt = String(first).slice(0, 10); else delete out.firstDoneAt;
+    if (out.status === 'done' && first) out.doneAt = first;
+    return out;
+  }
+  // R15 #6 flags for an hours entry: {future, overDay, beforeStart}. dayTotal = that person's hours on that date across
+  // every task (this entry included).
+  function hoursFlags(docs, w, entry, today, dayTotal) {
+    const f = {};
+    if (!entry || !isDate(entry.date)) return f;
+    if (isDate(today) && entry.date > today) f.future = true;
+    if (dayTotal != null && dayTotal > 24) f.overDay = true;
+    if (w && isDate(w.start) && entry.date < w.start) f.beforeStart = true;
+    return f;
+  }
+
+  // R15 #7 (BPM) boundary cases at every amount threshold of the processes that use a piece of information: at the
+  // threshold and just past it, each saying which path it takes. [{dataId, field, kind:'boundary', input, expect,
+  // origin:'spec', note, threshold: gatewayId}]
+  function thresholdCases(docs, dataId) {
+    const de = get(docs, 'dataElement', dataId); if (!de) return [];
+    const stems = x => tokens(x).split(' ').filter(w => w.length >= 4).map(w => w.replace(/(ies)$/, 'y').replace(/s$/, ''));
+    const out = [], seen = new Set();
+    list(docs, 'process').forEach(p => {
+      if (!flatSteps(p.tobe).some(st => stepData(st).includes(dataId))) return;
+      flatGateways(p.tobe).forEach(g => {
+        const th = g.threshold; if (!th || !isFinite(+th.amount)) return;
+        const sw = stems(th.subject || g.title || '');
+        (de.fields || []).filter(f => { const fw = stems(f.name); return fw.length && sw.length && fw.some(w => sw.includes(w)) && fw.filter(w => sw.includes(w)).length * 2 >= fw.length; }).forEach(f => {
+          const sp = fieldSpec(f); if (sp.type !== 'number' && sp.type !== 'currency') return;
+          const step = sp.type === 'currency' ? 0.01 : 1, a = +th.amount;
+          const fmtA = n => '$' + (Math.round(n * 100) / 100).toLocaleString('en-US');
+          const yes = (g.branches || []).find(b => /^(yes|y|true)$/i.test(String((b && b.label) || '').trim())), no = (g.branches || []).find(b => /^(no|n|false)$/i.test(String((b && b.label) || '').trim()));
+          const yl = yes ? yes.label : 'Yes', nl = no ? no.label : 'No';
+          const atYes = th.op === '<=' || th.op === '>=';
+          const past = th.op === '<' || th.op === '<=' ? a - step : a + step;
+          const cmp = th.compound ? ' (when the other conditions of the choice hold too)' : '';
+          [[a, 'At the threshold ' + fmtA(a), atYes ? yl : nl], [past, (th.op === '<' || th.op === '<=' ? 'Just under ' : 'Just over ') + fmtA(a), atYes ? nl : yl]].forEach(([v, what, path]) => {
+            const input = fmtNum(sp, +v.toFixed(2));
+            const key = f.name + '|' + input; if (seen.has(key) || !validate(sp, input)) return; seen.add(key);
+            out.push({ dataId, field: f.name, kind: 'boundary', input, expect: 'accept', origin: 'spec', threshold: g.id,
+              note: what + ' for “' + (g.title || 'the choice') + '”: takes the “' + path + '” path' + cmp });
+          });
+        });
+      });
+    });
+    return out;
+  }
+  // R15 #7 (BPM) what the latest sample says about a piece of information, for the data page: never "all match" while
+  // a warning stands. {allMatch, warnings:[{column, kind, text}], text}
+  function dataProfileStatus(docs, dataId) {
+    const d = get(docs, 'dataElement', dataId);
+    const prof = latestBy(list(docs, 'profile').filter(x => x.dataId === dataId), 'at');
+    if (!d || !prof) return { allMatch: null, warnings: [], text: 'No sample data checked yet' };
+    const warnings = [];
+    specDrift(d, prof).filter(x => x.issue !== 'unspecified-column').forEach(x => warnings.push({ column: x.field, kind: x.issue, text: x.field + ': ' + (x.detail || x.issue) }));
+    columnsOf(prof).forEach(c => {
+      if (c.sharedAccount) warnings.push({ column: c.name, kind: 'shared-account', text: c.name + ': ' + (c.sharedAccount.text || nWord(c.sharedAccount.accounts, 'account number') + ' shared by ' + nWord(c.sharedAccount.records, 'record')) });
+      if (c.nearDuplicates) warnings.push({ column: c.name, kind: 'near-duplicate', text: c.name + ': ' + nWord(c.nearDuplicates.records, 'record') + ' in ' + nWord(c.nearDuplicates.groups, 'group') + ' look like the same name spelled differently' });
+      else if (+c.duplicates > 0 && !c.sharedAccount && / (id|number|no|code|account|tax|ein|name) /.test(' ' + tokens(c.name) + ' ')) warnings.push({ column: c.name, kind: 'duplicate', text: c.name + ': ' + nWord(c.duplicateRecords || c.duplicates, 'record') + ' share a value' });
+    });
+    return { allMatch: warnings.length === 0, warnings, text: warnings.length ? nWord(warnings.length, 'warning') + ' in the sample: ' + warnings.map(w => w.text).join('; ') : 'All values match the rules' };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* R15 (M1): one owner truth, one approver truth, the stored sponsor   */
+  /* ------------------------------------------------------------------ */
+  function stepById(docs, pid, stepId) {
+    const p = get(docs, 'process', pid);
+    return p ? allNodes(p.tobe).find(n => n && n.id === stepId) || null : null;
+  }
+  // R15 #1 the doer of a task made from a step: the step's role (its one holder, else nobody), then its named owner.
+  // Never the process owner or the PM. {owner, ownerRole, text}
+  function stepTaskOwner(docs, pid, stepId) {
+    const st = typeof stepId === 'object' && stepId ? stepId : stepById(docs, pid, stepId);
+    if (!st) return { owner: null, ownerRole: null, text: 'Needs an owner' };
+    const d = stepDoerIn(personMap(docs), st);
+    const role = String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '') || null;
+    return { owner: d.owner || null, ownerRole: role, text: d.text };
+  }
+  // R15 #1 a data owner follows its step: information whose owner is (still) the step's old doer follows the step to
+  // its new doer. [{dataId, set: {owner?, ownerRole?}, from, to}]
+  function dataOwnersToFollow(docsBefore, docsAfter) {
+    const out = [], seen = new Set();
+    const doerKey = st => { const r = String((st && st.ownerRole) || '').trim(); return r ? 'r:' + r.toLowerCase() : st && st.owner ? 'p:' + st.owner : ''; };
+    list(docsAfter, 'process').forEach(pa => {
+      const pb = get(docsBefore, 'process', pa.id); if (!pb) return;
+      const was = {}; allNodes(pb.tobe).forEach(n => { if (n && n.id) was[n.id] = n; });
+      flatSteps(pa.tobe).forEach(st => {
+        const o = was[st.id]; if (!o || doerKey(o) === doerKey(st) || !doerKey(st)) return;
+        stepData(st).forEach(id => {
+          if (seen.has(id)) return;
+          const d = get(docsAfter, 'dataElement', id); if (!d) return;
+          const r = String(d.ownerRole || '').trim();
+          const ownedByOld = r ? doerKey(o) === 'r:' + r.toLowerCase() : d.owner ? doerKey(o) === 'p:' + d.owner || (!String(o.ownerRole || '').trim() && o.owner === d.owner) : false;
+          if (!ownedByOld) return;
+          seen.add(id);
+          const set = defaultDataOwner(st);
+          const nm = x => x.ownerRole || nameOf(docsAfter, x.owner);
+          out.push({ dataId: id, set: { owner: set.owner || null, ownerRole: set.ownerRole || null }, from: r || nameOf(docsAfter, d.owner), to: nm(set) });
+        });
+      });
+    });
+    return out;
+  }
+  // Workspace roles as Admin sees them: settings.roles first, then person.appRole, then the title default.
+  function appRoleOf(docs, personId) {
+    const ws = list(docs, 'workspace').find(x => x && x.id === 'settings') || {};
+    const r = ws.roles && typeof ws.roles === 'object' ? ws.roles[personId] : null;
+    if (['admin', 'editor', 'approver', 'viewer'].includes(r)) return r;
+    const p = personMap(docs)[personId]; if (!p) return null;
+    if (['admin', 'editor', 'approver', 'viewer'].includes(p.appRole)) return p.appRole;
+    return /project manager|process owner/i.test(String(p.role || '')) ? 'admin' : 'editor';
+  }
+  function adminsOf(docs) { return Object.keys(personMap(docs)).filter(id => appRoleOf(docs, id) === 'admin').sort(); }
+  // R15 #3 the ONE sponsor: project.sponsor when it names a person who is not the PM; never computed.
+  function sponsorOf(docs, prj) {
+    const project = projOf(docs, prj); if (!project) return null;
+    const s = project.sponsor; return s && s !== project.owner && personMap(docs)[s] ? s : null;
+  }
+  // R15 #3 who approves a deadline, budget or project-manager change: the sponsor (not the requester); with no sponsor,
+  // an Admin who is neither the requester nor the PM. {person, role, text}
+  function deadlineApprover(docs, prj, requester, opts) {
+    const project = projOf(docs, prj);
+    if (!project) return { person: null, role: null, text: 'This project could not be found.' };
+    const not = new Set([requester].concat((opts && opts.exclude) || []).filter(Boolean));
+    const sp = sponsorOf(docs, project);
+    if (sp && !not.has(sp)) return { person: sp, role: 'sponsor', text: nameOf(docs, sp) + ' (the sponsor) approves.' };
+    const adm = adminsOf(docs).find(id => !not.has(id) && id !== project.owner);
+    if (adm) return { person: adm, role: 'admin', text: sp ? nameOf(docs, sp) + ' (the sponsor) asked, so ' + nameOf(docs, adm) + ' (an Admin) approves.' : 'No sponsor is set, so ' + nameOf(docs, adm) + ' (an Admin) approves.' };
+    return { person: null, role: null, text: 'Nobody besides ' + (requester ? nameOf(docs, requester) : 'the requester') + ' can approve this change. Set the sponsor in the project’s settings first.' };
+  }
+  // R15 #2 the ONE approver list without a project: a department's named approvers when it has any, else its members.
+  function departmentApprovers(docs, bu) {
+    const d = departments(docs).find(x => teamKey(x.name) === teamKey(bu));
+    if (!d) return { ids: [], names: [], source: 'none', text: 'Nobody can approve yet' };
+    const named = d.approvers.length > 0, ids = named ? d.approvers.slice() : d.people.map(p => p.id);
+    const names = ids.map(id => nameOf(docs, id));
+    return { ids, names, source: ids.length ? (named ? 'named' : 'members') : 'none', text: ids.length ? 'Approves: ' + joinList(names, 4) : 'Nobody can approve yet' };
+  }
+  // R15 #2 the ONE approver list for a project's part (Launch, the part page, Departments): {bu, eligible, names,
+  // source, notEligible, text}. Same rule as readiness: named approvers (else members) plus the chosen approver, minus
+  // the PM, the launch owner, recent joiners and separation-of-duties bars.
+  function partApprovers(docs, prj, bu) {
+    const project = projOf(docs, prj);
+    if (!project) return { bu, eligible: [], names: [], source: 'none', notEligible: [], text: 'This project could not be found.' };
+    const people = personMap(docs), base = departmentApprovers(docs, bu);
+    const rm = project.releaseManager || project.owner || null;
+    const chosen = project.approvers && typeof project.approvers === 'object' ? (Object.keys(project.approvers).find(k => teamKey(k) === teamKey(bu)) || null) : null;
+    const pick = chosen ? project.approvers[chosen] : null;
+    const cand = base.ids.slice(); if (pick && people[pick] && !cand.includes(pick)) cand.push(pick);
+    const bars = partBars(docs, project, bu);
+    const notEligible = [], eligible = [];
+    cand.forEach(id => {
+      const nm = nameOf(docs, id);
+      let why = null;
+      if (id === project.owner) why = { rule: 'project-manager', text: nm + ' is the project manager, so they can’t approve a team’s part.' };
+      else if (id === rm) why = { rule: 'launch-owner', text: nm + ' is the launch owner, so they can’t approve a team’s part.' };
+      else if (grantTooRecent(docs, project, bu, id)) why = { rule: 'recent-move', text: nm + ' joined or became an approver for ' + bu + ' after this part was in flight, so they can’t approve it.' };
+      else why = approvalBar(docs, project, bu, id, { bars });
+      if (why) notEligible.push(Object.assign({ person: id, name: nm }, why)); else eligible.push(id);
+    });
+    const names = eligible.map(id => nameOf(docs, id));
+    const source = !cand.length ? 'none' : pick && eligible.length === 1 && eligible[0] === pick && !base.ids.includes(pick) ? 'chosen' : base.source;
+    return { bu, eligible, names, source, chosen: pick || null, notEligible,
+      text: eligible.length ? joinList(names, 4) + ' can approve the ' + bu + ' part.' : 'Nobody can approve the ' + bu + ' part yet' + (notEligible.length ? ': ' + notEligible.map(x => x.text).join(' ') : '.') };
+  }
+
   return {
+    // R15 (M1)
+    stepTaskOwner, dataOwnersToFollow, adminsOf, appRoleOf, sponsorOf, deadlineApprover, departmentApprovers, partApprovers,
+    startDateProblem, costBreach, keepFirstDone, hoursFlags, COST_TOLERANCE_PCT, gatewayInvolvement, thresholdCases, dataProfileStatus, approvalAsks,
     // R14 (L1)
     unconfirmedDone, dueDateProblem, deadlineBreach, timeEntryText, fmtStamp, knockOnRedates, pastDueWarnings, infoStateCounts, splitSampleColumns, grantTooRecent,
     // R13 (K1)

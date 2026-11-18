@@ -1,0 +1,12 @@
+Vendor Onboarding Procedure (Rev. 4)
+Owner: Operations Director
+
+1. Purchasing receives the new vendor request form from the requesting department and checks that a business reason is given.
+2. Purchasing emails the vendor and requests a signed W-9 and a certificate of insurance (COI).
+3. Purchasing reviews the COI to confirm general liability coverage of at least $1M and that our company is named as additional insured.
+4. The vendor sends a bank letter on bank letterhead with account and routing numbers. AP verifies the bank letter by calling the bank at a number we look up ourselves, not the number on the letter.
+5. Credit runs a credit check on the vendor using Dun & Bradstreet and records the credit limit.
+6. If the expected annual spend is over $25k, the Operations Director (Karen) approves too. Otherwise Purchasing manager approval is enough.
+7. AP enters the vendor in the ERP with the W-9 tax ID and payment terms.
+8. Treasury sets up the vendor bank account for ACH payments and confirms a $0.01 test deposit.
+9. Operations adds the vendor to the approved supplier list and notifies the requesting department.

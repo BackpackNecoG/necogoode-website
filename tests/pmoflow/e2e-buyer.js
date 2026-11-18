@@ -313,6 +313,33 @@ async function browserChecks(browser) {
   check('compare: recurring runs are listed under what PMOFlow deliberately doesn’t do', /each time it happens/i.test(await page.innerText('#not-h + ul')) &&
     await page.locator('tbody tr', { hasText: /each time|every time|each week/i }).locator('td[data-col="PMOFlow"]', { hasText: 'No, deliberately' }).count() === 1);
 
+  /* R15 M4 #4a (PMO R14 blocker): the demo form lists ServiceNow, so the compare page says plainly there is no ServiceNow
+     integration yet, names the tools PMOFlow does sync with, and promises no date for it */
+  const sn = (await page.innerText('[data-no-servicenow]').catch(() => '')).replace(/\s+/g, ' ');
+  check('compare: says plainly there is no ServiceNow integration yet', /no ServiceNow integration yet/.test(sn) && /Jira and Azure DevOps/.test(sn), sn);
+  check('compare: the ServiceNow note promises no date, plan or term', !/\b(Q[1-4]|20\d\d|planned|roadmap|coming soon|soon|later this year|next release)\b/i.test(sn), sn);
+  check('compare: ServiceNow is never shown as a supported integration anywhere on the site', await (async () => {
+    for (const n of ['index', 'pricing', 'security', 'compare', 'demo']) {
+      const t = fs.readFileSync(path.join(PUBLIC, 'pmoflow', n + '.html'), 'utf8').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      if (/(sync|syncs|integrat\w*|connect\w*) (both ways )?with[^.]{0,40}ServiceNow/i.test(t) && !/no ServiceNow integration yet/.test(t)) return false;
+    }
+    return true;
+  })());
+  check('demo: the ServiceNow choice says it is not integrated yet', /no integration yet/i.test(await page.evaluate(async () => {
+    const r = await fetch('/pmoflow/demo.html'); const d = new DOMParser().parseFromString(await r.text(), 'text/html');
+    const i = d.querySelector('input[name="tools"][value="ServiceNow"]'); return i ? i.closest('label').textContent : ''; })));
+
+  /* R15 M4 #4b: the pilot copy restates only what the pilot offer already says (we set up PMOFlow for your team, connected
+     to your tools if you want; one process; 90 days; credited to year one). No page promises a single setup call, an SLA
+     or a guarantee the offer doesn't make. */
+  await page.goto(ORIGIN + '/pmoflow/pricing');
+  const pilotTxt = (await page.innerText('.card.pilot')).replace(/\s+/g, ' ');
+  check('pricing: the pilot says who does the setup, as the offer states it', /We set up PMOFlow for your team, connected to your tools if you want/.test(pilotTxt) && /credited to your first year/.test(pilotTxt), pilotTxt);
+  check('pricing: the pilot names one process and 90 days', /one process/.test(pilotTxt) && /90 days/.test(pilotTxt), pilotTxt);
+  const site = ['index', 'pricing', 'security', 'compare', 'demo'].map(n => fs.readFileSync(path.join(PUBLIC, 'pmoflow', n + '.html'), 'utf8').replace(/<[^>]+>/g, ' ')).join(' ').replace(/\s+/g, ' ');
+  const invented = site.match(/\b(one|a single|single) (setup |onboarding )?call\b|money[- ]back|guarantee\w*|\bfree pilot\b|pilot[^.]{0,40}\bfree\b|\brefund\w*/gi);
+  check('site: no invented pilot terms (single setup call, guarantee, refund, free pilot)', !invented, invented);
+
   console.log('internal links');
   for (const href of internalLinks) {
     const u = new URL(href, ORIGIN);

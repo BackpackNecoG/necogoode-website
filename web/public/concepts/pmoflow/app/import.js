@@ -68,7 +68,7 @@
     'do download draft edit email enable enroll enrol enter equip escalate estimate evaluate export extend fax file fill finalise finalize finish fix follow forward ' +
     'gather generate get give grant hand handle hire hold import inform initiate inspect install interview investigate invite invoice issue keep key label launch load lock log lodge look ' +
     'mail maintain make map match migrate monitor move negotiate notify obtain offboard onboard open order pack pass pay perform pick place post prepare print process ' +
-    'provision publish pull purchase push quote raise read receive reconcile record recover refund register reject release remind remove renew reopen repair reply report request ' +
+    'provision publish pull purchase push quote raise read receive recommend reconcile record recover refund register reject release remind remove renew reopen repair reply report request ' +
     'reserve reset resolve respond resubmit retain retrieve return revoke review route run save scan schedule screen select send set settle share ship sign sort source ' +
     'start stamp store submit sync take tell terminate test track train transfer triage unlock update upload validate verify welcome witness write').split(' '));
   /* "approves" -> "approve", "applies" -> "apply", "co-approves" -> "co-approve"; null when not a known verb's 3rd-person form */
@@ -113,8 +113,14 @@
     /* "HR Manager (Pat Lee) updates the record" */
     const rn = /^(?:the\s+)?((?:[A-Za-z][\w&/-]*\s+){0,3}[A-Za-z][\w&/-]*)\s*\(([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,2})\)\s+(\S+)\s*(.*)$/.exec(t);
     if (rn && roleWords(rn[1].split(/\s+/))) {
-      const v = verbBase(rn[3]) || (isBase(rn[3]) ? rn[3].toLowerCase() : null);
-      if (v) return { actor: canonRole(rn[1]), name: rn[2], action: imperative(v, rn[4]) };
+      let v = verbBase(rn[3]) || (isBase(rn[3]) ? rn[3].toLowerCase() : null), rest = rn[4];
+      /* R15: "Controller (Sam Wu) must sign off …" */
+      if (!v && MODAL.test(rn[3])) {
+        const ws = String(rn[4] || '').split(' ');
+        let j = 0; while (j < ws.length && (MODAL.test(ws[j]) || /^to$/i.test(ws[j]))) j++;
+        if (ws[j] && isBase(ws[j])) { v = ws[j].toLowerCase(); rest = ws.slice(j + 1).join(' '); }
+      }
+      if (v) return { actor: canonRole(rn[1]), name: rn[2], action: imperative(v, rest) };
     }
     /* "Pat Lee approves the request": a person's name as written (kept as text, never matched to workspace people) */
     const pn = /^([A-Z][a-z]+(?:\s+[A-Z][a-z'-]+){1,2})\s+(\S+)\s*(.*)$/.exec(t);
@@ -260,7 +266,13 @@
       const head = /^ids?$/i.test(w) ? 'ID' : w.toLowerCase();
       if (OF_HEADS.test(w) && next && /^of$/i.test(next)) {
         const tail = [];
-        for (let i = k + 2; i < words.length && tail.length < 2; i++) { const x = bare(words[i]).toLowerCase(); if (x === ',' || DET.test(x) || PREP.test(x) || /^(and|or)$/.test(x) || isBase(x) || verbBase(x)) break; tail.push(x); }
+        for (let i = k + 2; i < words.length && tail.length < 2; i++) {
+          const raw = bare(words[i]), x = raw.toLowerCase();
+          if (x === ',' || DET.test(x) || PREP.test(x) || /^(and|or)$/.test(x) || isBase(x) || verbBase(x)) break;
+          /* R15 (Karen): "certificate of insurance (COI)": the abbreviation after the words is the same item */
+          if (tail.length && isAcronymOf(raw, mods.concat([head, 'of'], tail))) break;
+          tail.push(x);
+        }
         /* R14 (Karen 9): "COI certificate of insurance" is the certificate of insurance, written once */
         const ws = mods.concat([head, 'of'], tail);
         if (mods.length && isAcronymOf(mods[0], ws.slice(1))) ws.shift();
@@ -386,6 +398,18 @@
         if (!who) break;
         if (x.k === 'a') { if (!out.a) out.a = who; }
         else { const l = out[x.k] || (out[x.k] = []); if (!l.includes(who)) l.push(who); }
+        /* R15 (BPM): "… and notifies the sales rep and the customer": every one told is Informed, and the clause stays in
+           the title (stripping the first name only left "… and the customer") */
+        const more = x.k === 'i' && /^\s+and\s+/i.test(t.slice(m.index + m[0].length));
+        if (more) {
+          let rest = t.slice(m.index + m[0].length), mm;
+          while ((mm = /^\s*(?:,|and)\s+(?:the\s+)?([A-Za-z][\w&/'-]*(?:\s+[A-Za-z][\w&/'-]*){0,3}?)(?=\s*(?:[.;,!]|$)|\s+and\b)/i.exec(rest))) {
+            const w2 = raciWho(mm[1]); if (!w2) break;
+            if (!out.i.includes(w2)) out.i.push(w2);
+            rest = rest.slice(mm[0].length);
+          }
+          break;
+        }
         /* the whole clause is the step's own action ("Sam Wu signs off."): kept as written */
         if (!x.strip || m.index === 0 && !/^[;,\s]/.test(m[0])) break;
         t = (t.slice(0, m.index) + t.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ');
@@ -422,12 +446,26 @@
   }
   /* R14 (BPM-5): an amount threshold a choice tests: "Requested limit under $50k?" -> {subject, op: '<', amount: 50000} */
   const THRESH_RE = /^(.*?)\s*\b(?:is\s+|are\s+)?(above|over|exceeds?|exceeding|greater than|more than|at least|under|below|less than|at most|up to|no more than)\s+\$\s?([\d,]+(?:\.\d+)?)\s*([kKmM])?\b/i;
+  /* R15: "$50,000 or less" / "$1M or more" */
+  const THRESH_OR_RE = /^(.*?)\s*(?:\b(?:is|are)\s+)?\$\s?([\d,]+(?:\.\d+)?)\s*([kKmM])?\s+or\s+(less|below|under|lower|fewer|more|above|over|greater|higher)\b/i;
   function thresholdOf(title) {
+    const o = !THRESH_RE.exec(String(title || '')) && THRESH_OR_RE.exec(String(title || ''));
+    if (o) {
+      const amount = Number(o[2].replace(/,/g, '')) * (/k/i.test(o[3] || '') ? 1000 : /m/i.test(o[3] || '') ? 1e6 : 1);
+      if (!isFinite(amount)) return null;
+      const subject = squash(o[1]).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/\s+(?:is|are)$/, '') || 'amount';
+      return { subject, op: /^(less|below|under|lower|fewer)$/i.test(o[4]) ? '<' : '>', amount };
+    }
     const m = THRESH_RE.exec(String(title || '')); if (!m) return null;
     const amount = Number(m[3].replace(/,/g, '')) * (/k/i.test(m[4] || '') ? 1000 : /m/i.test(m[4] || '') ? 1e6 : 1);
     if (!isFinite(amount)) return null;
     const subject = squash(m[1]).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/\s+(?:is|are)$/, '') || 'amount';
     return { subject, op: /^(under|below|less than|at most|up to|no more than)$/i.test(m[2]) ? '<' : '>', amount };
+  }
+  /* R15: "limit $50,000 or less and risk score 60 or below": a second condition, so the No path is NOT "over $50,000" */
+  function compoundCond(title) {
+    const rest = String(title || '').replace(/\bor\s+(less|below|under|lower|fewer|more|above|over|greater|higher)\b/gi, ' ');
+    return /\b(and|or)\b/i.test(rest) && (rest.match(/\d[\d,.]*/g) || []).length >= 2;
   }
   /* two thresholds on the same thing that no value can meet together ("under $50k" and "above $250,000") */
   function thresholdsDisjoint(a, b) {
@@ -444,12 +482,17 @@
   const EXTERNAL_IN = /\b(?:from|by)\s+(?:the\s+|each\s+|every\s+)?(vendor|supplier|customer|client|contractor|applicant|candidate|new hire|member|patient|student|carrier|tenant|broker)s?\b/i;
   const PER_RUN_NAME = /^(W-\d+\w*|W-8\w*|I-9|1099(?:-\w+)?|Certificate of insurance|Proof of insurance|Signed W-9)$/i;
   const DOCLIKE = /(^[A-Z]{1,3}-\d|\b(forms?|certificates?|letters?|invoices?|receipts?|statements?|licen[cs]es?|permits?|ids?|passports?|contracts?|agreements?|applications?|quotes?|quotations?|proofs?|copy|copies|documents?|packets?)\b)/i;
+  /* R15 (Karen): details of the vendor (customer, …) the run is about: its routing numbers, tax ID, bank account and credit
+     limit are written down for each vendor, never made available once */
+  const PER_RUN_FIELD = /\b(routing(?:\s+and\s+account)?\s+numbers?|account\s+numbers?|bank\s+accounts?(?:\s+(?:numbers?|details))?|bank\s+details|tax\s+ids?|tins?|eins?|credit\s+limits?|remittance\s+address(?:es)?|ibans?|swift(?:\s+codes?)?|sort\s+codes?)$/i;
+  const PARTY_WORD = /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire|member|patient|student|carrier|tenant|broker)s?\b/i;
   function perRunOf(name, actor, line, ctxText) {
     const a = squash(actor).toLowerCase();
     const ext = EXTERNAL.test(a) ? a : '';
     const from = EXTERNAL_IN.exec(String(line || ''));
-    const party = ext || (from ? from[1].toLowerCase() : '');
-    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)))) return null;
+    let party = ext || (from ? from[1].toLowerCase() : '');
+    const field = PER_RUN_FIELD.test(String(name || '')) && (() => { const pw = PARTY_WORD.exec(String(name)) || PARTY_WORD.exec(String(line || '')); if (pw && !party) party = pw[1].toLowerCase(); return !!(party || /^W-\d/i.test(name)); })();
+    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)) || field)) return null;
     const p = party || ((EXTERNAL_IN.exec(ctxText || '') || /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire)s?\b/i.exec(ctxText || '') || [])[1] || '').toLowerCase();
     return { perRun: true, perRunText: `Collected ${p ? `from the ${p.replace(/s$/, '')} ` : ''}each time the process runs, so it is not a one-off setup task.` };
   }
@@ -577,6 +620,30 @@
       [...new Set(infoPhrases(withoutSystems(objText)).concat(extra ? infoPhrases(withoutSystems(extra)) : []))].forEach(nm => propose(nm, line, n));
       return n;
     };
+    /* R15 (BPM top 1): what a choice's path does. "the request is auto-approved and AR updates the limit" ends there
+       ("Done: approved automatically"), "stop" ends there, and a path that rejects the request stops; anything else is a
+       step and the path carries on */
+    const AUTO_END = /^(?:(?:the|this|that|it)\s+(?:[a-z]+\s+){0,2})?(?:is|are|gets?|will\s+be)\s+(?:auto-?approved|approved\s+automatically|automatically\s+approved)\b\s*(?:(?:,\s*)?(?:and\s+)?(?:then\s+)?(.*))?$/i;
+    const AUTO_IMP = /^(?:then\s+)?(?:auto-?approve|approve\s+(?:it\s+|the\s+\w+\s+)?automatically)\b(?:\s+(?:it|the\s+\w+))?\s*(?:(?:,\s*)?(?:and\s+)?(?:then\s+)?(.*))?$/i;
+    const STOP_RE = /^(?:then\s+)?(?:stop|end\s+(?:here|the\s+process)|stop\s+(?:here|the\s+process)|the\s+(?:process|request)\s+(?:ends|stops)(?:\s+here)?)$/i;
+    const branchNodes = (act, line, opts) => {
+      const a = stripEnd(act);
+      if (STOP_RE.test(a)) return [{ id: id('e'), type: 'end', title: 'Stop' }];
+      const au = AUTO_END.exec(a) || AUTO_IMP.exec(a);
+      if (au) {
+        const out = [];
+        const rest = stripEnd(au[1] || '');
+        if (rest) out.push(makeStep(rest, line, opts));
+        out.push({ id: id('e'), type: 'end', title: 'Done: approved automatically' });
+        return out;
+      }
+      /* "Otherwise Purchasing manager approval is enough": the Purchasing manager approves */
+      const en = /^(?:the\s+)?(.+?)(?:['’]s)?\s+(approval|sign-?off|review)\s+is\s+(?:enough|sufficient|required|needed)$/i.exec(a);
+      const st = makeStep(en && roleWords(en[1].split(/\s+/)) ? `${en[1]} ${/^sign/i.test(en[2]) ? 'signs off' : /^review/i.test(en[2]) ? 'reviews' : 'approves'}` : a, line, opts);
+      const out = [st];
+      if (st.type === 'step' && /^reject\b/i.test(st.title)) out.push({ id: id('e'), type: 'end', title: 'Stop: request rejected' });
+      return out;
+    };
     const addNote = (n, extra) => {
       if (!n || !extra) return;
       const x = tidy(extra); if (!x) return;
@@ -626,11 +693,11 @@
           const rest = stripEnd(els[2].replace(GOTO_STRIP, ''));
           const br = lastDec.branches[1];
           if (rest && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed)\b/i.test(rest)) {
-            const st = makeStep(rest, full);
+            const made = branchNodes(rest, full), st = made[0];
             /* "Otherwise, the Procurement Manager approves." reads "Approve the vendor" when the other path says what */
             const other = lastDec.branches[0].nodes[0];
             if (st.type === 'step' && other && other.type === 'step' && st.title.split(' ').length === 1 && other.title.toLowerCase().startsWith(st.title.toLowerCase() + ' ')) st.title = other.title;
-            br.nodes.push(st);
+            br.nodes.push(...made);
           }
           if (g) br.gotoNum = +g[1];
           return;
@@ -640,7 +707,7 @@
         if (isCond) {
           const act = stripEnd(lead[3].replace(GOTO_STRIP, ''));
           const yes = [];
-          if (act && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed)\b/i.test(act)) yes.push(makeStep(act, full, { dataText: sen }));
+          if (act && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed)\b/i.test(act)) yes.push(...branchNodes(act, full, { dataText: sen }));
           const negated = /^unless$/i.test(lead[1]);
           dec = { id: id('d'), type: 'decision', title: decisionTitle(lead[2]), branches: [{ label: negated ? 'No' : 'Yes', nodes: negated ? [] : yes }, { label: negated ? 'Yes' : 'No', nodes: negated ? yes : [] }] };
           if (g) dec.branches[negated ? 1 : 0].gotoNum = +g[1];
@@ -701,6 +768,12 @@
         if (compound.has(sen) || CONTROL_LINE.test(sen)) {
           const st = makeStep(sen, sen, { dataText: sen });
           out.push(st);
+          return;
+        }
+        /* R15 (Karen): "AP verifies the bank letter by calling the bank" after the vendor's step is AP's own step */
+        const sa = main.type === 'step' && splitActor(stripEnd(sen));
+        if (sa && sa.actor && canonRole(sa.actor).toLowerCase() !== String(main.ownerRole || '').toLowerCase() && /^(verify|check|validate|confirm|inspect|reconcile|audit|double-check|cross-check|review)\b/i.test(sa.action)) {
+          out.push(makeStep(sen, sen, { dataText: sen }));
           return;
         }
         /* any other sentence on the line is part of the same step: kept in its note, its information on the step */
@@ -789,11 +862,11 @@
         const br = prevDec.branches.slice().reverse().find(b => !b.nodes.length && b.gotoNum == null) || prevDec.branches[1];
         const made = [];
         if (rest && !/^(return|go back|loop back|send back|skip|go|jump|continue|proceed|carry on)\b/i.test(rest)) {
-          const st = makeStep(rest, it.body);
+          const bn = branchNodes(rest, it.body), st = bn[0];
           const other = (prevDec.branches.find(b => b !== br) || { nodes: [] }).nodes[0];
           if (st.type === 'step' && other && other.type === 'step' && st.title.split(' ').length === 1 && other.title.toLowerCase().startsWith(st.title.toLowerCase() + ' ')) st.title = other.title;
           it.subs.forEach(sb => st.subs && st.subs.push({ title: cap(tidy(stripEnd(sb))), data: [] }));
-          br.nodes.push(st); made.push(st.id);
+          br.nodes.push(...bn); made.push(st.id);
         }
         if (g) br.gotoNum = +g[1];
         if (it.num != null) lineFirst[it.num] = made[0] || prevDec.id;
@@ -853,6 +926,7 @@
       if (!d || d.type !== 'decision' || !LOW.test(d.title)) return;
       const yes = d.branches[0], no = d.branches[1];
       if (!yes || !no || String(yes.label).toLowerCase() !== 'yes' || yes.goto != null || yes.gotoNum != null || no.nodes.length || no.gotoNum != null) return;
+      if (yes.nodes.some(n => n.type === 'end')) return;
       if (!yes.nodes.some(n => n.type === 'step' && /^(also\s+)?(approve|authori[sz]e|accept|sign off)\b/i.test(n.title))) return;
       let j = i + 1;
       if (!isReview(nodes[j])) return;
@@ -865,11 +939,14 @@
     /* "return to step N": the branch loops back to the first node that line N produced */
     const walk = (ns, f) => (ns || []).forEach(n => { f(n); (n.branches || []).forEach(b => walk(b.nodes, f)); });
     walk(nodes, n => (n.branches || []).forEach(b => { if (b.gotoNum != null) { if (lineFirst[b.gotoNum]) b.goto = lineFirst[b.gotoNum]; delete b.gotoNum; } }));
+    /* R15 (BPM): "Otherwise, go to step 5" when step 5 comes next is just carrying on, never a jump ("Skips to"/"Loop back") */
+    const dropNext = ns => (ns || []).forEach((n, i) => (n.branches || []).forEach(b => { if (b.goto && ns[i + 1] && b.goto === ns[i + 1].id) delete b.goto; dropNext(b.nodes); }));
+    dropNext(nodes);
     /* R11: a rejected request stops unless the procedure says where it goes */
     walk(nodes, endRejectPath);
     /* R14 (BPM-5): the amount threshold each choice tests, so a path that took "under $50k" is never tested through
        "above $250,000" (business tests read decision.threshold with thresholdsDisjoint) */
-    walk(nodes, n => { if (n.type === 'decision') { const th = thresholdOf(n.title); if (th) n.threshold = th; } });
+    walk(nodes, n => { if (n.type === 'decision') { const th = thresholdOf(n.title); if (th) { if (compoundCond(n.title)) th.compound = true; n.threshold = th; } } });
     /* R13 #8: one actor however it is written. "Controller (Sam Wu)", "the Controller" and "Sam Wu" are the same person
        when the procedure ties the name to the role once; their steps share the role and their RACI the "Role (Name)" */
     const al = actorAliases(nodes);
