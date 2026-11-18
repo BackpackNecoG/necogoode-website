@@ -2198,3 +2198,13 @@ test('R14 BPM-2 server: a multi-column sample uploaded on one item is split per 
   assert.equal(r.body.columns.find(c => c.name === 'account_number').sharedAccount.records, 2);
   assert.ok(!JSON.stringify(st.docs.profile).includes('000123456789'), 'no values kept');
 });
+
+/* R14 lead (Jordan r14 #2): a write a route module refuses is recorded in History as "Refused: …" (server-written) */
+test('R14: route-module refusals (403/409) are logged as refused events', async () => {
+  const ws = await newWs();
+  const r = await call('PUT', `workspaces/${ws}/admin/sponsor/vendor-modernization`, { sponsor: 'ta', actor: 'ta' });
+  assert.equal(r.status, 403);
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events;
+  const ref = ev.find(e => e.action === 'refused');
+  assert.ok(ref && /^Refused: /.test(ref.summary) && ref.actor === 'ta', JSON.stringify(ev.slice(0, 3)));
+});

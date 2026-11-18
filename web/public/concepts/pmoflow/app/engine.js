@@ -1628,7 +1628,7 @@
       // R14 (Jordan A): a person moved in, or named approver, after the part was in flight is not eligible for it
       const e = (dd && dd.approvers.length ? dd.approvers.slice() : Object.keys(people).filter(id => people[id] && people[id].bu === bu)).filter(id => !excluded.includes(id) && !grantTooRecent(docs, project, bu, id));
       const o = overrides[bu];
-      if (o && people[o] && !excluded.includes(o) && !e.includes(o)) e.push(o);
+      if (o && people[o] && !excluded.includes(o) && !e.includes(o) && !grantTooRecent(docs, project, bu, o)) e.push(o); /* R14 (Jordan r14): a chosen approver is held to the same recent-move rule */
       const ok = e.filter(id => !barOf(bu, id));
       barred[bu] = e.filter(id => barOf(bu, id)).map(id => Object.assign({ person: id }, barOf(bu, id)));
       if (e.length && !ok.length) sodBlocked[bu] = barred[bu][0].person;
@@ -3916,10 +3916,11 @@
     // 3. Information connected (data-live + discovered requirements)
     const dl = ck('data-live'), dr = ck('discovered-resolved');
     const notLive = uniq([].concat(dl.missing || [], dl.examples || [], dl.pending || [], dl.problems || []));
-    const dataOwners = uniq(notLive.map(id => dataOwnerOf(docs, get(docs, 'dataElement', id))));
+    const dataOwners = uniq(notLive.map(id => dataOwnerOf(docs, get(docs, 'dataElement', id))).filter(id => id && people[id]));
     const nDr = (dr.items || []).length;
     // R10 §6: before a plan exists nothing past "Plan the work" can read as done ("No plan yet")
-    steps.push({ key: 'information', label: 'Information available', done: live || (planned && !!dl.pass && !!dr.pass), who: dataOwners.length ? dataOwners : (dl.pass && dr.pass ? [] : uniq([owner])),
+    steps.push({ key: 'information', label: 'Information available', done: live || (planned && !!dl.pass && !!dr.pass), who: dataOwners, /* R14 (Karen r14 #1): unowned information is never shown under the PM */
+      noOwner: notLive.filter(id => !dataOwnerOf(docs, get(docs, 'dataElement', id))).length,
       action: !planned && !live ? 'Plan the work first' : dl.pass && dr.pass ? 'Done' : [notLive.length ? nWord(notLive.length, 'piece') + ' of information ' + (notLive.length === 1 ? 'is' : 'are') + ' not available yet: ' + joinList(notLive.map(id => dataName(docs, id)), 3) : '',
         nDr ? nWord(nDr, 'new requirement') + ' found during the work ' + (nDr === 1 ? 'needs' : 'need') + ' a decision' : ''].filter(Boolean).join('; ') });
     // 4. Tests passed

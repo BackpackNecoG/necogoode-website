@@ -3692,6 +3692,12 @@ test('R14 Jordan A: a department move or new approver grants no rights on a part
   const d2 = Object.assign({}, d1, { workspace: d1.workspace.map(w => w.id === 'settings' ? { id: 'settings', data: Object.assign({}, settings, { departments: r2.departments }) } : w) });
   const a = E.projectTruth(d2, PRJ, GOLD_DAY).approvals.find(x => x.bu === 'Compliance');
   assert.ok(!a.eligible.includes('ar'), JSON.stringify(a.eligible));
+  // R14 Jordan r14: chosen as the project's approver for that part ("Choose who approves") after the fact: still not eligible,
+  // and so not an override co-signer either
+  const d4 = Object.assign({}, d1, { project: d1.project.map(e => e.id === PRJ ? { id: e.id, data: Object.assign({}, e.data, { approvers: Object.assign({}, e.data.approvers || {}, { Compliance: 'ar' }) }) } : e) });
+  const a4 = E.projectTruth(d4, PRJ, GOLD_DAY).approvals.find(x => x.bu === 'Compliance');
+  assert.ok(!a4.eligible.includes('ar'), 'chosen approver held to the recent-move rule: ' + JSON.stringify(a4.eligible));
+  assert.equal(E.overrideSignerRole(d4, PRJ, 'ar'), null);
   // a part not yet in flight (no tests, no approvals): the move counts
   const d3 = Object.assign({}, d1, { testRun: [], approval: [] });
   assert.equal(E.grantTooRecent(d3, d3.project.find(p => p.id === PRJ).data, 'Compliance', 'ar'), false);

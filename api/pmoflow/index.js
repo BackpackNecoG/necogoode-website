@@ -727,8 +727,25 @@ module.exports = async function (context, req) {
     /* R10: stream-owned route modules (buyer layer, connections, admin). Each exports
        handle({ method, seg, body, req, store, send, fail, clientIpHash, dayInput, clientToday }) → true when it handled the request.
        A module that is missing simply isn't loaded, so streams can land independently. */
+    /* R14 (Jordan r14 #2): a write a route module refuses (403/409) on a workspace is recorded in History as "Refused: …",
+       written by the server, the same as a refused doc write. GETs and non-workspace routes are not logged. */
+    const modWs = (seg[0] === 'ws' || seg[0] === 'workspaces') && seg[1] && /^[a-z0-9]{12,32}$/.test(seg[1]) ? seg[1] : null;
+    const modFail = (status, msg, reasons) => {
+      const out = fail(status, msg, reasons);
+      if (modWs && method !== 'GET' && (status === 403 || status === 409)) pendingLogs.push((async () => {
+        try {
+          const what = seg.slice(2).filter(x => !/^[a-z0-9_-]{12,}$/i.test(x)).join(' ').replace(/[^\w .-]/g, '').slice(0, 60) || 'change';
+          await store.appendEvent(modWs, { actor: actorOf(body || {}), action: 'refused', ref: 'route:' + seg.slice(2, 4).join('/').slice(0, 100),
+            summary: `Refused: ${what} — ${String((msg && msg.error) || msg || 'not allowed').replace(/\s+/g, ' ')}`.slice(0, 300) });
+        } catch (e) { /* the refusal stands even if History can't be written */ }
+      })());
+      return out;
+    };
+    const pendingLogs = [];
     for (const mod of ROUTE_MODULES) {
-      if (await mod.handle({ method, seg, body, req, store, send, fail, clientIpHash, dayInput, clientToday })) return;
+      const handled = await mod.handle({ method, seg, body, req, store, send, fail: modFail, clientIpHash, dayInput, clientToday });
+      if (pendingLogs.length) await Promise.all(pendingLogs);
+      if (handled) return;
     }
 
     /* POST /workspaces */
