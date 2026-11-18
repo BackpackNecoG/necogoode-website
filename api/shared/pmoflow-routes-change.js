@@ -27,6 +27,16 @@ function adminRoutes() { try { return require('./pmoflow-routes-admin.js'); } ca
 const getDoc = (docs, type, id) => { const d = (docs[type] || []).find(x => x.id === id); return d ? d.data : null; };
 const pname = (docs, id) => (getDoc(docs, 'person', id) || {}).name || 'someone';
 const newId = p => p + '-' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+/* R12 #4: approving a plan change needs the extra sign-in check (simulated MFA, reported by the client). Only the time
+   and method are kept. null when the body carries none. */
+const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+function stepUpOf(body, at) {
+  const s = body && isObj(body.stepUp) ? body.stepUp : null;
+  if (!s || typeof s.method !== 'string' || !s.method) return null;
+  const t = typeof s.at === 'string' && isFinite(Date.parse(s.at)) && Math.abs(Date.parse(s.at) - Date.parse(at)) < 15 * 60000 ? new Date(Date.parse(s.at)).toISOString() : at;
+  return { at: t, method: 'simulated-mfa' };
+}
+const STEPUP_NEEDED = 'Approving a plan change needs the extra sign-in check. Approve again and complete the check.';
 
 /* Who may propose/apply edits: a person in the directory whose workspace role can edit tasks (S5 roles when present). */
 function editorError(docs, actor) {
@@ -127,6 +137,22 @@ async function applyChange(store, wsId, docs, change, actor, today) {
     baselines: { before: blBefore.id, after: blAfter.id, beforeLabel: blBefore.label, afterLabel: blAfter.label },
     processRef: processRefs(afterDocs, proj, at),
   });
+  /* R12 #13: a knock-on into another project: a linked entry in that project's log, its history, its PM told */
+  const cross = (im.crossProjects || []).filter(x => getDoc(docs, 'project', x.projectId));
+  doc.impact = im;
+  const linked = [];
+  for (const x of cross) {
+    const lid = newId('chg');
+    const entry = Object.assign({ id: lid }, C.linkedEntry(Object.assign({}, change, { impact: im }), docs, afterDocs, x.projectId, today, { engine: E }),
+      { status: 'applied', appliedBy: actor, appliedAt: at });
+    await store.putDoc(wsId, 'planChange', lid, trimmed(entry));
+    linked.push({ projectId: x.projectId, changeId: lid });
+    const moved = (entry.knockOn || []).slice(0, 3).map(k => `“${k.title}” ${E.fmtDay(k.from)} → ${E.fmtDay(k.to)}`).join('; ');
+    log.push({ ref: 'project:' + x.projectId, action: 'update', summary: `Knock-on from the plan change “${change.title}” on ${project.name}: ${moved || 'expected dates move'}`.slice(0, 300) });
+    log.push({ ref: 'planChange:' + lid, action: 'apply', summary: `Recorded the knock-on of “${change.title}” (${project.name}) in ${x.name}’s plan changes`.slice(0, 300) });
+    if (x.owner) await notify(store, wsId, docs, [x.owner], actor, `A plan change on ${project.name} moves ${x.taskCount === 1 ? 'a task' : (x.taskCount || x.tasks.length) + ' tasks'} in ${x.name}: “${change.title}”.`, 'project:' + x.projectId, at);
+  }
+  if (linked.length) doc.linked = linked;
   const people = (im.people || []).map(p => p.id).concat([change.requestedBy]);
   doc.notified = await notify(store, wsId, docs, people, actor, `Plan change on ${project.name}: “${change.title}”. ${im.sentence}`, 'project:' + change.projectId, at);
   const stored = trimmed(doc);
@@ -182,8 +208,10 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const im = C.impact(docs, after, change.projectId, today, { change, engine: E });
     const need = C.needsApproval(change, im, docs);
     const id = newId('chg');
-    const approvers = need.approvers.map(a => (a.person === actor
-      ? Object.assign({}, a, { decision: 'approved', at, note: 'Requested it' }) : Object.assign({}, a, { decision: null, at: null })));
+    /* the requester's own approval counts only with the extra sign-in check (R12 #4); without it, it stays open */
+    const su = stepUpOf(body, at);
+    const approvers = need.approvers.map(a => (a.person === actor && su
+      ? Object.assign({}, a, { decision: 'approved', at, note: 'Requested it', stepUp: true, stepUpAt: su.at }) : Object.assign({}, a, { decision: null, at: null })));
     const doc = Object.assign({ id }, change, {
       status: 'proposed', requestedBy: actor, requestedAt: at, impact: im, tolerance: { within: need.within, reasons: need.reasons }, approvers,
     });
@@ -223,13 +251,15 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const pending = C.pendingApprovers(change);
     const mine = pending.filter(a => a.person === actor);
     if (!mine.length) {
-      fail(403, pending.length ? `Only ${pending.map(a => `${pname(docs, a.person)} (${C.ROLE_LABEL[a.role]})`).join(' and ')} can decide this change.` : 'Nobody needs to decide this change.');
+      fail(403, pending.length ? `Only ${pending.map(a => `${pname(docs, a.person)} (${C.roleText(a, docs)})`).join(' and ')} can decide this change.` : 'Nobody needs to decide this change.');
       return true;
     }
     const note = String(body.note || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200);
     const at = new Date().toISOString();
+    const su = stepUpOf(body, at);
+    if (decision === 'approve' && !su) { fail(403, STEPUP_NEEDED); return true; }
     const next = JSON.parse(JSON.stringify(change));
-    next.approvers.forEach(a => { if (a.person === actor && !a.decision) Object.assign(a, { decision: decision === 'approve' ? 'approved' : 'rejected', at, note }); });
+    next.approvers.forEach(a => { if (a.person === actor && !a.decision) Object.assign(a, { decision: decision === 'approve' ? 'approved' : 'rejected', at, note }, su && decision === 'approve' ? { stepUp: true, stepUpAt: su.at } : {}); });
     if (decision === 'reject') {
       Object.assign(next, { status: 'rejected', decidedBy: actor, decidedAt: at, decisionNote: note });
       await store.putDoc(wsId, 'planChange', cid, next);
@@ -239,7 +269,7 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
       return true;
     }
     await store.appendEvent(wsId, { actor, at, action: 'approve', ref: 'planChange:' + cid,
-      summary: `Approved plan change “${change.title}” as ${mine.map(a => C.ROLE_LABEL[a.role]).join(' and ')}${note ? ': ' + note : ''}`.slice(0, 300) });
+      summary: `Approved plan change “${change.title}” as ${[...new Set(mine.map(a => C.roleText(a, docs)))].join(' and ')} (extra sign-in check done)${note ? ': ' + note : ''}`.slice(0, 300) });
     if (C.pendingApprovers(next).length) {
       await store.putDoc(wsId, 'planChange', cid, next);
       await notify(store, wsId, docs, C.pendingApprovers(next).map(a => a.person), actor, `${pname(docs, actor)} approved the plan change “${change.title}” on ${project.name}; it now needs your approval.`, 'project:' + project.id, at);

@@ -4,7 +4,7 @@
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, toast } from '../ui.js';
 import { today, projectStats, rag, ragBadge, RAG_RULE, rerender, gateInfo, financials, money,
-  earnedValue, fmtIdx, idxCls, projectItems, truthOf, summaryPill, summaryOf, blockingInfo, evFlagsHTML, eng } from './project.js';
+  earnedValue, fmtIdx, idxCls, projectItems, truthOf, summaryPill, summaryOf, blockingInfo, evFlagsHTML, eng, launchLeft } from './project.js';
 import { byProgram, workloadList, burnOrNote, likelyResolved } from './portfolio.js';
 
 const KEY = 'pmoflow.dashboard';
@@ -133,9 +133,9 @@ function goLivesW(projects) {
   if (!list.length) return '<div class="empty">No upcoming launches.</div>';
   return list.map(p => {
     const s = projectStats(p.id), gi = gateInfo(p, s), t = truthOf(p), L0 = launchOf(p);
-    const fails = t.stepsLeft != null ? t.stepsLeft : null; /* R9: projectTruth.stepsLeft */
+    const LL = launchLeft(t), fails = LL.n; /* R12 #7: projectTruth.launchChecks, the Launch page's count */
     const d = Number(eng('businessDaysBetween', 0, today(), L0.date)) || 0; /* R9 §3: business days */
-    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}" data-launch-date="${esc(L0.date)}"><span class="pmo-dash-date"><b>${esc(fmt(L0.date).split(' ')[1] || '')}</b><small>${esc(fmt(L0.date).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${L0.source === 'window' ? 'Launch day' : 'Deadline (no launch day set)'} · ${d >= 0 ? `in ${d} business day${d === 1 ? '' : 's'}` : `${-d} business day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'expected ' + fmt(t.forecast) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail">${fails} launch step${fails === 1 ? '' : 's'} left</span>` : 'ready to launch'}` : ''}${t.raw && t.raw.launchFlag ? ` · <span class="fail" data-launch-flag>${esc(t.raw.launchFlag)}</span>` : L0.problem ? ` · <span class="fail">${esc(L0.problem)}</span>` : ''}</span></span>${summaryPill(summaryOf(p))}</a>`;
+    return `<a class="pmo-dash-row" href="${link('/release/' + encodeURIComponent(p.id))}" data-link data-dash-golive="${esc(p.id)}" data-launch-date="${esc(L0.date)}"><span class="pmo-dash-date"><b>${esc(fmt(L0.date).split(' ')[1] || '')}</b><small>${esc(fmt(L0.date).split(' ')[0])}</small></span><span class="pmo-dash-main"><b>${esc(p.name)}</b><span class="hint">${L0.source === 'window' ? 'Launch day' : 'Deadline (no launch day set)'} · ${d >= 0 ? `in ${d} business day${d === 1 ? '' : 's'}` : `${-d} business day${d === -1 ? '' : 's'} ago`} · ${esc(gi.k === 'forecast' && s.total ? 'expected ' + fmt(t.forecast) : gi.label)}${fails != null ? ` · ${fails ? `<span class="fail" data-launch-checks>${esc(LL.text)}</span>` : 'ready to launch'}` : ''}${t.raw && t.raw.launchFlag ? ` · <span class="fail" data-launch-flag>${esc(t.raw.launchFlag)}</span>` : L0.problem ? ` · <span class="fail">${esc(L0.problem)}</span>` : ''}</span></span>${summaryPill(summaryOf(p))}</a>`;
   }).join('');
 }
 const RENDER = { rag: ragW, burndown: burnW, ev: evW, workload: workloadW, risks: risksW, blockers: blockersW, golives: goLivesW };

@@ -395,6 +395,156 @@ test('Visio .vsdx: shapes, connectors and swimlanes become steps, links and role
   fs.writeFileSync('/tmp/pmo-design/purchase-request.vsdx', vsdxFixture(true));
 });
 
+/* ---------- R12 H2: the R11 reviewers' procedures (market-review/r11 karen.md, expert-bpm.md) ---------- */
+/* Karen (R11): 9 lines; inline roles "Purchasing mgr" / "Credit dept"; "if spend over $25k Karen approves too" (no comma);
+   documents COI, vendor master, bank details; teams Purchasing / Credit / AP / Treasury (never "Procurement") */
+const KAREN12 = `Vendor Onboarding
+1. Requester emails Purchasing the vendor name and what we are buying.
+2. Purchasing mgr sends the vendor our packet and collects the W-9, COI and bank details.
+3. Credit dept runs a D&B check on the vendor.
+4. If spend over $25k Karen approves too.
+5. AP sets up the vendor master in the ERP.
+6. Treasury verifies the bank details with a call-back to the vendor.
+7. AP saves the W-9 and COI in SharePoint.
+8. AP emails the vendor a welcome letter.
+9. Purchasing mgr tells the requester the vendor is live.`;
+/* BPM expert (R11): the "under $50k" Yes path approves and must skip the Credit Manager's review; the 2-day escalation
+   belongs on the Credit Manager's "Approve or reject" step, not on the reject path's "Notify the Sales Rep";
+   "Sam Wu signs off" is the Accountable person; "copies the Account Manager" is Informed */
+const CREDIT12 = `Credit Limit Request
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit limit request in Salesforce.
+2. The Credit Analyst pulls the D&B report and reviews the customer's payment history.
+3. If the requested limit is under $50k, approve it.
+4. The Credit Manager approves or rejects the request.
+5. If rejected, the Credit Manager notifies the Sales Rep.
+6. If the Credit Manager does not respond within 2 business days, escalate to the CFO.
+7. AR updates the credit limit in NetSuite. Sam Wu signs off.
+8. The Sales Rep tells the customer, and copies the Account Manager.`;
+
+test('R12 Karen: inline roles, "if spend over $25k Karen approves too" is an approval choice, documents found', () => {
+  const r = I.parseSop(KAREN12);
+  assert.equal(r.lines.length, 9);
+  assert.ok(everyLineKept(r));
+  assert.equal(r.linesText, '9 lines → 9 steps, 1 choice');
+  const t = tops(r);
+  /* inline roles: "Purchasing mgr", "Credit dept" */
+  assert.deepEqual([t[1].ownerRole, t[1].title], ['Purchasing manager', 'Send the vendor our packet and collect the W-9, COI and bank details']);
+  assert.deepEqual([t[2].ownerRole, t[2].title], ['Credit department', 'Run a D&B check on the vendor']);
+  assert.deepEqual(t[1].touches, ['Purchasing']);
+  assert.deepEqual(t[2].touches, ['Credit']);
+  assert.deepEqual([t[8].ownerRole, t[8].touches], ['Purchasing manager', ['Purchasing']], 'step 9 has its team');
+  /* line 4: a choice whose Yes path is Karen's extra approval; No carries on */
+  const d = t[3];
+  assert.equal(d.type, 'decision');
+  assert.equal(d.title, 'Spend over $25k?');
+  const ap = d.branches[0].nodes[0];
+  assert.deepEqual([ap.title, ap.ownerRole, ap.approval], ['Also approve', 'Karen', true]);
+  assert.deepEqual(d.branches[1].nodes, []);
+  assert.ok(!steps(r).some(s => /^if\b/i.test(s.title)), 'no step called "If spend…"');
+  /* every step a team does carries that team: AP does 3 steps */
+  assert.equal(steps(r).filter(s => (s.touches || []).includes('AP')).length, 3);
+  assert.ok(steps(r).filter(s => s.ownerRole && s.ownerRole !== 'Karen' && s.ownerRole !== 'Requester').every(s => s.touches.length), 'every team step has its team');
+  assert.deepEqual(r.teams.slice().sort(), ['AP', 'Credit', 'Purchasing', 'Treasury']);
+  assert.ok(!JSON.stringify(r).includes('Procurement'), 'never a default team');
+  /* documents named in the text become information */
+  const names = r.newData.map(x => x.name);
+  for (const n of ['W-9', 'Certificate of insurance', 'Bank details', 'Vendor master', 'Welcome letter']) assert.ok(names.includes(n), n + ' in ' + names.join(', '));
+  assert.ok(t[6].newData.some(x => x.name === 'Certificate of insurance'), 'COI on the step that saves it');
+});
+
+test('R12 approving departments: the teams the reader finds seed the engine\'s mapping; never a default (H1 API)', () => {
+  const E = require('../../api/shared/pmoflow-engine.js');
+  const docs = seed('2026-11-17').docs;
+  const m = E.seedTeamDepartments(docs, I.parseSop(KAREN12).nodes);
+  for (const t of ['Purchasing', 'Credit', 'AP', 'Treasury']) assert.ok(t in m, t + ' is a team: ' + JSON.stringify(m));
+  assert.deepEqual([m.Purchasing, m.Credit, m.AP, m.Treasury], [null, null, 'Accounts Payable', 'Treasury']);
+  assert.ok(!Object.values(m).includes('Procurement'), 'nothing defaults to Procurement');
+  /* the BPM expert's Credit / AR / Sales process: no department named Credit, AR or Sales, so all three are chosen by hand */
+  const c = E.seedTeamDepartments(docs, I.parseSop(CREDIT12).nodes);
+  assert.deepEqual(Object.keys(c).sort(), ['AR', 'Credit', 'Sales']);
+  assert.ok(Object.values(c).every(v => v === null));
+  const p = { id: 'x', name: 'Credit limit', tobe: I.parseSop(CREDIT12).nodes, teamDepartments: c };
+  assert.deepEqual(E.teamRouting(docs, p).teams.map(x => x.text), ['Choose who approves for Sales', 'Choose who approves for Credit', 'Choose who approves for AR']);
+});
+
+test('R12 credit limit: the "under $50k" path skips the review; the timer is on the Credit Manager\'s step; RACI pre-filled', () => {
+  const r = I.parseSop(CREDIT12);
+  assert.equal(r.lines.length, 8);
+  assert.ok(everyLineKept(r));
+  const t = tops(r);
+  const th = t[2];
+  assert.equal(th.type, 'decision');
+  assert.equal(th.title, 'Requested limit under $50k?');
+  const review = t[3], rej = t[4], upd = t[5];
+  assert.deepEqual([review.title, review.ownerRole], ['Approve or reject the request', 'Credit Manager']);
+  assert.equal(th.branches[0].nodes[0].title, 'Approve it');
+  assert.equal(th.branches[0].goto, upd.id, 'the Yes path skips the Credit Manager\'s review (and its reject path) to step 7');
+  assert.deepEqual(th.branches[1].nodes, [], 'No carries on to the review');
+  /* the escalation watches the Credit Manager's approval, never the reject path */
+  assert.deepEqual(review.timer, { after: '2 business days', iso: 'P2D', businessDays: 2, action: 'Escalate to the CFO', to: 'CFO' });
+  assert.equal(rej.type, 'decision');
+  assert.ok(!walk(rej.branches[0].nodes).some(n => n.timer), 'no timer on "Notify the Sales Rep"');
+  /* RACI from the text */
+  assert.deepEqual([upd.title, upd.raci], ['Update the credit limit in NetSuite', { a: 'Sam Wu' }]);
+  const tell = t[6];
+  assert.deepEqual([tell.title, tell.raci], ['Tell the customer', { i: ['Account Manager'] }]);
+  /* the timer line is a time limit, not a step */
+  assert.deepEqual(r.lines.map(l => l.as), ['step', 'step', 'step', 'step', 'step', 'timer', 'step', 'step']);
+});
+
+test('R12 RACI phrases: sign-off, consulted and informed', () => {
+  const r = I.parseSop(`1. The buyer drafts the contract after consulting Legal.
+2. Finance approves the contract; the Controller (Sam Wu) signs off.
+3. The buyer sends the contract to the supplier and keeps the requester informed.
+4. Limits above $250,000 also need sign-off from the Controller (Sam Wu).`);
+  const t = tops(r);
+  assert.deepEqual([t[0].title, t[0].raci], ['Draft the contract', { c: ['Legal'] }]);
+  assert.deepEqual([t[1].title, t[1].ownerRole, t[1].raci], ['Approve the contract', 'Finance', { a: 'Controller (Sam Wu)' }]);
+  assert.deepEqual([t[2].title, t[2].raci], ['Send the contract to the supplier', { i: ['Requester'] }]);
+  const ctl = steps(r).find(s => /sign-off/i.test(s.title));
+  assert.deepEqual([ctl.ownerRole, ctl.raci], ['Controller', { a: 'Controller (Sam Wu)' }]);
+  /* the R11 credit-limit fixture keeps its sign-off as Accountable too */
+  const c = steps(I.parseSop(CREDIT)).find(s => /sign-off/i.test(s.title));
+  assert.deepEqual(c.raci, { a: 'Controller (Sam Wu)' });
+});
+
+/* Visio as the BPM expert drew it: Start/End shapes named for events, connectors without a "Dynamic connector" master,
+   a decision shape without a Decision master */
+function vsdxR12() {
+  const sh = (id, master, text, x, y) => `<Shape ID="${id}" Type="Shape"${master ? ` Master="${master}"` : ''}><Cell N="PinX" V="${x}"/><Cell N="PinY" V="${y}"/><Cell N="Width" V="1.5"/><Cell N="Height" V="0.75"/><Text>${text}</Text></Shape>`;
+  const con = (id, master, text) => `<Shape ID="${id}" Type="Shape"${master ? ` Master="${master}"` : ''}><Cell N="BeginX" V="0"/><Cell N="EndX" V="1"/>${text ? `<Text>${text}</Text>` : ''}</Shape>`;
+  const shapes = [
+    sh(10, 2, 'Start', 2, 9), sh(11, 1, 'Receive application', 2, 8), sh(12, null, 'Eligible?', 2, 7),
+    sh(13, 1, 'Enroll member', 2, 6), sh(14, 1, 'Send refusal letter', 4, 6), sh(15, 6, 'End', 2, 5),
+    con(20, 7), con(21, null), con(22, 7, 'Yes'), con(23, null, 'No'), con(24, 7), con(25, null), con(26, null),
+  ].join('');
+  const c = (con, from, to) => `<Connect FromSheet="${con}" FromCell="BeginX" ToSheet="${from}"/><Connect FromSheet="${con}" FromCell="EndX" ToSheet="${to}"/>`;
+  const connects = [c(20, 10, 11), c(21, 11, 12), c(22, 12, 13), c(23, 12, 14), c(24, 13, 15), c(25, 14, 15)].join('') + '<Connect FromSheet="26" FromCell="BeginX" ToSheet="14"/>';
+  const NS = 'http://schemas.microsoft.com/office/visio/2012/main';
+  return zip({
+    'visio/pages/pages.xml': `<?xml version="1.0"?><Pages xmlns="${NS}"><Page ID="0" NameU="Benefits enrollment"/></Pages>`,
+    'visio/masters/masters.xml': `<?xml version="1.0"?><Masters xmlns="${NS}"><Master ID="1" NameU="Process"/><Master ID="2" NameU="Ellipse"/><Master ID="6" NameU="Circle"/><Master ID="7" NameU="Line-curve connector"/></Masters>`,
+    'visio/pages/page1.xml': `<?xml version="1.0" encoding="utf-8"?><PageContents xmlns="${NS}"><Shapes>${shapes}</Shapes><Connects>${connects}</Connects></PageContents>`,
+  }, true);
+}
+test('R12 Visio: Start/End are not steps, connectors listed once, a "?" shape is a choice', async () => {
+  const v = await I.parseVsdx(vsdxR12());
+  assert.deepEqual([v.steps, v.decisions, v.parallels], [3, 1, 0]);
+  const x = I.parseXml(v.bpmn); const proc = I._all(x, 'process')[0]; const by = l => I._all(proc, l);
+  assert.deepEqual(by('userTask').map(e => e.attrs.name).sort(), ['Enroll member', 'Receive application', 'Send refusal letter']);
+  assert.equal(by('startEvent').length, 1);
+  assert.equal(by('endEvent').length, 1);
+  assert.deepEqual(by('exclusiveGateway').map(e => e.attrs.name), ['Eligible?']);
+  assert.equal(by('parallelGateway').length, 0);
+  assert.equal(by('sequenceFlow').length, 6);
+  assert.deepEqual(by('sequenceFlow').filter(f => f.attrs.name).map(f => f.attrs.name).sort(), ['No', 'Yes']);
+  /* the one loose connector is listed once */
+  assert.deepEqual(v.dropped.map(d => [d.type, d.reason]), [['connector', 'not attached at both ends']]);
+  fs.mkdirSync('/tmp/pmo-design', { recursive: true });
+  fs.writeFileSync('/tmp/pmo-design/r12-eligibility.vsdx', vsdxR12());
+});
+
 test('the web copy is byte-identical', () => {
   const a = fs.readFileSync(path.join(__dirname, '../../api/shared/pmoflow-import.js'));
   const b = fs.readFileSync(path.join(__dirname, '../../web/public/concepts/pmoflow/app/import.js'));

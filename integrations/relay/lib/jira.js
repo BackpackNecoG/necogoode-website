@@ -95,6 +95,10 @@ class JiraAdapter {
         const f = is.fields || {};
         const c = { key: is.key, title: String(f[tf.title] || ''), description: S.textFromAdf(f[tf.description]), status: f.status ? f.status.name : '',
           due: f[tf.due] ? String(f[tf.due]).slice(0, 10) : '', updatedAt: isoOf(f.updated) };
+        /* R12: the latest changelog author (needs expand=changelog); email only when the user allows it, else display name */
+        const hist = is.changelog && Array.isArray(is.changelog.histories) ? is.changelog.histories : [];
+        const last = hist.reduce((m, h) => (!m || String(h.created || '') > String(m.created || '') ? h : m), null);
+        if (last && last.author) c.changedBy = String(last.author.emailAddress || last.author.displayName || '').toLowerCase() || null;
         /* Jira hides email addresses unless the user allows it; only send an assignee when it is known */
         if (f.assignee === null) c.assigneeEmail = '';
         else if (f.assignee && f.assignee.emailAddress) c.assigneeEmail = String(f.assignee.emailAddress).toLowerCase();

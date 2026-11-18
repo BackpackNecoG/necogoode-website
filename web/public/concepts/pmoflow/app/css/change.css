@@ -101,3 +101,7 @@
   .chg-wiz .mf .btn{flex:1 1 auto}
   .chg-ov{padding:8px}
 }
+/* R12 #13: entries linked from another project; R12 #4: the sign-in check on approvals */
+.chg-from{font-size:11.5px;text-decoration:none;color:var(--accent);border-color:#c7d2fe;background:#eef2ff;white-space:normal}
+.chg-from:hover{border-color:var(--accent)}
+.chg-mfa{color:var(--done,#15803d);font-weight:600}

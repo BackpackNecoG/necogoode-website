@@ -52,7 +52,8 @@ const normInt = v => { const n = parseInt(String(v).replace(/[^0-9-]/g, ''), 10)
 const normLabel = v => String(v || '').trim().replace(/\s+/g, ' ');
 const normName = v => v == null || v === '' ? 'none' : String(v).trim();
 const norm = x => x && ({ label: normLabel(x.label), forecast: normDate(x.forecast), late: normInt(x.late), blockers: normInt(x.blockers), planned: normMoney(x.planned), actual: normMoney(x.actual), cost: normMoney(x.cost),
-  who: x.who === undefined ? undefined : normName(x.who), steps: x.steps === undefined || x.steps === null ? undefined : normInt(x.steps) });
+  who: x.who === undefined ? undefined : normName(x.who), steps: x.steps === undefined || x.steps === null ? undefined : normInt(x.steps),
+    checks: x.checks === undefined || x.checks === null ? undefined : normInt(x.checks) });
 /* Weekend check for rendered text: every "Mon D" date (no year) is read in the year closest to today. */
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function weekendDates(text, todayYmd) {
@@ -93,7 +94,7 @@ const G = {
     who: 7, whoShown: 5, spi: '0.80', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
     tests: '9/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
     change: '5 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
-  erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$6,406', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
+  erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$10,406', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
     tests: '0/20', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '0/8', uat: '0/20',
     change: '4 new · 6 changed · 1 removed', deadlineBd: 41, forecastBd: 16, buffer: 25 },
   procs: { 'vendor-onboarding': '4 new · 6 changed · 1 removed', 'invoice-approval': '1 new · 3 changed', 'access-review': '3 changed', 'expense-reimbursement': '1 changed' },
@@ -199,6 +200,27 @@ async function goldenNumbers(browser, ymd, at, errors) {
   const plan = await page.evaluate(async u => { const { store } = await import(u); return window.PMOEngine.suggestWorkFromDiff(store.state.docs, 'prj-golden-noplan', store.state.today); }, STORE);
   /* R11 §4: a role-only step goes to the one person with that title, else it is unassigned with the role shown (never the PM) */
   check('D new project plan: a task per changed step, tell + train; the role-only step "Needs an owner: Employee", never the PM', plan.map(x => x.tag || x.step).join(',') === 'x1,tell,train' && plan[0].owner === null && plan[0].ownerRole === 'Employee' && /^Needs an owner: Employee\./.test(plan[0].note) && plan.slice(1).every(x => x.owner === 'mc') && (plan.find(x => x.tag === 'tell') || {}).teams && plan.find(x => x.tag === 'tell').teams.length > 0, plan.map(x => [x.title, x.owner, x.ownerRole, x.note, x.teams]));
+  /* R12 (H1) the counts the R11 reviewers flagged, on every screen where they appear */
+  await page.goto(ROOT + '/testing/' + G.vm.id); await page.waitForSelector('[data-tests-number]');
+  check(`D R12 #5 Simple "Try it out" shows its own stage (${G.vm.dev}), never the Business check line (${G.vm.uat})`,
+    (await attr('[data-stage="try"]', 'data-try-count')) === G.vm.dev && (await txt('[data-stage="try"]')).startsWith(G.vm.dev.replace('/', ' of ') + ' tests passed') && (await txt('[data-s-progress]')).startsWith(G.vm.uat.replace('/', ' of ') + ' tests passed'),
+    [await txt('[data-stage="try"]'), await txt('[data-s-progress]')]);
+  await page.goto(ROOT + '/release/' + G.vm.id); await page.waitForTimeout(1200);
+  await page.evaluate(() => { const d = document.querySelector('details[data-sec=access]'); if (d) d.open = true; }); await page.waitForTimeout(200);
+  const rows = await page.$$eval('#grants tr[data-grant]', trs => trs.map(tr => ({ id: tr.dataset.grant, st: (tr.querySelector('[data-grant-state]') || {}).dataset ? tr.querySelector('[data-grant-state]').dataset.grantState : null,
+    days: (tr.querySelector('[data-grant-days]') || { dataset: {} }).dataset.grantDays || '', wait: (tr.querySelector('[data-awaiting]') || {}).textContent || '' })));
+  const byG = Object.fromEntries(rows.map(r => [r.id, r]));
+  check('D R12 #7 access rows: G1 open, G2 waiting, G3 closed (never "Closed" on every row); header "1 open · 1 waiting"',
+    byG.G1 && byG.G1.st === 'open' && byG.G2 && byG.G2.st === 'waiting' && byG.G3 && byG.G3.st === 'closed' && (await attr('[data-grant-counts]', 'data-grant-counts')) === '1/1', rows);
+  check('D R12 #7 access approver: the row says "Waiting for Leo Park" (the information owner), and the launch step names Leo too',
+    /Waiting for Leo Park/.test(byG.G2 ? byG.G2.wait : '') && JSON.stringify(eng.vm.launchSteps.find(x => x.key === 'launch').who) === '["lp"]', [byG.G2, eng.vm.launchSteps.find(x => x.key === 'launch').who]);
+  check('D R12 #7 access: no grant runs past 30 days', rows.every(r => r.days === '' || +r.days <= 30), rows.map(r => r.days));
+  check('D R12 #10 launch-day plan: every step inside the window on a business day', eng.vm.launchPlan && eng.vm.launchPlan.ok === true, eng.vm.launchPlan);
+  check('D R12 #1 routing: no unmapped team in the seeded projects', eng.vm.routing && eng.vm.routing.unmapped.length === 0 && eng.erp.routing.unmapped.length === 0);
+  const hist = await page.evaluate(async u => { const { store } = await import(u); return (await store.events(null, 300)).filter(e => e.action === 'approve' && /^approval:/.test(e.ref)).map(e => [e.ref, e.actor]); }, STORE);
+  const cards = await page.evaluate(async u => { const { store } = await import(u); return store.list('approval', a => a.bu && !a.kind).map(a => ['approval:' + a.id, a.approver]); }, STORE);
+  check('D R12 #2 History names the approver on the card (Rosa Vega, Sam Keller), never a step owner', hist.length >= 2 && hist.every(([r, a]) => (cards.find(c => c[0] === r) || [])[1] === a) && hist.some(h => h[1] === 'rv') && hist.some(h => h[1] === 'sk'), [hist, cards]);
+  check('D R12 #9 ERP: CPI 0 and expected cost over budget (never under budget with CPI 0)', eng.erp.ev.CPI === 0 && eng.erp.cost.forecast > eng.erp.cost.planned && eng.erp.ev.bacSource === 'baseline', [eng.erp.ev.CPI, eng.erp.cost]);
   for (const w of [1366, 390]) {
     await page.setViewportSize({ width: w, height: 900 });
     for (const u of ['/', '/project/' + G.vm.id, '/testing/' + G.vm.id, '/dashboard']) {
@@ -239,7 +261,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
     return store.list('project').map(p => { const t = window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today);
       const live = p.status === 'live';
       return { id: p.id, name: p.name, live, show: t.cost.show !== false, t: { label: t.label, forecast: t.forecastFinish, late: t.lateCount, blockers: t.blocking.count, planned: t.cost.planned, actual: t.cost.actual, cost: t.cost.forecast, total: t.tasks.total,
-        who: live || !t.who[0] ? null : t.who[0].name, steps: live ? 0 : t.stepsLeft } }; });
+        who: live || !t.who[0] ? null : t.who[0].name, steps: live ? 0 : t.stepsLeft, checks: live ? 0 : t.launchChecks.notPassed } }; });
   }, STORE);
   check('seed has projects', truth.length >= 3, truth.length);
 
@@ -273,11 +295,11 @@ async function goldenNumbers(browser, ymd, at, errors) {
   check('CSV file name uses the local date', dl.suggestedFilename() === `portfolio-${ymd}.csv`, dl.suggestedFilename());
   const csv = parseCSV(fs.readFileSync(await dl.path(), 'utf8'));
   const H = csv[0], col = n => H.indexOf(n);
-  for (const n of ['Project', 'Status', 'Expected finish', 'Late', 'Past due', 'Will finish after due date', 'Blocking', 'First to act', 'Launch steps left', 'Planned budget', 'Actual cost', 'Expected cost']) check(`CSV has column "${n}"`, col(n) >= 0, H);
+  for (const n of ['Project', 'Status', 'Expected finish', 'Late', 'Past due', 'Will finish after due date', 'Blocking', 'First to act', 'Launch checks not passed', 'Planned budget', 'Actual cost', 'Expected cost']) check(`CSV has column "${n}"`, col(n) >= 0, H);
   check('CSV has no "Running late" or "Forecast cost" column', !H.includes('Running late') && !H.includes('Forecast cost'), H);
   for (const x of truth) {
     const r = csv.find(row => row[col('Project')] === x.name);
-    seen[x.id].csv = r ? norm({ label: r[col('Status')], forecast: r[col('Expected finish')], late: r[col('Late')], blockers: r[col('Blocking')], planned: r[col('Planned budget')], actual: r[col('Actual cost')], cost: r[col('Expected cost')], who: r[col('First to act')], steps: r[col('Launch steps left')] }) : null;
+    seen[x.id].csv = r ? norm({ label: r[col('Status')], forecast: r[col('Expected finish')], late: r[col('Late')], blockers: r[col('Blocking')], planned: r[col('Planned budget')], actual: r[col('Actual cost')], cost: r[col('Expected cost')], who: r[col('First to act')], checks: r[col('Launch checks not passed')] }) : null;
   }
   await page.screenshot({ path: `${SHOTS}/03-portfolio.png`, fullPage: false });
 
@@ -307,7 +329,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
   }
 
   /* compare */
-  const FIELDS = ['label', 'forecast', 'late', 'blockers', 'planned', 'actual', 'cost', 'who', 'steps'];
+  const FIELDS = ['label', 'forecast', 'late', 'blockers', 'planned', 'actual', 'cost', 'who', 'steps', 'checks'];
   for (const x of truth) {
     const s = seen[x.id];
     for (const surf of ['home', 'list', 'portfolio', 'header', 'report', 'csv']) {
@@ -316,7 +338,7 @@ async function goldenNumbers(browser, ymd, at, errors) {
       for (const f of FIELDS) {
         if (x.live && f === 'forecast' && surf === 'csv' && s.csv.forecast === 'none') continue;
         if (!x.show && ['planned', 'actual', 'cost'].includes(f)) continue; /* no budget or rates: cost is omitted */
-        if ((f === 'who' || f === 'steps') && s[surf][f] === undefined) continue; /* surface doesn't show it (checked in Part B) */
+        if ((f === 'who' || f === 'steps' || f === 'checks') && s[surf][f] === undefined) continue; /* surface doesn't show it (checked in Part B) */
         if (f === 'who' && surf !== 'csv' && s[surf][f] === 'none' && s.engine[f] !== 'none') { check(`${x.name}: ${surf} shows who acts first`, false, { engine: s.engine[f] }); continue; }
         check(`${x.name}: ${surf} ${f} = projectTruth`, s[surf][f] === s.engine[f], { [surf]: s[surf][f], engine: s.engine[f] });
       }

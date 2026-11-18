@@ -79,6 +79,13 @@ function truthSummary(docs, projectId, today) {
 }
 function publicConn(c) { const o = Object.assign({}, c); delete o.nonces; return o; }
 function toolName(conn) { return (S.TOOLS[conn.tool] || {}).simName || 'the tool'; }
+/* R12 #3: what a person did in Jira / Azure DevOps is recorded under THEIR identity there ("Jira: jane@contoso.com"),
+   never under the PMOFlow person who ran the sync. History stores the actor as text (64 characters at most). */
+const EXT_RE = /^[^\s@<>"',;]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
+function extActor(conn, by) {
+  const who = String(by || '').trim().toLowerCase().replace(/[\u0000-\u001f\u007f]/g, '');
+  return `${(S.TOOLS[conn.tool] || {}).name || 'Tool'}: ${who || 'person not reported'}`.slice(0, 64);
+}
 const shortVal = v => { const s = Array.isArray(v) ? v.join(', ') : String(v == null ? '' : v); return s.length > 60 ? s.slice(0, 57) + '…' : (s || '(blank)'); };
 function statusName(project, id) { const s = ((project && project.statuses) || []).find(x => x.id === id); return s ? s.name : id; }
 function fieldText(project, f, v, docs, conn) {
@@ -101,7 +108,7 @@ async function runSync(ctx, conn, st, opts) {
   const entry = (e) => { const x = Object.assign({ id: 'log-' + crypto.randomBytes(5).toString('hex'), at: nowIso() }, e); entries.push(x); return x; };
   const before = truthSummary(docs, conn.projectId, today);
   /* sent = created + updated + linked; each one is exactly one "PMOFlow → tool" row in the sync log */
-  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0 };
+  const sum = { sent: 0, created: 0, updated: 0, linked: 0, received: 0, conflicts: 0, skipped: 0, ignored: 0, refused: 0, early: 0, held: 0 };
 
   const exec = (intent) => {
     const signed = sign(intent, secretFor(wsId, conn));
@@ -137,20 +144,30 @@ async function runSync(ctx, conn, st, opts) {
         await store.putDoc(wsId, 'workItem', u.workItemId, u.data);
         const list = st.docs.workItem; const i = list.findIndex(d => d.id === u.workItemId);
         if (i >= 0) list[i] = { id: u.workItemId, data: u.data };
-        const what = u.changes.map(c => `${S.FIELD_LABELS[c.field].toLowerCase()} ${fieldText(project, c.field, c.from, docs, conn)} → ${fieldText(project, c.field, c.to, docs, conn)}`).join('; ');
-        await store.appendEvent(wsId, { actor, action: 'sync', ref: 'workItem:' + u.workItemId,
+        const what = u.changes.map(c => `${S.FIELD_LABELS[c.field].toLowerCase()} ${fieldText(project, c.field, c.from, docs, conn)} → ${fieldText(project, c.field, c.to, docs, conn)}${c.held ? ` (${S.TOOLS[conn.tool].name} said Done)` : ''}`).join('; ');
+        const ext = extActor(conn, u.by);
+        await store.appendEvent(wsId, { actor: ext, action: 'sync', ref: 'workItem:' + u.workItemId,
           summary: `From ${S.TOOLS[conn.tool].name} ${u.key}: work item "${u.data.title}" ${what}`.slice(0, 300) });
-        entry({ dir: 'in', op: 'apply', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'ok', detail: 'Updated in PMOFlow: ' + what });
+        entry({ dir: 'in', op: 'apply', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'ok', by: ext, detail: 'Updated in PMOFlow: ' + what });
         sum.received++;
         /* R11 §9: a "Done" from the tool is accepted, but flagged when work it depends on is still open */
         const early = u.changes.some(c => c.field === 'status') ? doneBeforeDeps(st.docs, u.workItemId) : null;
         if (early && early.flag) {
           const detail = `${early.text}. Accepted as ${S.TOOLS[conn.tool].name} reported it; check the order.`;
-          entry({ dir: 'in', op: 'flag', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'flagged', flag: 'finished-before-dependencies', open: early.open.map(w => w.id), detail });
-          await store.appendEvent(wsId, { actor, action: 'sync', ref: 'workItem:' + u.workItemId,
+          entry({ dir: 'in', op: 'flag', key: u.key, workItemId: u.workItemId, title: u.data.title, result: 'flagged', flag: 'finished-before-dependencies', open: early.open.map(w => w.id), by: ext, detail });
+          await store.appendEvent(wsId, { actor: ext, action: 'sync', ref: 'workItem:' + u.workItemId,
             summary: `From ${S.TOOLS[conn.tool].name} ${u.key}: "${u.data.title}": ${early.text}`.slice(0, 300) });
           sum.early++;
         }
+      }
+      /* R12 #3: a Done that would close a problem or make information available is held in review (see PMOSync.applyInbound) */
+      for (const h of applied.held) {
+        const ext = extActor(conn, h.by);
+        const wt = ((st.docs.workItem || []).find(d => d.id === h.workItemId) || {}).data || {};
+        entry({ dir: 'in', op: 'held', key: h.key, workItemId: h.workItemId, title: wt.title || '', result: 'held', kind: h.kind, dataId: h.dataId, by: ext, detail: h.reason });
+        await store.appendEvent(wsId, { actor: ext, action: 'sync-held', ref: 'workItem:' + h.workItemId,
+          summary: `From ${S.TOOLS[conn.tool].name} ${h.key}: "${wt.title || h.workItemId}" Done not applied. ${h.reason}`.slice(0, 300) });
+        sum.held++;
       }
       for (const c of applied.conflicts) {
         entry({ dir: 'in', op: 'conflict', key: c.key, workItemId: c.workItemId, result: 'conflict',
@@ -188,6 +205,7 @@ function syncSentence(conn, sum) {
   if (sum.linked) parts.push(`${sum.linked} dependency link${sum.linked === 1 ? '' : 's'} set in ${tool}`);
   if (sum.sent && !(sum.created || sum.updated || sum.linked)) parts.push(`${sum.sent} change${sum.sent === 1 ? '' : 's'} sent to ${tool}`);
   if (sum.received) parts.push(`${sum.received} task${sum.received === 1 ? '' : 's'} updated from ${tool}`);
+  if (sum.held) parts.push(`${sum.held} Done held for review in PMOFlow`);
   if (sum.early) parts.push(`${sum.early} finished before the work ${sum.early === 1 ? 'it depends' : 'they depend'} on (flagged)`);
   if (sum.conflicts) parts.push(`${sum.conflicts} conflict${sum.conflicts === 1 ? '' : 's'} settled (later change wins)`);
   if (sum.ignored) parts.push(`${sum.ignored} PMOFlow-owned date${sum.ignored === 1 ? '' : 's'} put back`);
@@ -309,12 +327,15 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     if (typeof body.assigneeEmail === 'string') patch.assigneeEmail = body.assigneeEmail.trim().slice(0, 254);
     if (typeof body.due === 'string') { if (!/^\d{4}-\d{2}-\d{2}$/.test(body.due)) { fail(400, 'Use a YYYY-MM-DD date.'); return true; } patch.due = body.due; }
     if (!Object.keys(patch).length) { fail(400, 'Nothing to change.'); return true; }
+    /* who did it in the tool: an email given as `by`, else the issue's assignee (the person doing the work) */
+    if (body.by != null && (typeof body.by !== 'string' || !EXT_RE.test(body.by.trim()))) { fail(400, 'Give the email of the person making the change in the tool.'); return true; }
+    const by = typeof body.by === 'string' ? body.by.trim().toLowerCase() : (item.assigneeEmail || '');
     const was = Object.assign({}, item);
     /* the tool's clock moves forward, so this change is newer than anything already synced */
     const at = new Date(Math.max(Date.now(), Date.parse(conn.cursor || 0) + 1)).toISOString();
-    S.simEdit(conn.sim, key, patch, at);
+    S.simEdit(conn.sim, key, patch, at, by);
     const what = Object.keys(patch).map(k => `${k === 'assigneeEmail' ? 'assignee' : k} ${shortVal(was[k])} → ${shortVal(patch[k])}`).join('; ');
-    await store.appendEvent(wsId, { actor: actor || 'anonymous', action: 'tool-change', ref: `${TYPE}:${id}`, summary: `In ${toolName(conn)}: ${key} ${what}` });
+    await store.appendEvent(wsId, { actor: extActor(conn, by), action: 'tool-change', ref: `${TYPE}:${id}`, summary: `In ${toolName(conn)}: ${key} ${what}` });
     const out = await runSync({ store, wsId, actor: actor || 'anonymous', today }, conn, st, { outbound: true });
     await store.putDoc(wsId, TYPE, id, conn);
     send(200, { ok: true, connection: publicConn(conn), summary: out.sum, sentence: syncSentence(conn, out.sum), before: out.before, after: out.after, changed: what });
@@ -376,4 +397,4 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
   fail(404, 'unknown route'); return true;
 }
 
-module.exports = { handle, _internal: { sign, verify, secretFor, runSync, noticeContext, syncSentence, doneBeforeDeps } };
+module.exports = { handle, _internal: { sign, verify, secretFor, runSync, noticeContext, syncSentence, doneBeforeDeps, extActor } };

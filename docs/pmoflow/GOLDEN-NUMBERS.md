@@ -161,8 +161,8 @@ The removed step is the Today step "Print and file the bank letter".
 | Spent (AC) | $1,406.25, hours logged on the in-progress task |
 | SPI | **0.00** (spent with nothing finished) |
 | CPI | **0.00** |
-| EAC | **$6,406.25** (`eacMethod: 'bottom-up'`): max(bottom-up $5,000, spent $1,406.25 + remaining $5,000) |
-| Expected cost | **$6,406** |
+| EAC | **$10,406.25** (`eacMethod: 'bottom-up'`). R12 #9: CPI is 0 (spent with nothing finished), so EAC = spent $1,406.25 + the budgeted value of the work still to do $9,000 (AC + BAC − EV). It is over the $9,000 budget, never under it while CPI reads 0 |
+| Expected cost | **$10,406** (over budget by $1,406) |
 | Flag | "Spent with nothing finished" |
 
 The label reads "Behind on effort", never "On track" beside SPI 0.00.
@@ -228,3 +228,20 @@ The seed carries dated facts for this (business-day offsets): task `createdAt`/`
 **Overall** (projectTruth today): label "Some tasks late"; "Expected Dec 9, 14 business days before the Dec 30 deadline"; "Higher budget need expected: expected cost $48,847 against the $48,000 budget ($847 over)". **Common areas of concern:** "Banking (risk area): 4 of the 5 late or blocked tasks", "The “Capture banking details” step: 3 of the 5 late or blocked tasks", "IT team: 2 of the 5 late or blocked tasks".
 
 **Since last report** = Mon Nov 16 – Tue Nov 17 (last report Fri Nov 13). Email subject: "Vendor Onboarding Modernization: status, week of Nov 16".
+
+## R12 (H1): the counts the R11 reviewers flagged
+
+Seed day 0, Vendor Onboarding Modernization unless named. Asserted in `engine.test.js` (R12 tests) and on screen in `e2e-consistency.js` Part D.
+
+| What | Value | Screens that must agree |
+|---|---|---|
+| Try it out (Simple and Advanced) | **7 of 8** (`testing.stages[0]`) | Testing Simple step 3 (`data-try-count`), Advanced tile |
+| Business check | **9 of 26** (`testing.stages[1]`, = `testing.count`) | Testing Simple step 4, Advanced tile, report, gate, Launch |
+| Launch gate | **9 checks not passed** of 10 (`projectTruth.launchChecks.text`) | Launch, Portfolio, report ("checks", never "launch steps left") |
+| Access rows | G1 **open**, G2 **waiting** ("Waiting for Leo Park"), G3 **closed** | Launch access table (desktop and phone), header "1 open · 1 waiting" (`data-grant-counts="1/1"`) |
+| Access approver | **Leo Park** (owner of Bank remittance details) | the row, the Launch step "Launch" (`who: ['lp']`) |
+| Grant length | every grant **≤ 30 days** from local approval day; G3 ends the same local day History says it expired | access table, History |
+| Approver identity | AP1 **Rosa Vega**, AP2 **Sam Keller** | status card, History (seeded `approve` events), report |
+| Routing | **0** unmapped teams in the seeded projects (`projectTruth.routing.unmapped`) | Launch approvals |
+| Launch-day plan | **ok** (every step on a business day inside the window) (`projectTruth.launchPlan`) | Launch, gate `cutover-plan` |
+| ERP expected cost | **$10,406.25** = spent $1,406.25 + $9,000 still to do; CPI **0.00**; `ev.bacSource: 'baseline'` | Project header, Portfolio, report |

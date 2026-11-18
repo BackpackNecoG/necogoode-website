@@ -1806,8 +1806,8 @@ test('R11 §2 bulk pass: only tests assigned to you or unassigned; never as some
   // Maya is an Admin: no exemption. She can't pass Priya's test, even in a bulk pass with her own
   let r = await run('RX1', 'mc', [{ caseId: 'TC11', outcome: 'pass', evidence: 'bulk' }, { caseId: 'TC12', outcome: 'pass', evidence: 'bulk' }]);
   assert.equal(r.status, 403); assert.match(r.body.error, /only pass tests assigned to you or unassigned ones\. 1 of the 2 selected tests is assigned to Priya Shah\./);
-  // her own and an unassigned one are fine
-  r = await run('RX2', 'mc', [{ caseId: 'TC12', outcome: 'pass', evidence: 'ok' }, { caseId: 'TC13', outcome: 'pass', evidence: 'ok' }]);
+  // her own is fine (R12: an unassigned Compliance test is Compliance's to pass, see the R12 test below)
+  r = await run('RX2', 'mc', [{ caseId: 'TC12', outcome: 'pass', evidence: 'ok' }]);
   assert.equal(r.status, 200, JSON.stringify(r.body));
   // a failure on someone else's test can be recorded (anyone may report a problem)
   r = await run('RX3', 'mc', [{ caseId: 'TC11', outcome: 'fail', note: 'Rejected a valid value' }]);
@@ -1844,7 +1844,7 @@ test('R11 §2 approvals: step owners, test recorders, the PM, other names and no
   assert.equal(r.status, 200, JSON.stringify(r.body));
   // recording any result for a part's tests bars that person from approving it
   const ws2 = await newWs();
-  r = await put(ws2, 'testRun', 'RD', 'ar', { projectId: 'vendor-modernization', env: 'uat', at: new Date().toISOString(), by: 'ar', results: [{ caseId: 'TC14', outcome: 'pass' }] });
+  r = await put(ws2, 'testRun', 'RD', 'ar', { projectId: 'vendor-modernization', env: 'uat', at: new Date().toISOString(), by: 'ar', results: [{ caseId: 'TC14', outcome: 'fail', note: 'R12: Ana may report a problem, but only Compliance passes it' }] });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   r = await put(ws2, 'approval', 'Q7', 'ar', { projectId: 'vendor-modernization', bu: 'Compliance', approver: 'ar', decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' });
   assert.equal(r.status, 403); assert.match(r.body.error, /Ana Ruiz recorded test results for Compliance’s part/);
@@ -1890,4 +1890,25 @@ test('R11 §2/§3 launch overrides need the PM and a sponsor, both with step-up;
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual(r.body.release.override.signoffs.map(x => [x.role, x.by]), [['pm', 'ta'], ['sponsor', 'do']]);
   assert.ok(!r.body.release.approvers.includes('ta'), 'override sign-offs are never team approvals');
+});
+
+/* ================= R12 (H1) ================= */
+test('R12 #4 who can pass a business check: the assignee or the owning department; bulk passes need step-up', { skip: !(engine && engine.canPassTest) && 'engine without R12' }, async () => {
+  const ws = await newWs();
+  const run = (id, by, results, extra) => put(ws, 'testRun', id, by, Object.assign({ projectId: 'vendor-modernization', env: 'uat', at: new Date().toISOString(), by, results }, extra || {}));
+  // Jordan's repro: Ana (Accounts Payable) bulk-passes Compliance's unassigned sanctions tests
+  let r = await run('RY1', 'ar', [{ caseId: 'TC11', outcome: 'pass', evidence: 'bulk' }, { caseId: 'TC12', outcome: 'pass', evidence: 'bulk' }], { stepUp: true });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /^Only someone in Compliance \(or the person it is assigned to\) can pass the test “Sanctions screening result: Match status”\. \(2 of the 2 selected tests can't be passed by Ana Ruiz\.\)$/);
+  // Ana may still record a failure on them (anyone may report a problem)
+  r = await run('RY2', 'ar', [{ caseId: 'TC11', outcome: 'fail', note: 'Rejected a valid value' }]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // Priya (Compliance) passing two at once needs step-up; with it, it is accepted
+  r = await run('RY3', 'ps', [{ caseId: 'TC11', outcome: 'pass', evidence: 'ok' }, { caseId: 'TC12', outcome: 'pass', evidence: 'ok' }]);
+  assert.equal(r.status, 403); assert.match(r.body.error, /^Passing 2 tests at once needs the extra sign-in check \(step-up\)\.$/);
+  r = await run('RY4', 'ps', [{ caseId: 'TC11', outcome: 'pass', evidence: 'ok' }, { caseId: 'TC12', outcome: 'pass', evidence: 'ok' }], { stepUp: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // one pass needs no step-up
+  r = await run('RY5', 'ps', [{ caseId: 'TC13', outcome: 'pass', evidence: 'ok' }]);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
 });

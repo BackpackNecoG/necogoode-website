@@ -244,3 +244,5 @@ td.p { color: var(--bus); }
 [data-u="m0"] { margin: 0; }
 [data-u="note-amber"] { color: var(--bus); margin: 10px 0 0; }
 [data-u="mt14"] { margin-top: 14px; }
+/* R12: the estimator's "Switch to Business" nudge */
+#est-note .est-switch { display: flex; margin-top: 10px; min-height: 40px; padding: 8px 14px; }

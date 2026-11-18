@@ -1241,7 +1241,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-export-pf]')]);
   const lines2 = fs.readFileSync(await dl2.path(), 'utf8').replace(/^﻿/, '').trim().split(/\r\n/);
   const nPrj = await page.evaluate(async u => (await import(u)).store.list('project').length, STORE);
-  check('R6/R8 portfolio CSV: one row per project with status, the one cost forecast and EV columns', lines2.length === nPrj + 1 && /Status,Status sentence/.test(lines2[0]) && /Planned budget,Actual cost,Expected cost/.test(lines2[0]) && /Late,Past due,Will finish after due date,Blocking,First to act,Launch steps left/.test(lines2[0]) && !/Running late/.test(lines2[0]) && /SPI,CPI$/.test(lines2[0]) && !/EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
+  check('R6/R8 portfolio CSV: one row per project with status, the one cost forecast and EV columns', lines2.length === nPrj + 1 && /Status,Status sentence/.test(lines2[0]) && /Planned budget,Actual cost,Expected cost/.test(lines2[0]) && /Late,Past due,Will finish after due date,Blocking,First to act,Launch checks not passed/.test(lines2[0]) && !/Running late/.test(lines2[0]) && /SPI,CPI$/.test(lines2[0]) && !/EAC/.test(lines2[0]), { head: lines2[0], n: lines2.length, nPrj });
   await page.click('[data-gen-rep]'); await page.waitForSelector('[data-pf-rep] .pmo-rep-h', { timeout: 30000 });
   await page.evaluate(() => { window.__pfPrinted = 0; window.print = () => { window.__pfPrinted++; window.__pfCls = document.body.classList.contains('pmo-print-pf'); }; });
   await page.click('[data-print-pf-rep]');
@@ -1715,6 +1715,72 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R8 risk with all linked work done: "Likely resolved: close it?"', rk8 && await sp.locator(`[data-likely-resolved="${rk8}"]`).count() === 1);
   await sp.click(`[data-close-risk="${rk8}"]`); await sSettle(); await sp.waitForTimeout(600);
   check('R8 "Close it" closes the risk', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('risk', id).status, [STORE, rk8])) === 'closed');
+  /* ================= R12 (Simple): custom report range chip, phone spacing ================= */
+  console.log('R12 simple custom range + phone spacing');
+  {
+    /* phone: words never run into numbers ("Late1", "Blockingholds up") on the PMO pages */
+    const RUN = /\b(Late|late|Blocking|blocking)(\d|holds)|\d(Late|Blocking)\b/;
+    for (const [path, sel] of [['/', '[data-waiting]'], ['/projects', '[data-plist]'], [`/project/${PRJ7}`, '.hdr'], [`/project/${PRJ7}?mode=work`, '.hdr'], ['/portfolio', '[data-pcard]'], ['/dashboard', '#app .card'], ['ADV', ''], [`/project/${PRJ7}`, '.hdr .kpis'], ['/portfolio', '.hdr'], ['/dashboard', '[data-dash-grid]'], ['SIMPLE', '']]) {
+      /* the same pages with Advanced on (the KPI tiles with their notes), then back to Simple */
+      if (path === 'ADV' || path === 'SIMPLE') { await sp.evaluate(async ([u, on]) => (await import(u)).store.setAdvanced(on), [STORE, path === 'ADV']); await sSettle(); continue; }
+      await sGo(path, sel);
+      const t = await sp.locator('#app').innerText();
+      const m = t.match(RUN);
+      check(`R12 phone spacing @390 ${path}`, !m, m ? t.slice(Math.max(0, m.index - 40), m.index + 40) : null);
+      if (path === `/project/${PRJ7}`) await sShot('20-r12-kpis-390');
+    }
+    /* #7 Home: a pasted and saved process (saved as Today only) shows its real step count, never "0 steps" */
+    await sGo('/import', '[data-sop]');
+    await sp.fill('[data-sop]', '1. Buyer requests the new vendor\n2. Credit reviews the vendor\n3. AP enters the vendor in the ERP\n4. Treasury confirms the bank details');
+    await sp.dispatchEvent('[data-sop]', 'input');
+    await sp.click('[data-draft]'); await sp.waitForSelector('.is-draft', { timeout: 20000 }); await sSettle();
+    await sp.click('[data-create]'); await sp.waitForSelector('.overlay [data-pname]');
+    await sp.fill('.overlay [data-pname]', 'R12 pasted vendor setup');
+    await Promise.all([sp.waitForURL(/\/process\//, { timeout: 30000 }), sp.click('.overlay [data-act="create"]')]);
+    const pid12 = sp.url().match(/process\/([^?/]+)/)[1];
+    const want12 = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const m = await import(u.replace('store.js', 'pages/project.js')); const p = store.get('process', id);
+      return m.flatSteps(p.tobe && p.tobe.length ? p.tobe : p.asis).length; }, [STORE, pid12]);
+    await sGo('/', '[data-waiting]');
+    const chip12 = (await sp.locator(`[data-proctile="${pid12}"] .chips .chip`).first().innerText().catch(() => '')).trim();
+    check('R12 Home: a pasted and saved process shows its real step count', want12 >= 4 && chip12 === `${want12} steps`, { chip12, want12 });
+    /* #7 launch counts: one phrase and one number, the Launch page's (projectTruth.launchChecks), on the portfolio and in the report */
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await sSettle();
+    await sGo('/portfolio', '[data-prow]');
+    const lc = await sp.evaluate(async u => { const { store } = await import(u); return store.list('project', p => p.status !== 'live').map(p => {
+      const t = window.PMOEngine.projectTruth(store.state.docs, p.id, store.state.today); const el = document.querySelector(`[data-prow="${p.id}"] [data-t="checks"]`);
+      return { id: p.id, lc: t.launchChecks || null, shown: el ? el.textContent.trim() : null }; }); }, STORE);
+    check('R12 portfolio: launch readiness = projectTruth.launchChecks.text (checks, not steps)', lc.length && lc.every(x => x.lc && (x.lc.notPassed ? x.shown === x.lc.text : x.shown === null)), lc);
+    check('R12 portfolio: no "launch steps left" wording', !/launch steps? left/i.test(await sp.locator('#app').innerText()));
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE); await sSettle();
+    /* Simple: a small "Custom…" chip opens a from/to range */
+    await sGo(`/project/${PRJ7}`, '[data-report]');
+    await sp.click('[data-report]'); await sp.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await sSettle();
+    check('R12 Simple report: a "Custom…" chip next to the presets', (await sp.locator('[data-prj-rep] [data-rep-custom-chip]').innerText()).trim() === 'Custom…');
+    check('R12 Simple report: the date range stays tucked away until asked for', !(await sp.locator('[data-prj-rep] [data-rep-from]').isVisible()));
+    await sp.click('[data-prj-rep] [data-rep-custom-chip]'); await sp.waitForTimeout(150);
+    check('R12 Simple report: "Custom…" shows From and To', await sp.locator('[data-prj-rep] [data-rep-from]').isVisible() && await sp.locator('[data-prj-rep] [data-rep-end]').isVisible());
+    const t12 = await sp.evaluate(async u => (await import(u)).store.state.today, STORE);
+    const from12 = await sp.evaluate(([d]) => window.PMOEngine.addBusinessDays(d, -8), [t12]);
+    await sp.fill('[data-prj-rep] [data-rep-from]', from12); await sp.fill('[data-prj-rep] [data-rep-end]', t12);
+    await sp.click('[data-prj-rep] [data-rep-apply]'); await sp.waitForSelector('[data-prj-rep] [data-rep-window]', { timeout: 30000 }); await sSettle();
+    const w12 = await sp.evaluate(async ([u, prj, f, t]) => window.PMOEngine.periodReport((await import(u)).store.state.docs, prj, { preset: 'custom', from: f, to: t }, t).window.label, [STORE, PRJ7, from12, t12]);
+    check('R12 Simple report: the custom range is used (engine window)', (await sp.innerText('[data-prj-rep] [data-rep-window]')).trim().startsWith(w12), { shown: await sp.innerText('[data-prj-rep] [data-rep-window]'), w12 });
+    check('R12 Simple report: the chip reads as chosen', await sp.locator('[data-prj-rep] [data-rep-custom-chip].on').count() === 1 && await sp.locator('[data-prj-rep] [data-rep-from]').isVisible());
+    check('R12 Simple report with a range: no overflow @390', await sNoOverflow());
+    await sp.locator('[data-prj-rep]').screenshot({ path: `${SHOTS}/s-21-r12-custom-range-390.png` });
+    await sp.setViewportSize({ width: 1366, height: 900 }); await sSettle();
+    await sp.locator('[data-prj-rep] [data-rep-picker]').screenshot({ path: `${SHOTS}/s-21-r12-custom-range-1366.png` });
+    await sp.setViewportSize({ width: 390, height: 844 }); await sSettle();
+    await sGo('/portfolio', '[data-pf-rep]');
+    /* the status tiles count each project under the label it shows ("Behind on effort" is never counted as late) */
+    const tiles = await sp.evaluate(() => ({ late: Number((document.querySelector('[data-kpi-late] b') || {}).textContent), other: [...document.querySelectorAll('[data-kpi-other]')].map(e => [e.dataset.kpiOther, Number(e.querySelector('b').textContent)]),
+      labels: [...document.querySelectorAll('[data-pcard] [data-summary-label]')].map(e => e.textContent.trim()) }));
+    check('R12 portfolio: "Some tasks late" tile = projects labelled so', tiles.late === tiles.labels.filter(l => l === 'Some tasks late').length, tiles);
+    check('R12 portfolio: every other amber label has its own tile', tiles.other.every(([l, n]) => tiles.labels.filter(x => x === l).length === n), tiles);
+    const nl = await sp.evaluate(async u => (await import(u.replace('store.js', 'pages/project.js'))).notLiveText({ n: 3, of: 5, by: { unchecked: 2, missing: 1 } }), STORE);
+    check('R12 information line: "not checked yet" in its own words', /1 not available yet, 2 not checked yet/.test(nl), nl);
+    check('R12 Simple portfolio report: "Custom…" chip too', await sp.locator('[data-pf-rep] [data-rep-custom-chip]').count() === 1);
+  }
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();
 

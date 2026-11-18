@@ -6,7 +6,7 @@
    "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED, importBtn, bindImport, timerText } from './process.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects } from './process.js';
 
 const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
@@ -92,6 +92,8 @@ function normStep(n) {
     sla: slaOf(n),
     note: typeof n.note === 'string' ? n.note : '',
     raci: n.raci || undefined,
+    /* R12: "if spend over $25k Karen approves too" is an extra approval */
+    approval: n.approval === true || undefined,
     /* R11 G2: "if not approved within 2 days, escalate to the CFO" is a timer on the step */
     timer: n.timer && typeof n.timer === 'object' ? Object.assign({}, n.timer) : undefined,
     subs: (Array.isArray(n.subs) ? n.subs : []).map(s => typeof s === 'string' ? { title: cleanTitle(s), data: [] } : { title: cleanTitle(s.title || s.text || ''), data: [] }).filter(s => s.title),
@@ -329,6 +331,16 @@ function foundSummary(d) {
   return `${linesHtml}<div class="is-found" data-found><b>We found ${esc(last)}.</b>${roles.length ? ` <span>Who does them: ${roles.map(esc).join(', ')}.</span>` : ''}${teams.length ? ` <span data-found-teams>Teams involved: ${teams.map(esc).join(', ')}.</span>` : ''}</div>`;
 }
 
+/* R12 #1: who approves each team's part. The engine seeds the mapping from the draft's steps (a department of the same
+   name, else nobody: no default) and words it; choices made here are kept while the draft is edited and saved with it. */
+function draftRouting(d) {
+  const seedMap = eng('seedTeamDepartments', [docs(), d.nodes], {}) || {};
+  const map = Object.assign({}, seedMap);
+  Object.keys(d.teamDepartments || {}).forEach(k => { const hit = Object.keys(map).find(x => x.toLowerCase() === k.toLowerCase()); if (hit) map[hit] = d.teamDepartments[k]; });
+  const r = eng('teamRouting', [docs(), { id: '_draft', name: d.name || '', tobe: d.nodes, teamDepartments: map }], null);
+  return { map, rt: r ? { teams: r.teams || [], departments: (r.departments || []).map(x => x.name), text: r.text || '' } : { teams: [], departments: [], text: '' } };
+}
+
 /* ---------- R10 S2 §6: start from a template ---------- */
 const TPL_FALLBACK = ['Vendor onboarding', 'Employee onboarding', 'Employee offboarding', 'Invoice approval', 'Purchase request', 'Customer refund'];
 function templatesHTML() {
@@ -462,6 +474,7 @@ export function render() {
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + stepNo(s)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
+    ${draftRouting(d).rt.teams.length ? approversHTML(draftRouting(d).rt, { editable: true, inline: true }) : ''}
     <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add choice</button>${adv() ? '<button class="btn sm" data-add-par>+ Add “at the same time”</button>' : ''}<button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Save as how it works today</button></div></div>` : '';
 
   return `<datalist id="is-people">${store.state.people.map(p => `<option value="${esc(p.name)}"></option>`).join('')}</datalist><section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · Paste a procedure</div>
@@ -496,6 +509,7 @@ function readDraft(root) {
   root.querySelectorAll('[data-blabel]').forEach(el => { const [p, b] = el.dataset.blabel.split(/\.b(?=\d+$)/); const g = at(p); if (g && g.branches[+b]) g.branches[+b].label = el.value; });
   root.querySelectorAll('[data-nd-create]').forEach(el => { const x = ui.draft.newData[+el.dataset.ndCreate]; if (x && !x.exists) x.create = el.checked; });
   root.querySelectorAll('[data-nd-name]').forEach(el => { const x = ui.draft.newData[+el.dataset.ndName]; if (x && !x.exists) x.name = el.value; });
+  if (root.querySelector('[data-apr-sel]')) ui.draft.teamDepartments = readApproverSelects(root, draftRouting(ui.draft).map);
 }
 
 function removeAt(path) {
@@ -544,7 +558,11 @@ export function bind(root) {
     if (el.value === '__end') br.nodes.push(keepEnd || endNode('Stop'));
     else if (el.value) br.goto = el.value;
     store.emit(); });
-  root.querySelectorAll('[data-f=owner],[data-f=who],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; rerender(); });
+  /* R12 #12: typing a name then clicking Save fires "change" on the box first; re-drawing the page then would swallow
+     the click (the button under the pointer is replaced). While a pointer is down the re-draw waits for the click. */
+  root.querySelectorAll('[data-f=owner],[data-f=who],[data-f=data],[data-nd-create]').forEach(el => el.onchange = () => { if (el.dataset.f === 'data') ui.openData = el.closest('[data-dpath]').dataset.dpath; afterPointer(rerender); });
+  root.querySelectorAll('[data-f=who]').forEach(el => el.oninput = () => readDraft(root));
+  root.querySelectorAll('[data-apr-sel]').forEach(el => el.onchange = () => { readDraft(root); afterPointer(rerender); });
   root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-f=direction],[data-f=calls]').forEach(el => el.onchange = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
@@ -556,6 +574,16 @@ export function bind(root) {
   const ap = root.querySelector('[data-add-par]'); if (ap) ap.onclick = () => { readDraft(root); ui.draft.nodes.push({ type: 'parallel', src: srcId({}), title: 'Do these at the same time', branches: [{ label: 'Branch A', nodes: [] }, { label: 'Branch B', nodes: [] }] }); store.emit(); };
   const cr = root.querySelector('[data-create]'); if (cr) cr.onclick = () => { readDraft(root); createProcess(); };
 }
+
+/* run fn now, or once the pointer that is down comes up (and its click has been handled) */
+let pointerDown = false, pendingFn = null;
+if (typeof window !== 'undefined' && !window.__isPointerWatch) {
+  window.__isPointerWatch = true;
+  window.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+  const up = () => { if (!pointerDown) return; pointerDown = false; const f = pendingFn; pendingFn = null; if (f) setTimeout(f, 0); };
+  window.addEventListener('click', up); window.addEventListener('pointerup', () => setTimeout(up, 0), true); window.addEventListener('pointercancel', up, true);
+}
+function afterPointer(fn) { if (pointerDown) pendingFn = fn; else fn(); }
 
 function allSteps(nodes, out) { (nodes || []).forEach(n => { if (n.type === 'step') out.push(n); else (n.branches || []).forEach(b => allSteps(b.nodes, out)); }); return out; }
 
@@ -647,6 +675,7 @@ async function createProcess() {
     if (s.note) node.note = s.note;
     if (s.raci) node.raci = s.raci;
     if (s.timer) node.timer = s.timer;
+    if (s.approval) node.approval = true;
     const subs = (s.subs || []).filter(x => String(x.title || '').trim()).map(x => ({ title: x.title.trim(), data: (x.data || []).slice() }));
     if (subs.length) node.subs = subs;
     return node;
@@ -661,8 +690,10 @@ async function createProcess() {
   const tobe = [];
   const pid = store.newId('proc');
   const resources = [...new Set(steps.map(s => s.owner).filter(Boolean))];
+  /* R12 #1: who approves each team's part, as shown in the draft (a team nobody chose stays unchosen) */
+  const teamDepartments = draftRouting(d).map;
   try {
-    await store.save('process', pid, { id: pid, name, desc: (r.form.desc || '').trim(), owner: store.state.me, resources, version: 1, asis, tobe, released: [] },
+    await store.save('process', pid, { id: pid, name, desc: (r.form.desc || '').trim(), owner: store.state.me, resources, version: 1, asis, tobe, released: [], teamDepartments },
       `Created process “${name}” from ${d.template ? 'the ' + d.template.toLowerCase() + ' template' : 'a pasted procedure'} (${countNumbered(nodes)} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);
   } catch (e) { toast('Could not create: ' + e.message); return; }
   ui.draft = null; ui.text = ''; ui.notes = []; ui.source = null; ui.openData = null;

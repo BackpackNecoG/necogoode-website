@@ -610,3 +610,14 @@ details.is-data:not([open]) > .is-pop{display:none}
 .d-raci-n{display:inline-block;min-width:18px;color:var(--ink3);font-size:11px;margin-right:4px}
 .d-raci-sel{border:1px solid var(--line);border-radius:6px;padding:2px 4px;font:inherit;font-size:12px;background:#fff;min-width:44px}
 @media (max-width:640px){.is-hdracts{justify-content:flex-start}.is-orimport{text-align:left}.d-raci-t tbody th{min-width:140px}}
+/* R12 #1: who approves each team's part (process side panel and the import draft) */
+.d-apr{align-items:center;gap:8px}
+.d-apr .t{font-weight:600}
+.d-apr .r{flex-shrink:0}
+.d-apr .d-sel{max-width:180px}
+.d-apr-gap .d-sel{border-color:#f59e0b;background:var(--soon-soft)}
+.d-apr-ask{color:#92400e}
+.d-apr-n{background:var(--soon-soft);color:#92400e;white-space:nowrap}
+.is-apr{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.is-apr h4{margin:0 0 4px;font-size:13.5px}
+@media (max-width:640px){.d-apr .d-sel{max-width:46vw}}

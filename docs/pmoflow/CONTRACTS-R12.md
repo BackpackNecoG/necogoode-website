@@ -125,3 +125,60 @@ The engine has a single owner. Every stream owns whole files. Each item number r
   - your e2e suites pass;
   - you have looked at screenshots at 1366 and 390.
 - **Don't commit.** Report in ≤300 words, with exact cross-stream asks.
+
+## Appendix: R12 engine API (H1, published early; shapes are stable, items marked *landing* are being filled in)
+
+`E` = `api/shared/pmoflow-engine.js` (web copy `app/engine.js`, byte-identical). Render these; never count locally.
+
+### #1 Department routing (H2 builds the UI on this; H3 reads `projectTruth.routing`)
+
+**Stored on the process:** `process.teamDepartments = { [team: string]: string | null }`.
+- Key: a team as found on the steps (keep the spelling the import found: "Purchasing", "Credit", "AP", or a role with no team word such as "Buyer/Vendor").
+- Value: the approving department (a `person.bu` value, e.g. "Accounts Payable"), or `null` = not chosen yet. **There is no default.** Keys match case-insensitively.
+- Save it with the process (`store.save('process', …)`); the engine reads it from the process doc only.
+
+**Which teams a step has:** `E.stepTeams(docs, process, step)` → `[team]`.
+- A step with `ownerRole` is done by that role. Its team is the team word inside the role ("Purchasing mgr" → "Purchasing", "Credit dept" → "Credit", "AP clerk" → "AP"); a role with no team word is its own key ("Buyer/Vendor"). **`step.owner` is ignored when `ownerRole` is set**: the process owner written there by "Who does it" is never the step's team or owner.
+- A step owned by a person (no `ownerRole`) has that person's `bu`.
+- Plus every `touches` entry that is a team (a team word, a department name, or a key of `teamDepartments`). Systems such as "Email" are ignored.
+
+**Team → department:** `E.departmentFor(docs, process, team)` → `string | null`. The mapping value if the key exists; else the department whose name (or abbreviation: AP, AR, HR, IT) equals the team; else `null`.
+
+**Seeding at import:** `E.seedTeamDepartments(docs, nodes)` → `{ team: department | null }` for every team found on `nodes` (a Future map). Teams whose name is a department get it; every other team gets `null`. H2 calls this once at import and saves the result on the process.
+
+**For the import and process pages:** `E.teamRouting(docs, process)` → `{ teams: [{ team, department, explicit, steps: [{ id, title }], text }], unmapped: [team], departments: [{ name, people: [{ id, name }] }], text }`.
+- `teams[i].text` is "Purchasing → Procurement" or **"Choose who approves for Purchasing"**.
+- `departments` is the pick list (every `person.bu`, sorted).
+- `text` is "4 teams · 1 needs an approving department" or "All 4 teams have an approving department".
+
+**Approvals (`readiness` bu-signoff, `approvalsOf`, `projectTruth.approvals`):** a changed step's departments = `departmentFor` of each of its `stepTeams`. A changed step whose team has no department adds an **unrouted** entry, and the bu-signoff check fails until it is chosen.
+- `projectTruth.routing` = `{ unmapped: [{ pid, process, team, steps: [{ id, title }], text: "Choose who approves for Purchasing" }], text }`.
+- `bu-signoff` gains `unrouted` (same array). Its detail leads with the "Choose who approves for …" sentences.
+- The "Tell affected teams" task's `teams` lists departments (and unmapped team names as they are), never the process owner's department by default.
+
+**Re-approval:** reopens only the departments whose own steps changed. Approvals saved from R12 carry a `v:` part in `approval.fingerprint` (from `E.sectionFingerprint`), so `stale[i].details[j].label` reads **"“Pay the vendor” time limit 2 business days → 1 business day"**, owner "Ana Ruiz → AP clerk", name "“X” → “Y”". `ref` no longer contains internal ids in any `label`/`text`.
+
+### #6 Ownership: `E.stepDoer(docs, step)` → `{ owner: personId | null, role: string | null, text }`
+- Role steps resolve to the one person whose title equals the role, else `owner: null`, `text: "Needs an owner: <role>"`. Never the PM, never the process owner.
+- `E.ownerText(docs, workItem)` → person name, or "Needs an owner: <role>" (or "Needs an owner"). `who`, the period report, Home and the portfolio use it; an unowned task never appears under a person's name.
+
+### #4 Who can pass a test: `E.canPassTest(docs, prj, testId, personId)` → `null | { rule: 'assignee' | 'department', text }`
+- Allowed: the test's assignee; or, for an unassigned test, people in the department that owns the test's part (`E.testDepartments(docs, prj, testId)` → `[dept]`). A test owned by no department may be passed by anyone eligible to record.
+- Server: PUT `testRun` refuses a pass with 403 when `canPassTest` names a rule; a run with more than one pass (bulk) needs `stepUp: true`. PUT `changeRequest` approval needs `stepUp: true` (403 otherwise).
+
+### #10 Launch-day plan: `E.launchPlanCheck(docs, prj)` → `{ ok, problems: [{ taskId, task, at, why: 'day-off' | 'outside-window', text }], text }`
+- Every not-done task's `plannedStart` must fall on a business day, on the window's day, between its start and end (and end by the window's end). `projectTruth.launchPlan` is the same object. The `cutover-plan` gate check fails while `ok` is false (`planProblems` on the check); it is a gate failure, not something the override skips. (Landed.)
+- Override wording: `launchOverrideStatus().signoffs[i].label` and `E.overrideRoleLabel(docs, prj, person)` → "project manager" | "sponsor" (only `project.sponsor`) | "approver". The override panel now also shows on the Simple Launch page (launch owner) and as a "Launch early?" card for signers.
+
+### #7 / #9 Counts (landed)
+- `projectTruth.launchChecks` = `{ total, passed, notPassed, failing, text: "9 checks not passed" }`. One phrase: "checks". Portfolio, report and Launch use `text`.
+- Report week labels always read "Week of Mon … – Fri …" (even when the project started mid-week). "Since last report" counts a report sent earlier today. A plan change applied this evening (tomorrow's UTC date) is in a window that ends today.
+- `earnedValue` uses the **locked baseline** budget: the latest `project.baselines[i].budget` (`ev.bacSource: 'baseline' | 'current' | 'estimate'`). **H3: when saving a baseline, store `budget: project.budget.planned` on it.** With CPI = 0, EAC = spent + budgeted value of the work still to do (AC + BAC − EV), so never under budget.
+- `projectTruth.cost.show` is false unless the project has a budget, a task owner with a day rate, or logged hours (role-only tasks priced at the default rate never show an expected cost).
+- Access: `E.grantApproverOf(docs, grant)` (the information owner; the PM when the owner asked). `grantView` may be called docs-first (`eng()` style) and then adds `approver`, `approverName`, and `text: "Waiting for Leo Park"`. The Launch step "Launch" names the access approvers while requests wait.
+- `E.ownerText(docs, workItem)`; `who` rows for unowned tasks carry `needsOwner: true`, `role`, `name: "Needs an owner: <role>"`.
+- `defectState`: a defect with `status: 'review'` (inbound Jira/ADO Done) is `fixed`, awaiting a passing retest (H4 ask).
+
+### #11 Profiling (landed; counts and row numbers only, never values)
+- `profileCsv` columns may carry `whitespace: { count, firstRow }`, `nearDuplicates: { groups, records, rows }`, `sharedAccount: { accounts, records, rows, text }` (account/IBAN columns).
+- `profileLines` names them. `generateTests` never makes an observed shape whose real values pass the rules a "reject" test, and turns a duplicate warning on an id/tax/account/unique field into a uniqueness test (`context: { duplicateOf: 'another record' }`).

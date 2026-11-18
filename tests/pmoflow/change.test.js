@@ -54,6 +54,8 @@ const preview = (docs, edits, extra) => {
   return { change, after, im: C.impact(docs, after, PRJ, TODAY, { change }) };
 };
 const addBiz = (d, n) => E.addBusinessDays(d, n);
+/* R12 #4: approving a plan change needs the extra sign-in check (simulated MFA), enforced by the server */
+const STEP = () => ({ method: 'simulated-mfa', at: new Date().toISOString() });
 
 test('planChange doc type is registered, the web copy is byte-identical', () => {
   assert.ok(DOC_TYPES.includes('planChange'));
@@ -110,7 +112,8 @@ test('tolerance: within / finish past deadline / deadline / budget / cost ≥ 5%
   r = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
   need = C.needsApproval(r.change, r.im, docs);
   assert.equal(need.within, false); assert.match(need.reasons[0], /past the .* deadline/);
-  assert.deepEqual(need.approvers, [{ role: 'pm', person: 'ta' }]);
+  /* R12 #13: W6 also moves an ERP task (a cross-project knock-on), so ERP's project manager approves too */
+  assert.deepEqual(need.approvers, [{ role: 'pm', person: 'ta' }, { role: 'linkedPm', person: 'ta', projectId: 'erp-upgrade-readiness' }]);
   /* the deadline moves: project manager and sponsor (the process owner, as no sponsor is set) */
   r = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs).target, 5) }]);
   need = C.needsApproval(r.change, r.im, docs);
@@ -213,7 +216,7 @@ test('over tolerance: proposed, waiting in the approver’s queue, approve by a 
   assert.equal(r.status, 200);
   const c = r.body.change;
   assert.equal(c.status, 'proposed'); assert.equal(r.body.applied, false);
-  assert.deepEqual(c.approvers.map(a => [a.role, a.person, a.decision]), [['pm', 'ta', null]]);
+  assert.deepEqual(c.approvers.map(a => [a.role, a.person, a.decision]), [['pm', 'ta', null], ['linkedPm', 'ta', null]]);
   let docs = await docsOf(ws.id);
   assert.equal(task(docs, 'W6').due, task(docs0, 'W6').due, 'nothing applied yet');
   const q = C.queueFor(docs, 'ta', TODAY);
@@ -227,7 +230,7 @@ test('over tolerance: proposed, waiting in the approver’s queue, approve by a 
   const early = await call('POST', `workspaces/${ws.id}/changes/${c.id}/apply`, { actor: 'lp' });
   assert.equal(early.status, 409); assert.match(early.body.error, /needs approval/);
   /* the project manager approves: it applies */
-  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve', note: 'Agreed' });
+  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve', note: 'Agreed', stepUp: STEP() });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(ok.body.change.status, 'applied');
   assert.equal(ok.body.change.decidedBy, 'ta'); assert.equal(ok.body.change.appliedBy, 'ta');
@@ -241,12 +244,12 @@ test('over tolerance: proposed, waiting in the approver’s queue, approve by a 
 test('a deadline move needs the project manager and the sponsor; the PM’s own request counts as the PM’s approval', async () => {
   const ws = await newWs();
   const docs0 = await docsOf(ws.id);
-  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Client moved go-live', category: 'client',
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', stepUp: STEP(), change: { projectId: PRJ, reason: 'Client moved go-live', category: 'client',
     edits: [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs0).target, 5) }] } });
   const c = r.body.change;
   assert.equal(c.status, 'proposed');
   assert.deepEqual(c.approvers.map(a => [a.role, a.person, a.decision]), [['pm', 'ta', 'approved'], ['sponsor', 'mc', null]]);
-  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'mc', decision: 'approve' });
+  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'mc', decision: 'approve', stepUp: STEP() });
   assert.equal(ok.body.change.status, 'applied');
   assert.equal(proj(await docsOf(ws.id)).target, addBiz(proj(docs0).target, 5));
 });
@@ -277,7 +280,7 @@ test('apply refuses when the plan moved since the proposal; generic doc writes o
     edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs0, 'W6').due, 25) }] } });
   const c = r.body.change;
   await call('PUT', `ws/${ws.id}/doc/workItem/W6`, { actor: 'lp', data: Object.assign({}, task(docs0, 'W6'), { due: addBiz(task(docs0, 'W6').due, 2) }), summary: 'Moved' });
-  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve' });
+  const ok = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve', stepUp: STEP() });
   assert.equal(ok.body.change.status, 'approved');
   assert.match(ok.body.change.applyError, /The plan changed since this was proposed/);
   if (wired) {
@@ -350,7 +353,7 @@ test('process drift through the routes: the seeded plan is the reference until a
   list = await call('GET', `workspaces/${ws.id}/changes`, null, { project: PRJ });
   const dr = C.processDrift(docs, PRJ, list.body.refs[PRJ], TODAY, { newId: i => 'wi-p' + i });
   assert.equal(dr.changed, true);
-  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'The process changed', category: 'scope', source: 'process',
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', stepUp: STEP(), change: { projectId: PRJ, reason: 'The process changed', category: 'scope', source: 'process',
     edits: dr.suggestions.map(w => ({ op: 'add', type: 'workItem', id: w.id, data: w })) } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.change.status, 'applied');
@@ -358,4 +361,99 @@ test('process drift through the routes: the seeded plan is the reference until a
   assert.ok(task(docs, 'wi-p0'));
   list = await call('GET', `workspaces/${ws.id}/changes`, null, { project: PRJ });
   assert.equal(C.processDrift(docs, PRJ, list.body.refs[PRJ], TODAY).changed, false, 'banner gone after the plan was updated');
+});
+
+/* ---------------------------------------------------------------- R12 */
+const ERP = 'erp-upgrade-readiness';
+test('R12 #13: a knock-on into another project is listed per project, and that project’s PM approves too', () => {
+  const docs = seedDocs();
+  const { change, im } = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  assert.ok(Array.isArray(im.crossProjects), 'impact lists the other projects the change reaches');
+  const x = im.crossProjects.find(p => p.projectId === ERP);
+  assert.ok(x, 'ERP is reached');
+  assert.equal(x.name, 'ERP Upgrade Readiness');
+  assert.equal(x.owner, 'ta');
+  assert.ok(x.tasks.some(t => t.id === 'E1' && t.to > t.from), 'E1 moves');
+  assert.ok(!im.crossProjects.some(p => p.projectId === PRJ), 'the change’s own project is not “another project”');
+  /* ERP's own expected finish before/after, from the engine */
+  const eb = E.projectTruth(docs, ERP, TODAY);
+  assert.equal(x.finish.before, eb.forecastFinish);
+  assert.match(im.sentence, /moves \d+ tasks? in ERP Upgrade Readiness\.$/);
+  const need = C.needsApproval(change, im, docs);
+  assert.ok(need.reasons.some(r => /ERP Upgrade Readiness/.test(r) && /project manager approves too/.test(r)), need.reasons.join(' | '));
+  assert.ok(need.approvers.some(a => a.role === 'linkedPm' && a.projectId === ERP && a.person === 'ta'));
+  assert.equal(C.roleText({ role: 'linkedPm', person: 'ta', projectId: ERP }, docs), 'project manager of ERP Upgrade Readiness');
+  assert.equal(C.roleText({ role: 'pm', person: 'ta' }, docs), 'project manager');
+  /* a knock-on alone (inside tolerance otherwise) still needs the other PM */
+  const d2 = JSON.parse(JSON.stringify(docs));
+  const owner2 = 'nb';
+  proj(d2); d2.project.find(p => p.id === ERP).data.owner = owner2;
+  const r2 = preview(d2, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(d2, 'W6').due, 25) }]);
+  const n2 = C.needsApproval(r2.change, r2.im, d2);
+  assert.ok(n2.approvers.some(a => a.role === 'linkedPm' && a.person === owner2), 'ERP’s own PM (Nina here) is asked');
+  assert.match(C.waitingText(Object.assign({}, r2.change, { approvers: n2.approvers }), d2), /Nina Brooks \(project manager of ERP Upgrade Readiness\)/);
+});
+
+test('R12 #13 routes: the other project’s log gets a linked entry, its PM approves (with step-up), history and notice', async () => {
+  const ws = await newWs();
+  /* give ERP its own PM so the extra approver is visible */
+  const docs0 = await docsOf(ws.id);
+  const erp = docs0.project.find(p => p.id === ERP).data;
+  await store.putDoc(ws.id, 'project', ERP, Object.assign({}, erp, { owner: 'nb' }));
+  const newDue = addBiz(task(docs0, 'W6').due, 25);
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'Bank portal vendor delayed', category: 'dependency',
+    edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: newDue }] } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.change;
+  assert.equal(c.status, 'proposed');
+  assert.deepEqual(c.approvers.map(a => [a.role, a.person, a.projectId || null]), [['pm', 'ta', null], ['linkedPm', 'nb', ERP]]);
+  let docs = await docsOf(ws.id);
+  /* while waiting: Nina has it in her queue, and ERP's log shows it as pending (from another project) */
+  assert.equal(C.queueFor(docs, 'nb', TODAY).length, 1);
+  const pend = C.changesOf(docs, ERP);
+  assert.equal(pend.length, 1); assert.equal(pend[0].id, c.id);
+  assert.ok(docs.notification.some(n => n.data.to === 'nb' && /asks you to approve/.test(n.data.text)));
+  /* approving without the extra sign-in check is refused by the server */
+  const noStep = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve' });
+  assert.equal(noStep.status, 403); assert.match(noStep.body.error, /extra sign-in check/);
+  const a1 = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'ta', decision: 'approve', stepUp: STEP() });
+  assert.equal(a1.status, 200); assert.equal(a1.body.change.status, 'proposed', 'still waits for ERP’s PM');
+  assert.equal(a1.body.change.approvers[0].stepUp, true);
+  assert.match(C.waitingText(a1.body.change, docs), /Nina Brooks \(project manager of ERP Upgrade Readiness\)/);
+  const a2 = await call('POST', `workspaces/${ws.id}/changes/${c.id}/decide`, { actor: 'nb', decision: 'approve', stepUp: STEP() });
+  assert.equal(a2.status, 200, JSON.stringify(a2.body));
+  assert.equal(a2.body.change.status, 'applied');
+  docs = await docsOf(ws.id);
+  const main = docs.planChange.find(d => d.id === c.id).data;
+  assert.ok(Array.isArray(main.linked) && main.linked.length === 1 && main.linked[0].projectId === ERP);
+  const erpLog = C.changesOf(docs, ERP);
+  assert.equal(erpLog.length, 1, 'ERP’s log has exactly one entry: the linked one');
+  const L = erpLog[0];
+  assert.equal(L.id, main.linked[0].changeId);
+  assert.equal(L.projectId, ERP);
+  assert.equal(L.status, 'applied');
+  assert.equal(L.source, 'knockOn');
+  assert.deepEqual(L.linkedFrom, { projectId: PRJ, changeId: c.id, projectName: 'Vendor Onboarding Modernization' });
+  assert.ok(L.knockOn.some(t => t.id === 'E1'));
+  assert.equal(L.impact.projectId, ERP);
+  assert.ok(L.approvers.some(a => a.person === 'nb' && a.decision === 'approved'));
+  assert.equal(L.title, main.title);
+  assert.deepEqual(L.impact.crossProjects, []); assert.ok(L.impact.knockOn.every(k => k.projectId === ERP));
+  /* the generic approval queue is empty again, and ERP's history has the entry */
+  assert.deepEqual(C.queueFor(docs, 'nb', TODAY), []);
+  const evs = await store.listEvents(ws, { limit: 80 });
+  assert.ok(evs.some(e => e.ref === 'project:' + ERP && /Knock-on from the plan change/.test(e.summary)), 'ERP history');
+  assert.ok(evs.some(e => e.ref === 'planChange:' + L.id));
+  /* CSV of ERP lists the linked entry */
+  const csv = await call('GET', `workspaces/${ws.id}/changes`, null, { project: ERP, format: 'csv' });
+  assert.match(csv.body, /Knock-on/);
+});
+
+test('R12 #4: a self-approval at request time needs step-up; without it the approval stays open', async () => {
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const r = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Client moved go-live', category: 'client',
+    edits: [{ op: 'set', type: 'project', id: PRJ, field: 'target', to: addBiz(proj(docs0).target, 5) }] } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.change.approvers.map(a => [a.role, a.person, a.decision]), [['pm', 'ta', null], ['sponsor', 'mc', null]]);
 });

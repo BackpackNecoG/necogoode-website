@@ -67,7 +67,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     for (const w of r.waiting) {
       if (w.kind === 'work') for (const id of w.items) { const x = store.get('workItem', id); await store.save('workItem', id, Object.assign({}, x, { status: 'done', doneAt: store.state.today, updatedAt: now }), 'Done (e2e)'); }
       if (w.kind === 'information') for (const id of w.items) { const d = store.get('dataElement', id); await store.save('dataElement', id, Object.assign({}, d, { avail: 'live', liveEvidence: { type: 'attested', ref: 'https://northwind.example/evidence/' + id } }), 'Available (e2e)'); }
-      if (w.kind === 'tests') { const id = 'run-ready-' + a.bu.replace(/\W/g, ''); await store.save('testRun', id, { id, projectId: a.p, env: 'uat', at: now, by: 'ps', cycle: 1, results: w.items.map(k => (store.get('testCase', k) ? { caseId: k } : { scriptId: k, steps: [] })).map(x => Object.assign(x, { outcome: 'pass', note: '', evidence: 'Walked through with the ' + a.bu + ' team' })) }, 'Recorded business sign-off test (e2e)'); }
+      if (w.kind === 'tests') { const id = 'run-ready-' + a.bu.replace(/\W/g, ''); await store.save('testRun', id, { id, projectId: a.p, env: 'uat', at: now, by: 'ps', cycle: 1, stepUp: true, results: w.items.map(k => (store.get('testCase', k) ? { caseId: k } : { scriptId: k, steps: [] })).map(x => Object.assign(x, { outcome: 'pass', note: '', evidence: 'Walked through with the ' + a.bu + ' team' })) }, 'Recorded business sign-off test (e2e)'); }
     }
     return E.buReady(store.state.docs, a.p, a.bu);`, { p, bu });
   const actions = { n: 0 }; const act = async fn => { actions.n++; await fn(); };
@@ -211,7 +211,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await setMe('ps');
     /* a bulk pass with one shared note, for the evidence summary */
     const cIds = await st(`return store.list('testCase', c => c.dataId === 'D7').map(c => c.id);`);
-    if (cIds.length) await st(`const id = 'run-e2e-bulk'; await store.save('testRun', id, { id, projectId: a.p, env: 'uat', at: new Date().toISOString(), by: 'ps', cycle: 1, results: a.ids.map(caseId => ({ caseId, outcome: 'pass', note: '', evidence: 'Checked every row with the access team' })) }, 'Recorded business testing run (e2e)');`, { p: AR, ids: cIds });
+    if (cIds.length) await st(`const id = 'run-e2e-bulk'; await store.save('testRun', id, { id, projectId: a.p, env: 'uat', at: new Date().toISOString(), by: 'ps', cycle: 1, stepUp: true, results: a.ids.map(caseId => ({ caseId, outcome: 'pass', note: '', evidence: 'Checked every row with the access team' })) }, 'Recorded business testing run (e2e)');`, { p: AR, ids: cIds });
     const r1 = await makeReady(AR, 'Compliance');
     ok(r1.ready, 'once its work, information and tests are complete, Compliance is ready: ' + r1.sentence);
     await setMe('do');
@@ -515,23 +515,25 @@ The process starts when an employee asks to buy something.
       await page.fill(`${row} >> [data-td]`, '30');
       if (gng) await page.check(`${row} >> [data-tg]`);
     };
-    await fillTask(0, 'Freeze manual access changes', 'dk', FUT + 'T08:00', false);
+    /* R12 #10: launch-day steps go on the launch window's own day (a step outside the window is not ready) */
+    const WD = (await st(`const w = String((store.get('project', a).cutover || {}).window || ''); return /^\\d{4}-\\d{2}-\\d{2}/.test(w) ? w.slice(0, 10) : '';`, AR)) || FUT;
+    await fillTask(0, 'Freeze manual access changes', 'dk', WD + 'T08:00', false);
     await page.click('.overlay [data-tadd]');
-    await fillTask(1, 'Go/no-go call with Compliance', '', FUT + 'T08:30', true);
+    await fillTask(1, 'Go/no-go call with Compliance', '', WD + 'T08:30', true);
     await page.click('.overlay [data-tadd]');
-    await fillTask(2, 'Enable the auto-removal job', 'dk', FUT + 'T09:00', false);
+    await fillTask(2, 'Enable the auto-removal job', 'dk', WD + 'T09:00', false);
     await page.click('.overlay [data-act=save]'); await settle(300);
     ok(await page.$('.overlay [data-err]:not([hidden])') && /final check, so it needs an owner/.test(await txt('.overlay [data-err]')), 'final yes/no step without an owner: dialog stays open with the reason');
     await page.selectOption('.overlay [data-trow] >> nth=1 >> [data-to]', 'ps');
     await page.click('.overlay [data-act=save]'); await settle(1000);
     const tasks = await st(`return store.get('project', a).cutover.tasks;`, AR);
     const gngId = tasks[1].id;
-    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && tasks[1].plannedStart.startsWith(FUT + 'T08:30') && tasks[1].durationMins === 30, 'runbook saved in order with plannedStart and durationMins; the go/no-go task is owned by Priya Shah');
+    ok(tasks.length === 3 && tasks[1].gonogo && tasks[1].owner === 'ps' && tasks[1].plannedStart.startsWith(WD + 'T08:30') && tasks[1].durationMins === 30, 'runbook saved in order with plannedStart and durationMins; the go/no-go task is owned by Priya Shah');
     /* overdue: a task whose planned end has passed shows a warning */
     await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '2026-01-05T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved into the past (e2e)');`, AR);
     await settle(800);
     ok(await page.$(`[data-rbtask="${tasks[2].id}"][data-overdue]`) && /1 launch-day step is overdue/.test(await txt('[data-runbook-overdue]')), 'overdue runbook task: warning on the runbook and an "Overdue" badge');
-    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '${FUT}T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved back (e2e)');`, AR);
+    await st(`const p = store.get('project', a); const c = Object.assign({}, p.cutover, { tasks: p.cutover.tasks.map((t, i) => i === 2 ? Object.assign({}, t, { plannedStart: '${WD}T09:00' }) : t) }); await store.save('project', a, Object.assign({}, p, { cutover: c }), 'Task moved back (e2e)');`, AR);
     await settle(800);
     ok(!(await page.$('[data-runbook-overdue]')), 'warning clears once the task is back on schedule');
     /* checklist density: one line per check, detail on demand, plain labels */
@@ -718,7 +720,7 @@ The process starts when an employee asks to buy something.
     ok(await st(`return JSON.stringify(store.list('grant', g => g.projectId === a).map(g => g.status));`, AR) === grants0, 'no grant expiry');
     ok(await page.$('.rl-latest [data-failed] [data-no-side-effects]'), 'release record says nothing was promoted or published');
     await shot('05-pipeline-failed');
-    ok(au.some(e => /Signed the launch override as project manager .*Steering group/.test(e.t)) && au.some(e => /Signed the launch override as sponsor/.test(e.t)), 'both override sign-offs are logged in History');
+    ok(au.some(e => /Signed the launch override as project manager .*Steering group/.test(e.t)) && au.some(e => /Signed the launch override as (sponsor|approver)/.test(e.t)), 'both override sign-offs are logged in History');
     console.log('Retry succeeds');
     ok(await page.$eval('[data-retry]', b => b.disabled), 'retry stays locked by the launch guard');
     /* open the window now and finish the launch-day steps (the PM edits the plan): the guard lifts */
@@ -968,7 +970,7 @@ The process starts when an employee asks to buy something.
     ok(evAll, 'every selected row passed with the one evidence note');
     /* R11 §2: "All" never selects a test assigned to someone else or held by an open problem; those rows say why */
     const locked = await page.$$eval('.overlay .ts-case[data-pass-locked]', rows => rows.filter(r => !r.closest('[hidden]')).map(r => ({ pick: !!r.querySelector('[data-pick]'), passed: [...r.querySelectorAll('select')].some(s => s.value === 'pass'), hint: (r.querySelector('[data-lock-hint]') || {}).textContent || '' })));
-    ok(locked.length > 0 && locked.every(x => !x.pick && !x.passed && /Assigned to|problem to be fixed/.test(x.hint)), `bulk pass leaves the ${locked.length} tests assigned to others (or held) alone, and says why`);
+    ok(locked.length > 0 && locked.every(x => !x.pick && !x.passed && /Assigned to|problem to be fixed|^Only someone in /.test(x.hint)), `bulk pass leaves the ${locked.length} tests assigned to others (or held) alone, and says why`);
     /* the multi-step script fails on its last step */
     await page.evaluate(sid => {
       const row = document.querySelector(`.overlay [data-row="s:${sid}"]`); const sels = row.querySelectorAll('[data-step-row] select'); sels[sels.length - 1].value = 'fail';
@@ -976,6 +978,9 @@ The process starts when an employee asks to buy something.
       document.querySelector('.overlay .ts-cases').dispatchEvent(new Event('change', { bubbles: true }));
     }, multi.id);
     await page.click('.overlay [data-act=save]');
+    /* R12 #4: passing several business-check tests at once asks for the extra sign-in check */
+    await page.waitForSelector('.overlay input[name=code], .overlay .ts-mk', { timeout: 10000 });
+    if (await page.$('.overlay input[name=code]')) await stepUpOk();
     await page.waitForSelector('.overlay .ts-mk', { timeout: 10000 });
     if (await page.$('.overlay [data-close-offer]')) {   /* the seeded defect's item passed: it is verified and closing is offered first */
       ok(/Verified/.test(await txt('.overlay h2')), 'a passing result verifies the linked seeded defect and offers to close it');
@@ -1198,6 +1203,19 @@ The process starts when an employee submits an expense claim.
     await page.click('[data-add-cycle]'); await page.waitForSelector('.overlay input[name=name]'); await settle(300);
     ok(await overflow(), 'no overflow at 390 with the cycle dialog open');
     await page.click('.overlay [data-act=cancel]');
+    /* R12 (H4 ask): the access table keeps status, end date and actions visible at 390, with no horizontal scroll */
+    await open('/release/' + VM);
+    await page.evaluate(() => { const d = document.querySelector('details[data-sec=access]'); if (d) d.open = true; }); await settle(300);
+    const acc = await page.evaluate(() => [...document.querySelectorAll('#grants tr[data-grant]')].map(tr => {
+      const vis = sel => { const el = tr.querySelector(sel); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= innerWidth + 1; };
+      const wrap = tr.closest('.tbl-wrap');
+      return { status: vis('td[data-label=Status]'), ends: vis('td[data-label=Ends]'), acts: vis('td.rl-acts button, td.rl-acts .btn'), noScroll: !wrap || wrap.scrollWidth <= wrap.clientWidth + 1,
+        label: getComputedStyle(tr.querySelector('td[data-label=Status]'), '::before').content };
+    }));
+    ok(acc.length >= 3 && acc.every(r => r.status && r.ends && r.acts && r.noScroll), 'phone access table: status, end date and actions visible without a horizontal scroll: ' + JSON.stringify(acc));
+    ok(acc.every(r => /Status/.test(r.label)), 'phone access table: each cell is labelled');
+    ok(await overflow(), 'no overflow at 390 with the access table open');
+    await page.screenshot({ path: `${SHOTS}/m-access-table.png`, fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
   } catch (e) {
     failed++; console.log('  ✗ threw: ' + (e && e.stack || e));

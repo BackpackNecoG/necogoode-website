@@ -114,7 +114,7 @@ export function historyPanel(ref) { return `<div data-history="${esc(ref || '')}
 export function bindHistory(root) {
   root.querySelectorAll('[data-history]').forEach(async box => {
     const evs = await store.events(box.dataset.history || null, 50);
-    box.innerHTML = evs.length ? evs.map(e => `<div class="ev"><time>${esc(fmtTime(e.at))}</time><span>${av(e.actor)} <b>${esc(pname(e.actor))}</b> ${esc(e.summary || e.action)}</span></div>`).join('') : '<div class="hint">No changes recorded yet.</div>';
+    box.innerHTML = evs.length ? evs.map(e => `<div class="ev"><time>${esc(fmtTime(e.at))}</time><span>${store.person(e.actor) ? av(e.actor) : ''} <b>${esc(store.person(e.actor) ? pname(e.actor) : (e.actor || '—'))}</b> ${esc(e.summary || e.action)}</span></div>`).join('') : '<div class="hint">No changes recorded yet.</div>';
   });
 }
 

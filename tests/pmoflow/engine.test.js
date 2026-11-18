@@ -1711,19 +1711,20 @@ test('R11 re-approval reason says what changed; ownerRole, raci and timer reopen
   s3.owner = 'tw';
   let st = staleOf(d);
   assert.deepEqual(st.map(x => x.bu), ['Treasury'], JSON.stringify(st) + ' ' + (tr && tr.id));
-  assert.equal(st[0].text, 'Treasury must approve again: “' + s3.title + '” owner changed.');
+  // R12: the reason says from → to
+  assert.equal(st[0].text, 'Treasury must approve again: “' + s3.title + '” owner Leo Park → Tess Wade.');
   assert.ok(st[0].changed.every(c => /^section:Treasury#s:/.test(c)));
   const ap = E.projectTruth(d, PRJ, TODAY).approvals.find(a => a.bu === 'Treasury');
-  assert.equal(ap.sentence, 'Changed after approval: Treasury must approve again: “' + s3.title + '” owner changed.');
+  assert.equal(ap.sentence, 'Changed after approval: Treasury must approve again: “' + s3.title + '” owner Leo Park → Tess Wade.');
   // ownerRole, raci and timer are part of the step: each one alone reopens the approval, and is named
-  for (const [f, v, word] of [['ownerRole', 'Treasury Analyst', 'owner'], ['raci', { r: ['lp'], a: 'lp', c: [], i: ['ar'] }, 'RACI'], ['timer', '2 business days', 'timer']]) {
+  for (const [f, v, word] of [['ownerRole', 'Treasury Analyst', 'owner Leo Park → Treasury Analyst'], ['raci', { r: ['lp'], a: 'lp', c: [], i: ['ar'] }, 'RACI'], ['timer', '2 business days', 'timer']]) {
     d = fresh(); d.process[0].data.tobe.find(n => n.id === 's3')[f] = v;
     st = staleOf(d);
-    assert.ok(st.length && st.every(x => new RegExp('“' + s3.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '” ' + word + ' changed').test(x.text)), f + ': ' + JSON.stringify(st));
+    assert.ok(st.length && st.every(x => new RegExp('“' + s3.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '” ' + word + (/→/.test(word) ? '' : ' changed')).test(x.text)), f + ': ' + JSON.stringify(st));
   }
   // two fields at once are listed together
   d = fresh(); Object.assign(d.process[0].data.tobe.find(n => n.id === 's3'), { timer: '1 day', sla: '4h' });
-  assert.match(staleOf(d)[0].text, /time limit and timer changed\.$/);
+  assert.match(staleOf(d)[0].text, /time limit none → 4h, timer changed\.$/);
   // an approval saved before R11 (no per-step hashes) still reopens, with the general reason
   d = fresh(); d.approval.forEach(e => { e.data.fingerprint = e.data.fingerprint.replace(/;k:.*$/, ''); });
   d.process[0].data.tobe.find(n => n.id === 's3').timer = '3 days';
@@ -1736,7 +1737,7 @@ test('R7 re-approval scope: one owner change stales only the sections it touches
   const fp = bu => E.sectionFingerprint(d, PRJ, bu);
   d.approval.forEach(e => { e.data.fingerprint = fp(e.data.bu); });
   assert.equal(E.readiness(d, PRJ, TODAY).pass, true);
-  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+$/);
+  assert.match(fp('Treasury'), /^s:[0-9a-z]+;d:[0-9a-z]+;t:[0-9a-z]+;c:[0-9a-z]+;k:[^;]+;v:[^;]+$/);
   // s3 moves from Leo Park (Treasury) to Ana Ruiz (Accounts Payable); the process is stamped as a whole
   d.process[0].data.tobe.find(n => n.id === 's3').owner = 'ar';
   d.process[0].data.updatedAt = '2026-11-03T00:00:00Z';
@@ -2515,11 +2516,11 @@ test('R10 §2 earned value reconciles: tile % = EV ÷ budget; SPI/CPI/EAC blank 
   assert.ok(t.ev.SPI < 0.9 && t.label !== 'On track' && t.reasons.some(r => /^Behind on effort: /.test(r)));
   const erp = E.projectTruth(d, 'erp-upgrade-readiness', GOLD_DAY);
   // R11 §6: money spent with nothing finished shows 0.00 and is flagged; one EAC method (bottom-up + spent)
-  assert.deepEqual([erp.ev.SPI, erp.ev.CPI, erp.ev.EAC, erp.ev.started, erp.ev.eacMethod], [0, 0, 6406.25, false, 'bottom-up']);
+  assert.deepEqual([erp.ev.SPI, erp.ev.CPI, erp.ev.EAC, erp.ev.started, erp.ev.eacMethod], [0, 0, 10406.25, false, 'bottom-up']);
   assert.ok(erp.ev.AC > 0);                                        // hours logged, but nothing earned yet
   assert.deepEqual(erp.evFlags.map(f => f.text), ['Spent with nothing finished']);
   assert.equal(erp.label, 'Behind on effort');                     // SPI 0.00 is never "On track"
-  assert.deepEqual([erp.cost.forecast, erp.cost.actual], [6406.25, 1406.25]);
+  assert.deepEqual([erp.cost.forecast, erp.cost.actual], [10406.25, 1406.25]);
   assert.ok(erp.cost.forecast >= erp.cost.actual);
   // a project that would be green but is behind on effort reads "Behind on effort"
   const W = (id, more) => ({ id, data: Object.assign({ id, projectId: 'P', owner: 'mc', title: id, status: 'prog', start: '2026-11-03', due: '2026-12-01', deps: [], effortDays: 2, progress: 0.1, time: [{ by: 'mc', date: '2026-11-04', hours: 4 }] }, more) });
@@ -2607,7 +2608,7 @@ test('R11 golden numbers (docs/pmoflow/GOLDEN-NUMBERS.md) at seed day 0', () => 
   assert.ok(v.approvals.every(a => a.approver && !E.approvalBar(d, PRJ, a.bu, a.approver) && !a.blockedBy), JSON.stringify(v.approvals.map(a => [a.bu, a.approver, a.blockedBy])));
   assert.equal(v.who.filter(x => x.why === 'blocker').length, v.blocking.count);
   assert.deepEqual([e.label, e.tasks.done, e.tasks.total, e.pctDone, e.lateCount, e.stepsLeft, e.ev.SPI, e.ev.CPI, e.ev.EAC, e.cost.forecast, e.cost.actual],
-    ['Behind on effort', 0, 2, 0, 0, 6, 0, 0, 6406.25, 6406.25, 1406.25]);
+    ['Behind on effort', 0, 2, 0, 0, 6, 0, 0, 10406.25, 10406.25, 1406.25]);
   assert.deepEqual(e.evFlags.map(f => f.text), ['Spent with nothing finished']);
   assert.deepEqual([e.forecastFinish, e.target, e.bufferDays, e.launch.date, e.launch.source], ['2026-12-10', '2027-01-19', 25, '2027-01-19', 'deadline']);
   assert.deepEqual([e.testing.passed, e.testing.total, e.testing.haveTests], [0, 20, 1]);
@@ -2901,3 +2902,211 @@ test('R10 "Not checked yet": imported information (avail unchecked) is never "We
     assert.deepEqual([sl.from, sl.to], ['2026-11-16', RDAY]);
   });
 }
+
+/* ================================ Round 12 (H1) ================================ */
+// Karen's repro: a pasted procedure whose roles are Purchasing, Credit, AP and Treasury. "Who does it" stores the
+// role as ownerRole and writes the process owner (Maya, Procurement) into owner as a fallback.
+function karenDocs(mapping) {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const st = (id, title, role, touches) => ({ id, type: 'step', title, owner: 'mc', ownerRole: role, touches, data: [] });
+  const tobe = [
+    st('k1', 'Request a new vendor', 'Purchasing mgr', ['Purchasing']),
+    st('k2', 'Run the credit check', 'Credit dept', ['Credit', 'D&B']),
+    st('k3', 'Set up the vendor in the ERP', 'AP clerk', ['AP', 'ERP']),
+    st('k4', 'Pay the vendor', 'AP clerk', ['AP'], ),
+    st('k5', 'Verify the bank account', 'Treasury analyst', ['Treasury']),
+  ];
+  tobe[3].sla = '2 business days';
+  const proc = { id: 'kp', name: 'Karen vendor setup', owner: 'mc', asis: [], tobe };
+  if (mapping) proc.teamDepartments = mapping;
+  d.process.push({ id: 'kp', data: proc });
+  d.project.push({ id: 'kprj', data: { id: 'kprj', name: 'Karen rollout', owner: 'ta', processes: ['kp'], status: 'active', target: E.addBusinessDays(GOLD_DAY, 40) } });
+  return d;
+}
+
+test('R12 #1 routing: a role step is routed by its role\'s team, never the process owner\'s department', () => {
+  const d = karenDocs();
+  const kp = d.process.find(p => p.id === 'kp').data;
+  assert.deepEqual(kp.tobe.map(n => E.stepTeams(d, kp, n)), [['Purchasing'], ['Credit'], ['AP'], ['AP'], ['Treasury']]);
+  assert.equal(E.departmentFor(d, kp, 'AP'), 'Accounts Payable');
+  assert.equal(E.departmentFor(d, kp, 'Purchasing'), null, 'no default team');
+  const t = E.projectTruth(d, 'kprj', GOLD_DAY);
+  assert.ok(!t.approvals.some(a => a.bu === 'Procurement'), 'Procurement is never asked by default: ' + JSON.stringify(t.approvals.map(a => a.bu)));
+  assert.deepEqual(t.approvals.map(a => a.bu), ['Accounts Payable', 'Treasury']);
+  assert.deepEqual(t.routing.unmapped.map(x => x.text), ['Choose who approves for Purchasing', 'Choose who approves for Credit']);
+  const ck = E.readiness(d, 'kprj', GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.equal(ck.pass, false);
+  assert.match(ck.detail, /^Choose who approves for Purchasing \(“Request a new vendor”\)\. Choose who approves for Credit/);
+  // the doer of a role step is never the fallback owner
+  assert.deepEqual(E.stepDoer(d, kp.tobe[1]), { owner: null, role: 'Credit dept', text: 'Needs an owner: Credit dept' });
+  assert.equal(E.stepDoer(d, { owner: 'ar' }).text, 'Ana Ruiz');
+});
+
+test('R12 #1 routing: the mapping is seeded at import with no default, editable, and drives approvals', () => {
+  const d = karenDocs();
+  const kp = d.process.find(p => p.id === 'kp').data;
+  assert.deepEqual(E.seedTeamDepartments(d, kp.tobe), { Purchasing: null, Credit: null, AP: 'Accounts Payable', Treasury: 'Treasury' });
+  const r = E.teamRouting(d, kp);
+  assert.deepEqual(r.teams.map(x => x.text), ['Choose who approves for Purchasing', 'Choose who approves for Credit', 'AP → Accounts Payable', 'Treasury']);
+  assert.equal(r.text, '4 teams · 2 need an approving department');
+  assert.ok(r.departments.some(x => x.name === 'Procurement' && x.people.some(p => p.id === 'rv')));
+  const d2 = karenDocs({ Purchasing: 'Procurement', Credit: 'Treasury', AP: 'Accounts Payable', Treasury: 'Treasury' });
+  const t = E.projectTruth(d2, 'kprj', GOLD_DAY);
+  assert.deepEqual(t.approvals.map(a => a.bu), ['Accounts Payable', 'Procurement', 'Treasury']);
+  assert.deepEqual(t.routing.unmapped, []);
+  assert.equal(E.teamRouting(d2, 'kp').text, 'All 4 teams have an approving department');
+  // the process owner is not a step owner, so she may approve Procurement's part
+  assert.equal(E.approvalBar(d2, 'kprj', 'Procurement', 'mc'), null);
+});
+
+test('R12 #1 re-approval: an AP-only edit reopens only AP, and says from → to', () => {
+  const d = karenDocs({ Purchasing: 'Procurement', Credit: 'Treasury', AP: 'Accounts Payable', Treasury: 'Treasury' });
+  const at = '2026-11-17T15:00:00Z';
+  [['Accounts Payable', 'nb'], ['Procurement', 'rv'], ['Treasury', 'gw']].forEach(([bu, who], i) => d.approval.push({ id: 'KA' + i, data: {
+    id: 'KA' + i, projectId: 'kprj', bu, approver: who, decision: 'approved', stepUp: true, at, fingerprint: E.sectionFingerprint(d, 'kprj', bu) } }));
+  let ck = E.readiness(d, 'kprj', GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.deepEqual(ck.stale, []);
+  const kp = d.process.find(p => p.id === 'kp').data;
+  kp.tobe[3].sla = '1 business day';
+  kp.tobe[2].title = 'Create the vendor in the ERP';
+  ck = E.readiness(d, 'kprj', GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.deepEqual(ck.stale.map(x => x.bu), ['Accounts Payable'], 'Procurement and Treasury stay approved');
+  assert.deepEqual(ck.stale[0].details.map(x => x.label),
+    ['“Set up the vendor in the ERP” → “Create the vendor in the ERP”', '“Pay the vendor” time limit 2 business days → 1 business day']);
+  assert.ok(!/section:|#s:|kprj|kp\//.test(ck.detail + ck.stale[0].text), 'no internal ids in text: ' + ck.detail);
+});
+
+test('R12 #6 ownership: role steps never fall back to the PM or process owner, on the plan, who and Tell teams', () => {
+  const d = karenDocs({ Purchasing: 'Procurement' });
+  const sug = E.suggestWorkFromDiff(d, 'kprj', GOLD_DAY);
+  const step = sug.filter(s => s.step);
+  assert.ok(step.length >= 5);
+  assert.ok(step.every(s => s.owner === null), JSON.stringify(step.map(s => [s.title, s.owner])));
+  assert.deepEqual(step.map(s => s.note), ['Needs an owner: Purchasing mgr.', 'Needs an owner: Credit dept.', 'Needs an owner: AP clerk.', 'Needs an owner: AP clerk.', 'Needs an owner: Treasury analyst.']);
+  const tell = sug.find(s => s.tag === 'tell');
+  assert.deepEqual(tell.teams, ['Procurement', 'Credit', 'Accounts Payable', 'Treasury'], 'departments, plus unmapped teams by name; never the owner\'s department');
+  // after Accept, who and the owner text agree with the Work tab ("Needs an owner")
+  const d2 = E.withPlan(d, 'kprj', sug);
+  const who = E.projectTruth(d2, 'kprj', GOLD_DAY).who;
+  assert.ok(!who.some(x => x.person === 'mc' && /^work:/.test(x.ref || '')), 'no task under Maya');
+  const w = d2.workItem.find(x => x.data.projectId === 'kprj' && x.data.ownerRole === 'Credit dept').data;
+  assert.equal(E.ownerText(d2, w), 'Needs an owner: Credit dept');
+  who.filter(x => /^work:/.test(x.ref || '') && !x.person).forEach(x => assert.match(x.name, /^Needs an owner/));
+  // the information a role step uses is owned by the role, not the process owner
+  const kp = d.process.find(p => p.id === 'kp').data; kp.tobe[1].data = ['D5'];
+  assert.notEqual(E.dataOwner(d, 'D5') && E.dataOwner(d, 'D5').owner, 'mc');
+});
+
+test('R12 #2 seeded history obeys separation of duties and records the real approver', () => {
+  const s = SEED.seed(GOLD_DAY);
+  const appr = s.docs.approval.map(x => x.data).filter(a => a.bu && !a.kind);
+  const approveEvents = s.events.filter(e => e.action === 'approve' && /^approval:/.test(e.ref));
+  assert.equal(approveEvents.length, appr.length);
+  approveEvents.forEach(e => {
+    const a = appr.find(x => 'approval:' + x.id === e.ref);
+    assert.equal(e.actor, a.approver, e.summary + ': history names the approver on the card');
+    assert.equal(E.approvalBar(s.docs, a.projectId, a.bu, e.actor), null, e.summary + ' is a sign-off the rule allows');
+  });
+  // grants are approved by the information owner (never the requester)
+  s.docs.grant.map(x => x.data).filter(g => g.approvedBy).forEach(g => assert.equal(g.approvedBy, E.grantApproverOf(s.docs, g), g.id));
+});
+
+test('R12 #7 access: one status per row, the information owner approves, never over 30 days, the same day in history', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const g = id => d.grant.find(x => x.id === id).data;
+  // pages call grantView with docs first (eng() prepends docs); that must not read every row as Closed
+  assert.deepEqual(['G1', 'G2', 'G3'].map(id => E.grantView(d, g(id), GOLD_DAY, 360).state), ['open', 'waiting', 'closed']);
+  assert.deepEqual(['G1', 'G2', 'G3'].map(id => E.grantView(g(id), GOLD_DAY, 360).state), ['open', 'waiting', 'closed']);
+  assert.equal(E.grantView(d, g('G2'), GOLD_DAY, 360).text, 'Waiting for Leo Park');
+  assert.equal(E.grantApproverOf(d, g('G2')), 'lp');
+  const launch = E.projectTruth(d, PRJ, GOLD_DAY).launchSteps.find(s => s.key === 'launch');
+  assert.deepEqual(launch.who, ['lp'], 'the launch step names the same approver as the table');
+  d.grant.forEach(x => { const v = E.grantView(x.data, GOLD_DAY, 360); assert.ok(v.days == null || v.days <= 30, x.id + ' ' + v.days); });
+  const v3 = E.grantView(g('G3'), GOLD_DAY, 360), exp = g('G3').log.find(l => l.action === 'expired');
+  assert.equal(v3.closedOn, E.localDay(exp.at, 360), 'Ends and History give the same local day');
+  const c = E.grantCounts(d, PRJ, GOLD_DAY);
+  assert.deepEqual([c.open, c.waiting, c.closed], [1, 1, 1]);
+});
+
+test('R12 #10 launch-day plan: every step on a business day and inside the window, or the plan is not ready', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const prj = d.project.find(p => p.id === PRJ).data;
+  assert.equal(E.launchPlanCheck(d, PRJ).ok, true, E.launchPlanCheck(d, PRJ).text);
+  assert.deepEqual(E.projectTruth(d, PRJ, GOLD_DAY).launchPlan.problems, []);
+  // the BPM expert's repro: one step on Christmas, one outside the window
+  prj.cutover.tasks[1].plannedStart = '2026-12-25T08:00';
+  prj.cutover.tasks[2].plannedStart = prj.cutover.tasks[2].plannedStart.slice(0, 10) + 'T13:00';
+  const lp = E.launchPlanCheck(d, PRJ);
+  assert.equal(lp.ok, false);
+  assert.deepEqual(lp.problems.map(x => [x.taskId, x.why]), [['VT2', 'day-off'], ['VT3', 'outside-window']]);
+  assert.equal(lp.problems[0].text, '“Final check with Treasury and Compliance” is set for Fri Dec 25, Christmas Day: pick a business day');
+  assert.match(lp.problems[1].text, /^“Switch vendor intake to the portal” is set for [A-Z][a-z]{2} [A-Z][a-z]{2} \d+, 1:00 PM, outside the launch window \([A-Z][a-z]{2} [A-Z][a-z]{2} \d+, 7:30 AM–10:00 AM\)$/);
+  const ck = E.readiness(d, PRJ, GOLD_DAY).checks.find(c => c.id === 'cutover-plan');
+  assert.equal(ck.pass, false);
+  assert.match(ck.detail, /^2 launch-day steps need a new time: /);
+  assert.equal(E.projectTruth(d, PRJ, GOLD_DAY).launchSteps.find(s => s.key === 'launch-plan').done, false, 'never "Ready"');
+});
+
+test('R12 #4 canPassTest: the assignee, else the department that owns the test\'s part', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  assert.deepEqual(E.testDepartments(d, PRJ, 'TC11'), ['Compliance']);
+  assert.equal(E.canPassTest(d, PRJ, 'TC11', 'ps'), null);
+  assert.equal(E.canPassTest(d, PRJ, 'TC11', 'ar').rule, 'department');
+  d.testCase.find(x => x.id === 'TC11').data.tester = 'ar';
+  assert.equal(E.canPassTest(d, PRJ, 'TC11', 'ar'), null);
+  assert.deepEqual(E.canPassTest(d, PRJ, 'TC11', 'ps'), { rule: 'assignee', text: 'The test “Sanctions screening result: Match status” is assigned to Ana Ruiz, so only they can pass it.' });
+});
+
+test('R12 (H4 ask) defectState: a defect In review (inbound Jira/ADO Done) is fixed, awaiting a passing retest', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const w12 = d.workItem.find(x => x.id === 'W12').data;
+  delete w12.defectStatus; w12.status = 'review';
+  assert.equal(E.defectState(d, 'W12'), 'fixed');
+  assert.ok(!E.heldTests(d, PRJ).TC4, 'no longer held by an open problem');
+  assert.notEqual(E.projectTruth(d, PRJ, GOLD_DAY).testing.status.TC4, 'passed', 'still needs a passing retest');
+});
+
+test('R12 (H2 ask) stepTeams: a person\'s name and generic actors are never teams that need an approving department', () => {
+  const d = karenDocs({ Purchasing: 'Procurement', Credit: 'Treasury' });
+  const kp = d.process.find(p => p.id === 'kp').data;
+  // Karen's SOP wording: "The Requester submits the request", "if spend over $25k Karen approves too", "Sam Wu signs off",
+  // "Ana Ruiz sets up the vendor" (a workspace person), "The vendor sends bank details", "Employee", "Applicant"
+  const st = (id, title, role) => ({ id, type: 'step', title, owner: 'mc', ownerRole: role, touches: [], data: [] });
+  kp.tobe.push(st('r1', 'Submit the request', 'Requester'), st('r2', 'Approve spend over $25k', 'Karen'), st('r3', 'Sign off', 'Sam Wu'),
+    st('r4', 'Set up the vendor record', 'Ana Ruiz'), st('r5', 'Send bank details', 'Vendor'), st('r6', 'File the claim', 'Employee'), st('r7', 'Apply', 'Applicant'),
+    st('r8', 'Upload the W-9', 'Customer/Vendor'));
+  assert.deepEqual(kp.tobe.slice(5).map(n => E.stepTeams(d, kp, n)), [[], [], [], ['Accounts Payable'], [], [], [], []]);
+  const r = E.teamRouting(d, kp);
+  assert.ok(!r.teams.some(x => /Karen|Requester|Sam|Vendor|Employee|Applicant|Customer/.test(x.team)), JSON.stringify(r.teams.map(x => x.text)));
+  assert.deepEqual(r.unmapped, []);
+  assert.deepEqual(Object.keys(E.seedTeamDepartments(d, kp.tobe)), ['Purchasing', 'Credit', 'AP', 'Treasury']);
+  // the step of a workspace person named in "Who does it" is that person's
+  assert.equal(E.stepDoer(d, kp.tobe[8]).owner, 'ar');
+  assert.deepEqual(E.projectTruth(d, 'kprj', GOLD_DAY).routing.unmapped, []);
+});
+
+test('R12 #11 profiling: shared bank account, near-duplicate names, whitespace; observed valid shapes never rejected; uniqueness tests', () => {
+  const csv = ['Vendor name,Tax ID,Account number',
+    'Acme Supply Inc,12-3456789,000123456789',
+    'ACME Supply,12-3456789,000123456789',
+    ' Northwind Parts ,98-7654321,000123456789',
+    'Contoso  Ltd,45-1112223,000987654321',
+    'ABC,45-1112224,000555666777'].join('\n');
+  const prof = E.profileCsv(csv);
+  const col = n => prof.find(c => c.name === n);
+  assert.deepEqual([col('Account number').sharedAccount.accounts, col('Account number').sharedAccount.records], [1, 3]);
+  assert.match(col('Account number').sharedAccount.text, /same account number is on 3 records/);
+  assert.deepEqual([col('Vendor name').nearDuplicates.groups, col('Vendor name').nearDuplicates.records], [1, 2]);
+  assert.deepEqual(col('Vendor name').whitespace, { count: 2, firstRow: 3 });
+  assert.ok(!JSON.stringify(prof).includes('000123456789') && !JSON.stringify(prof).includes('Acme'), 'no values kept');
+  const de = { id: 'DV', name: 'Vendors', fields: [{ name: 'Vendor name', type: 'text', required: true, maxLen: 60 }, { name: 'Tax ID', format: '##-#######', type: 'text', unique: true }, { name: 'Account number', type: 'digits', minLen: 4, maxLen: 17 }] };
+  const lines = E.profileLines(de, { rows: 5, columns: E.profileCsv(csv, { dataElement: de }) });
+  assert.match(lines.find(l => l.field === 'Account number').text, /same account number is on 3 records/);
+  assert.match(lines.find(l => l.field === 'Vendor name').text, /2 have extra spaces, 2 look like duplicates/);
+  const tests = E.generateTests(de, E.profileCsv(csv, { dataElement: de }), { all: true });
+  // the observed valid short name ("ABC" shape) is never a "should be rejected" test
+  assert.ok(!tests.some(t => t.field === 'Vendor name' && t.origin === 'profile' && /Observed shape/.test(t.note) && t.expect === 'reject'), JSON.stringify(tests.filter(t => t.field === 'Vendor name')));
+  // duplicate warnings become uniqueness tests
+  assert.ok(tests.some(t => t.field === 'Tax ID' && t.expect === 'reject' && /Same value as another record/.test(t.note)));
+  assert.ok(tests.some(t => t.field === 'Account number' && t.expect === 'reject' && /Same account number as another record/.test(t.note)));
+});

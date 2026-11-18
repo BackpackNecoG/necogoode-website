@@ -174,10 +174,11 @@ function historyHTML() {
         ${list.slice(0, S.shown).map(e => `<tr data-entry="${e.seq}"><td class="adm-when">${esc(fmtTime(e.at))}</td><td class="adm-who">${av(e.actor)} ${esc(e.actorName || pname(e.actor))}</td><td>${esc(e.summary || e.action)}</td><td>${itemCell(e.ref)}</td></tr>`).join('')}
       </tbody></table></div>${list.length > S.shown ? `<div style="text-align:center;margin-top:8px"><button class="btn sm" data-more>Show ${Math.min(PAGE, list.length - S.shown)} more</button></div>` : ''}`
       : `<div class="empty">${anyF ? 'No changes match these filters.' : 'No changes recorded yet.'}</div>`}
-      <div class="hint" style="margin-top:8px" data-audit-claim>Exports use the filters above and carry each entry’s fingerprints. An unfiltered export also carries a signed head (the entry count and last fingerprint, signed by the PMOFlow service), so checking it catches an edited entry, entries removed from the end, and fingerprints recomputed after export. Fingerprints are worked out from the stored history when you view or export it, not as each change is saved. The demo keeps the latest ${S.audit.limit || 500} changes.</div>
-      <details class="adm-check" ${fc ? 'open' : ''}><summary>Check a saved JSON export</summary>
-        <div class="adm-checkrow"><input type="file" accept="application/json,.json" data-checkfile aria-label="Saved JSON export" />
-        ${fc ? `<span class="${fc.ok ? 'pass' : 'fail'}" data-filecheck="${fc.ok ? 'ok' : 'broken'}">${fc.ok ? '✓ ' : '✕ '}${esc(fc.summary)}</span>` : ''}</div>
+      <div class="hint" style="margin-top:8px" data-audit-claim>Exports use the filters above and carry each entry’s fingerprints. Each fingerprint covers who made the change (their name too), when, and what. An unfiltered export also carries a signed head (the entry count and last fingerprint, signed by the PMOFlow service; in a CSV it is the last row), so checking it catches an edited entry or name, entries removed from the end, and fingerprints recomputed after export. Fingerprints are worked out from the stored history when you view or export it, not as each change is saved. The demo keeps the latest ${S.audit.limit || 500} changes.</div>
+      <div class="hint" data-keysource="${esc(S.audit.keySource || '')}">Signed with the ${esc(S.audit.keySource || 'development key')}${S.audit.keySource === 'production key' ? '.' : ' (this copy runs without the production key; the live service signs with its production key).'}</div>
+      <details class="adm-check" ${fc ? 'open' : ''}><summary>Check a saved export (CSV or JSON)</summary>
+        <div class="adm-checkrow"><input type="file" accept="text/csv,.csv,application/json,.json" data-checkfile aria-label="Saved CSV or JSON export" />
+        ${fc ? `<span class="${fc.ok ? 'pass' : 'fail'}" data-filecheck="${fc.ok ? 'ok' : 'broken'}">${fc.ok ? '✓ ' : '✕ '}${esc(fc.summary)}${fc.ok && fc.fileKeySource ? ` Signed with the ${esc(fc.fileKeySource)}.` : ''}</span>` : ''}</div>
         <div class="hint">Only an unfiltered export can be checked on its own: a filtered one leaves gaps in the chain.</div></details>
     </div>`;
 }
@@ -228,7 +229,7 @@ function securityHTML() {
       ['Extra sign-in check', 'Approvals, going live and data-access grants ask for a second check. In the demo any 6 digits work.'],
       ['Time-boxed data access', 'Access to real data is approved by its owner, expires, and closes automatically at launch.'],
       ['Statistics only', 'Data checks keep counts and patterns, never the values themselves.'],
-      ['Every change recorded', 'History lists every change and exports as CSV or JSON. A JSON export is signed, so an edited entry, entries cut from the end, or recomputed fingerprints fail the check.'],
+      ['Every change recorded', 'History lists every change and who made it, including changes that came from Jira or Azure DevOps under that person’s identity there. It exports as CSV or JSON; both are signed and can be checked here, so an edited entry or name, entries cut from the end, or recomputed fingerprints fail the check.'],
       ['No third-party scripts', 'No analytics or tag managers run in the app.'],
     ])}</ul></div>
     <div class="card" data-sec="business"><h3><span class="adm-dot biz"></span>With the Business plan, in your own Microsoft tenant</h3><ul class="adm-ul">${li([
@@ -316,7 +317,10 @@ export function bind(root, params) {
   on('[data-checkfile]', 'change', async el => {
     const f = el.files && el.files[0]; if (!f) return;
     try {
-      const j = JSON.parse(await f.text());
+      const text = await f.text();
+      /* R12: a CSV export is checked on the server from its footer row (signed head and count) */
+      if (/\.csv$/i.test(f.name || '') || /^\uFEFF?seq,at,actor/.test(text)) { S.fileCheck = (await api('POST', '/audit/verify', { csv: text })).verify; rerender(); return; }
+      let j; try { j = JSON.parse(text); } catch (e) { throw new Error('That file isn’t a PMOFlow history export.'); }
       const entries = Array.isArray(j) ? j : j.entries;
       if (!Array.isArray(entries)) throw new Error('That file isn’t a PMOFlow history export.');
       if (j.filtered) { S.fileCheck = { ok: false, summary: 'This export was filtered, so its chain has gaps. Export without filters to check it.' }; rerender(); return; }

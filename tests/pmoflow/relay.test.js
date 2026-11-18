@@ -167,7 +167,9 @@ test('Jira: pull pages through /search/jql and normalises issues', async () => {
   const c = conn('jira'); c.links = { W6: { key: 'VOM-6', base: { status: 'idle' } } };
   const docs = require(path.join(ROOT, 'api', 'shared', 'pmoflow-seed.js')).seed('2026-11-17').docs;
   const applied = S.applyInbound(c, docs, r.body.changes, { today: '2026-11-17' });
-  assert.equal(applied.updates[0].data.status, 'done');
+  /* R12 H4 guardrail: W6 makes Bank remittance details available, so a Done from the relay waits in review */
+  assert.equal(applied.updates[0].data.status, 'review');
+  assert.equal(applied.held[0].kind, 'information');
 });
 
 test('Azure DevOps: create with JSON Patch on the managed identity, then set state', async () => {

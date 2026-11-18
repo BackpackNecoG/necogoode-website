@@ -129,7 +129,9 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(j.verify && j.verify.ok === true && j.entries.length === j.total && j.entries.every((e, i) => i === 0 || e.prevHash === j.entries[i - 1].hash), 'JSON export: verified, every entry links to the one before');
   ok(j.head && j.head.count === j.total && j.head.hash === j.entries[j.entries.length - 1].hash && /^[a-f0-9]{64}$/.test(j.head.signature), 'JSON export carries the signed head (count, last fingerprint, signature)');
   ok(!/PMOFLOW_AUDIT_KEY|AccountKey/i.test(JSON.stringify(j)), 'no key material in the export');
-  ok(/# Signed head: \d+ entries/.test(csv), 'CSV export carries the signed head line');
+  ok(/\r\n# Signed head,\d+,[a-f0-9]{64},[a-f0-9]{64},(production|development) key\r\n$/.test(csv), 'CSV export ends with the signed head row (count, head, signature, key source)');
+  ok(/,(production|development) key\r\n$/.test(csv) && csv.trimEnd().endsWith(j.keySource), 'CSV and JSON name the same key source: ' + j.keySource);
+  ok((await page.getAttribute('[data-keysource]', 'data-keysource')) === j.keySource && (await page.textContent('[data-keysource]')).includes(j.keySource), 'History shows the key source');
   await settle(800);
   /* check the saved file, then a tampered copy */
   await page.click('.adm-check summary');
@@ -158,10 +160,30 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const forged = JSON.parse(JSON.stringify(j));
   forged.entries[1].summary = 'Nothing to see here';
   let prev = forged.genesis;
-  forged.entries.forEach((e, i) => { e.prevHash = prev; e.hash = crypto.createHash('sha256').update(prev + '\n' + JSON.stringify([i + 1, String(e.at || ''), String(e.actor || ''), String(e.action || ''), String(e.ref || ''), String(e.summary || '')])).digest('hex'); prev = e.hash; });
+  forged.entries.forEach((e, i) => { e.prevHash = prev; e.hash = crypto.createHash('sha256').update(prev + '\n' + JSON.stringify([i + 1, String(e.at || ''), String(e.actor || ''), String(e.actorName || ''), String(e.action || ''), String(e.ref || ''), String(e.summary || '')])).digest('hex'); prev = e.hash; });
   forged.head.hash = prev;
   res = await checkFile(forged, 'rehashed-forgery');
   ok(res.state === 'broken' && /signature does not match/.test(res.text), 'a fully re-hashed forgery is caught: ' + res.text.slice(0, 90));
+  /* R12: an edit to who an entry names (actorName only) is caught */
+  const renamed = JSON.parse(JSON.stringify(j)); renamed.entries[0].actorName = 'Rosa Diaz';
+  res = await checkFile(renamed, 'actorname-edit');
+  ok(res.state === 'broken' && /Chain broken at entry 1/.test(res.text), 'an edited actorName is caught: ' + res.text.slice(0, 90));
+  /* R12: a CSV export checks out in the app, and a tampered CSV does not */
+  const checkCsv = async (text, name) => {
+    const fp = `${SHOTS}/${name}.csv`; fs.writeFileSync(fp, text);
+    if (!(await page.isVisible('[data-checkfile]'))) await page.click('.adm-check summary');
+    await page.evaluate(() => { const el = document.querySelector('[data-filecheck]'); if (el) el.remove(); });
+    await page.setInputFiles('[data-checkfile]', fp);
+    await page.waitForSelector('[data-filecheck]', { timeout: 8000 }).catch(() => {});
+    return { state: await page.getAttribute('[data-filecheck]', 'data-filecheck').catch(() => null), text: await page.textContent('[data-filecheck]').catch(() => '') };
+  };
+  res = await checkCsv(csv, 'export');
+  ok(res.state === 'ok' && /signed head matches/.test(res.text) && new RegExp(j.keySource).test(res.text), 'the saved CSV checks out in the app: ' + res.text.slice(0, 120));
+  await page.screenshot({ path: `${SHOTS}/history-csvcheck-1366.png` });
+  res = await checkCsv(csv.replace(/Christmas Eve/, 'Christmas Day'), 'csv-edited');
+  ok(res.state === 'broken' && /Chain broken at entry/.test(res.text), 'an edited CSV is caught: ' + res.text.slice(0, 90));
+  res = await checkCsv(csv.replace(/# Signed head,[^\r\n]*\r\n$/, ''), 'csv-nohead');
+  ok(res.state === 'broken' && /no signed head/.test(res.text), 'a CSV without its head row is caught');
   ok(/signed head/.test(await page.textContent('[data-audit-claim]')) && /not as each change is saved/.test(await page.textContent('[data-audit-claim]')), 'History states what the seal does and does not cover');
 
   console.log('Security');

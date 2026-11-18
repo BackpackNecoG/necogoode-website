@@ -60,7 +60,11 @@ async function render() {
   renderChrome(NAV[name] || '');
   const app = document.getElementById('app');
   if (store.state.offline) {
-    app.innerHTML = `<div class="banner">The demo workspace service is unavailable right now (${esc(store.state.error || 'offline')}). Try again in a minute.</div>`;
+    /* R12 H4: a rate-limit (429) message already names its one true wait; show it alone, never with a second retry time */
+    const em = String(store.state.error || '');
+    app.innerHTML = /demos|try again (tomorrow|in \d+)/i.test(em)
+      ? `<div class="banner">${esc(em)} <a href="/pmoflow/demo">Book a guided demo</a></div>`
+      : `<div class="banner">The demo workspace service is unavailable right now (${esc(em || 'offline')}). Try again in a minute.</div>`;
     return;
   }
   if (!name) { app.innerHTML = `<div class="card"><h3>Not found</h3><a href="${link('/')}" data-link style="color:var(--accent)">Back to workspace</a></div>`; return; }

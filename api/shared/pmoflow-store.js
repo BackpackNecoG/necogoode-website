@@ -19,10 +19,12 @@ const EXPIRY_DAYS = 30;
 const CREATES_PER_DAY = 50;      /* R11: a shared office NAT must not lock people out */
 const BURST_MAX = 10;            /* R11: abuse guard, per network, rolling window */
 const BURST_WINDOW_MS = 10 * 60000;
-/* R11: one plain message per limit. The client shows it as is. */
+/* R11: one plain message per limit. The client shows it as is.
+   R12 (#12): each message names ONE time, and it is the true one: the burst message says when the oldest of the recent
+   sandboxes leaves the 10-minute window (1–10 minutes), never a fixed "10 minutes". */
 const LIMIT_MSG = {
-  daily: 'This network has started a lot of demos today. Try again tomorrow, or book a guided demo.',
-  burst: 'This network has started a lot of demos in the last few minutes. Try again in 10 minutes, or book a guided demo.',
+  daily: 'This network has started a lot of demos today. You can start another tomorrow, or book a guided demo.',
+  burst: mins => `This network has started a lot of demos recently. You can start another in ${mins} minute${mins === 1 ? '' : 's'}, or book a guided demo.`,
 };
 const CHUNK = 16000;            /* chars per string property (Table limit is 64 KiB of UTF-16) */
 const APP = 'pmoflow';
@@ -127,9 +129,19 @@ async function createWorkspace(ipHash, opts) {
   let times = [];
   try { times = JSON.parse((burstRows[0] && burstRows[0].times) || '[]'); } catch (e) { times = []; }
   times = (Array.isArray(times) ? times : []).filter(t => Number.isFinite(t) && nowMs - t < BURST_WINDOW_MS && t <= nowMs + 1000);
-  if (times.length >= BURST_MAX) throw Object.assign(new Error(LIMIT_MSG.burst), { status: 429, limit: 'burst' });
+  if (times.length >= BURST_MAX) {
+    /* the request is allowed again once the (length - BURST_MAX + 1)-th oldest stamp leaves the window */
+    const sorted = times.slice().sort((a, b) => a - b);
+    const freeAt = sorted[sorted.length - BURST_MAX] + BURST_WINDOW_MS;
+    const secs = Math.max(1, Math.ceil((freeAt - nowMs) / 1000));
+    const mins = Math.min(10, Math.max(1, Math.ceil(secs / 60)));
+    throw Object.assign(new Error(LIMIT_MSG.burst(mins)), { status: 429, limit: 'burst', retryAfter: secs });
+  }
   const count = (dayRows[0] && dayRows[0].count) || 0;
-  if (count >= CREATES_PER_DAY) throw Object.assign(new Error(LIMIT_MSG.daily), { status: 429, limit: 'daily' });
+  if (count >= CREATES_PER_DAY) {
+    const midnight = Date.parse(dayKey(new Date(nowMs)).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3') + 'T00:00:00Z') + 86400000;
+    throw Object.assign(new Error(LIMIT_MSG.daily), { status: 429, limit: 'daily', retryAfter: Math.max(1, Math.ceil((midnight - nowMs) / 1000)) });
+  }
   times.push(nowMs);
   await Promise.all([
     db().upsert(T.limits, { PartitionKey: pk, RowKey: rk, count: count + 1, app: APP }),

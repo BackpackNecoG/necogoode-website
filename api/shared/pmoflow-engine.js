@@ -357,7 +357,7 @@
     const asis = new Set(), stepOwner = {}, stepRole = {}, stepInfo = {};
     const claim = st => stepData(st).forEach(d => {
       if (stepOwner[d] || stepRole[d]) return;
-      if (st.owner) stepOwner[d] = st.owner; else if (String(st.ownerRole || '').trim()) stepRole[d] = String(st.ownerRole).trim();
+      if (String(st.ownerRole || '').trim()) stepRole[d] = String(st.ownerRole).trim(); else if (st.owner) stepOwner[d] = st.owner;   // R12: role first
     });
     list(docs, 'process').forEach(p => {
       flatSteps(p.asis).forEach(st => stepData(st).forEach(d => asis.add(d)));
@@ -877,18 +877,137 @@
   // BU sections: a step belongs to its owner's BU plus every BU named (case-insensitive) in its touches tags;
   // trigger touches count too. Known BU names include those of people plus KNOWN_BUS (a BU may have no person).
   // R7: role-only steps (ownerRole, no owner) belong to no section.
+  // R12 #1 department routing. A step's TEAMS come from who does it and what it touches; each team maps to the
+  // department that approves it through process.teamDepartments ({team: department|null}). No default team, ever:
+  // an unmapped team is "Choose who approves for <team>". A step with ownerRole is done by that role; step.owner is
+  // then only the "Who does it" fallback (the process owner) and is never the step's team or owner.
+  const TEAM_WORDS = ['Accounts Payable', 'Accounts Receivable', 'Customer Service', 'Human Resources', 'Information Technology', 'Supply Chain', 'Service Desk', 'Help Desk',
+    'Procurement', 'Purchasing', 'Compliance', 'Treasury', 'Finance', 'Legal', 'Facilities', 'Payroll', 'Security', 'Operations', 'Sales', 'Marketing',
+    'Support', 'Tax', 'Audit', 'Risk', 'Receiving', 'Shipping', 'Warehouse', 'Logistics', 'Quality', 'Engineering', 'Benefits', 'Training', 'Accounting',
+    'Billing', 'Credit', 'Collections', 'Reception', 'Admissions', 'Records', 'HR', 'IT', 'AP', 'AR', 'QA', 'PMO'];
+  const TEAM_WORD_RE = new RegExp('(^|[^\\p{L}])(' + TEAM_WORDS.map(t => t.replace(/\s+/g, '\\s+')).join('|') + ')(?=$|[^\\p{L}])', 'giu');
+  const TEAM_ALIAS = { ap: 'accounts payable', ar: 'accounts receivable', hr: 'human resources', it: 'information technology' };
+  const teamKey = t => String(t || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  function sameTeam(a, b) {
+    const x = teamKey(a), y = teamKey(b); if (!x || !y) return false;
+    return x === y || TEAM_ALIAS[x] === y || TEAM_ALIAS[y] === x;
+  }
+  function roleTeams(role) {
+    const r = String(role || '').trim().replace(/^(the|a|an)\s+/i, ''); if (!r) return [];
+    const out = []; let m; TEAM_WORD_RE.lastIndex = 0;
+    while ((m = TEAM_WORD_RE.exec(r))) {
+      const w = m[2].replace(/\s+/g, ' '), canon = TEAM_WORDS.find(t => t.toLowerCase() === w.toLowerCase()) || w;
+      // two-letter abbreviations count only in capitals ("AP clerk", not "it")
+      if (canon.length <= 3 && w !== w.toUpperCase()) continue;
+      if (!out.some(x => sameTeam(x, canon))) out.push(canon);
+    }
+    return out.length ? out : [r];
+  }
+  const GENERIC_ACTORS = new Set(('requester requestor employee employees customer customers client clients vendor vendors supplier suppliers applicant applicants ' +
+    'candidate candidates user users member members visitor visitors patient patients student students caller submitter new hire contractor staff someone anyone').split(' '));
+  function isGenericActor(r) {
+    const parts = String(r || '').toLowerCase().split(/\s*\/\s*|\s+or\s+|\s*&\s*|\s+and\s+/).map(x => x.trim().replace(/^(the|a|an)\s+/, '')).filter(Boolean);
+    return parts.length > 0 && parts.every(x => GENERIC_ACTORS.has(x) || GENERIC_ACTORS.has(x.replace(/s$/, '')) || x === 'new hire');
+  }
+  // a bare personal name ("Karen", "Sam Wu"): 1–3 capitalised words, none a team word or a role word
+  const ROLE_WORDS = new Set('clerk lead head staff team admin agent sme cfo ceo cio cto coo vp counsel desk board committee chair nurse attorney paralegal intern group unit office department dept mgr manager owner'.split(' '));
+  function looksLikeName(r) {
+    const ws = String(r || '').trim().split(/\s+/);
+    if (!ws.length || ws.length > 3) return false;
+    return ws.every(w => /^\p{Lu}[\p{Ll}'’-]+$/u.test(w) && !ROLE_WORDS.has(w.toLowerCase()) && !/(er|or|ist|ant|ent|ian|ee|ive|ary|ive)$/i.test(w) && !TEAM_WORDS.some(t => t.toLowerCase() === w.toLowerCase()));
+  }
+  function personNamed(people, r) {
+    const k = String(r || '').trim().toLowerCase(); if (!k) return null;
+    const ids = Object.keys(people).filter(id => people[id]);
+    const full = ids.find(id => String(people[id].name || '').toLowerCase() === k); if (full) return full;
+    const first = ids.filter(id => String(people[id].name || '').split(' ')[0].toLowerCase() === k);
+    return first.length === 1 ? first[0] : null;
+  }
+  function procOf(docs, proc) { return typeof proc === 'string' ? get(docs, 'process', proc) : proc || null; }
+  function mapOf(proc) { return proc && proc.teamDepartments && typeof proc.teamDepartments === 'object' ? proc.teamDepartments : {}; }
+  function mapKey(map, team) { return Object.keys(map).find(k => sameTeam(k, team)) || null; }
+  // The step's doer: a role step is done by the one person whose title is that role, else nobody yet.
+  function stepDoerIn(people, step) {
+    if (!step) return { owner: null, role: null, text: 'Needs an owner' };
+    const role = String(step.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
+    if (role) {
+      const named = roleTeams(role)[0] === role ? personNamed(people, role) : null;
+      if (named) return { owner: named, role: null, text: people[named].name || role };
+      const hits = Object.keys(people).filter(id => people[id] && String(people[id].role || '').trim().toLowerCase() === role.toLowerCase());
+      return hits.length === 1 ? { owner: hits[0], role, text: people[hits[0]].name || role } : { owner: null, role, text: 'Needs an owner: ' + role };
+    }
+    if (step.owner && people[step.owner]) return { owner: step.owner, role: null, text: people[step.owner].name || 'someone' };
+    return { owner: null, role: null, text: 'Needs an owner' };
+  }
   function sectionHelpers(people) {
     const buOf = pid => people[pid] && people[pid].bu || null;
     const peopleBus = [...new Set(Object.keys(people).map(k => people[k] && people[k].bu).filter(Boolean))];
     const allBus = [...new Set(peopleBus.concat(KNOWN_BUS))];
-    const stepBus = st => {
-      const set = new Set();
-      if (!st.owner && String(st.ownerRole || '').trim()) return [];
-      const ob = buOf(st.owner); if (ob) set.add(ob);
-      (st.touches || []).forEach(tag => { const tl = String(tag || '').trim().toLowerCase(); allBus.forEach(b => { if (b.toLowerCase() === tl) set.add(b); }); });
-      return [...set];
+    const deptNamed = t => allBus.find(b => sameTeam(b, t)) || null;
+    // teams of a step (names as found)
+    const stepTeamsOf = (st, proc) => {
+      if (!st) return [];
+      const map = mapOf(proc), out = [];
+      const add = t => { if (t && !out.some(x => sameTeam(x, t))) out.push(t); };
+      const role = String(st.ownerRole || '').trim();
+      if (role) {
+        const bare = role.replace(/^(the|a|an)\s+/i, ''), rt = roleTeams(role), d = stepDoerIn(people, st);
+        const noTeamWord = rt.length === 1 && rt[0] === bare;
+        // R12 (H2): a person's name ("Karen") is that person, never a team; generic actors (Requester, Employee,
+        // Customer, Vendor, Applicant…) are no team at all, so they never need an approving department
+        const named = noTeamWord ? personNamed(people, bare) : null;
+        if (noTeamWord && named) { if (buOf(named)) add(buOf(named)); }
+        else if (noTeamWord && (isGenericActor(bare) || looksLikeName(bare))) { /* no team */ }
+        else if (noTeamWord && d.owner && buOf(d.owner)) add(buOf(d.owner));
+        else rt.forEach(add);
+      } else { const ob = buOf(st.owner); if (ob) add(ob); }
+      (st.touches || []).forEach(tag => { const t = String(tag || '').trim(); if (t && (deptNamed(t) || mapKey(map, t))) add(mapKey(map, t) || deptNamed(t)); });
+      return out;
     };
-    return { buOf, peopleBus, allBus, stepBus };
+    // team -> approving department (mapping first, then a department of the same name), else null
+    const deptOf = (team, proc) => {
+      const map = mapOf(proc), k = mapKey(map, team);
+      if (k) { const v = map[k]; return v ? (allBus.find(b => sameTeam(b, v)) || String(v)) : null; }
+      return deptNamed(team);
+    };
+    const stepBus = (st, proc) => [...new Set(stepTeamsOf(st, proc).map(t => deptOf(t, proc)).filter(Boolean))];
+    const stepUnrouted = (st, proc) => stepTeamsOf(st, proc).filter(t => !deptOf(t, proc));
+    return { buOf, peopleBus, allBus, stepBus, stepTeamsOf, deptOf, stepUnrouted };
+  }
+  function stepTeams(docs, proc, step) { return sectionHelpers(personMap(docs)).stepTeamsOf(step, procOf(docs, proc)); }
+  function departmentFor(docs, proc, team) { return sectionHelpers(personMap(docs)).deptOf(team, procOf(docs, proc)); }
+  function stepDoer(docs, step) { return stepDoerIn(personMap(docs), step); }
+  // Seed the mapping at import: every team found on the map; a team that IS a department gets it; others null.
+  function seedTeamDepartments(docs, nodes) {
+    const h = sectionHelpers(personMap(docs)), out = {};
+    const touchTeam = t => TEAM_WORDS.some(w => sameTeam(w, t)) || h.allBus.some(b => sameTeam(b, t));
+    allNodes(versionNodes(nodes)).forEach(n => {
+      if (!n || isGateway(n) || n.type === 'end') return;
+      const teams = h.stepTeamsOf(n, null).concat((n.touches || []).map(t => String(t || '').trim()).filter(t => t && touchTeam(t)));
+      teams.forEach(t => { if (Object.keys(out).some(k => sameTeam(k, t))) return; out[t] = h.allBus.find(b => sameTeam(b, t)) || null; });
+    });
+    return out;
+  }
+  function teamRouting(docs, proc) {
+    const p = procOf(docs, proc), people = personMap(docs), h = sectionHelpers(people);
+    if (!p) return { teams: [], unmapped: [], departments: [], text: '' };
+    const map = mapOf(p), teams = [];
+    const addTeam = (t, st) => {
+      let x = teams.find(y => sameTeam(y.team, t));
+      if (!x) { x = { team: t, steps: [] }; teams.push(x); }
+      if (st && !x.steps.some(s => s.id === st.id)) x.steps.push({ id: st.id, title: st.title || '' });
+    };
+    Object.keys(map).forEach(k => addTeam(k, null));
+    allNodes(p.tobe).forEach(n => { if (n && !isGateway(n) && n.type !== 'end') h.stepTeamsOf(n, p).forEach(t => addTeam(t, n)); });
+    teams.forEach(x => {
+      x.department = h.deptOf(x.team, p); x.explicit = mapKey(map, x.team) != null;
+      x.text = x.department ? (teamKey(x.team) === teamKey(x.department) ? x.department : x.team + ' → ' + x.department) : 'Choose who approves for ' + x.team;
+    });
+    const unmapped = teams.filter(x => !x.department).map(x => x.team);
+    const departments = h.peopleBus.slice().sort().map(name => ({ name, people: Object.keys(people).filter(id => people[id].bu === name).map(id => ({ id, name: people[id].name || '' })) }));
+    const text = !teams.length ? 'No teams yet' : unmapped.length ? nWord(teams.length, 'team') + ' · ' + unmapped.length + ' need' + (unmapped.length === 1 ? 's' : '') + ' an approving department'
+      : 'All ' + nWord(teams.length, 'team') + ' have an approving department';
+    return { teams, unmapped, departments, text };
   }
   // R7: a runbook task belongs to the section of its owner's BU (or task.bu when set).
   function taskBu(people, t) { return (t && t.bu) || (t && people[t.owner] && people[t.owner].bu) || null; }
@@ -909,7 +1028,7 @@
     const stepsOut = [];
     linkedProcesses(docs, project).forEach(p => allNodes(p.tobe).forEach(n => {
       if (!n || isGateway(n) || n.type === 'end') return;
-      if (!stepBus(n).includes(bu)) return;
+      if (!stepBus(n, p).includes(bu)) return;
       stepsOut.push({ pid: p.id, id: n.id, title: n.title || '', type: n.type || '', owner: n.owner || '', ownerRole: n.ownerRole || '', data: stepData(n).slice().sort(),
         touches: (n.touches || []).map(String).sort(), subs: (n.subs || []).map(x => x && x.title || ''), sla: n.sla == null ? '' : n.sla, system: n.system || '', calls: n.calls || '',
         raci: n.raci == null ? '' : n.raci, timer: n.timer == null ? '' : n.timer });
@@ -922,21 +1041,34 @@
       .map(t => ({ id: t.id || '', task: t.task || t.title || '', owner: t.owner || '', gonogo: !!t.gonogo, order: t.order == null ? '' : t.order, plannedStart: t.plannedStart || '', durationMins: t.durationMins == null ? '' : t.durationMins }));
     const k = stepsOut.map(st => encodeURIComponent(st.pid + '/' + st.id) + '=' + stepFieldHashes(st)).join(',');
     const titles = {}; stepsOut.forEach(st => { titles[st.pid + '/' + st.id] = st.title; });
-    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)), k, titles };
+    // R12 #1: readable values per step (name, owner, time limit, system), so a reopened approval can say from → to
+    const vals = {}; stepsOut.forEach(st => { vals[st.pid + '/' + st.id] = [st.title, st.ownerRole || (people[st.owner] && people[st.owner].name) || '', String(st.sla || ''), st.system]; });
+    return { s: hashStr(JSON.stringify(stepsOut)), d: hashStr(JSON.stringify(dataOut)), t: hashStr(JSON.stringify(testsOut)), c: hashStr(JSON.stringify(tasks)), k, titles, v: vals };
   }
-  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c + (parts.k != null ? ';k:' + parts.k : ''); }
-  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtck]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function fpString(parts) { return 's:' + parts.s + ';d:' + parts.d + ';t:' + parts.t + ';c:' + parts.c + (parts.k != null ? ';k:' + parts.k : '') + (parts.v ? ';v:' + encodeURIComponent(JSON.stringify(parts.v)) : ''); }
+  function fpParse(str) { const out = {}; String(str || '').split(';').forEach(x => { const m = /^([sdtckv]):(.*)$/.exec(x); if (m) out[m[1]] = m[2]; }); return out; }
+  function fpVals(v) { try { return v ? JSON.parse(decodeURIComponent(v)) : null; } catch (e) { return null; } }
+  const FROM_TO = { name: 0, owner: 1, 'time limit': 2, system: 3 };
   function fpSteps(k) { const out = {}; String(k || '').split(',').filter(Boolean).forEach(x => { const i = x.indexOf('='); if (i > 0) out[decodeURIComponent(x.slice(0, i))] = x.slice(i + 1).split('.'); }); return out; }
   // R11 (partStepChanges): what changed in a part's steps since the approval, in words: [{key, title, text}] ("“X” owner changed").
   // Needs the per-step hashes (k); approvals saved before R11 have none, so [] (the caller says "its steps").
-  function partStepChanges(wasK, now, docs) {
+  function partStepChanges(wasK, now, docs, wasV) {
     if (wasK == null) return [];
-    const was = fpSteps(wasK), cur = fpSteps(now.k), out = [];
+    const was = fpSteps(wasK), cur = fpSteps(now.k), out = [], wv = fpVals(wasV) || {}, nv = now.v || {};
+    const shown = x => (x == null || x === '' ? 'none' : String(x));
     Object.keys(cur).forEach(key => {
       const t = '“' + (now.titles[key] || 'a step') + '”';
       if (!was[key]) return out.push({ key, title: now.titles[key] || '', text: t + ' added' });
       const f = STEP_FIELDS.filter((x, i) => was[key][i] !== cur[key][i]).map(x => x[1]);
-      if (f.length) out.push({ key, title: now.titles[key] || '', text: t + ' ' + joinList(f) + ' changed' });
+      if (!f.length) return;
+      const a = wv[key], b = nv[key];
+      // R12: from → to for the readable fields (when the approval kept them); the rest by name
+      const ft = a && b ? f.filter(x => FROM_TO[x] != null && a[FROM_TO[x]] !== b[FROM_TO[x]]) : [];
+      const rest = f.filter(x => !ft.includes(x));
+      const parts = ft.filter(x => x !== 'name').map(x => x + ' ' + shown(a[FROM_TO[x]]) + ' → ' + shown(b[FROM_TO[x]]));
+      if (rest.length) parts.push(joinList(rest) + ' changed');
+      const head = ft.includes('name') ? '“' + (a[0] || 'a step') + '” → “' + (b[0] || 'a step') + '”' : t;
+      out.push({ key, title: now.titles[key] || '', text: head + (parts.length ? ' ' + parts.join(', ') : '') });
     });
     Object.keys(was).filter(key => !cur[key]).forEach(key => {
       const [pid, id] = key.split('/'); const pr = docs ? get(docs, 'process', pid) : null;
@@ -966,7 +1098,7 @@
           const tch = x => JSON.stringify((x.touches || []).map(String).sort());
           changed = !a || a.type !== 'trigger' || (a.title || '') !== (n.title || '') || (a.owner || '') !== (n.owner || '') || tch(a) !== tch(n);
         } else changed = diff.nodes[n.id] === 'new' || diff.nodes[n.id] === 'changed';
-        if (changed) stepBus(n).forEach(b => set.add(b));
+        if (changed) stepBus(n, p).forEach(b => set.add(b));
       });
     });
     // Launch-day tasks run by the PM or launch owner themselves (no explicit task.bu) add no section: they cannot approve it.
@@ -976,6 +1108,23 @@
       const b = taskBu(people, t); if (b) set.add(b);
     });
     return [...set].sort();
+  }
+  // R12 #1: changed steps whose team has no approving department yet: [{pid, process, team, steps, text}].
+  function unroutedTeams(docs, project) {
+    const h = sectionHelpers(personMap(docs)), out = [];
+    linkedProcesses(docs, project).forEach(p => {
+      const diff = diffProcess(p);
+      allNodes(p.tobe).forEach(n => {
+        if (!n || isGateway(n) || n.type === 'end' || n.type === 'trigger') return;
+        if (!(diff.nodes[n.id] === 'new' || diff.nodes[n.id] === 'changed')) return;
+        h.stepUnrouted(n, p).forEach(t => {
+          let x = out.find(y => y.pid === p.id && sameTeam(y.team, t));
+          if (!x) { x = { pid: p.id, process: p.name || '', team: t, steps: [], text: 'Choose who approves for ' + t }; out.push(x); }
+          x.steps.push({ id: n.id, title: n.title || '' });
+        });
+      });
+    });
+    return out;
   }
   // R8 test stages: dev, sit and system runs count toward "Try it out"; uat toward "Business sign-off".
   function stageOfEnv(env) { return env === 'uat' ? 'uat' : env === 'dev' || env === 'sit' || env === 'system' ? 'system' : null; }
@@ -1015,7 +1164,7 @@
   //    project does not change needs no tests (listed in notChanged, never counted as a gap).
   const FIX_DONE = ['fixed', 'verified', 'closed'];
   function rawDefectState(w) { return String((w && w.defectStatus) || '').trim().toLowerCase().replace(/[\s_]+/g, '-'); }
-  function problemFixDone(w) { return !!w && (w.status === 'done' || FIX_DONE.includes(rawDefectState(w))); }
+  function problemFixDone(w) { return !!w && (w.status === 'done' || (w.status === 'review' && !rawDefectState(w)) || FIX_DONE.includes(rawDefectState(w))); }
   // {testId: defect workItem id} for open problems whose fix is not done yet
   function heldTests(docs, projectId) {
     const m = {};
@@ -1124,7 +1273,7 @@
     const tests = new Set(sc.caseIds.concat(sc.scriptIds));
     const runs = ctx.runs || list(docs, 'testRun').filter(r => r.projectId === project.id);
     const recorders = [...new Set(runs.filter(r => r.by && (r.results || []).some(x => { const k = x && (x.caseId || x.scriptId); return k && tests.has(k); })).map(r => r.by))].sort();
-    const stepOwners = [...new Set(sc.steps.map(x => x.s.owner).filter(Boolean))].sort();
+    const stepOwners = [...new Set(sc.steps.map(x => stepDoerIn(people, x.s).owner).filter(Boolean))].sort();
     return { recorders, stepOwners, pm: project.owner || null, launchOwner: project.releaseManager || project.owner || null, people };
   }
   function approvalBar(docs, prj, bu, personId, ctx) {
@@ -1165,7 +1314,8 @@
     const checks = [];
     const { buOf, peopleBus, stepBus } = sectionHelpers(people);
     const stepBuIdx = {};
-    steps.forEach(x => { stepBuIdx[x.pid + '/' + x.s.id] = stepBus(x.s); });
+    const procIdx = byId(procs);
+    steps.forEach(x => { stepBuIdx[x.pid + '/' + x.s.id] = stepBus(x.s, procIdx[x.pid]); });
     // R8: a defect raised from a test belongs to the sections that test covers (not to its owner's team).
     const workBus = w => stepBuIdx[w.pid + '/' + w.step] || (w.testRef && (w.testRef.caseId || w.testRef.scriptId) ? testBus(w.testRef.caseId || w.testRef.scriptId) : null) || [buOf(w.owner)].filter(Boolean);
     // R8 the sections a test covers: a data case → the sections whose steps use that information; a UAT script → the
@@ -1182,7 +1332,7 @@
       return [...new Set(own.length ? own : steps.filter(x => (sc.data || []).some(d => stepData(x.s).includes(d))).flatMap(x => stepBuIdx[x.pid + '/' + x.s.id] || []))];
     };
     const triggers = p => allNodes(p.tobe).filter(n => n.type === 'trigger');
-    const procBus = p => [...new Set(flatSteps(p.tobe).flatMap(stepBus).concat(triggers(p).flatMap(stepBus)))];
+    const procBus = p => [...new Set(flatSteps(p.tobe).flatMap(n => stepBus(n, p)).concat(triggers(p).flatMap(n => stepBus(n, p))))];
 
     // work-done
     const open = work.filter(w => w.status !== 'done');
@@ -1354,7 +1504,7 @@
     const needsApprover = bus.filter(bu => !eligible[bu].length && !validForRaw(bu));
     const suggestions = {};
     needsApprover.forEach(bu => {
-      const p = procs.find(pp => allNodes(pp.tobe).some(n => n && !isGateway(n) && stepBus(n).includes(bu)));
+      const p = procs.find(pp => allNodes(pp.tobe).some(n => n && !isGateway(n) && stepBus(n, pp).includes(bu)));
       const cand = [p && p.owner].concat(procs.map(pp => pp.owner), project.sponsor || null).find(id => id && people[id] && !excluded.includes(id) && !barOf(bu, id));
       suggestions[bu] = cand || null;
     });
@@ -1380,7 +1530,7 @@
         const was = fpParse(a.fingerprint), now = sectionParts(docs, project, bu);
         ['s', 'd', 't'].forEach(k => {
           if (was[k] == null || was[k] === now[k]) return;
-          const sc = k === 's' ? partStepChanges(was.k, now, docs) : [];
+          const sc = k === 's' ? partStepChanges(was.k, now, docs, was.v) : [];
           if (sc.length) sc.forEach(x => out.push({ ref: 'section:' + bu + '#s:' + x.key, label: x.text }));
           else out.push({ ref: 'section:' + bu + '#' + k, label: PART_LABEL[k] });
         });
@@ -1396,7 +1546,7 @@
         if (!(p.updatedAt && String(p.updatedAt) > t)) return;
         const nodes = allNodes(p.tobe).filter(n => n && !isGateway(n));
         // Step-level stamps scope the change to the sections of the changed steps; else the whole process.
-        const hit = nodes.some(n => n.updatedAt) ? nodes.some(n => n.updatedAt && String(n.updatedAt) > t && stepBus(n).includes(bu)) : procBus(p).includes(bu);
+        const hit = nodes.some(n => n.updatedAt) ? nodes.some(n => n.updatedAt && String(n.updatedAt) > t && stepBus(n, p).includes(bu)) : procBus(p).includes(bu);
         if (hit) out.push({ ref: 'process:' + p.id, label: 'the ' + (p.name || 'linked') + ' process' });
       });
       return out;
@@ -1406,11 +1556,13 @@
     const staleSet = new Set(stale.map(x => x.bu));
     const pnSafe = id => (people[id] && people[id].name) || null;
     const buDetail = [];
-    if (!bus.length) buDetail.push("No team's part changed, so no approvals are needed.");
+    const unrouted = unroutedTeams(docs, project);
+    unrouted.forEach(x => buDetail.push(x.text + ' (' + joinList(x.steps.map(st => '“' + (st.title || 'untitled step') + '”'), 3) + ').'));
+    if (!bus.length && !unrouted.length) buDetail.push("No team's part changed, so no approvals are needed.");
     needsApprover.forEach(b => buDetail.push((sodBlocked[b] ? barred[b].map(x => x.text).join(' ') + ' Choose who approves ' + b + "'s part." : 'No approver in ' + b + ': assign one.') + (suggestions[b] && pnSafe(suggestions[b]) ? ' Suggested: ' + pnSafe(suggestions[b]) + '.' : '')));
     if (unsigned.length) buDetail.push('Waiting for sign-off from ' + joinList(unsigned) + '.');
     stale.forEach(x => buDetail.push(x.bu + ': re-approval needed: ' + joinList(x.changed.map(c => c.label)) + (x.changed.every(c => /#s:/.test(c.ref)) ? ' (after sign-off).' : ' changed after sign-off.')));
-    if (bus.length && !unsigned.length && !stale.length && !needsApprover.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
+    if (bus.length && !unsigned.length && !stale.length && !needsApprover.length && !unrouted.length) buDetail.push('All ' + nWord(bus.length, 'business unit') + ' approved with step-up: ' + joinList(bus) + '.');
     const exclNames = joinList(excluded.map(pn));
     const exclRole = excluded.length > 1 ? 'the project owner and release manager' : releaseManager === project.owner ? 'the project owner' : 'the release manager';
     if (ownerApprovals) buDetail.push('Approvals by ' + exclRole + ' (' + exclNames + ') do not count.');
@@ -1423,8 +1575,8 @@
       approver: validFor(bu) ? validFor(bu).approver || null : null, approvedAt: validFor(bu) ? validFor(bu).at || null : null,
       sodBlockedBy: sodBlocked[bu] || null, recorders: recordersOf(bu), stepOwners: barsOf[bu].stepOwners.slice(), barred: barred[bu].slice() }));
     // R9 §13: a team that does not need to approve is never a gate condition (no changed teams → nothing to approve).
-    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0,
-      detail: buDetail.join(' '), items: needsApprover.concat(unsigned, stale.map(x => x.bu)), unsigned, noPerson, needsApprover, eligible, suggestions, sectionStatus, launchOwnerReview,
+    checks.push({ id: 'bu-signoff', label: 'Every business unit signed off', pass: unsigned.length === 0 && stale.length === 0 && needsApprover.length === 0 && unrouted.length === 0,
+      detail: buDetail.join(' '), items: needsApprover.concat(unsigned, stale.map(x => x.bu), unrouted.map(x => x.team)), unsigned, unrouted, noPerson, needsApprover, eligible, suggestions, sectionStatus, launchOwnerReview,
       sections: bus, excludedApprover: project.owner || null, excludedApprovers: excluded, releaseManager,
       stale: stale.map(x => ({ bu: x.bu, changed: x.changed.map(c => c.ref), details: x.changed.map(c => ({ ref: c.ref, label: c.label })), reason: 're-approval needed: ' + joinList(x.changed.map(c => c.label)),
         text: x.bu + ' must approve again: ' + joinList(x.changed.map(c => c.label)) + '.' })) });
@@ -1456,9 +1608,13 @@
     if (!coDetail.length) coDetail.push('Rollback owner (' + pn(co.rollbackOwner) + '), rollback plan, hypercare owner (' + pn(co.hypercareOwner) + ') and ' + nWord(tasks.length, 'runbook task') + ' are set.');
     // R10 §3: the launch window must be a business day (never a weekend or a holiday)
     const lw = launchWindowProblem(windowDate(co.window));
+    // R12 #10: every launch-day step on a business day and inside the launch window
+    const lp = launchPlanCheckCore(project);
+    if (!lp.ok) coDetail.unshift(lp.text);
     if (lw) coDetail.unshift('The launch window is on ' + lw + '; pick a business day.');
-    checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: !missingCo.length && tasks.length > 0 && !gonogoNoOwner.length && !lw,
-      detail: coDetail.join(' '), items: missingCo.concat(tasks.length ? [] : ['tasks'], gonogoNoOwner.map(x => 'task:' + (x.id || x.task || x.step || '')), lw ? ['window'] : []) });
+    checks.push({ id: 'cutover-plan', label: 'Cutover and rollback plan', pass: !missingCo.length && tasks.length > 0 && !gonogoNoOwner.length && !lw && lp.ok,
+      detail: coDetail.join(' '), items: missingCo.concat(tasks.length ? [] : ['tasks'], gonogoNoOwner.map(x => 'task:' + (x.id || x.task || x.step || '')), lw ? ['window'] : [], lp.problems.map(x => 'task:' + x.taskId)),
+      planProblems: lp.problems });
 
     // exceptions (warning only), R6: computed from the same staleness function (changedSince) as bu-signoff, so the
     // two always agree. Items: work ids, "process:<id>" and "cutover". Stale ones block through bu-signoff.
@@ -1717,6 +1873,26 @@
       const numeric = trimmed.length > 0 && trimmed.every(v => RE_NUM.test(v));
       const idLike = trimmed.every(v => /^\d+$/.test(v)) && trimmed.some(v => v.length > 1 && v[0] === '0' || v.length >= 8);
       if (numeric && !idLike) { const ns = trimmed.map(Number); col.min = Math.min(...ns); col.max = Math.max(...ns); }
+      // R12 #11 (counts and row numbers only, never values): extra spaces, near-duplicate names, and an account
+      // number shared across records (a fraud signal: several vendors paid into one bank account)
+      const ws = present.map((v, i) => ({ v, i })).filter(x => x.v !== x.v.trim() || /\s{2,}/.test(x.v));
+      if (ws.length) col.whitespace = { count: ws.length, firstRow: vals.indexOf(ws[0].v) + 1 };
+      if (present.length) {
+        const norm = v => v.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ')
+          .replace(/\b(inc|incorporated|llc|ltd|limited|co|corp|corporation|company|the|plc|gmbh)\b/g, ' ').replace(/\s+/g, ' ').trim();
+        const groups = {};
+        vals.forEach((v, i) => { if (v.trim() === '') return; const k = norm(v); if (!k) return; (groups[k] = groups[k] || []).push({ v, row: i + 1 }); });
+        const near = Object.keys(groups).map(k => groups[k]).filter(g => g.length > 1 && new Set(g.map(x => x.v)).size > 1);
+        const textual = present.some(v => /\p{L}/u.test(v));
+        if (near.length && textual) col.nearDuplicates = { groups: near.length, records: near.reduce((a, g) => a + g.length, 0), rows: near.slice(0, 5).map(g => g.map(x => x.row)) };
+      }
+      const accountCol = /\b(account|acct|iban)\b/i.test(name.replace(/[_-]+/g, ' ')) && !/holder|name|type/i.test(name);
+      if (accountCol && col.duplicates > 0) {
+        const seen = {}; vals.forEach((v, i) => { const t = v.trim(); if (t) (seen[t] = seen[t] || []).push(i + 1); });
+        const shared = Object.keys(seen).map(k => seen[k]).filter(r => r.length > 1);
+        col.sharedAccount = { accounts: shared.length, records: shared.reduce((a, r) => a + r.length, 0), rows: shared.slice(0, 5),
+          text: 'The same account number is on ' + nWord(shared.reduce((a, r) => Math.max(a, r.length), 0), 'record') + ': check for a shared or fraudulent bank account' };
+      }
       col.charClasses = ['digits', 'letters', 'space', 'punct', 'unicode'].filter(c => classes.has(c));
       col.specials = specials;
       if (nullRow != null) col.nullRow = nullRow;
@@ -2137,7 +2313,9 @@
         if (pt.valid !== false && sp.regex) input = fitRegex(sp, input) || input;
         // R9 §13: when the profile checked the real values against the rules, that decides (a real value the
         // rules reject is a "should be rejected" test); the test links to the sample row it came from.
-        const bad = outlier(pt) || pt.valid === false;
+        // R12 #11: a shape whose real values the rules accept is never a "should be rejected" test
+        if (pt.valid === true && ok(input) !== 'accept') return;
+        const bad = pt.valid === true ? false : outlier(pt) || pt.valid === false;
         const expect = bad ? 'reject' : ok(input);
         const before = out.length;
         add(f, 'edge', input, expect, 'profile', 'Observed shape: ' + humanPattern(pt.pattern) + ' (' + pt.count + ' of ' + colRows(col, profile) + ' rows)'
@@ -2159,6 +2337,10 @@
         add(f, 'edge', input, ok(input), 'profile', 'Unicode characters observed in the extract');
       }
       if (col.nulls > 0) { const before = out.length; add(f, 'edge', '', ok(''), 'profile', 'Empty values observed (' + col.nulls + ')'); if (out.length > before && col.nullRow) out[out.length - 1].sampleRow = col.nullRow; }
+      // R12 #11: a duplicate warning becomes a uniqueness test: a value already on another record is rejected
+      if ((+col.duplicates > 0 && (sp.unique || col.sharedAccount || sp.sem === 'id' || /\b(id|tax|ein|account|number)\b/i.test(f.name))) && validate(sp, valid)) {
+        add(f, 'invalid', valid, 'reject', 'profile', (col.sharedAccount ? 'Same account number as another record' : 'Same value as another record') + ' (' + col.duplicates + ' repeated in the sample)', { duplicateOf: 'another record' });
+      }
     }
     return out;
   }
@@ -2190,6 +2372,11 @@
         if (other.length && !shortN && !longN && !misN) bits.push('some do not match the rules');
       }
       if (!f && nulls) bits.push(nulls + ' ' + isAre(nulls) + ' empty');
+      // R12 #11
+      if (col.whitespace) bits.push(col.whitespace.count + ' ' + (col.whitespace.count === 1 ? 'has' : 'have') + ' extra spaces');
+      if (col.nearDuplicates) bits.push(col.nearDuplicates.records + ' look like duplicates of each other (same name spelled differently)');
+      if (col.sharedAccount) bits.push(col.sharedAccount.text);
+      else if (+col.duplicates > 0 && f && fieldSpec(f).unique) bits.push(col.duplicates + ' repeat' + (+col.duplicates === 1 ? 's' : '') + ' an earlier value');
       return { column: col.name, field: f ? f.name : null, problems: bits.length, text: (f ? f.name : col.name) + ': ' + nWord(filled, 'value') + (bits.length ? ', ' + bits.join(', ') : '') };
     });
   }
@@ -2357,9 +2544,10 @@
     // otherwise the task stays unassigned with the role shown ("Needs an owner: Credit Analyst"), never the PM.
     const ppl = personList(docs);
     const roleHolder = role => { const m = ppl.filter(p => String(p.role || '').trim().toLowerCase() === role.toLowerCase()); return m.length === 1 ? m[0] : null; };
+    // R12 #6: a role step is done by its role (step.owner is only the "Who does it" fallback), never the PM.
     const ownerOf = (st, fallbackPerson) => {
-      if (st && st.owner) return { owner: st.owner };
       const role = st && String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
+      if (st && st.owner && !role) return { owner: st.owner };
       if (role) {
         const h = roleHolder(role);
         return h ? { owner: h.id, ownerRole: role, note: 'The step is done by the role "' + role + '"; ' + (h.name || 'one person') + ' is the only ' + role + ' in the workspace.' }
@@ -2427,7 +2615,7 @@
           if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
             const firstStep = flatSteps((nd.branches || []).flatMap(b => (b && b.nodes) || []))[0];
             const g = push(Object.assign({ pid: p.id, step: nd.id, title: (nd.type === 'parallel' ? 'Set up parallel branches: ' : 'Configure routing: ') + (nd.title || 'untitled gateway'),
-              kind: 'build', deps: flowPrev.slice() }, ownerOf(firstStep, p.owner)));
+              kind: 'build', deps: flowPrev.slice() }, ownerOf(firstStep)));
             stepTasks.push(g.key);
             flowPrev = [g.key];
           }
@@ -2442,7 +2630,7 @@
         const st = diff.nodes[nd.id];
         if (st === 'new' || st === 'changed') {
           anyChange = true;
-          if (nd.owner) changedPeople.add(nd.owner); else if (String(nd.ownerRole || '').trim()) changedRoles.add(String(nd.ownerRole).trim());
+          if (String(nd.ownerRole || '').trim()) changedRoles.add(String(nd.ownerRole).trim()); else if (nd.owner) changedPeople.add(nd.owner);
         }
         if ((st === 'new' || st === 'changed') && !hasWork(p.id, nd.id)) {
           const light = nd.type === 'wait' || nd.type === 'message';
@@ -2471,12 +2659,14 @@
       const people = [...changedPeople].map(id => nameOf(docs, id)), roles = [...changedRoles];
       // R11 §4 "Tell affected teams" names the process's own teams: each changed step's team (its owner's team, else
       // its role), plus the teams it touches.
-      const pmap = personMap(docs), teams = [];
+      // R12 #1: the approving departments of the changed steps (process.teamDepartments), plus any team not mapped yet
+      // by its own name. Never the process owner's department by default.
+      const hs = sectionHelpers(personMap(docs)), teams = [];
       linkedProcesses(docs, project).forEach(p => { const df = diffProcess(p); flatSteps(p.tobe).forEach(st => {
         if (df.nodes[st.id] !== 'new' && df.nodes[st.id] !== 'changed') return;
-        const t = st.owner && pmap[st.owner] && pmap[st.owner].bu ? pmap[st.owner].bu : String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
-        const known = new Set(Object.keys(pmap).map(id => pmap[id] && pmap[id].bu).filter(Boolean).concat(KNOWN_BUS).map(x => String(x).toLowerCase()));
-        [t].concat((Array.isArray(st.touches) ? st.touches : []).filter(x => known.has(String(x || '').trim().toLowerCase())))
+        // a generic actor ("Employee") is no team, but the people in it are still told
+        const tt = hs.stepTeamsOf(st, p), gen = String(st.ownerRole || '').trim().replace(/^(the|a|an)\s+/i, '');
+        (tt.length ? tt.map(t => hs.deptOf(t, p) || t) : gen && isGenericActor(gen) ? [gen] : [])
           .forEach(x => { x = String(x || '').trim(); if (x && !teams.some(y => y.toLowerCase() === x.toLowerCase())) teams.push(x); });
       }); });
       // telling the teams happens early (1 day, can start now); training follows the changed steps' work
@@ -2825,6 +3015,10 @@
     const span = businessDaysBetween(w.start, w.due);
     return span > 0 ? Math.min(1, Math.max(0, businessDaysBetween(w.start, today) / span)) : 0;
   }
+  function baselineBudget(project) {
+    const bls = ((project && project.baselines) || []).filter(b => b && b.budget != null && isFinite(+b.budget) && +b.budget > 0).sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+    return bls.length ? +bls[bls.length - 1].budget : null;
+  }
   function rateOf(docs, id) { const p = personMap(docs)[id]; return p && p.dayRate != null && isFinite(+p.dayRate) ? +p.dayRate : null; }
   function earnedValue(docs, projectId, today) {
     const project = get(docs, 'project', projectId);
@@ -2832,7 +3026,11 @@
     const r2 = n => Math.round(n * 100) / 100;
     const costs = items.map(w => workCost(docs, w));
     const total = costs.reduce((a, b) => a + b, 0);
-    const planned = project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) && +project.budget.planned > 0 ? +project.budget.planned : null;
+    const current = project && project.budget && project.budget.planned != null && isFinite(+project.budget.planned) && +project.budget.planned > 0 ? +project.budget.planned : null;
+    // R12 #9: earned value is measured against the locked baseline's budget (the latest baseline that recorded one), so
+    // a budget change moves the expected cost and variance, never SPI/CPI by itself. No baseline budget: the current one.
+    const bl = baselineBudget(project);
+    const planned = bl != null ? bl : current, bacSource = bl != null ? 'baseline' : current != null ? 'current' : 'estimate';
     const BAC = planned != null ? planned : total;
     const scale = total > 0 ? BAC / total : 0;
     let PV = 0, EV = 0, AC = 0;
@@ -2857,13 +3055,15 @@
     // max(bottom-up estimate, spent + remaining estimate). Never below what is already spent.
     const remainingEst = items.reduce((a, w, i) => a + (w.status === 'done' ? 0 : costs[i] * (1 - progressOf(w))), 0);
     const eacMethod = CPI ? 'cpi' : 'bottom-up';
-    const EAC = !items.length ? null : r2(Math.max(AC, CPI ? BAC / (EV / AC) : Math.max(total, AC + remainingEst)));
+    // R12 #9: with money spent and nothing earned (CPI 0), the expected cost is what is spent plus the budgeted value
+    // of the work still to do (AC + BAC − EV), so it is never under budget while CPI reads 0.
+    const EAC = !items.length ? null : r2(Math.max(AC, CPI ? BAC / (EV / AC) : spentNothing ? AC + remainingEst * scale : Math.max(total, AC + remainingEst)));
     const pctDone = BAC > 0 ? EV / BAC : 0;
     const doneNoHours = items.filter(w => w.status === 'done' && !(Array.isArray(w.time) ? w.time : []).some(t => t && isFinite(+t.hours) && +t.hours > 0)).map(w => w.id);
     const flags = [];
     if (spentNothing) flags.push({ key: 'spent-nothing-finished', text: 'Spent with nothing finished' });
     if (doneNoHours.length) flags.push({ key: 'done-no-hours', items: doneNoHours, text: nWord(doneNoHours.length, 'task') + ' marked Done with no hours logged, so the cost figures may be too low' });
-    return { BAC: r2(BAC), PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, eacMethod, remainingEstimate: r2(remainingEst), estimate: r2(total), pctDone, pct: Math.round(pctDone * 100), started,
+    return { BAC: r2(BAC), bacSource, PV: r2(PV), EV: r2(EV), AC: r2(AC), SPI, CPI, EAC, eacMethod, remainingEstimate: r2(remainingEst), estimate: r2(total), pctDone, pct: Math.round(pctDone * 100), started,
       spentNothing, doneNoHours, flags };
   }
 
@@ -3039,6 +3239,8 @@
     }
     if (ds === 'verified') return 'fixed';   // verified needs a passing retest
     if (DEFECT_STATES.includes(ds)) return ds;
+    // R12 (H4): an inbound Jira/ADO "Done" lands as In review; for a defect that means fixed, awaiting a passing retest
+    if (w.status === 'review') return 'fixed';
     return w.status === 'prog' ? 'in-progress' : 'new';
   }
   // Defects of a project that a passing retest has verified and that can now be closed.
@@ -3166,7 +3368,52 @@
     });
     const t = extra.testing;
     if (t && t.stage && t.stage !== 'done' && t.next) add(project.testLead || project.owner, t.next, 'test', '/testing/' + project.id, 'testing:' + project.id);
+    // R12 #6: an unowned task is never shown under a person: "Needs an owner: <role>"
+    const allIdx = byId(c.items || c.open);
+    out.forEach(x => { const id = x.workId || (/^work:/.test(x.ref || '') ? x.ref.slice(5) : null); const w = id && allIdx[id];
+      if (!x.person && w) { x.name = ownerText(docs, w); x.needsOwner = true; x.role = String(w.ownerRole || '').trim() || null; } });
     return out.sort((x, y) => x.rank - y.rank);
+  }
+  // R12 #4 who can pass a test. The departments whose part covers the test (its data case's information or its
+  // script's step); an assigned test may be passed only by its assignee, an unassigned one only by people in one of
+  // those departments. A test no department owns may be passed by anyone (null).
+  function testDepartments(docs, prj, testId) {
+    const project = projOf(docs, prj); if (!project || !testId) return [];
+    return sectionBus(docs, project, personMap(docs)).filter(bu => { const sc = sectionScope(docs, project, bu); return sc.caseIds.includes(testId) || sc.scriptIds.includes(testId); });
+  }
+  function testAssignee(docs, project, testId) {
+    const tc = get(docs, 'testCase', testId); if (tc) return tc.tester || null;
+    const sc = (Array.isArray(project.uatScripts) ? project.uatScripts : []).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []).find(x => x && x.id === testId);
+    return (sc && sc.tester) || null;
+  }
+  function canPassTest(docs, prj, testId, personId) {
+    const project = projOf(docs, prj); if (!project || !personId) return { rule: 'unknown', text: 'Sign in to record test results.' };
+    const tc = get(docs, 'testCase', testId);
+    const scr = tc ? null : (Array.isArray(project.uatScripts) ? project.uatScripts : generateUatScripts(docs, project.id)).concat(Array.isArray(project.uatScenarios) ? project.uatScenarios : []).find(x => x && x.id === testId);
+    const label = tc ? dataName(docs, tc.dataId) + (tc.field ? ': ' + tc.field : '') : scr ? (scr.title || 'business check script') : 'this test';
+    const who = testAssignee(docs, project, testId);
+    if (who) return who === personId ? null : { rule: 'assignee', text: 'The test “' + label + '” is assigned to ' + nameOf(docs, who) + ', so only they can pass it.' };
+    const depts = testDepartments(docs, project, testId);
+    if (!depts.length) return null;
+    const p = personMap(docs)[personId];
+    if (p && depts.includes(p.bu)) return null;
+    const orList = depts.length === 1 ? depts[0] : depts.slice(0, -1).join(', ') + ' or ' + depts[depts.length - 1];
+    return { rule: 'department', departments: depts, text: 'Only someone in ' + orList + ' (or the person it is assigned to) can pass the test “' + label + '”.' };
+  }
+  function launchChecksOf(r) {
+    const cks = (r && r.checks) || [];
+    if (r && r.released) return { total: cks.length, passed: cks.length, notPassed: 0, text: 'Launched' };
+    const failing = cks.filter(c => !c.pass && !c.warning).length;
+    const passed = cks.filter(c => c.pass).length;
+    return { total: cks.length, passed, notPassed: cks.length - passed, failing, text: cks.length - passed ? nWord(cks.length - passed, 'check') + ' not passed' : 'All ' + nWord(cks.length, 'check') + ' passed' };
+  }
+  // R12 #6 the one owner text for a task: the person's name, or "Needs an owner: <role>" (never the PM)
+  function ownerText(docs, w) {
+    if (!w) return 'Needs an owner';
+    const p = w.owner && personMap(docs)[w.owner];
+    if (p) return p.name || 'someone';
+    const role = String(w.ownerRole || '').trim();
+    return role ? 'Needs an owner: ' + role : 'Needs an owner';
   }
   // R9 §1 status sentence: the forecast and the deadline, then the late count and the first name to act.
   function sentenceOf(docs, project, c, who) {
@@ -3351,7 +3598,9 @@
     // 7. Launch (also needs temporary data access closed)
     const gc = ck('grants-closed');
     const blockers = steps.filter(s => !s.done).length;
-    steps.push({ key: 'launch', label: 'Launch', done: live, who: live ? [] : uniq([lo]),
+    // R12 #7: the access requests are decided by their approvers (the information owners), not the launch owner
+    const gApprovers = uniq((gc.blocking || []).map(id => grantApproverOf(docs, get(docs, 'grant', id))));
+    steps.push({ key: 'launch', label: 'Launch', done: live, who: live ? [] : !gc.pass && gApprovers.length ? gApprovers : uniq([lo]),
       action: live ? 'Launched' : !gc.pass ? 'Approve or decline the ' + nWord((gc.blocking || []).length || 1, 'access request') + ' waiting for approval' : blockers ? 'Waiting for the steps above' : 'Ready: give the final yes and launch' });
     const first = steps.find(s => !s.done);
     steps.forEach(s => { s.next = s === first; });
@@ -3391,7 +3640,7 @@
     linkedProcesses(docs, project).forEach(p => {
       const diff = diffProcess(p);
       flatSteps(p.tobe).forEach(st => {
-        if ((diff.nodes[st.id] === 'new' || diff.nodes[st.id] === 'changed') && stepBus(st).includes(bu)) { steps.push({ pid: p.id, s: st }); stepKeys.add(p.id + '/' + st.id); }
+        if ((diff.nodes[st.id] === 'new' || diff.nodes[st.id] === 'changed') && stepBus(st, p).includes(bu)) { steps.push({ pid: p.id, s: st }); stepKeys.add(p.id + '/' + st.id); }
       });
     });
     const dataIds = [...new Set(steps.flatMap(x => stepData(x.s)))];
@@ -3555,7 +3804,10 @@
     const ev = earnedValue(docs, project.id, today);
     const planned = project.budget && project.budget.planned != null && isFinite(+project.budget.planned) ? +project.budget.planned : null;
     const cost = costOf(project, planned, ev);
-    const hasRates = planned != null || personList(docs).some(p => p.dayRate != null && isFinite(+p.dayRate));
+    // R12 #7: money shows only with a budget, or a day rate for someone doing this project's work, or hours logged.
+    // Unowned (role) tasks priced at the default rate never produce an "expected cost" on their own.
+    const pm_ = personMap(docs), rated = id => !!(id && pm_[id] && pm_[id].dayRate != null && isFinite(+pm_[id].dayRate));
+    const hasRates = planned != null || c.items.some(w => rated(w.owner) || (Array.isArray(w.time) && w.time.some(t => t && +t.hours > 0)));
     // R9 §5 Advanced-only note: the label stays driven by §1.
     const advancedNote = ev.SPI != null && ev.SPI < 0.95 && c.rag === 'green' ? 'Behind plan on effort (SPI ' + ev.SPI.toFixed(2) + ')' : null;
     return {
@@ -3565,6 +3817,7 @@
       // R10 §6: no work yet and not live: every screen says "No plan yet" instead of a step count
       noPlan: !c.items.length && !r.released && project.status !== 'live',
       launch: launchDate(docs, project),
+      routing: { unmapped: (buCk.unrouted || []).slice(), text: (buCk.unrouted || []).map(x => x.text).join(' · ') },
       lateText: lateText({ lateCount: c.late.length, pastDueCount: c.pastDue.length, finishAfterDueCount: c.finishAfterDue.length }),
       forecastFinish: c.finish, actualFinish: c.allDone ? c.finish : null, target: c.target, deadline: c.target,
       bufferDays: c.bufferDays, bufferUnit: 'business days',
@@ -3575,6 +3828,8 @@
       rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, who, reasons: c.reasons.slice(),
       status: { rag: c.rag, label: c.label, labelAdvanced: c.labelAdvanced, advancedNote, sentence, reasons: c.reasons.slice(), who },
       launchSteps: launch, stepsLeft: launch.filter(s => !s.done).length, testing, approvals,
+      // R12 #7 the launch gate in ONE phrase and ONE number: checks (never "launch steps left" next to "checks")
+      launchChecks: launchChecksOf(r),
       cost: { planned, estimate: cost.estimate, actual: cost.actualCost, forecast: cost.forecastCost, remaining: cost.remainingCost, variance: cost.variance, overBudget: cost.overBudget, show: hasRates,
         method: ev.eacMethod || null },
       ev, evFlags: (ev.flags || []).slice(), burndown: burndownStatus(docs, project.id, today, ev),
@@ -3583,6 +3838,7 @@
       lateness: Object.fromEntries(c.open.filter(w => c.fc[w.id] && c.fc[w.id].late).map(w => [w.id, lateInfo(docs, w, today, c.fc)])),
       // R11 §3 launch day on a day off (Launch, Dashboard, status), access counts
       launchFlag: c.launchFlag || null, grants: grantCounts(docs, project, today),
+      launchPlan: launchPlanCheckCore(project),
     };
   }
 
@@ -3707,7 +3963,8 @@
   }
   function lastReportDay(project, today) {
     const log = (Array.isArray(project.reportLog) ? project.reportLog : []).map(r => dayOfValue(r && r.date)).filter(Boolean);
-    const all = log.concat([dayOfValue(project.lastReportAt)]).filter(d => d && d < today).sort();
+    // R12 #7: a report sent earlier today counts as the last report
+    const all = log.concat([dayOfValue(project.lastReportAt)]).filter(d => d && d <= today).sort();
     return all.length ? all[all.length - 1] : null;
   }
   // {preset, from, to, label, short, noun, partial, note, weekEnd}
@@ -3743,7 +4000,8 @@
     if (from > to) { const x = from; from = to; to = x; if (to > td) to = td; }
     const start = project ? projectStart(docs, project) : null;
     let clamped = false;
-    if (start && from < start && start <= to) { from = start; clamped = true; if (label) label = fmtDayLong(from) + ' – ' + fmtDayLong(weekEnd || to); }
+    // R12 #7: a report week is always labelled Monday–Friday, even when the project started mid-week
+    if (start && from < start && start <= to) { from = start; clamped = true; if (label && !/^Week of /.test(label)) label = fmtDayLong(from) + ' – ' + fmtDayLong(weekEnd || to); }
     if (!label) label = from === to ? fmtDayLong(from) : fmtDayLong(from) + ' – ' + fmtDayLong(to);
     const partial = !!(weekEnd && to < weekEnd);
     const short = /^Week of /.test(label) ? 'week of ' + fmtDay(from) : from === to ? fmtDay(from) : fmtDay(from) + ' – ' + fmtDay(to);
@@ -3898,7 +4156,9 @@
     const planChanges = [];
     list(docs, 'planChange').filter(c => c && c.projectId === project.id).forEach(c => {
       const ap = c.status === 'applied' ? dayOfValue(c.appliedAt) : null, pr = dayOfValue(c.at);
-      const ev = within(ap) ? 'applied' : within(pr) ? 'proposed' : null;
+      // R12 #7: a change applied this evening carries tomorrow's UTC date; a window that ends today still includes it
+      const nowish = d => within(d) || (!!d && isDate(today) && to === String(today).slice(0, 10) && d > to && d <= addDays(to, 1));
+      const ev = nowish(ap) ? 'applied' : nowish(pr) ? 'proposed' : null;
       if (!ev) return;
       const im = c.impact && typeof c.impact === 'object' ? c.impact : {};
       const de = im.deadlineEffect;
@@ -4029,7 +4289,27 @@
     return g.status === 'requested' ? 'waiting' : g.status === 'active' || g.status === 'approved' ? 'open' : 'closed';
   }
   const GRANT_WORDS = { waiting: 'Waiting for approval', open: 'Open', closed: 'Closed' };
-  function grantView(g, today, tzOffsetMinutes) {
+  // R12 #7 the one access approver: the information's owner; when the owner asked for it, the project manager.
+  // The requester never approves their own request (null: someone else must ask).
+  function grantApproverOf(docs, g) {
+    if (!g) return null;
+    const d = get(docs, 'dataElement', g.dataId) || {}, prj = get(docs, 'project', g.projectId) || {};
+    const a = g.requestedBy && g.requestedBy === d.owner ? prj.owner : d.owner;
+    return a && a !== g.requestedBy ? a : null;
+  }
+  // R12: also callable as grantView(docs, g, today, tz) (pages pass docs first); then it names the approver.
+  function grantView(g, today, tzOffsetMinutes, tz2) {
+    let docs = null;
+    if (g && typeof g === 'object' && !('status' in g) && (Array.isArray(g.grant) || Array.isArray(g.project) || Array.isArray(g.person))) { docs = g; g = today; today = tzOffsetMinutes; tzOffsetMinutes = tz2; }
+    const v = grantViewCore(g, today, tzOffsetMinutes);
+    if (docs) {
+      const ap = g && g.status === 'requested' ? grantApproverOf(docs, g) : (g && g.approvedBy) || null;
+      v.approver = ap; v.approverName = ap ? nameOf(docs, ap) : null;
+      if (v.state === 'waiting') v.text = ap ? 'Waiting for ' + nameOf(docs, ap) : 'Nobody else can approve: ask someone else to request it';
+    }
+    return v;
+  }
+  function grantViewCore(g, today, tzOffsetMinutes) {
     const state = grantState(g, today);
     const from = localDay(g && (g.approvedAt || null), tzOffsetMinutes);
     const to = g && isDate(g.expires) ? String(g.expires).slice(0, 10) : null;
@@ -4055,6 +4335,29 @@
     const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(String(w).trim());
     return m ? { date: m[1], from: m[2] ? (m[2].length === 4 ? '0' + m[2] : m[2]) : '' } : null;
   }
+  // R12 #10 launch-day plan validation: each step's plannedStart must be a business day, on the window's day and
+  // between its start and end times (the step must also end by the window's end).
+  function windowEnd(w) { const m = /\d{1,2}:\d{2}\s*[–—-]\s*(\d{1,2}):(\d{2})/.exec(String((w && typeof w === 'object' ? w.end : w) || '')); return m ? String(m[1]).padStart(2, '0') + ':' + m[2] : null; }
+  function hmAdd(hm, mins) { const m = /^(\d{2}):(\d{2})$/.exec(hm || ''); if (!m) return null; const t = +m[1] * 60 + +m[2] + (+mins || 0); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); }
+  function launchPlanCheckCore(project) {
+    const co = (project && project.cutover) || {};
+    let wp = windowParts(co.window); const wEnd = windowEnd(co.window);
+    if (wp && launchWindowProblem(wp.date)) wp = null;   // the window itself must move first (its own message)
+    const problems = [];
+    // a step already done is history: only the steps still to do are checked
+    (Array.isArray(co.tasks) ? co.tasks.filter(Boolean) : []).filter(t => !t.done).forEach(t => {
+      const at = String(t.plannedStart || t.planned || ''); if (!isDate(at)) return;
+      const day = at.slice(0, 10), hm = (/T(\d{2}:\d{2})/.exec(at) || [])[1] || null, name = '“' + (t.task || t.title || 'untitled step') + '”';
+      const off = launchWindowProblem(day);
+      if (off) return problems.push({ taskId: t.id || '', task: t.task || t.title || '', at, why: 'day-off', text: name + ' is set for ' + off + ': pick a business day' });
+      const endHm = hm && t.durationMins ? hmAdd(hm, t.durationMins) : hm;
+      const outside = wp && (day !== wp.date || (hm && wp.from && hm < wp.from) || (hm && wEnd && (hm > wEnd || (endHm && endHm > wEnd))));
+      if (outside) problems.push({ taskId: t.id || '', task: t.task || t.title || '', at, why: 'outside-window',
+        text: name + ' is set for ' + fmtDayLong(day) + (hm ? ', ' + fmtClock(hm) : '') + ', outside the launch window (' + fmtDayLong(wp.date) + (wp.from ? ', ' + fmtClock(wp.from) + (wEnd ? '–' + fmtClock(wEnd) : '') : '') + ')' });
+    });
+    return { ok: !problems.length, problems, text: problems.length ? capFirst(nWord(problems.length, 'launch-day step')) + ' ' + (problems.length === 1 ? 'needs' : 'need') + ' a new time: ' + problems.map(x => x.text).join('; ') + '.' : 'Every launch-day step is on a business day inside the launch window.' };
+  }
+  function launchPlanCheck(docs, prj) { const project = projOf(docs, prj); syncCalendar(docs); return project ? launchPlanCheckCore(project) : { ok: false, problems: [], text: 'This project could not be found.' }; }
   function fmtClock(hm) { const m = /^(\d{1,2}):(\d{2})$/.exec(hm || ''); if (!m) return ''; const h = +m[1]; return (h % 12 || 12) + ':' + m[2] + ' ' + (h < 12 ? 'AM' : 'PM'); }
   function launchGuard(docs, prj, now) {
     const project = projOf(docs, prj);
@@ -4094,6 +4397,11 @@
     const approved = (bu.sectionStatus || []).some(x => x.approver === personId && x.approved);
     return elig || approved ? 'sponsor' : null;
   }
+  // R12 #7 the words for a signer: "project manager", "sponsor" (only project.sponsor), else "approver"
+  function overrideRoleLabel(docs, prj, personId) {
+    const project = projOf(docs, prj); const role = overrideSignerRole(docs, project, personId);
+    return role === 'pm' ? 'project manager' : role === 'sponsor' ? (project && project.sponsor === personId ? 'sponsor' : 'approver') : null;
+  }
   function launchOverrideStatus(docs, prj, now) {
     const project = projOf(docs, prj);
     if (!project) return { needed: false, ok: false, signoffs: [], missing: [], text: '' };
@@ -4102,7 +4410,7 @@
     const docsO = list(docs, 'approval').filter(a => a.projectId === project.id && a.kind === 'launch-override' && a.decision === 'approved' && a.stepUp === true && String(a.at || '') > since);
     const pick = role => latestBy(docsO.filter(a => a.role === role && overrideSignerRole(docs, project, a.approver) === role), 'at');
     const pm = pick('pm'), sp = pick('sponsor');
-    const signoffs = [pm, sp].filter(Boolean).map(a => ({ role: a.role, by: a.approver, name: nameOf(docs, a.approver), at: a.at, reason: a.reason || '' }));
+    const signoffs = [pm, sp].filter(Boolean).map(a => ({ role: a.role, label: overrideRoleLabel(docs, project, a.approver), by: a.approver, name: nameOf(docs, a.approver), at: a.at, reason: a.reason || '' }));
     const ok = !!(pm && sp && pm.approver !== sp.approver);
     const missing = [!pm ? 'pm' : null, !sp ? 'sponsor' : null].filter(Boolean);
     return { needed: !guard.ok, guard, ok: guard.ok || ok, overridden: !guard.ok && ok, signoffs, missing,
@@ -4144,6 +4452,8 @@
   }
 
   return {
+    // R12 (H1)
+    stepTeams, departmentFor, stepDoer, ownerText, withPlan, grantApproverOf, testDepartments, canPassTest, launchPlanCheck, overrideRoleLabel, seedTeamDepartments, teamRouting, unroutedTeams,
     // R11 (G1)
     testingTruth, runAuditText, approvalBar, partTests, lateInfo, blockingOf, grantState, grantView, grantCounts, localDay, launchGuard,
     launchOverrideStatus, overrideSignerRole, doneBeforeDeps, sprintCalendar, heldTests, problemFixDone, GRANT_MAX_DAYS,

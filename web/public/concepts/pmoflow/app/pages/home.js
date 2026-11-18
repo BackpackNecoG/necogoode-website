@@ -69,7 +69,7 @@ function projectTile(j) {
     ${whoLineHTML(j, 2)}</a>`;
 }
 function processTile(p) {
-  const st = flatSteps(p.tobe), dc = changePhrase(p);
+  const st = flatSteps(p.tobe && p.tobe.length ? p.tobe : p.asis), dc = changePhrase(p);   /* R12: a process saved as Today only counts its Today steps */
   const dl = [...new Set(st.flatMap(s => [...(s.data || []), ...(s.subs || []).flatMap(x => x.data || [])]))];
   const notYet = dl.filter(d => availText(d).key === 'missing').length;
   /* R10 §1: the one change phrase (removed steps count), from E().changeSummary */

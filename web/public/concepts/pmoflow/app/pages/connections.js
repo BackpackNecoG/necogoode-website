@@ -160,7 +160,7 @@ function resultHTML(r) {
   return `<div class="cx-result ${r.error ? 'err' : ''}" data-cx-result role="status">${r.error ? esc(r.error) : `<b>${esc(r.title || 'Synced')}</b> ${esc(r.sentence || '')}.${st}`}</div>`;
 }
 
-const RESULT_BADGE = { flagged: ['b-soon', 'Check order'], ok: ['b-done', 'Done'], failed: ['b-late', 'Failed'], refused: ['b-done', 'Refused'], conflict: ['b-soon', 'Conflict'], skipped: ['b-idle', 'Skipped'], ignored: ['b-idle', 'Put back'] };
+const RESULT_BADGE = { held: ['b-soon', 'Waits in review'], flagged: ['b-soon', 'Check order'], ok: ['b-done', 'Done'], failed: ['b-late', 'Failed'], refused: ['b-done', 'Refused'], conflict: ['b-soon', 'Conflict'], skipped: ['b-idle', 'Skipped'], ignored: ['b-idle', 'Put back'] };
 function logHTML(c) {
   const sync = S(), tool = sync.TOOLS[c.tool].name;
   const items = (c.log || []).slice(0, 25);
@@ -168,18 +168,27 @@ function logHTML(c) {
   return `<div class="cx-log" data-cx-log>${items.map(e => {
     const [cls, lbl] = RESULT_BADGE[e.result] || ['b-idle', e.result];
     const dir = e.dir === 'out' ? `PMOFlow → ${tool}` : `${tool} → PMOFlow`;
-    const what = { create: 'Create', update: 'Update', link: 'Link', pull: 'Read changes', apply: 'Apply', conflict: 'Conflict', skip: 'Skip', ignore: 'Keep PMOFlow’s', flag: 'Finished early', 'replay-test': 'Replay test' }[e.op] || e.op;
+    const what = { create: 'Create', update: 'Update', link: 'Link', pull: 'Read changes', apply: 'Apply', conflict: 'Conflict', skip: 'Skip', ignore: 'Keep PMOFlow’s', flag: 'Finished early', held: 'Done held', 'replay-test': 'Replay test' }[e.op] || e.op;
     const open = ui.openLog.has(e.id);
     const tech = e.intent || (e.requests && e.requests.length);
     return `<div class="cx-le"><div class="cx-lh"><span class="badge ${cls}">${esc(lbl)}</span><span class="cx-ld">${esc(dir)}</span>
       <span class="cx-lt"><b>${esc(what)}${e.key ? ' ' + esc(e.key) : ''}</b>${e.title ? ' · ' + esc(e.title) : ''}</span><time>${esc(fmtTime(e.at))}</time></div>
-      <div class="cx-lx">${esc(e.detail || '')}</div>
+      <div class="cx-lx">${esc(e.detail || '')}</div>${e.by ? `<div class="hint cx-lby" data-cx-by>Changed by ${esc(e.by)}</div>` : ''}
       ${tech ? `<details data-cx-tech="${esc(e.id)}" ${open ? 'open' : ''}><summary>Signed request and what the relay calls</summary>
         ${e.intent ? `<div class="hint">Signed intent (HMAC-SHA256, key ${esc(e.intent.kid)}, expires ${esc(fmtTime(e.intent.exp))})</div><pre>${esc(JSON.stringify(e.intent, null, 2))}</pre>` : ''}
         ${(e.requests || []).map(q => `<div class="hint">${esc(q.method)} ${esc(q.url)}</div>${q.body ? `<pre>${esc(JSON.stringify(q.body, null, 2))}</pre>` : ''}`).join('')}</details>` : ''}</div>`;
   }).join('')}</div>`;
 }
 
+/* R12 #3: a Done from the tool that PMOFlow held in review (it would close a problem or make information available).
+   Shown while the tool still says Done and PMOFlow has not finished the task itself. */
+function heldNote(c, wid, it, w) {
+  if (!wid || !w || w.status === 'done') return null;
+  const sync = S();
+  if (sync.pmoStatus(c, it.status) !== 'done') return null;
+  const h = (c.log || []).find(e => e.op === 'held' && e.workItemId === wid);
+  return h ? h.detail : null;
+}
 /* R11 §9: G1's engine helper (the one definition), shown while it is still true */
 function earlyFlag(wid) {
   const eng = window.PMOEngine;
@@ -197,7 +206,8 @@ function simHTML(c, p) {
     return `<div class="cx-si" data-cx-item="${esc(it.key)}"><span class="cx-key">${esc(it.key)}</span>
       <div class="cx-st"><div class="t">${esc(it.title)}</div><div class="s">${esc(who)}${it.due ? ' · due ' + esc(fmt(it.due)) : ''}${(it.deps || []).length ? ' · after ' + esc(it.deps.join(', ')) : ''}</div>
         <div class="s">In PMOFlow: ${w ? `<b data-cx-pmo="${esc(wid)}">${esc(statusName(p, w.status))}</b>` : '<i>deleted</i>'}</div>
-        ${(() => { const t = earlyFlag(wid); return t ? `<div class="s warn cx-flag" data-cx-early="${esc(wid)}" role="note">${esc(t)}.</div>` : ''; })()}</div>
+        ${(() => { const t = earlyFlag(wid); return t ? `<div class="s warn cx-flag" data-cx-early="${esc(wid)}" role="note">${esc(t)}.</div>` : ''; })()}
+        ${(() => { const t = heldNote(c, wid, it, w); return t ? `<div class="s warn cx-flag" data-cx-held="${esc(wid)}" role="note">${esc(t)}</div>` : ''; })()}</div>
       <label class="cx-ss"><span>${esc(T.name)} status</span><select data-cx-simstatus="${esc(it.key)}" aria-label="Status of ${esc(it.key)} in ${esc(T.simName)}">${statuses.concat(statuses.includes(it.status) ? [] : [it.status]).map(s => `<option ${s === it.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label></div>`;
   }).join('')}</div>`;
 }
@@ -240,7 +250,7 @@ function connectedHTML(c) {
     </div>
     <div class="cx-cols">
       <div class="card"><h3>${esc(T.simName)} <span class="sim">simulated</span></h3>
-        <p class="hint" style="margin:0 0 8px">This is what your team sees in ${esc(T.name)}. Change a status here, as someone would in ${esc(T.name)}: it flows back to PMOFlow and the project status updates.</p>
+        <p class="hint" style="margin:0 0 8px">This is what your team sees in ${esc(T.name)}. Change a status here, as the person it is assigned to would in ${esc(T.name)}: it flows back to PMOFlow, the project status updates, and History records it under their ${esc(T.name)} identity. A Done never closes a problem or makes information available on its own: those wait in review until the retest passes or the information’s owner confirms it.</p>
         ${simHTML(c, p)}</div>
       <div class="card"><h3>Sync log <span class="n">${(c.log || []).length}</span></h3>${logHTML(c)}
         <details class="cx-adv"><summary>Security checks</summary>

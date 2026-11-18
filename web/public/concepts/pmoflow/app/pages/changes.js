@@ -7,7 +7,7 @@
    preview comes from running window.PMOEngine on the docs before and after the change. Writes go through
    /api/pmoflow/workspaces/:ws/changes (api/shared/pmoflow-routes-change.js), which writes each edit through the doc store. */
 import { store } from '../store.js';
-import { esc, fmt, fmtTime, link, toast, drawer, av, pname, modal, activityCard, bindActivity } from '../ui.js';
+import { esc, fmt, fmtTime, link, toast, drawer, av, pname, modal, activityCard, bindActivity, stepUp } from '../ui.js';
 
 const C = () => window.PMOChange;
 const E = () => window.PMOEngine;
@@ -55,6 +55,9 @@ const tasksOf = prj => store.list('workItem', w => w.projectId === prj).sort((a,
 const statusBadge = c => `<span class="badge ${STATUS_CLS[c.status] || 'b-idle'}" data-chg-status="${esc(c.status)}">${esc(C().STATUS_LABEL[c.status] || c.status)}</span>`;
 const changeHref = c => `/project/${encodeURIComponent(c.projectId)}/changes?change=${encodeURIComponent(c.id)}`;
 const catLabel = id => (C().CATEGORIES.find(x => x.id === id) || {}).label || '';
+/* R12 #13: "project manager", "sponsor", "project manager of ERP Upgrade Readiness" */
+const roleOf = a => C().roleText(a, store.state.docs);
+const prjHref = (prj, id) => `/project/${encodeURIComponent(prj)}/changes?change=${encodeURIComponent(id)}`;
 
 function deltaDays(a, b) { return a && b && a !== b ? E().businessDaysBetween(a, b) : 0; }
 function impactDetailsHTML(im, opts) {
@@ -74,40 +77,49 @@ function impactDetailsHTML(im, opts) {
     </div>
     <div class="chg-lists">
       <div class="chg-list" data-imp-knock><h4>Tasks that move as a knock-on <span class="n">${im.knockOnCount || 0}</span></h4>${ko.length ? `<ul>${ko.map(k => `<li><span>${esc(k.title)}${k.projectId !== im.projectId ? ` <small class="hint">(${pjName(k.projectId)})</small>` : ''}${k.dependent ? ' <small class="chip">waits on it</small>' : ''}</span><span class="hint">${pn(k.owner)} · ${esc(fmt(k.from))} → <b class="${k.lateAfter ? 'fail' : ''}">${esc(fmt(k.to))}</b></span></li>`).join('')}</ul>` : '<div class="hint">None. No other task moves.</div>'}</div>
+      ${(im.crossProjects || []).length ? `<div class="chg-list" data-imp-cross><h4>Other projects this moves <span class="n">${im.crossProjects.length}</span></h4><ul>${im.crossProjects.map(x => `<li><span><b>${esc(x.name)}</b> · ${plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task')}</span><span class="hint">${x.owner ? esc(pname(x.owner)) + ' (its project manager) approves too' : 'no project manager to ask'}${x.finish && x.finish.before && x.finish.after && x.finish.before !== x.finish.after ? ` · expected finish ${esc(fmt(x.finish.before))} → ${esc(fmt(x.finish.after))}` : ''}</span></li>`).join('')}</ul></div>` : ''}
       <div class="chg-list" data-imp-people><h4>People affected <span class="n">${(im.people || []).length}</span></h4>${(im.people || []).length ? `<ul>${im.people.map(p => `<li><span>${av(p.id)} ${esc(p.name)}</span><span class="hint">${esc(p.why.join('; '))}</span></li>`).join('')}</ul>` : '<div class="hint">Nobody.</div>'}</div>
       <div class="chg-list" data-imp-approvals><h4>Department approvals that reopen <span class="n">${(im.approvalsReopen || []).length}</span></h4>${(im.approvalsReopen || []).length ? `<ul>${im.approvalsReopen.map(a => `<li><span>${esc(a.bu)}</span><span class="hint">${a.approverName ? esc(a.approverName) + ' approves again' : 'needs approval again'}</span></li>`).join('')}</ul>` : '<div class="hint">None. Every approval stays valid.</div>'}</div>
       <div class="chg-list" data-imp-tests><h4>Tests to run again <span class="n">${im.testsRerunCount || 0}</span></h4>${(im.testsRerun || []).length ? `<ul>${im.testsRerun.map(t => `<li><span>${esc(t.label)}</span></li>`).join('')}</ul>${opts.testsNote === false ? '' : '<div class="hint">Passed tests on the information used by the steps whose work changed.</div>'}` : '<div class="hint">None.</div>'}</div>
     </div>`;
 }
 function editsListHTML(c) {
+  if (c.linkedFrom) {
+    const ko = c.knockOn || [];
+    return ko.length ? `<ul class="chg-edits" data-chg-edits data-chg-linked-tasks>${ko.map(k => `<li>“${esc(k.title)}”: expected finish ${esc(fmt(k.from))} → <b class="${k.lateAfter ? 'fail' : ''}">${esc(fmt(k.to))}</b> <small class="hint">(knock-on, ${esc(pname(k.owner))})</small></li>`).join('')}</ul>` : '<div class="hint">No task here moved.</div>';
+  }
   const ed = (c.edits || []);
   if (!ed.length) return '<div class="hint">No edits.</div>';
   return `<ul class="chg-edits" data-chg-edits>${ed.map(e => `<li class="${e.auto ? 'auto' : ''}">${esc(C().editText(e, store.state.docs, E()))}${e.auto ? ' <small class="hint">(automatic)</small>' : ''}</li>`).join('')}</ul>`;
 }
 function decisionsHTML(c) {
   const rows = [`<li>${av(c.requestedBy)} <span><b>${esc(pname(c.requestedBy))}</b> proposed it · ${esc(fmtTime(c.requestedAt))}</span></li>`];
-  (c.approvers || []).forEach(a => rows.push(`<li>${av(a.person)} <span><b>${esc(pname(a.person))}</b> (${esc(C().ROLE_LABEL[a.role])}) ${a.decision ? `${a.decision === 'approved' ? 'approved' : 'rejected'}${a.note ? ': “' + esc(a.note) + '”' : ''} · ${esc(fmtTime(a.at))}` : '<i>has not decided yet</i>'}</span></li>`));
+  (c.approvers || []).forEach(a => rows.push(`<li>${av(a.person)} <span><b>${esc(pname(a.person))}</b> (${esc(roleOf(a))}) ${a.decision ? `${a.decision === 'approved' ? 'approved' : 'rejected'}${a.note ? ': “' + esc(a.note) + '”' : ''} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="chg-mfa">extra sign-in check done</span>' : ''}` : '<i>has not decided yet</i>'}</span></li>`));
   if (c.appliedAt) rows.push(`<li>${av(c.appliedBy)} <span>Applied by <b>${esc(pname(c.appliedBy))}</b> · ${esc(fmtTime(c.appliedAt))}</span></li>`);
   return `<ul class="chg-trail" data-chg-trail>${rows.join('')}</ul>`;
 }
-function entryHTML(c, open) {
+function entryHTML(c, open, here) {
   const me = store.state.me;
+  /* R12 #13: an entry linked from another project (applied knock-on), or another project's change still waiting */
+  const from = c.linkedFrom ? c.linkedFrom : (here && c.projectId !== here ? { projectId: c.projectId, changeId: c.id, projectName: (projectOf(c.projectId) || {}).name || 'another project' } : null);
+  const fromChip = from ? `<a class="chip chg-from" href="${link(prjHref(from.projectId, from.changeId))}" data-link data-chg-from="${esc(from.projectId)}">${c.linkedFrom ? 'Knock-on from' : 'Proposed on'} ${esc(from.projectName)}</a>` : '';
   const canDecide = c.status === 'proposed' && C().pendingApprovers(c).some(a => a.person === me);
   const wait = c.status === 'proposed' ? C().waitingText(c, store.state.docs) : '';
   const tol = c.tolerance ? (c.tolerance.within ? '<span class="chip chg-ok">Within tolerance</span>' : `<span class="chip chg-over" title="${esc(c.tolerance.reasons.join(' '))}">Needed approval</span>`) : '';
   return `<details class="chg-entry" data-chg="${esc(c.id)}" ${open || openIds.has(c.id) ? 'open' : ''}>
-    <summary><div class="chg-sum"><div class="chg-sum-t"><b data-chg-title>${esc(c.title)}</b>${statusBadge(c)}${tol}</div>
+    <summary><div class="chg-sum"><div class="chg-sum-t"><b data-chg-title>${esc(c.title)}</b>${statusBadge(c)}${c.linkedFrom ? '' : tol}${fromChip}</div>
       <div class="chg-sum-s">“${esc(c.reason)}”${c.category ? ` · ${esc(catLabel(c.category))}` : ''} · ${esc(pname(c.requestedBy))} · ${esc(fmtTime(c.requestedAt))}</div>
       ${c.impact ? `<div class="chg-sum-i" data-chg-sentence>${esc(c.impact.sentence)}</div>` : ''}
       ${wait ? `<div class="chg-sum-w" data-chg-waiting>${esc(wait)}.</div>` : ''}${c.applyError ? `<div class="banner" style="margin:6px 0 0">${esc(c.applyError)}</div>` : ''}</div></summary>
     <div class="chg-body">
-      ${canDecide ? `<div class="chg-decide" data-chg-decide-box><span>You decide this change as ${esc(C().pendingApprovers(c).filter(a => a.person === me).map(a => C().ROLE_LABEL[a.role]).join(' and '))}.</span><span class="chg-acts"><button class="btn primary" data-chg-approve="${esc(c.id)}">Approve and apply</button><button class="btn danger" data-chg-reject="${esc(c.id)}">Reject</button></span></div>` : ''}
+      ${canDecide ? `<div class="chg-decide" data-chg-decide-box><span>You decide this change as ${esc([...new Set(C().pendingApprovers(c).filter(a => a.person === me).map(roleOf))].join(' and '))}. Approving asks for the extra sign-in check.</span><span class="chg-acts"><button class="btn primary" data-chg-approve="${esc(c.id)}">Approve and apply</button><button class="btn danger" data-chg-reject="${esc(c.id)}">Reject</button></span></div>` : ''}
       ${c.status === 'approved' ? `<div class="chg-decide"><span>Approved but not applied yet.</span><span class="chg-acts"><button class="btn primary" data-chg-apply="${esc(c.id)}">Apply now</button></span></div>` : ''}
       <h4>What changes</h4>${editsListHTML(c)}
       <h4>Impact ${c.status === 'applied' ? 'when it was applied' : c.status === 'rejected' ? 'it would have had' : 'if applied'}</h4>${impactDetailsHTML(c.impact)}
       ${c.tolerance && !c.tolerance.within ? `<div class="hint chg-why">Why it needed approval: ${esc(c.tolerance.reasons.join(' '))}</div>` : ''}
       <h4>Decisions</h4>${decisionsHTML(c)}
-      ${c.status === 'applied' ? `<div class="chg-plans" data-chg-plans><span>Saved plans: <b>${esc((c.baselines || {}).beforeLabel || 'before')}</b> and <b>${esc((c.baselines || {}).afterLabel || 'after')}</b></span><button class="btn sm" data-chg-compare="${esc(c.id)}">Compare before and after</button></div>` : c.status === 'rejected' ? '<div class="hint" data-chg-nothing>Rejected, so nothing in the plan changed.</div>' : ''}
+      ${c.linkedFrom ? `<div class="chg-plans" data-chg-linked><span>Recorded here because a plan change on <b>${esc(c.linkedFrom.projectName)}</b> moves work in this project.</span><a class="btn sm" href="${link(prjHref(c.linkedFrom.projectId, c.linkedFrom.changeId))}" data-link>Open the original change</a></div>`
+        : c.status === 'applied' ? `<div class="chg-plans" data-chg-plans><span>Saved plans: <b>${esc((c.baselines || {}).beforeLabel || 'before')}</b> and <b>${esc((c.baselines || {}).afterLabel || 'after')}</b></span><button class="btn sm" data-chg-compare="${esc(c.id)}">Compare before and after</button></div>` : c.status === 'rejected' ? '<div class="hint" data-chg-nothing>Rejected, so nothing in the plan changed.</div>' : ''}
     </div></details>`;
 }
 
@@ -126,7 +138,7 @@ export function renderChangesSection(projectId, opts) {
     ${mine.length ? `<div class="card chg-waiting" data-chg-mine><h3>Waiting for your decision <span class="n">${mine.length}</span></h3>${mine.map(c => `<a class="row click" href="${link(changeHref(c))}" data-link data-chg-goto="${esc(c.id)}"><div><div class="t">${esc(c.title)}</div><div class="s">${esc(c.impact ? c.impact.sentence : c.reason)}</div></div></a>`).join('')}</div>` : ''}
     <div class="card chg-log" data-chg-log><div class="chg-log-h"><h3>Plan changes <span class="n" data-chg-count>${all.length}</span></h3>
       <span class="chg-acts">${opts.standalone ? `<button class="btn sm primary" data-chg-open="${esc(projectId)}">Change the plan</button>` : ''}${all.length ? `<button class="btn sm" data-chg-csv="${esc(projectId)}">Export CSV</button>` : ''}</span></div>
-      ${all.length ? all.map(c => entryHTML(c, c.id === focus)).join('') : '<div class="empty" data-chg-none>No plan changes yet. When dates, owners, work, scope, budget or the deadline change, use “Change the plan” so the reason and the impact are kept.</div>'}</div>
+      ${all.length ? all.map(c => entryHTML(c, c.id === focus, projectId)).join('') : '<div class="empty" data-chg-none>No plan changes yet. When dates, owners, work, scope, budget or the deadline change, use “Change the plan” so the reason and the impact are kept.</div>'}</div>
   </section>`;
 }
 
@@ -170,9 +182,15 @@ async function decide(id, decision, btn) {
     if (r.action !== 'reject') return;
     note = (r.form.note || '').trim();
   }
+  /* R12 #4: approving needs the extra sign-in check; the server refuses an approval without it */
+  let su = null;
+  if (decision === 'approve') {
+    if (!(await stepUp('approve this plan change'))) { toast('Not approved: the extra sign-in check was not completed.'); return; }
+    su = { method: 'simulated-mfa', at: new Date().toISOString() };
+  }
   if (btn) btn.disabled = true;
   try {
-    const r = await api('POST', `/${encodeURIComponent(id)}/decide`, { decision, note });
+    const r = await api('POST', `/${encodeURIComponent(id)}/decide`, Object.assign({ decision, note }, su ? { stepUp: su } : {}));
     await refresh();
     toast(r.change.status === 'applied' ? 'Approved and applied' : r.change.status === 'rejected' ? 'Plan change rejected' : r.error ? 'Approved, but not applied: ' + r.error : 'Approved. Waiting for the next approver.');
   } catch (e) { if (btn) btn.disabled = false; toast(e.message); }
@@ -293,7 +311,7 @@ export async function openChangeWizard(projectId, preset) {
   }
   function step2() {
     const im = S.im, need = S.need;
-    const who = need.approvers.map(a => `${pname(a.person)} (${C().ROLE_LABEL[a.role]})${a.person === store.state.me ? ' — that’s you' : ''}`);
+    const who = need.approvers.map(a => `${pname(a.person)} (${roleOf(a)})${a.person === store.state.me ? ' — that’s you' : ''}`);
     return `<p class="chg-sentence" data-chg-preview-sentence>${esc(im.sentence)}</p>
       ${need.within ? '<div class="chg-verdict ok" data-chg-verdict="within">Within tolerance: it applies as soon as you confirm.</div>'
         : `<div class="chg-verdict over" data-chg-verdict="approval"><b>Needs approval from ${esc(who.join(' and '))}.</b><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}
@@ -327,10 +345,17 @@ export async function openChangeWizard(projectId, preset) {
     return true;
   }
   async function submit() {
+    /* R12 #4: when you are one of the approvers, your own approval counts only with the extra sign-in check */
+    let su = null;
+    if (S.need && !S.need.within && S.need.approvers.some(a => a.person === store.state.me)) {
+      if (await stepUp('approve your own plan change')) su = { method: 'simulated-mfa', at: new Date().toISOString() };
+      else toast('Sent without your approval: approve it from the log after the extra sign-in check.');
+    }
     S.busy = true; draw();
     try {
       const body = { change: { projectId, title: S.built.title, reason: S.reason, category: S.category || null, source: preset.source || 'manual', edits: S.built.edits.filter(e => !e.auto).map(e => {
         const o = { op: e.op, type: e.type, id: e.id }; if (e.op === 'set') { o.field = e.field; o.to = e.to; } if (e.op === 'add') { o.data = e.data; if (e.fromProcess) o.fromProcess = true; } return o; }), ackSteps: preset.ackSteps } };
+      if (su) body.stepUp = su;
       const r = await api('POST', '', body);
       close();
       await refresh();

@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -32,7 +32,7 @@ function projectRow(j) {
     <td>${summaryPill(summaryOf(j))}</td>
     <td><div class="pmo-prog"><div class="bar" style="width:110px"><i style="width:${s.pct}%"></i></div><b>${s.pct}%</b></div><div class="hint">${s.done}/${s.total} done</div></td>
     <td class="pmo-nowrap" data-when>${when}</td>
-    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}" ${nb ? `title="${esc(blockingInfo(t).text)}"` : ''}><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && t.stepsLeft != null ? ` · <b data-t="steps">${t.stepsLeft}</b> launch step${t.stepsLeft === 1 ? '' : 's'} left` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
+    <td class="pmo-nowrap"><span class="${t.late ? 'fail' : ''}"><b data-t="late">${t.late}</b> late</span>${t.late ? `<div class="hint" data-late-breakdown>${t.pastDue} past due · ${t.finishAfterDue} will finish after the due date</div>` : ''}<div class="hint"><span class="${nb ? 'fail' : ''}" ${nb ? `title="${esc(blockingInfo(t).text)}"` : ''}><b data-t="blockers">${nb}</b> blocking</span>${j.status !== 'live' && launchLeft(t).text ? ` · <span data-t="checks" data-n="${launchLeft(t).n}">${esc(launchLeft(t).text)}</span>` : ''}</div>${t.advancedNote && j.status !== 'live' ? `<div class="hint pmo-advnote" data-adv-note>${esc(t.advancedNote)}</div>` : ''}</td>
     <td class="pmo-nowrap pmo-num">${t.cost.show ? `<span data-t="cost" class="${c.planned && c.forecast > c.planned ? 'fail' : ''}">${esc(money(c.forecast))}</span><div class="hint">budget <span data-t="planned">${c.planned ? esc(money(c.planned)) : 'not set'}</span> · spent <span data-t="actual">${esc(money(c.actual))}</span></div>` : '<span class="hint">No budget or rates</span>'}</td>
     <td>${j.status === 'live' ? `<span class="badge b-done">Launched</span><div class="hint">${rel ? esc(fmt(rel.at)) : ''}</div>` : `<a class="badge b-idle" href="${link('/release/' + encodeURIComponent(j.id))}" data-link>Not launched ›</a>`}</td></tr>`;
 }
@@ -85,12 +85,12 @@ const evCells = ev => ev ? `<td class="pmo-num" data-ev-spi><b class="${idxCls(e
 /* ---------------------------------------------------------------- R6: portfolio CSV */
 export function portfolioCSVRows(projects) {
   /* R9: every value from projectTruth; one late count (with its Advanced breakdown), business days, Expected cost */
-  const head = ['Program', 'Project', 'Project manager', 'Launch owner', 'Status', 'Status sentence', 'Progress %', 'Work done', 'Work total', 'Late', 'Past due', 'Will finish after due date', 'Blocking', 'First to act', 'Launch steps left', 'Expected finish', 'Deadline', 'Buffer (business days)', 'Planned budget', 'Actual cost', 'Expected cost', 'PV', 'EV', 'SPI', 'CPI'];
+  const head = ['Program', 'Project', 'Project manager', 'Launch owner', 'Status', 'Status sentence', 'Progress %', 'Work done', 'Work total', 'Late', 'Past due', 'Will finish after due date', 'Blocking', 'First to act', 'Launch checks not passed', 'Expected finish', 'Deadline', 'Buffer (business days)', 'Planned budget', 'Actual cost', 'Expected cost', 'PV', 'EV', 'SPI', 'CPI'];
   const rows = byProgram(projects).flatMap(g => g.projects.map(j => {
     const t = truthOf(j), ev = t.ev || {};
     const n = v => v == null ? '' : Math.round(v * 100) / 100;
     const first = whoActs(j, 1)[0];
-    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, j.status === 'live' ? 0 : blockingCount(t), first ? whoName(first) : '', j.status === 'live' ? 0 : (t.stepsLeft == null ? '' : t.stepsLeft), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
+    return [g.program, j.name, pname(j.owner), pname(relMgr(j)), t.label, t.sentence, t.pct, t.done, t.total, t.late, t.pastDue, t.finishAfterDue, j.status === 'live' ? 0 : blockingCount(t), first ? whoName(first) : '', j.status === 'live' ? 0 : (launchLeft(t).n == null ? '' : launchLeft(t).n), t.total || j.status === 'live' ? (t.forecast || '') : '', j.target || '', t.buffer == null ? '' : t.buffer, t.cost.planned || '', t.cost.show ? Math.round(t.cost.actual) : '', t.cost.show ? Math.round(t.cost.forecast) : '', n(ev.pv), n(ev.ev), n(ev.spi), n(ev.cpi)];
   }));
   return [head, ...rows];
 }
@@ -399,15 +399,27 @@ function simpleCard(j) {
     <div class="pmo-sline" data-pcard-facts>${factsHTML(j)}</div>
     ${who || (j.status === 'live' ? '' : '<div class="pmo-who" data-who><span class="hint">Nobody needs to act right now.</span></div>')}</a>`;
 }
+/* R12 #7: the status tiles count each project under the label it actually shows. "Some tasks late" counts only projects
+   labelled so; another amber label ("Behind on effort", "Launch day is a day off") gets its own tile and is never
+   counted as late. */
+export function labelCounts(sums) {
+  const k = { red: 0, amber: 0, green: 0, none: 0, live: 0 }, other = new Map();
+  sums.forEach(sm => {
+    if (sm.k === 'amber' && sm.label !== RAG_LBL.amber) { other.set(sm.label, (other.get(sm.label) || 0) + 1); return; }
+    k[sm.k] = (k[sm.k] || 0) + 1;
+  });
+  k.other = [...other.entries()].map(([label, n]) => ({ label, n }));
+  return k;
+}
 function simpleRender(projects) {
-  const k = { red: 0, amber: 0, green: 0, none: 0, live: 0 };
-  const sums = projects.map(p => { const sm = summaryOf(p); k[sm.k] = (k[sm.k] || 0) + 1; return sm; });
+  const sums = projects.map(p => summaryOf(p));
+  const k = labelCounts(sums);
   const order = { red: 0, amber: 1, none: 2, green: 3, live: 4 };
   const sorted = projects.map((p, i) => ({ p, sm: sums[i] })).sort((a, b) => (order[a.sm.k] ?? 5) - (order[b.sm.k] ?? 5)).map(x => x.p);
   const over = workloadRows().filter(r => r.overloaded);
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › Portfolio</div><h1>Portfolio</h1>
       <p>How every project is doing, and who needs to act.</p></div>
-    <div class="hdr-side"><div class="kpis" data-kpi-rag><div class="kpi"><b class="fail">${k.red}</b><span>${esc(RAG_LBL.red)}</span></div><div class="kpi"><b class="warn">${k.amber}</b><span>${esc(RAG_LBL.amber)}</span></div><div class="kpi"><b class="pass">${k.green}</b><span>On track</span></div>${k.none ? `<div class="kpi"><b>${k.none}</b><span>Not planned</span></div>` : ''}${k.live ? `<div class="kpi"><b>${k.live}</b><span>Launched</span></div>` : ''}</div>
+    <div class="hdr-side"><div class="kpis" data-kpi-rag><div class="kpi"><b class="fail">${k.red}</b><span>${esc(RAG_LBL.red)}</span></div><div class="kpi" data-kpi-late><b class="warn">${k.amber}</b><span>${esc(RAG_LBL.amber)}</span></div>${k.other.map(o => `<div class="kpi" data-kpi-other="${esc(o.label)}"><b class="warn">${o.n}</b><span>${esc(o.label)}</span></div>`).join('')}<div class="kpi"><b class="pass">${k.green}</b><span>On track</span></div>${k.none ? `<div class="kpi"><b>${k.none}</b><span>Not planned</span></div>` : ''}${k.live ? `<div class="kpi"><b>${k.live}</b><span>Launched</span></div>` : ''}</div>
       <button class="btn primary" data-new-project>+ New project</button></div></section>
     ${projects.length ? `<div class="pmo-pcards">${sorted.map(simpleCard).join('')}</div>` : '<div class="card" style="margin-top:14px"><div class="empty">No projects yet. <button class="btn sm primary" data-new-project>+ New project</button></div></div>'}
     ${over.length ? `<div class="card pmo-stack" data-overloaded><h3>Too much work</h3><div class="s pmo-inl">${over.map(r => `${av(r.pid)} <b>${esc(pname(r.pid))}</b>`).join(', ')} ${over.length === 1 ? 'has' : 'have'} more work in the next two weeks than time to do it.</div></div>` : ''}
@@ -419,12 +431,12 @@ export function render() {
   const projects = store.list('project');
   if (isSimple()) return simpleRender(projects);
   const totals = projects.map(p => ({ p, s: projectStats(p.id) }));
-  const rc = { red: 0, amber: 0, green: 0, live: 0, none: 0 }; totals.forEach(({ p }) => { rc[truthOf(p).k] = (rc[truthOf(p).k] || 0) + 1; });
+  const rc = labelCounts(projects.map(p => summaryOf(p)));
   const openWork = totals.reduce((a, x) => a + (x.s.total - x.s.done), 0);
   const openRisks = store.list('risk', r => r.status !== 'closed').length;
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> › Portfolio</div><h1>Portfolio</h1>
       <p>Every project’s health in one place, grouped by program: progress, expected finish against the deadline, cost against budget, burndown, who is overloaded, what could go wrong, and how far the plan has moved since it was saved.</p></div>
-    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>${esc(RAG_LBL.red)} · ${esc(RAG_LBL.amber.toLowerCase())} · ${esc(RAG_LBL.green.toLowerCase())}${rc.none ? ' · not planned' : ''}</span></div><div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
+    <div class="hdr-side"><div class="kpis"><div class="kpi"><b>${projects.length}</b><span>Projects</span></div><div class="kpi" data-kpi-rag><b><em class="pmo-rc fail">${rc.red}</em> · <em class="pmo-rc warn">${rc.amber}</em> · <em class="pmo-rc pass">${rc.green}</em>${rc.none ? ` · <em class="pmo-rc pmo-muted">${rc.none}</em>` : ''}</b><span>${esc(RAG_LBL.red)} · ${esc(RAG_LBL.amber.toLowerCase())} · ${esc(RAG_LBL.green.toLowerCase())}${rc.none ? ' · not planned' : ''}</span></div>${rc.other.map(o => `<div class="kpi" data-kpi-other="${esc(o.label)}"><b class="warn">${o.n}</b><span>${esc(o.label)}</span></div>`).join('')}<div class="kpi"><b>${openWork}</b><span>Open work items</span></div><div class="kpi"><b>${openRisks}</b><span>Open risks</span></div></div></div></section>
     <div class="pmo-stack">${projectsHTML(projects)}</div>
     <div class="two pmo-top">${financialsHTML(projects)}${burnHTML(projects)}</div>
     <div class="two pmo-top">${workloadHTML()}${reportHTML(projects)}</div>
@@ -451,7 +463,8 @@ export function bind(root) {
   /* R10.1: the period picker re-counts every project and refreshes an open report */
   const pick = r => { setPfRange(r); const sel = root.querySelector('[data-rep-prj]'); const prj = sel ? sel.value : st.repPrj; if (prj && reports[prj] && reports[prj].data) generate(prj); else rerender(); };
   on('[data-rep-preset]', el => pick({ preset: el.dataset.repPreset }));
-  on('[data-rep-apply]', () => { const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-to]'); const from = f && f.value, to = (t && t.value) || today();
+  bindPeriodPicker(root);
+  on('[data-rep-apply]', () => { const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-end]'); const from = f && f.value, to = (t && t.value) || today();
     if (!from) { toast('Choose a start date'); return; } pick({ preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from }); });
   if (!pfEvents.loaded) { pfEvents.loaded = true; reportEvents().then(list => { pfEvents.list = list; }); }   /* used from the next render on */
   on('[data-gen-rep]', () => { const sel = root.querySelector('[data-rep-prj]'); generate(sel ? sel.value : st.repPrj); });

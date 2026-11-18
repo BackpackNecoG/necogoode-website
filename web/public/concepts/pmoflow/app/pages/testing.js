@@ -1,7 +1,7 @@
 /* Testing page (stream R): data profiling (statistics only), spec drift, generated test cases, process UAT scripts,
    step-level test runs with evidence and defects, discovered requirements. Route: /testing/:prj */
 import { store } from '../store.js';
-import { E, esc, fmt as fmtDay, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues } from '../ui.js';
+import { E, esc, fmt as fmtDay, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues, stepUp } from '../ui.js';
 
 /* R8: timestamps render as the browser's LOCAL calendar date; plain YYYY-MM-DD dates stay as they are. */
 const fmt = s => s && /T\d/.test(String(s)) && !isNaN(new Date(s)) ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : fmtDay(s);
@@ -694,6 +694,10 @@ function simpleRender(prj, focusDe) {
   const row2 = d => { const n = casesFor(d.id).length; const prob = openProblemFor(prj, d.id);
     return `<li class="ts-sr" data-s2="${esc(d.id)}"><div class="ts-sr-t"><b>${esc(d.name)}</b><small>${n ? plural(n, 'test') : 'No tests yet'}</small>${genList(d, adv)}</div><div class="ts-sr-a">${prob ? '<span class="ts-prob-chip" data-has-problem>Has a problem</span>' : n && !fieldCoverage(d).missing.length ? '<span class="ts-okt">✓ Ready</span>' : ''}</div></li>`; };
   const stepCard = (n, title, done, body, isCur, extra) => `<li class="ts-step ${done ? 'done' : ''} ${isCur ? 'cur' : ''}" data-guide-step="${n}" data-step-done="${done ? 1 : 0}" ${extra || ''}><div class="ts-step-h"><span class="ts-num">${done ? '✓' : n}</span><b>${title}</b>${done ? '<span class="ts-okt">Done</span>' : ''}</div>${body}</li>`;
+  /* R12 #5: "Try it out" shows its own stage (projectTruth.testing.stages[0]); Business check shows the one count */
+  const t1 = f.try1 || { passed: 0, total: 0, failed: 0 };
+  const t1NotRun = Math.max(0, t1.total - t1.passed - t1.failed);
+  const tryLine = `${t1.passed} of ${plural(t1.total, 'test')} passed${t1.failed ? ` · ${t1.failed} ${t1.failed === 1 ? 'needs' : 'need'} fixing` : ''}${t1NotRun ? ` · ${t1NotRun} not run yet` : ''}`;
   const countLine = `${f.passed} of ${plural(f.total, 'test')} passed${f.failed ? ` · ${f.failed} ${f.failed === 1 ? 'needs' : 'need'} fixing` : ''}${f.notRun ? ` · ${f.notRun} not run yet` : ''}`;
   const big = `<div class="ts-big" data-tests-number="${f.passed}/${f.total}"><b>${f.passed} of ${f.total}</b><span>tests passed</span></div>`;
   const done = f.stage === 'done' || f.sum.done;
@@ -710,7 +714,7 @@ function simpleRender(prj, focusDe) {
           <div class="ts-step-a"><button class="btn ${cur === 2 ? 'primary' : ''} rs-big" data-s-create ${ui.creating ? 'disabled' : ''}>${ui.creating ? 'Adding the tests…' : 'Add tests'}</button><span class="hint" data-s2-count="${f.haveTests}/${f.needTests}">${f.haveTests} of ${f.needTests} ${f.needTests === 1 ? 'has' : 'have'} tests</span></div>
           ${fold(des.map(row2), `See the tests for each piece of information (${des.length})`, 's2')}`, cur === 2)}
         ${stepCard(des.length ? 3 : 1, gt('Try it out', 'sit'), step3Done, `<p class="ts-help">Run the tests in the test system and mark each one passed or failed.</p>
-          <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record="sit">Record what happened</button><span class="hint" data-stage="try" data-stage-done="${step3Done ? 1 : 0}">${countLine}</span></div>`, cur === 3)}
+          <div class="ts-step-a"><button class="btn ${cur === 3 ? 'primary' : ''}" data-s-record="sit">Record what happened</button><span class="hint" data-stage="try" data-stage-done="${step3Done ? 1 : 0}" data-try-count="${t1.passed}/${t1.total}">${tryLine}</span></div>`, cur === 3)}
         ${stepCard(des.length ? 4 : 2, gt('Business check', 'uat'), step4Done, `<p class="ts-help">The people who run the process try each test and mark it passed or failed. A failed test becomes a problem for the owner to fix.</p>
           <div class="ts-step-a"><button class="btn ${cur === 4 ? 'primary' : ''}" data-s-record="uat">Record what happened</button><span class="hint" data-stage="signoff" data-stage-done="${step4Done ? 1 : 0}" data-s-progress>${countLine}</span></div>`, cur === 4)}
       </ol>` : ''}
@@ -1003,7 +1007,9 @@ async function recordRun(prj, opts) {
   /* R11 §2 separation of duties, shown here as the server enforces it: you pass only tests assigned to you or unassigned
      ones, and never a test held by an open problem (engine heldTests). Such rows can't be selected for a bulk pass. */
   const heldMap = eng('heldTests', store.state.docs, prj.id) || {};
-  const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : '';
+  /* R12 #4: in a business check, an unassigned test is passed only by the department that owns its part */
+  const deptLock = id => { if (env0 !== 'uat') return ''; const b = eng('canPassTest', store.state.docs, prj.id, id, me); return b && b.rule === 'department' ? b.text : ''; };
+  const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : deptLock(id);
   const lockAttr = (id, tester) => { const t = passLock(id, tester); return t ? ` data-pass-locked="${esc(t)}"` : ''; };
   const lockHint = (id, tester) => { const t = passLock(id, tester); return t ? `<small class="hint" data-lock-hint>${esc(t)}</small>` : ''; };
   const pick = (k, label, locked) => locked ? '<span class="ts-pick" aria-hidden="true"></span>' : `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
@@ -1117,11 +1123,23 @@ async function recordRun(prj, opts) {
   if (prev) doc.retestOf = prev.id;
   const cyc = cycles.find(c => c.id === r.form.cycleId && c.env === env);
   if (cyc) doc.cycleId = cyc.id;
-  try { await store.save('testRun', id, doc,
-    prev ? `Recorded ${envTxt(env)} retest (cycle ${cycle}) for ${prj.name}: ${fresh.size} retested, ${fails.length} still failing`
-      : `Recorded ${envTxt(env)} test run for ${prj.name}${cyc ? ` in “${cyc.name}”` : ''}: ${results.length} of ${total} run, ${fails.length} failed`);
+  /* R12 #4: a business-check pass is the assignee's or the owning department's (the server refuses the rest);
+     passing several at once needs the extra sign-in check */
+  const newPasses = results.filter(x => x.outcome === 'pass' && !x.carriedFrom);
+  if (env === 'uat') {
+    const E_ = E();
+    const refused = E_ && E_.canPassTest ? newPasses.map(x => E_.canPassTest(store.state.docs, prj.id, x.caseId || x.scriptId, me)).filter(Boolean) : [];
+    if (refused.length) { ui.runOpen.delete(id); toast(refused[0].text + (refused.length > 1 ? ` (${refused.length} tests)` : '')); return; }
+    if (newPasses.length > 1) {
+      if (!(await stepUp(`pass ${newPasses.length} tests at once`))) { ui.runOpen.delete(id); toast('Not saved: the extra sign-in check was not completed.'); return; }
+      doc.stepUp = true;
+    }
+  }
+  /* R12 #5: the audit line uses the one testing count (runAuditText), never a local count */
+  const audit = (E() && E().runAuditText) ? E().runAuditText(store.state.docs, prj.id, doc) : `Recorded ${envTxt(env)} test run for ${prj.name}`;
+  try { await store.save('testRun', id, doc, (prev ? `Retest cycle ${cycle}. ` : '') + audit);
   } catch (e) { ui.runOpen.delete(id); toast('Not saved: ' + ((e && e.message) || 'the server refused the results')); return; }
-  toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : opts.simple ? `Saved: ${results.filter(x => x.outcome === 'pass').length} passed${fails.length ? `, ${fails.length} failed` : ''}` : `${envTxt(env)} run saved · ${results.length}/${total} run · ${fails.length} fail${fails.length === 1 ? '' : 's'}`);
+  toast(prev ? `Retest cycle ${cycle} saved · ${fails.length} still failing` : opts.simple ? `Saved: ${results.filter(x => x.outcome === 'pass').length} passed${fails.length ? `, ${fails.length} failed` : ''}` : audit.replace(/^Recorded /, 'Saved ').replace(/ for [^:]+:/, ':'));
   await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
 }

@@ -44,6 +44,10 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const wiz = '.chg-wiz';
   const expand = async sel => { await page.$$eval(sel || '[data-chg]', els => els.forEach(d => { if (!d.open) d.open = true; })); await settle(250); };
   const next = async () => { await page.click(`${wiz} [data-w="next"]`); await settle(300); };
+  /* R12 #4: the extra sign-in check (simulated: any 6 digits) */
+  const stepUpOk = async () => { await page.waitForSelector('.overlay .modal input[name="code"]', { timeout: 10000 }); await page.fill('.overlay .modal input[name="code"]', '123456'); await page.click('.overlay [data-act="verify"]'); await settle(300); };
+  const maybeStepUp = async () => { try { await page.waitForSelector('.overlay .modal input[name="code"]', { timeout: 2500 }); } catch (e) { return false; } await stepUpOk(); return true; };
+  const ERP = 'erp-upgrade-readiness';
 
   console.log('Empty log');
   await page.goto(ROOT + '/'); await page.waitForSelector('#app .card', { timeout: 30000 });
@@ -123,12 +127,19 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(/^This moves the expected finish from \w{3} \d+ to \w{3} \d+ \(\d+ business days? after the \w{3} \d+ deadline\)/.test(await page.textContent('[data-chg-preview-sentence]')), 'the sentence says the finish moves past the deadline');
   const knock = Number(await page.textContent(`${wiz} [data-imp-knock] .n`));
   ok(knock >= 3 && /waits on it/.test(await page.textContent(`${wiz} [data-imp-knock]`)), `${knock} tasks move as a knock-on, the dependents flagged`);
+  /* R12 #13: the knock-on into ERP is named, and ERP's project manager approves too */
+  ok(/ERP Upgrade Readiness/.test(await page.textContent(`${wiz} [data-imp-cross]`)) && /approves too/.test(await page.textContent(`${wiz} [data-imp-cross]`)), 'preview: the other project the change moves is listed');
+  ok(/project manager of ERP Upgrade Readiness/.test(await page.textContent('[data-chg-verdict]')) && /ERP Upgrade Readiness \(another project\)/.test(await page.textContent('[data-chg-verdict]')), 'verdict: ERP’s project manager approves too, and why');
   await page.click(`${wiz} [data-w="submit"]`);
   ok(await toastSays(/Sent for approval: Tom Alvarez/), 'sent for approval');
   await page.waitForSelector('[data-chg-status="proposed"]', { timeout: 15000 }); await settle(500);
   d = await docs();
   ok(d.workItem.find(x => x.id === 'W6').data.due !== newDue, 'nothing applied while waiting');
-  ok(/Waiting for Tom Alvarez \(project manager\)/.test(await page.textContent('[data-chg-waiting]')), 'the log says who it waits for');
+  ok(/Waiting for Tom Alvarez \(project manager and project manager of ERP Upgrade Readiness\)/.test(await page.textContent('[data-chg-waiting]')), 'the log says who it waits for, once per person: ' + await page.textContent('[data-chg-waiting]'));
+  /* while it waits, ERP's own log shows it (proposed on another project) */
+  await page.goto(`${ROOT}/project/${ERP}/changes`); await page.waitForSelector('[data-chg-log]'); await settle(700);
+  ok(await page.isVisible(`[data-chg-from="${PRJ}"]`) && /Proposed on Vendor Onboarding Modernization/.test(await page.textContent('[data-chg-from]')), 'ERP’s log shows the pending change from the vendor project');
+  await page.goto(`${ROOT}/project/${PRJ}/changes`); await page.waitForSelector('[data-chg-log]'); await settle(500);
   ok(!(await page.$('[data-chg-approve]')), 'the requester cannot approve');
   await setMe('ta');
   await page.waitForSelector('[data-chg-mine]');
@@ -139,7 +150,8 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await page.click('[data-chg-goto]');
   await page.waitForSelector('[data-chg-approve]'); await settle(400);
   await page.click('[data-chg-approve]');
-  ok(await toastSays(/Approved and applied/), 'Tom approves; it applies');
+  await stepUpOk();
+  ok(await toastSays(/Approved and applied/), 'Tom approves with the extra sign-in check; it applies');
   await settle(900);
   d = await docs();
   ok(d.workItem.find(x => x.id === 'W6').data.due === newDue, 'the new due date is in the plan');
@@ -147,6 +159,22 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(!(await page.$('[data-chg-mine]')), 'nothing waits for Tom any more');
   const notif = d.notification.map(n => n.data).filter(n => n.to === 'lp' && /Plan change on/.test(n.text));
   ok(notif.length >= 1, 'Leo is notified when it applies');
+  const applied = d.planChange.map(x => x.data).find(c => c.status === 'applied' && (c.edits || []).some(e => e.id === 'W6'));
+  ok(applied && applied.approvers.every(a => a.stepUp === true), 'the stored approvals carry the sign-in check');
+  ok(/extra sign-in check done/.test(await page.textContent(`[data-chg="${applied.id}"] [data-chg-trail]`)), 'the decision trail shows the sign-in check');
+  /* R12 #13: ERP's log has the linked entry, pointing back */
+  const linkedEntry = d.planChange.map(x => x.data).find(c => c.projectId === ERP && c.linkedFrom);
+  ok(linkedEntry && linkedEntry.linkedFrom.changeId === applied.id && (applied.linked || []).some(l => l.changeId === linkedEntry.id), 'a linked entry is recorded in ERP’s plan changes');
+  await page.goto(`${ROOT}/project/${ERP}/changes`); await page.waitForSelector('[data-chg-log]'); await settle(700);
+  ok(await page.$eval('[data-chg-count]', el => el.textContent) === '1' && await page.isVisible('[data-chg-status="applied"]'), 'ERP’s log: 1 applied entry');
+  ok(/Knock-on from Vendor Onboarding Modernization/.test(await page.textContent('[data-chg-from]')), 'ERP’s entry says where it came from');
+  await expand();
+  ok(/expected finish .* → /.test(await page.textContent('[data-chg-linked-tasks]')), 'ERP’s entry lists its tasks that moved');
+  ok(/Tom Alvarez.*project manager of ERP Upgrade Readiness.*approved/.test(await page.textContent('[data-chg-trail]')), 'ERP’s entry shows its PM’s approval');
+  await shotBoth('linked', null);
+  await page.click('[data-chg-linked] a');
+  await page.waitForSelector(`[data-chg="${applied.id}"]`); await settle(500);
+  ok(new RegExp(PRJ + '/changes').test(page.url()), 'Open the original change goes back to the vendor project');
 
   console.log('Reject changes nothing');
   await setMe('dk');
@@ -194,6 +222,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await page.$$eval(`${wiz} input[name="sg"]`, els => els.length) === 1, 'one suggestion (none for older gaps)');
   await next();
   await page.click(`${wiz} [data-w="submit"]`);
+  await maybeStepUp();
   ok(await toastSays(/Plan change applied|Sent for approval/), 'plan updated from the process change');
   await settle(1200);
   d = await docs();
@@ -210,7 +239,7 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-chg-csv]')]);
   const csv = fs.readFileSync(await dl.path(), 'utf8');
   const lines = csv.trim().split(/\r\n/);
-  ok(lines.length === 1 + d.planChange.length && lines[0].startsWith('Requested,Project,Title,Reason'), `CSV: header + ${lines.length - 1} changes`);
+  ok(lines.length === 1 + d.planChange.filter(x => x.data.projectId === PRJ).length && lines[0].startsWith('Requested,Project,Title,Reason'), `CSV: header + ${lines.length - 1} changes`);
   ok(/Treasury needs the deposit check|Rejected/.test(csv) && /The bank portal vendor needs five more weeks/.test(csv), 'CSV has reasons and statuses');
   await shotBoth('log', null);
   await expand();

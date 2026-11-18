@@ -89,23 +89,47 @@
       return '<option value="' + esc(x.id) + '"' + (x.highlight ? ' selected' : '') + '>' + esc(x.name) + ' · ' + esc(money(x.perEditorMonthly, p.currency)) + ' per editor / month</option>';
     }).join('');
     /* R11: the estimate and the input always agree. Fewer than 1 editor becomes 1 in the box too (an empty box while
-       typing is left alone and filled with 1 when the visitor leaves the field). */
+       typing is left alone and filled with 1 when the visitor leaves the field).
+       R12 (#12): a plan with an editor cap (Team: 25) never prices more editors than it allows. The box is capped at the
+       plan's limit, the estimate is for that many, and the note offers the plan that fits the number asked for, priced,
+       with one button to switch. */
+    var wanted = null, clamped = null;
     function update(e) {
       var pl = planById(p, sel.value);
       var raw = String(num.value).trim();
       var n = Math.floor(Number(raw));
       if (!isFinite(n) || n < 1) { n = 1; }
       if (n > 10000) { n = 10000; }
-      if ((raw !== '' || (e && e.type === 'change')) && String(n) !== raw) num.value = String(n);
+      /* the box holding the cap we put there (a later change event) still means the larger number asked for */
+      var asked = (e && e.type === 'plan' && wanted) || (wanted && clamped && raw === clamped) ? wanted : n;
+      wanted = asked; clamped = null;
+      var cap = pl.maxEditors || 10000;
+      num.max = String(cap);
+      if (n > cap || asked > cap) n = cap;
+      if (asked <= cap) n = asked;
+      if ((raw !== '' || (e && (e.type === 'change' || e.type === 'plan'))) && String(n) !== raw) num.value = String(n);
+      if (asked > n) clamped = String(n);
       var annual = n * pl.perEditorMonthly * 12;
       out.textContent = money(annual, p.currency) + ' a year';
       detail.textContent = n + ' editor' + (n === 1 ? '' : 's') + ' × ' + money(pl.perEditorMonthly, p.currency) + ' × 12 months';
-      if (pl.maxEditors && n > pl.maxEditors) {
-        var next = p.plans.filter(function (x) { return x.perEditorMonthly && !x.maxEditors; })[0];
-        note.textContent = pl.name + ' covers up to ' + pl.maxEditors + ' editors.' + (next ? ' For ' + n + ' editors, choose ' + next.name + '.' : '');
-      } else note.textContent = '';
+      /* rebuilt only when it changes: the box's change event fires on mousedown of the button, before its click */
+      var next = pl.maxEditors && asked > pl.maxEditors ? p.plans.filter(function (x) { return x.perEditorMonthly && (!x.maxEditors || x.maxEditors >= asked); })[0] : null;
+      var text = pl.maxEditors && asked > pl.maxEditors ? pl.name + ' covers up to ' + pl.maxEditors + ' editors, so this is the price for ' + pl.maxEditors + '.' +
+        (next ? ' For ' + asked + ' editors, ' + next.name + ' is ' + money(asked * next.perEditorMonthly * 12, p.currency) + ' a year.' : '') : '';
+      if (note.getAttribute('data-text') === text) return;
+      note.setAttribute('data-text', text);
+      note.innerHTML = '';
+      if (!text) return;
+      note.appendChild(document.createTextNode(text));
+      if (next) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn ghost est-switch'; b.setAttribute('data-est-switch', next.id);
+        b.textContent = 'Switch to ' + next.name;
+        b.addEventListener('click', function () { sel.value = next.id; update({ type: 'plan' }); num.focus(); });
+        note.appendChild(document.createTextNode(' ')); note.appendChild(b);
+      }
     }
-    sel.addEventListener('change', update);
+    sel.addEventListener('change', function () { update({ type: 'plan' }); });
     num.addEventListener('input', update);
     num.addEventListener('change', update);
     form.addEventListener('submit', function (e) { e.preventDefault(); update({ type: 'change' }); });

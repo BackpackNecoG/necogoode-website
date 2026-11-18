@@ -75,7 +75,9 @@ class AdoAdapter {
         const who = f['System.AssignedTo'];
         changes.push({ key: String(w.id), title: String(f[tf.title] || ''), description: S.textFromHtml(f[tf.description] || ''), status: String(f['System.State'] || ''),
           assigneeEmail: who && typeof who === 'object' ? String(who.uniqueName || '').toLowerCase() : String(who || '').replace(/^.*<([^>]+)>$/, '$1').toLowerCase(),
-          due: f[tf.due] ? String(f[tf.due]).slice(0, 10) : '', updatedAt: f['System.ChangedDate'] ? new Date(f['System.ChangedDate']).toISOString() : null });
+          due: f[tf.due] ? String(f[tf.due]).slice(0, 10) : '', updatedAt: f['System.ChangedDate'] ? new Date(f['System.ChangedDate']).toISOString() : null,
+          /* R12: the person who made the change in Azure DevOps (identity ref or "Name <email>") */
+          changedBy: (cb => cb && typeof cb === 'object' ? String(cb.uniqueName || cb.displayName || '').toLowerCase() : String(cb || '').replace(/^.*<([^>]+)>$/, '$1').toLowerCase())(f['System.ChangedBy']) || null });
       }
     }
     const cursor = changes.reduce((m, c) => (c.updatedAt && c.updatedAt > m ? c.updatedAt : m), p.since || '') || null;

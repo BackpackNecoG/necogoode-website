@@ -44,7 +44,10 @@
     'reviewer approver administrator admin accountant assistant agent team staff technician engineer employee contractor vendor supplier ' +
     'customer client owner partner representative rep head sme associate executive president vp cfo ceo cio cto coo hire newhire recruiter ' +
     'planner scheduler dispatcher driver courier receptionist nurse teacher auditor counsel attorney paralegal treasurer cashier steward ' +
-    'desk department committee board panel group unit office function sponsor champion user member worker personnel').split(' '));
+    'desk department committee board panel group unit office function sponsor champion user member worker personnel ' +
+    /* R12: inline abbreviations ("Purchasing mgr", "Credit dept"); canonRole spells them out */
+    'mgr dept dir coord asst supv supvr spec').split(' '));
+  const ROLE_ABBR = { mgr: 'manager', dept: 'department', dir: 'director', coord: 'coordinator', asst: 'assistant', supv: 'supervisor', supvr: 'supervisor', spec: 'specialist' };
   /* team / department names: an actor on its own ("Procurement creates") and what fills "Teams involved" */
   const TEAMS = ['Accounts Payable', 'Accounts Receivable', 'Customer Service', 'Human Resources', 'Information Technology', 'Supply Chain', 'Service Desk', 'Help Desk',
     'Procurement', 'Purchasing', 'Compliance', 'Treasury', 'Finance', 'Legal', 'Facilities', 'Payroll', 'Security', 'Operations', 'Sales', 'Marketing',
@@ -119,10 +122,19 @@
       const v = verbBase(pn[2].replace(/[,;:]$/, ''));
       if (v) return { actor: pn[1], action: imperative(v, pn[3]) };
     }
+    /* R12: "Karen approves too": one capitalised first name and a known verb (never a team, role, system or sentence word) */
+    const p1 = /^([A-Z][a-z]{2,})\s+(\S+)\s*(.*)$/.exec(t);
+    if (p1 && !roleNoun(p1[1]) && !isTeam(p1[1]) && !SYS_RE.test(p1[1]) && !isBase(p1[1]) && !verbBase(p1[1]) && !DET.test(p1[1]) && !MODAL.test(p1[1]) && !PREP.test(p1[1])
+      && !/^(then|next|finally|first|please|someone|everyone|nobody|each|he|she|they|it|we|you|once|when|if|unless|where|after|before|while|otherwise|limits?|requests?|spend)$/i.test(p1[1])) {
+      const v = verbBase(p1[2].replace(/[,;:]$/, ''));
+      if (v) return { actor: p1[1], action: imperative(v, p1[3]) };
+    }
     const words = t.split(' ');
     let i = 0;
     while (i < words.length && DET.test(words[i])) i++;
-    if (i === 0 && words.length && (isBase(words[0]) || /^(please|then|next|finally|first)$/i.test(words[0]))) return { actor: null, action: t };
+    /* R12: "Credit dept runs…" / "Credit reviews…" is the Credit team, not the verb "credit" */
+    const teamLead = isTeam(words[0]) && words[1] && (roleNoun(words[1].replace(/[,;:]$/, '')) || verbBase(words[1].replace(/[,;:]$/, '')));
+    if (i === 0 && words.length && !teamLead && (isBase(words[0]) || /^(please|then|next|finally|first)$/i.test(words[0]))) return { actor: null, action: t };
     for (let k = i + 1; k <= Math.min(words.length - 1, i + 5); k++) {
       const actorWords = words.slice(i, k).map(w => w.replace(/[,;:]$/, ''));
       if (actorWords.some(w => /[,;:]$/.test(w))) break;
@@ -154,7 +166,7 @@
   }
   /* "the procurement coordinator" -> "Procurement coordinator"; "accounts payable" -> "Accounts Payable" */
   function canonRole(r) {
-    const x = squash(String(r).replace(/^(the|a|an|our|your|their)\s+/i, ''));
+    const x = squash(String(r).replace(/^(the|a|an|our|your|their)\s+/i, '')).split(' ').map(w => ROLE_ABBR[w.toLowerCase().replace(/\.$/, '')] || w).join(' ');
     if (isTeam(x)) return TEAM_CANON[x.toLowerCase().replace(/\s+/g, ' ')];
     return cap(x.split(' ').map((w, i) => /^[A-Z]{2,}$/.test(w) || (i > 0 && /^[A-Z]/.test(w)) || isTeam(w) ? (isTeam(w) ? TEAM_CANON[w.toLowerCase()] : w) : i ? w.toLowerCase() : w).join(' '));
   }
@@ -202,11 +214,13 @@
   }
 
   /* ---------------------------------------------------------------- information (data elements) */
-  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?)$/i;
+  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?|masters?)$/i;
+  /* R12 (Karen): document abbreviations a procedure uses as names */
+  const DOC_ABBR = { COI: 'Certificate of insurance', NDA: 'NDA', MSA: 'MSA', SOW: 'Statement of work', BAA: 'BAA', 'W9': 'W-9' };
   const NOUNISH = /^(request|review|purchase|change|check|schedule|order|payment|expense|update|access|record|screening|approval|contact|delivery|return|transfer|release|exit|welcome|termination|refund|offer|onboarding|tax|credit|time|start|end|due|ship|bill)$/i;
   const OF_HEADS = /^(certificate|record|proof|copy|statement|letter|bill|notice|evidence|confirmation)s?$/i;
   const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded|their|its|his|her|our|your|returned|known|listed|usual|main|registered|existing|official|verified|primary|preferred|same|other)$/i;
-  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?)$/i;
+  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?|masters?)$/i;
   const INFO_NOUNS = [
     { re: /\bamounts?\b/i, name: 'Amount' },
     { re: /\bcost cent(re|er)s?\b/i, name: m => 'Cost cent' + m[1].toLowerCase() },
@@ -224,6 +238,7 @@
     words.forEach((w0, k) => {
       const w = bare(w0);
       if (/^[A-Z]{1,3}-\d{1,4}[A-Z]?$/.test(w)) { out.push(w); return; }                           /* W-9, I-9, DS-11 */
+      if (DOC_ABBR[w.replace(/s$/, '')]) { out.push(DOC_ABBR[w.replace(/s$/, '')]); return; }          /* COI, NDA, SOW */
       if (!DOC_HEADS.test(w)) return;
       const next = words[k + 1] ? bare(words[k + 1]) : '';
       if (DOC_HEADS.test(next) && !/^(of|,)$/.test(next) && /^[a-z]/.test(next)) return;              /* "timesheet record": the last noun is the head */
@@ -290,11 +305,24 @@
     return { who, timer: { after: d ? d.text : `${m[4]} ${m[6]}`, iso: d ? d.iso : '', businessDays: d ? d.businessDays : null, action: cap(tidy(sp.action)), to: to && roleWords(to[1].split(/\s+/)) ? canonRole(to[1]) : (sp.actor || '') } };
   }
   /* the step a timer watches: the latest step of the named role, else the latest approval-like step, else the latest step */
+  /* R12 (BPM expert): the timer goes on the step that is waited on (the actor's own approval), never on a step of the path
+     taken after a rejection ("If rejected, notify the Sales Rep"). Order: the named role's approval-like step, the named
+     role's step, any approval-like step, the latest step. */
+  const APPROVAL_LIKE = /^(approve|review|sign|authori[sz]e|decide|check|verify|countersign|co-approve|accept|respond|reply)\b/i;
+  function rejectBranch(d) {
+    if (!d || d.type !== 'decision' || !Array.isArray(d.branches)) return null;
+    const t = String(d.title || '');
+    const lbl = REJECT_COND.test(t) ? 'yes' : APPROVE_COND.test(t) && !/\bnot\b/i.test(t) ? 'no' : null;
+    return lbl ? d.branches.find(x => String(x.label).toLowerCase() === lbl) || null : null;
+  }
   function escalationHost(nodes, es) {
-    const order = []; const walk = ns => (ns || []).forEach(n => { if (n.type === 'step') order.push(n); (n.branches || []).forEach(b => walk(b.nodes)); }); walk(nodes);
-    const rev = order.slice().reverse();
-    return (es.who && rev.find(n => String(n.ownerRole || '').toLowerCase() === es.who.toLowerCase()))
-      || rev.find(n => /^(approve|review|sign|authori[sz]e|decide|check|verify|countersign|co-approve)\b/i.test(n.title)) || rev[0] || null;
+    const order = [], onReject = new Set();
+    const walk = (ns, rej) => (ns || []).forEach(n => { if (n.type === 'step') { order.push(n); if (rej) onReject.add(n); } const rb = rejectBranch(n); (n.branches || []).forEach(b => walk(b.nodes, rej || b === rb)); });
+    walk(nodes, false);
+    const rev = order.slice().reverse(), ok = rev.filter(n => !onReject.has(n));
+    const pool = ok.length ? ok : rev;
+    const mine = n => es.who && String(n.ownerRole || '').toLowerCase() === es.who.toLowerCase();
+    return pool.find(n => mine(n) && APPROVAL_LIKE.test(n.title)) || pool.find(mine) || pool.find(n => APPROVAL_LIKE.test(n.title)) || pool[0] || null;
   }
   const REJECT_COND = /\b(reject\w*|declin\w*|den(?:y|ies|ied)|refus\w*|not\s+approv\w*|fail\w*|not\s+accept\w*)\b/i;
   const APPROVE_COND = /\b(approv\w*|accept\w*|ok|okay|pass(?:es|ed)?)\??$/i;
@@ -310,6 +338,58 @@
     b.nodes.push({ id: 'e' + d.id, type: 'end', title: 'Stop: request rejected' });
     d.rejectEnds = true;
   }
+
+  /* ---------------------------------------------------------------- R12: RACI from the text */
+  /* "Sam Wu signs off" / "sign-off from the Controller (Sam Wu)" -> Accountable; "after consulting Legal" -> Consulted;
+     ", and copies the Account Manager" / "keeps the requester informed" -> Informed. Only a role, a team or a person's
+     name counts. A clause that is not the step's own action is taken out of the title (it lives in the RACI). */
+  const RX_WHO = "((?:[A-Z][\\w&/'-]*|[a-z][\\w&/-]*)(?:\\s+[A-Za-z][\\w&/'-]*){0,3}?(?:\\s*\\([A-Z][^)]{1,40}\\))?)";
+  const RX_END = "(?=\\s*(?:[.;,!]|$)|\\s+(?:and|before|after|when|once|that|about|of|on)\\b)";
+  const RACI_RX = [
+    { k: 'a', strip: true, re: new RegExp("(?:^|[;,]\\s*(?:and\\s+)?|\\s+and\\s+)(?:the\\s+)?" + RX_WHO + "\\s+(?:then\\s+)?(?:signs?\\s+off|gives?\\s+(?:the\\s+)?(?:final\\s+)?(?:sign-?off|approval))(?:\\s+on\\s+[^.;,]+)?", 'i') },
+    { k: 'a', strip: false, re: new RegExp("\\bsign-?off\\s+(?:from|by)\\s+(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+    { k: 'a', strip: true, re: new RegExp("(?:^|[;,]\\s*|\\s+and\\s+)(?:the\\s+)?" + RX_WHO + "\\s+is\\s+accountable\\b(?:\\s+for\\s+[^.;,]+)?", 'i') },
+    { k: 'c', strip: true, re: new RegExp(",?\\s+(?:after|before)\\s+(?:consulting(?:\\s+with)?|checking\\s+with|speaking\\s+(?:to|with)|talking\\s+to)\\s+(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+    { k: 'c', strip: true, re: new RegExp(",?\\s+(?:in\\s+consultation\\s+with|with\\s+input\\s+from)\\s+(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+    { k: 'c', strip: true, re: new RegExp("(?:,\\s*and\\s+|,\\s+|\\s+and\\s+)consults?\\s+(?:with\\s+)?(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+    { k: 'i', strip: true, re: new RegExp("(?:,\\s*and\\s+|,\\s+|\\s+and\\s+)(?:also\\s+)?(?:copies|copy|cc(?:'?s)?)\\s+(?:in\\s+)?(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+    { k: 'i', strip: true, re: new RegExp("(?:,\\s*and\\s+|,\\s+|\\s+and\\s+)(?:also\\s+)?keeps?\\s+(?:the\\s+)?" + RX_WHO + "\\s+(?:informed|updated|in\\s+the\\s+loop)\\b", 'i') },
+    { k: 'i', strip: true, re: new RegExp("(?:,\\s*and\\s+|,\\s+|\\s+and\\s+)(?:also\\s+)?(?:informs?|notifies|tells?)\\s+(?:the\\s+)?" + RX_WHO + RX_END, 'i') },
+  ];
+  function raciWho(x) {
+    const m = /^(.*?)\s*\(([A-Z][^)]{1,40})\)$/.exec(squash(x));
+    const base = squash((m ? m[1] : x).replace(/^(the|a|an|our|your|their)\s+/i, ''));
+    if (!base) return '';
+    const ws = base.split(' ');
+    if (/^[A-Z][a-z]+(?:\s+[A-Z][\w'-]+){1,2}$/.test(base) && !ws.some(w => roleNoun(w) || isTeam(w))) return m ? '' : base;
+    if (!(roleWords(ws) || isTeam(base))) return '';
+    const r = canonRole(base);
+    return m ? `${r} (${squash(m[2])})` : r;
+  }
+  /* raciIn(text) -> {raci: {a?, c?, i?} | null, text: text without the RACI clauses that are not the step's action} */
+  function raciIn(text) {
+    let t = String(text || '');
+    const out = {};
+    RACI_RX.forEach(x => {
+      for (let guard = 0; guard < 4; guard++) {
+        const m = x.re.exec(t); if (!m) break;
+        const who = raciWho(m[1]);
+        if (!who) break;
+        if (x.k === 'a') { if (!out.a) out.a = who; }
+        else { const l = out[x.k] || (out[x.k] = []); if (!l.includes(who)) l.push(who); }
+        /* the whole clause is the step's own action ("Sam Wu signs off."): kept as written */
+        if (!x.strip || m.index === 0 && !/^[;,\s]/.test(m[0])) break;
+        t = (t.slice(0, m.index) + t.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ');
+      }
+    });
+    return { raci: Object.keys(out).length ? out : null, text: t.trim() };
+  }
+  const mergeRaci = (n, r) => {
+    if (!n || !r) return;
+    const x = n.raci || (n.raci = {});
+    if (r.a && !x.a) x.a = r.a;
+    ['c', 'i'].forEach(k => (r[k] || []).forEach(w => { const l = x[k] || (x[k] = []); if (!l.includes(w)) l.push(w); }));
+  };
 
   /* ---------------------------------------------------------------- the SOP parser */
   const SKIP_LINE = /^(title|purpose|scope|objective|owner|process owner|document owner|revision|rev\.?|version|effective(\s+date)?|approved by|author|department|document(\s+(id|no\.?|number))?|sop(\s+(id|no\.?|number))?|last\s+(updated|reviewed)|applies to|audience|references?|trigger|start(?:ing)? event|procedure|process|name|notes?)\b\s*[:\-–—]/i;
@@ -373,6 +453,9 @@
         return { id: id('w'), type: 'wait', title: cap(tidy(t.replace(/^then\s+/i, ''))), wait: tidy(what) };
       }
       const n = { id: id('s'), type: 'step', touches: [], subs: [], newData: [] };
+      /* R12: RACI clauses ("; the Controller (Sam Wu) signs off", ", and copies the Account Manager") */
+      const rc = raciIn(t);
+      if (rc.raci) { n.raci = rc.raci; t = stripEnd(rc.text) || t; }
       /* "… Owner: Records Clerk" */
       let ownerTxt = null;
       const ol = /[.;,]?\s*\bowner\s*[:\-–—]\s*(.+)$/i.exec(t);
@@ -404,9 +487,14 @@
       }
       if (n.ownerRole) n.ownerRole = cap(squash(n.ownerRole.replace(/^(?:the|a|an|our|your|their)\s+/i, '')));
       n.title = cap(tidy(stripEnd(action))) || cap(tidy(stripEnd(clause)));
+      /* R12 (Karen): "Karen approves too" / "the CFO also approves": an extra approval, not a plain step */
+      if (/^(approve|co-approve|sign off|authori[sz]e)\b/i.test(n.title) && (/\s+(?:too|as well)$/i.test(n.title) || /\b(?:also|additionally)\s+(?:approves?|co-approves?|signs?\s+off|authori[sz]es?)\b/i.test(clause))) {
+        n.title = 'Also ' + n.title.replace(/\s+(?:too|as well)$/i, '').replace(/^./, c => c.toLowerCase());
+        n.approval = true;
+      }
       if (n.named) n.note = `Named in the procedure: ${n.named}`;
       delete n.named;
-      const tm = teamsIn(line);
+      const tm = teamsIn(rc.raci ? raciIn(line).text : line);
       n.touches = [...new Set(teamOfRole(n.ownerRole).concat(tm))];
       addTeams(n.touches);
       /* information named by the action (never by the actor), plus any the line's condition reads ("the amount") */
@@ -474,6 +562,20 @@
           if (g) dec.branches[negated ? 1 : 0].gotoNum = +g[1];
           out.push(dec); lastDec = dec; return;
         }
+        /* R12 (Karen): "If spend over $25k Karen approves too": a leading condition with no comma before the action */
+        const bare = !lead && /^(if|when|where|should)\s+(.+)$/i.exec(stripEnd(sen));
+        if (bare && (COMPARE.test(bare[2]) || /\$\s?\d/.test(bare[2]))) {
+          const ws = bare[2].split(/\s+/);
+          const amt = ws.findIndex(w => /^\$?\d/.test(w));
+          let made = null;
+          for (let j = Math.max(1, amt + 1); j < ws.length && !made; j++) {
+            const rest = ws.slice(j).join(' ');
+            if (!(splitActor(rest).actor || (isBase(ws[j]) && !/^(per|a|an)$/i.test(ws[j])))) continue;
+            const st = makeStep(rest, full, { dataText: sen });
+            made = { id: id('d'), type: 'decision', title: decisionTitle(ws.slice(0, j).join(' ')), branches: [{ label: 'Yes', nodes: [st] }, { label: 'No', nodes: [] }] };
+          }
+          if (made) { dec = made; out.push(dec); lastDec = dec; return; }
+        }
         /* "…, if it is over $5,000" / "… only if …" with no comma before the action */
         const trail = /^(.+?)\s+(?:only\s+)?(if|unless)\s+(.+)$/i.exec(sen);
         if (trail && !main && si === 0 && (COMPARE.test(trail[3]) || /\$\s?\d/.test(trail[3]))) {
@@ -502,6 +604,8 @@
         }
         /* any other sentence on the line is part of the same step: kept in its note, its information on the step */
         notes.push(stripEnd(sen));
+        /* R12: "Sam Wu signs off." after the step: its Accountable */
+        if (main.type === 'step') { const rc = raciIn(stripEnd(sen)); if (rc.raci) mergeRaci(main, rc.raci); }
         if (main.type === 'step') infoPhrases(withoutSystems(sen)).forEach(nm => propose(nm, full, main));
       });
       if (main && main.type === 'step') notes.forEach(x => addNote(main, x));
@@ -637,6 +741,24 @@
       out.forEach(n => nodes.push(n));
       record(it, idx, 'step', out.map(n => n.id).concat(timerHosts));
     });
+    /* R12 (BPM expert): "If the requested limit is under $50k, approve it." followed by the Credit Manager's review: the
+       Yes path is already approved, so it skips the review (and the review's reject choice) to the next step. Only when
+       the No path is empty and the text gives the Yes path no destination of its own. */
+    const LOW = /\b(under|below|less than|at most|up to|no more than|not over|not more than)\b/i;
+    const isReview = n => n && n.type === 'step' && /^(approve|review|authori[sz]e|sign|decide|countersign|co-approve|check and approve)\b/i.test(n.title);
+    nodes.forEach((d, i) => {
+      if (!d || d.type !== 'decision' || !LOW.test(d.title)) return;
+      const yes = d.branches[0], no = d.branches[1];
+      if (!yes || !no || String(yes.label).toLowerCase() !== 'yes' || yes.goto != null || yes.gotoNum != null || no.nodes.length || no.gotoNum != null) return;
+      if (!yes.nodes.some(n => n.type === 'step' && /^(also\s+)?(approve|authori[sz]e|accept|sign off)\b/i.test(n.title))) return;
+      let j = i + 1;
+      if (!isReview(nodes[j])) return;
+      j++;
+      while (nodes[j] && nodes[j].type === 'decision' && rejectBranch(nodes[j]) && rejectBranch(nodes[j]) === nodes[j].branches[0]) j++;
+      if (nodes[j]) yes.goto = nodes[j].id;
+      else yes.nodes.push({ id: 'e' + d.id, type: 'end', title: 'Done: approved' });
+      d.skips = true;
+    });
     /* "return to step N": the branch loops back to the first node that line N produced */
     const walk = (ns, f) => (ns || []).forEach(n => { f(n); (n.branches || []).forEach(b => walk(b.nodes, f)); });
     walk(nodes, n => (n.branches || []).forEach(b => { if (b.gotoNum != null) { if (lineFirst[b.gotoNum]) b.goto = lineFirst[b.gotoNum]; delete b.gotoNum; } }));
@@ -758,13 +880,23 @@
     if (/connector|line|arrow/.test(m)) return 'connector';
     if (/swimlane|swim lane|^lane|cff container|functional band|separator/.test(m)) return 'lane';
     if (/decision|diamond/.test(m)) return 'decision';
-    if (/start|end|terminator|terminal/.test(m)) return /^\s*(end|stop|finish|done|complete)/i.test(text || '') ? 'end' : /^\s*(start|begin)/i.test(text || '') ? 'start' : 'terminator';
+    /* R12: a Start/End drawn as an ellipse or circle is the start or the end, never a step */
+    if (/start|end|terminator|terminal|ellipse|circle|oval/.test(m)) return /^\s*(end|stop|finish|done|complete)/i.test(text || '') ? 'end' : /^\s*(start|begin)/i.test(text || '') ? 'start' : 'terminator';
     if (/parallel|fork|join/.test(m)) return 'parallel';
     if (/delay|timer|wait/.test(m)) return 'wait';
     if (/data|document|database|stored data|internal storage/.test(m)) return 'data';
     if (/process|subprocess|sub-process|predefined|action|task|step|rectangle|box|manual|preparation/.test(m)) return 'process';
     if (/title|page|legend|annotation|text|callout|container|pool/.test(m)) return 'ignore';
     return text ? 'process' : 'ignore';
+  }
+  /* R12 (BPM expert): what a shape is from its words when its master does not say: "Start"/"End" are the start and the
+     end, a question ("Eligible?") is a choice */
+  function refineKind(kind, text) {
+    if (kind !== 'process') return kind;
+    if (/^\s*(start|begin|process starts)\s*$/i.test(text || '')) return 'start';
+    if (/^\s*(end|stop|finish|done|complete|completed|process ends)\s*$/i.test(text || '')) return 'end';
+    if (/\?\s*$/.test(text || '')) return 'decision';
+    return kind;
   }
   const cell = (sh, n) => { const c = kids(sh, 'Cell').find(x => x.attrs.N === n); return c ? Number(c.attrs.V) : NaN; };
   /* parseVsdx(bytes) -> {name, nodes, lanes, links, steps, decisions, parallels, dropped, bpmn}
@@ -787,7 +919,9 @@
     const visit = (sh, parent) => {
       const idv = sh.attrs.ID; const master = masters[sh.attrs.Master] || (parent && parent.master) || sh.attrs.NameU || sh.attrs.Name || '';
       const text = squash(textOf(kid(sh, 'Text')));
-      const kind = shapeKind(master, text);
+      /* R12: a 1-D shape (it has a begin and an end point) is a connector whatever its master is called */
+      const oneD = kids(sh, 'Cell').some(c => c.attrs.N === 'BeginX') && kids(sh, 'Cell').some(c => c.attrs.N === 'EndX');
+      const kind = oneD ? 'connector' : refineKind(shapeKind(master, text), text);
       const s = { id: idv, master, text, kind, x: cell(sh, 'PinX'), y: cell(sh, 'PinY'), w: cell(sh, 'Width'), h: cell(sh, 'Height') };
       shapes[idv] = s;
       kids(kid(sh, 'Shapes'), 'Shape').forEach(c => { if (kind === 'lane' || kind === 'ignore') visit(c, null); });
@@ -795,7 +929,10 @@
     kids(shapesEl, 'Shape').forEach(sh => visit(sh, null));
     /* connectors: BeginX -> from shape, EndX -> to shape */
     const ends = {};
-    kids(kid(page, 'Connects'), 'Connect').forEach(c => {
+    const connEls = kids(kid(page, 'Connects'), 'Connect');
+    /* R12: the sheet a Connect starts from at its BeginX / EndX is a connector, whatever its master is called */
+    connEls.forEach(c => { const s = shapes[c.attrs.FromSheet]; if (s && /^(Begin|End)/i.test(c.attrs.FromCell || '')) s.kind = 'connector'; });
+    connEls.forEach(c => {
       const con = c.attrs.FromSheet, to = c.attrs.ToSheet, which = c.attrs.FromCell;
       if (!shapes[con] || !shapes[to]) return;
       const e = ends[con] || (ends[con] = {});
@@ -832,6 +969,9 @@
     let pageTitle = '';
     const px = files['visio/pages/pages.xml'];
     if (px) { const pg = all(parseXml(utf8(px)), 'Page')[0]; const nm = pg ? squash(pg.attrs.Name || pg.attrs.NameU || '') : ''; if (nm && !/^(page|seite|página|pagina)[-\s]?\d*$/i.test(nm)) pageTitle = nm; }
+    /* R12: a shape left out is listed once */
+    const seenDrop = new Set();
+    for (let i = 0; i < dropped.length; i++) { const k = dropped[i].type + '|' + dropped[i].name + '|' + dropped[i].reason; if (seenDrop.has(k)) dropped.splice(i--, 1); else seenDrop.add(k); }
     const name = opts.name || pageTitle || docTitle || '';
     const bpmn = vsdxBpmn({ name: name || 'Imported Visio process', shapes, flowShapes, links: links.filter(l => flowKinds.has(shapes[l.from].kind) && flowKinds.has(shapes[l.to].kind)), laneOf, dataOf, ins, outs });
     const c = { steps: flowShapes.filter(s => s.kind === 'process' || s.kind === 'wait').length, decisions: flowShapes.filter(s => s.kind === 'decision').length, parallels: flowShapes.filter(s => s.kind === 'parallel').length };
@@ -977,5 +1117,5 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
   }
 
   return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn,
-    RACI_ROLES, raciOf, raciEmpty, raciText, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
+    RACI_ROLES, raciOf, raciEmpty, raciText, raciIn, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
 });

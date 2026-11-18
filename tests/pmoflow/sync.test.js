@@ -146,19 +146,20 @@ test('a status change in Jira flows back and the engine recomputes', () => {
   const { docs, conn } = fresh('jira');
   sync(docs, conn);
   const before = E.projectTruth(docs, PRJ, DAY);
-  S.simEdit(conn.sim, S.keyOf(conn, 'W6'), { status: 'Done' }, clock());
+  /* R12: W11 is a plain task (no problem fix, no information to make available), so Done moves its status */
+  S.simEdit(conn.sim, S.keyOf(conn, 'W11'), { status: 'Done' }, clock());
   const { res } = sync(docs, conn);
   assert.equal(res.updates.length, 1);
   assert.deepEqual(res.updates[0].changes, [{ field: 'status', from: 'idle', to: 'done' }]);
-  assert.equal(wi(docs, 'W6').status, 'done');
-  assert.equal(wi(docs, 'W6').doneAt, DAY);
+  assert.equal(wi(docs, 'W11').status, 'done');
+  assert.equal(wi(docs, 'W11').doneAt, DAY);
   const after = E.projectTruth(docs, PRJ, DAY);
   assert.equal(after.tasks.done, before.tasks.done + 1);
   /* back to In Progress clears the done date */
-  S.simEdit(conn.sim, S.keyOf(conn, 'W6'), { status: 'In Progress' }, clock());
+  S.simEdit(conn.sim, S.keyOf(conn, 'W11'), { status: 'In Progress' }, clock());
   sync(docs, conn);
-  assert.equal(wi(docs, 'W6').status, 'prog');
-  assert.equal(wi(docs, 'W6').doneAt, undefined);
+  assert.equal(wi(docs, 'W11').status, 'prog');
+  assert.equal(wi(docs, 'W11').doneAt, undefined);
 });
 
 test('assignee maps by email; unknown people and unmapped statuses are skipped and logged', () => {
@@ -248,9 +249,13 @@ test('Azure DevOps: JSON Patch payloads, WIQL pull, dependency relations', () =>
   const k6 = S.keyOf(conn, 'W6'), k7 = S.keyOf(conn, 'W7');
   assert.match(k6, /^\d+$/);
   assert.deepEqual(conn.sim.items[k7].deps, [k6]);
+  S.simEdit(conn.sim, k7, { status: 'Closed' }, clock());
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W7').status, 'done', 'Closed in Azure DevOps → Done for a plain task');
+  /* R12: W6 makes Bank remittance details available, so Closed is held as In review, never Done */
   S.simEdit(conn.sim, k6, { status: 'Closed' }, clock());
   sync(docs, conn);
-  assert.equal(wi(docs, 'W6').status, 'done');
+  assert.equal(wi(docs, 'W6').status, 'review');
   const pull = S.describeRequest(conn, S.pullIntent(conn, { nonce }));
   assert.match(pull[0].url, /\/_apis\/wit\/wiql\?timePrecision=true&api-version=7\.1$/);
   assert.match(pull[0].body.query, /\[System\.ChangedDate\] > '/);
@@ -345,6 +350,167 @@ test('R11 route: "changed issues since the last sync" excludes PMOFlow’s own w
     assert.equal(after.workItem.find(d => d.id === items[key].pmoId).data.status, 'done', 'accepted, not refused');
     const evs = (await call('GET', `ws/${ws}/events`)).body.events;
     assert.ok(evs.some(e => /finished before the work it depends on/i.test(e.summary)), 'recorded in history');
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});
+
+/* ---------- R12 H4 (CONSOLIDATED-R11 #3): sync can never bypass governance ----------
+   The PMO expert's repro: moving issues to Done in Jira closed a defect while its test was still failing, marked
+   "Bank remittance details" confirmed live with no evidence, flipped the project to On track, cut the expected cost,
+   and recorded all of it under the PM. Inbound changes may move a work item's status only. */
+const strip = (docs) => JSON.parse(JSON.stringify(docs));
+/* every doc, with the one work item's status / doneAt / updatedAt taken out */
+function without(docs, wid) {
+  const d = strip(docs);
+  d.workItem.forEach(x => { if (x.id === wid) { delete x.data.status; delete x.data.doneAt; delete x.data.updatedAt; } });
+  delete d.connection;
+  return d;
+}
+const cost = (docs) => E.projectFinancials(docs, PRJ, DAY).forecastCost;
+
+test('R12 guardrail 1: an inbound Done never closes a defect (it waits in review)', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W12').kind, 'defect');
+  assert.notEqual(E.defectState(docs, 'W12'), 'closed');
+  const k = S.keyOf(conn, 'W12');
+  S.simEdit(conn.sim, k, { status: 'Done' }, clock(), 'leo.park@northwind.example');
+  const { res, sent } = sync(docs, conn);
+  assert.notEqual(wi(docs, 'W12').status, 'done', 'the defect is not closed from Jira');
+  assert.notEqual(E.defectState(docs, 'W12'), 'closed');
+  assert.equal(wi(docs, 'W12').status, 'review', 'it moves to In review, waiting for its retest');
+  assert.equal(res.held.length, 1);
+  assert.equal(res.held[0].workItemId, 'W12');
+  assert.equal(res.held[0].kind, 'problem');
+  assert.match(res.held[0].reason, /retest/);
+  assert.ok(!sent.some(i => i.ref.workItemId === 'W12'), 'Jira keeps its own Done; nothing is pushed back');
+  /* a second sync with nothing new does not log it again */
+  assert.equal(sync(docs, conn).res.held.length, 0);
+  /* ADO "Closed" and a custom status that means done are held too */
+  const a = fresh('ado');
+  sync(a.docs, a.conn);
+  S.simEdit(a.conn.sim, S.keyOf(a.conn, 'W12'), { status: 'Closed' }, clock());
+  sync(a.docs, a.conn);
+  assert.notEqual(E.defectState(a.docs, 'W12'), 'closed');
+  const c = fresh('jira');
+  c.docs.project.find(d => d.id === PRJ).data.statuses.push({ id: 'shipped', name: 'Shipped', maps: 'done' });
+  c.conn.statusMap.shipped = 'Shipped';
+  sync(c.docs, c.conn);
+  S.simEdit(c.conn.sim, S.keyOf(c.conn, 'W12'), { status: 'Shipped' }, clock());
+  sync(c.docs, c.conn);
+  assert.equal(wi(c.docs, 'W12').status, 'review', 'a status that maps to done is held the same way');
+});
+
+test('R12 guardrail 2: an inbound Done never marks information available', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W6').resolves, 'D2');
+  const before = E.effectiveAvail(docs, 'D2');
+  assert.notEqual(before, 'live');
+  S.simEdit(conn.sim, S.keyOf(conn, 'W6'), { status: 'Done' }, clock(), 'leo.park@northwind.example');
+  const { res } = sync(docs, conn);
+  assert.equal(E.effectiveAvail(docs, 'D2'), before, 'availability is unchanged');
+  assert.notEqual(wi(docs, 'W6').status, 'done');
+  assert.equal(wi(docs, 'W6').status, 'review');
+  assert.equal(res.held[0].kind, 'information');
+  assert.match(res.held[0].reason, /Bank remittance details/);
+  assert.match(res.held[0].reason, /confirm/i);
+  const d2 = docs.dataElement.find(d => d.id === 'D2').data;
+  assert.ok(!d2.liveConfirmedBy && d2.avail !== 'live', 'the information record itself is never touched');
+  /* W6's owner is the information owner, so a done W6 would count as their confirmation in PMOFlow: still held. The project
+     status is exactly what the same task in review gives (it does not flip to On track) */
+  const byHand = strip(fresh('jira').docs); setWi(byHand, 'W6', { status: 'review' });
+  assert.equal(E.projectTruth(docs, PRJ, DAY).label, E.projectTruth(byHand, PRJ, DAY).label);
+});
+
+test('R12 guardrail 3: an inbound Done changes the expected cost only through the work item status', () => {
+  /* a plain task: the result equals marking the same task done in PMOFlow, and nothing else in the workspace changes */
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  const manual = strip(docs);
+  setWi(manual, 'W11', { status: 'done', doneAt: DAY });
+  const beforeDocs = strip(docs);
+  S.simEdit(conn.sim, S.keyOf(conn, 'W11'), { status: 'Done' }, clock());
+  sync(docs, conn);
+  assert.equal(cost(docs), cost(manual), 'same expected cost as marking it done in PMOFlow');
+  assert.deepEqual(without(docs, 'W11'), without(beforeDocs, 'W11'), 'nothing but W11 status / done date changed');
+  /* guarded items: the expected cost equals the same item set to In review by hand, and nothing else changed */
+  for (const wid of ['W12', 'W6']) {
+    const f = fresh('jira');
+    sync(f.docs, f.conn);
+    const pre = strip(f.docs);
+    const byHand = strip(f.docs); setWi(byHand, wid, { status: 'review' });
+    S.simEdit(f.conn.sim, S.keyOf(f.conn, wid), { status: 'Done' }, clock());
+    sync(f.docs, f.conn);
+    assert.equal(cost(f.docs), cost(byHand), `${wid}: expected cost moves only with the status`);
+    assert.deepEqual(without(f.docs, wid), without(pre, wid), `${wid}: no other document changed`);
+    assert.equal(wi(f.docs, wid).doneAt, undefined);
+  }
+  /* titles, notes and owners still sync, and never touch cost-bearing fields (effort, rates, budget) */
+  const g = fresh('jira');
+  sync(g.docs, g.conn);
+  const pre = strip(g.docs);
+  S.simEdit(g.conn.sim, S.keyOf(g.conn, 'W11'), { title: 'Route invoices by amount' }, clock());
+  sync(g.docs, g.conn);
+  assert.equal(cost(g.docs), cost(pre));
+});
+
+test('R12 guardrail 4 (route): audit entries name the external identity, never the PM; the early-Done flag stays', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r12-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.8' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const st0 = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const pm = st0.project.find(d => d.id === PRJ).data.owner;
+    const r = await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: pm });
+    assert.equal(r.status, 201);
+    const c = r.body.connection, items = c.sim.items;
+    const keyOf = wid => Object.keys(items).find(k => items[k].pmoId === wid);
+    const stateBefore = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const costBefore = E.projectFinancials(stateBefore, PRJ, DAY).forecastCost;
+    /* the PM is the persona clicking in the simulated Jira; the person who moved it in Jira is jane */
+    const s1 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W12'), status: 'Done', by: 'jane@contoso.example', actor: pm });
+    assert.equal(s1.status, 200);
+    assert.ok(s1.body.connection.log.some(e => e.op === 'held' && e.workItemId === 'W12' && e.result === 'held'), 'held row in the sync log');
+    assert.match(s1.body.sentence, /1 Done held for review in PMOFlow/);
+    const s2 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W6'), status: 'Done', actor: pm });
+    assert.equal(s2.status, 200);
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    assert.notEqual(E.defectState(docs, 'W12'), 'closed', 'defect not closed');
+    assert.notEqual(E.effectiveAvail(docs, 'D2'), 'live', 'information not available');
+    assert.equal(docs.dataElement.find(d => d.id === 'D2').data.avail, stateBefore.dataElement.find(d => d.id === 'D2').data.avail);
+    const costAfter = E.projectFinancials(docs, PRJ, DAY).forecastCost;
+    const byHand = strip(stateBefore); setWi(byHand, 'W12', { status: 'review' }); setWi(byHand, 'W6', { status: 'review' });
+    assert.equal(costAfter, E.projectFinancials(byHand, PRJ, DAY).forecastCost, `expected cost moves only with the status (${costBefore} → ${costAfter})`);
+    /* approvals, tests and test runs are never written by sync */
+    for (const t of ['approval', 'testRun', 'testCase', 'uatScript', 'grant', 'dataElement']) assert.deepEqual(docs[t], stateBefore[t], `${t} untouched by sync`);
+    const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+    const fromTool = evs.filter(e => /^From Jira VOM-/.test(e.summary) || e.action === 'tool-change');
+    assert.ok(fromTool.length >= 4, 'tool changes are in history');
+    assert.ok(fromTool.every(e => e.actor !== pm), 'never recorded under the PM');
+    assert.ok(fromTool.every(e => /^Jira: /.test(e.actor)), 'recorded under the Jira identity: ' + fromTool.map(e => e.actor).join(', '));
+    assert.ok(fromTool.some(e => e.actor === 'Jira: jane@contoso.example' && /W12|blank account holder/.test(e.summary + e.ref)), 'the person who moved it in Jira');
+    assert.ok(fromTool.some(e => e.actor === 'Jira: leo.park@northwind.example'), 'without "by", the Jira assignee moved it');
+    /* audit export shows the external identity as the actor name */
+    const audit = (await call('GET', `workspaces/${ws}/admin/audit`)).body;
+    assert.ok(audit.entries.some(e => e.actor === 'Jira: jane@contoso.example' && e.actorName === 'Jira: jane@contoso.example'));
+    /* "Finished before the work it depends on" stays flagged across later syncs */
+    const w = docs.workItem.find(d => d.data.projectId === PRJ && d.data.kind !== 'defect' && !d.data.resolves && d.data.status !== 'done' &&
+      (d.data.deps || []).some(id => { const p = docs.workItem.find(x => x.id === id); return p && p.data.status !== 'done'; }));
+    assert.ok(w, 'a plain task waiting on open work');
+    const s3 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf(w.id), status: 'Done', actor: pm });
+    assert.equal(s3.body.summary.early, 1);
+    const again = await call('POST', `workspaces/${ws}/connections/${c.id}/sync`, { actor: pm });
+    assert.equal(again.status, 200);
+    const later = (await call('GET', `ws/${ws}/state`)).body.docs;
+    assert.equal(E.doneBeforeDeps(later, w.id).flag, true, 'still flagged after another sync');
+    const flagEv = (await call('GET', `ws/${ws}/events`)).body.events.find(e => /finished before the work it depends on/i.test(e.summary));
+    assert.ok(flagEv && /^Jira: /.test(flagEv.actor), 'the flag is recorded under the Jira identity');
   } finally {
     await store.deleteWorkspace(ws).catch(() => {});
     if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;

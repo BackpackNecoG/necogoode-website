@@ -225,6 +225,13 @@ function testRunError(prev, next, actor, docs) {
       const who = [...new Set(others.map(k => personName(docs, testerOf[k])))];
       return `You can only pass tests assigned to you or unassigned ones. ${others.length} of the ${passes.length} selected test${passes.length === 1 ? '' : 's'} ${others.length === 1 ? 'is' : 'are'} assigned to ${who.join(', ')}.`;
     }
+    // R12 #4: a business-check pass is the assignee's, or (unassigned) someone's in the department that owns the
+    // test's part; passing several at once needs the extra sign-in check (step-up)
+    if (next.env === 'uat' && typeof eng.canPassTest === 'function') {
+      const refused = passes.map(k => eng.canPassTest(flat, next.projectId, k, actor)).filter(Boolean);
+      if (refused.length) return refused.length === 1 ? refused[0].text : `${refused[0].text} (${refused.length} of the ${passes.length} selected tests can't be passed by ${personName(docs, actor)}.)`;
+      if (passes.length > 1 && !(next.stepUp === true || (next.stepUp && typeof next.stepUp === 'object'))) return `Passing ${passes.length} tests at once needs the extra sign-in check (step-up).`;
+    }
     const held = eng.heldTests(flat, next.projectId);
     const blocked = passes.filter(k => held[k]);
     if (blocked.length) {

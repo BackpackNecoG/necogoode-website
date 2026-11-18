@@ -231,6 +231,17 @@ async function browserChecks(browser) {
   check('estimator: says approvers are free', /Approvers are free/.test(await page.innerText('.est-out')));
   await page.selectOption('#est-plan', 'team'); await page.fill('#est-editors', String(team.maxEditors + 5));
   check('estimator: Team over its editor cap suggests Business', (await page.innerText('#est-note')).includes(String(team.maxEditors)) && (await page.innerText('#est-note')).includes('Business'));
+  /* R12 #12: Team never prices more than 25 editors; the nudge prices Business for the number asked, and switches in one click */
+  check('estimator: Team is capped at its limit in the box and the estimate', (await page.inputValue('#est-editors')) === String(team.maxEditors) &&
+    (await page.innerText('#est-total')).trim() === money(team.maxEditors * team.perEditorMonthly * 12) + ' a year', await page.inputValue('#est-editors') + ' / ' + await page.innerText('#est-total'));
+  check('estimator: the nudge prices Business for the editors asked for', (await page.innerText('#est-note')).includes(money((team.maxEditors + 5) * biz.perEditorMonthly * 12) + ' a year'), await page.innerText('#est-note'));
+  await page.click('[data-est-switch="business"]');
+  check('estimator: "Switch to Business" keeps the number asked for', (await page.inputValue('#est-plan')) === 'business' && (await page.inputValue('#est-editors')) === String(team.maxEditors + 5) &&
+    (await page.innerText('#est-total')).trim() === money((team.maxEditors + 5) * biz.perEditorMonthly * 12) + ' a year' && !(await page.innerText('#est-note')).trim());
+  await page.selectOption('#est-plan', 'team');
+  check('estimator: switching back to Team caps again', (await page.inputValue('#est-editors')) === String(team.maxEditors) && /covers up to/.test(await page.innerText('#est-note')));
+  await page.fill('#est-editors', '-3'); await page.dispatchEvent('#est-editors', 'change');
+  check('estimator: a negative number becomes 1', (await page.inputValue('#est-editors')) === '1' && /^1 editor ×/.test((await page.innerText('#est-detail')).trim()));
   /* R11: 0 editors → the box and the estimate both say 1 */
   await page.fill('#est-editors', '0');
   check('estimator: 0 becomes 1 in the input and the estimate', (await page.inputValue('#est-editors')) === '1' && /^1 editor ×/.test((await page.innerText('#est-detail')).trim()), await page.inputValue('#est-editors'));

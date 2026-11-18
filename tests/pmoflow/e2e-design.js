@@ -321,6 +321,147 @@ async function r11(browser, ip, errors) {
   await ctx.close();
 }
 
+
+/* ---------------------------------------------------------------- R12 H2: the R11 reviewers' procedures
+   (market-review/r11 karen.md, expert-bpm.md): department routing at import and on the process (no default), parser
+   control flow, the first Save click after typing an owner, and the Today counters. */
+const R12_KAREN = `Vendor Onboarding
+1. Requester emails Purchasing the vendor name and what we are buying.
+2. Purchasing mgr sends the vendor our packet and collects the W-9, COI and bank details.
+3. Credit dept runs a D&B check on the vendor.
+4. If spend over $25k Karen approves too.
+5. AP sets up the vendor master in the ERP.
+6. Treasury verifies the bank details with a call-back to the vendor.
+7. AP saves the W-9 and COI in SharePoint.
+8. AP emails the vendor a welcome letter.
+9. Purchasing mgr tells the requester the vendor is live.`;
+const R12_CREDIT = `Credit Limit Request
+Trigger: A customer asks for a higher credit limit.
+1. The Sales Rep submits the credit limit request in Salesforce.
+2. The Credit Analyst pulls the D&B report and reviews the customer's payment history.
+3. If the requested limit is under $50k, approve it.
+4. The Credit Manager approves or rejects the request.
+5. If rejected, the Credit Manager notifies the Sales Rep.
+6. If the Credit Manager does not respond within 2 business days, escalate to the CFO.
+7. AR updates the credit limit in NetSuite. Sam Wu signs off.
+8. The Sales Rep tells the customer, and copies the Account Manager.`;
+async function r12(browser, ip, errors) {
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r12 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r12 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const adv = async on => { await page.evaluate(v => localStorage.setItem('pmoflow.advanced', v), on ? '1' : '0'); };
+  const paste = async text => {
+    await nav('/import'); await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const saveDraft = async name => {
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', name);
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    return page.url().match(/process\/([^?/]+)/)[1];
+  };
+  const aprRows = () => page.$$eval('[data-approvers] [data-apr-team]', els => els.map(e => ({ team: e.dataset.aprTeam, dept: e.dataset.aprDept, ask: (e.querySelector('[data-apr-ask]') || {}).textContent || '' })));
+  try {
+    await nav('/'); await adv(false);
+    console.log('# R12 #8/#1: Karen\'s vendor procedure (inline roles, "Karen approves too", who approves each team)');
+    await paste(R12_KAREN);
+    ok((await page.getAttribute('[data-lines]', 'data-lines-text')) === '9 lines → 9 steps, 1 choice', 'Karen: ' + await page.getAttribute('[data-lines]', 'data-lines-text'));
+    const who = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
+    ok(who.includes('Purchasing manager') && who.includes('Credit department') && who.includes('Karen'), 'inline roles "Purchasing mgr" / "Credit dept" and Karen\'s extra approval: ' + who.join(', '));
+    const choice = await page.$$eval('.is-draft .is-step[data-type="decision"] textarea.is-title', els => els.map(e => e.value));
+    ok(choice.includes('Spend over $25k?'), '"if spend over $25k Karen approves too" is a choice: ' + choice.join(', '));
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(['Certificate of insurance', 'Vendor master', 'Bank details', 'W-9'].every(n => nds.includes(n)), 'documents named in the text are information: ' + nds.join(', '));
+    let rows = await aprRows();
+    const byTeam = t => rows.find(r => r.team === t) || {};
+    ok(['Purchasing', 'Credit', 'AP', 'Treasury'].every(t => rows.some(r => r.team === t)), 'import shows who approves each team: ' + rows.map(r => r.team).join(', '));
+    ok(byTeam('AP').dept === 'Accounts Payable' && byTeam('Treasury').dept === 'Treasury', 'same-name departments are pre-filled (AP = Accounts Payable, Treasury)');
+    ok(byTeam('Purchasing').dept === '' && /Choose who approves for Purchasing/.test(byTeam('Purchasing').ask) && byTeam('Credit').dept === '', 'no default: "Choose who approves for Purchasing", Credit unchosen');
+    ok(!rows.some(r => r.dept === 'Procurement'), 'nothing routes to Procurement by default');
+    await page.selectOption('[data-apr-sel="Purchasing"]', 'Procurement'); await settle();
+    rows = await aprRows();
+    ok(byTeam('Purchasing').dept === 'Procurement', 'choosing Procurement for Purchasing sticks in the draft');
+    await shot('r12-karen-draft'); await overflow('R12 Karen draft @1366');
+    await page.setViewportSize({ width: 390, height: 844 }); await overflow('R12 Karen draft @390'); await shot('r12-karen-draft-390'); await page.setViewportSize({ width: 1366, height: 900 });
+    const pidK = await saveDraft('Vendor onboarding R12');
+    const pK = (await state()).docs.process.find(d => d.id === pidK).data;
+    const td = pK.teamDepartments || {};
+    ok(td.Purchasing === 'Procurement' && td.AP === 'Accounts Payable' && td.Treasury === 'Treasury' && 'Credit' in td && td.Credit === null, 'saved: process.teamDepartments = ' + JSON.stringify(td));
+    const extra = flat(pK.asis).find(s => s.ownerRole === 'Karen');
+    ok(extra && extra.approval === true && extra.title === 'Also approve', 'saved: Karen\'s extra approval is an approval on the choice\'s Yes path');
+    console.log('# R12 #1: the process page shows and edits the mapping');
+    await nav(`/process/${pidK}?mode=asis`);
+    rows = await aprRows();
+    ok(rows.find(r => r.team === 'Purchasing').dept === 'Procurement' && /Choose who approves for Credit/.test(rows.find(r => r.team === 'Credit').ask), 'process page: Purchasing → Procurement, "Choose who approves for Credit"');
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }), page.selectOption('[data-apr-sel="Credit"]', 'Treasury')]);
+    await settle();
+    const td2 = ((await state()).docs.process.find(d => d.id === pidK).data.teamDepartments) || {};
+    ok(td2.Credit === 'Treasury' && td2.Purchasing === 'Procurement', 'process page edit saved: Credit → Treasury, Purchasing kept');
+    ok((await aprRows()).find(r => r.team === 'Credit').dept === 'Treasury', 'process page shows the saved choice after the edit');
+    await shot('r12-process-routing');
+    await page.setViewportSize({ width: 390, height: 844 }); await nav(`/process/${pidK}?mode=asis`); await overflow('R12 process page @390');
+    await page.evaluate(() => { const c = document.querySelector('[data-approvers]'); if (c) { c.classList.add('d-unfold'); c.scrollIntoView(); } });
+    await shot('r12-process-routing-390'); await page.setViewportSize({ width: 1366, height: 900 });
+    console.log('# R12 #7: the Today counters describe the Today map');
+    await adv(true); await nav(`/process/${pidK}?mode=asis`);
+    const ks = await page.getAttribute('[data-kpi-steps]', 'data-kpi-steps');
+    const kd = await page.getAttribute('[data-kpi-data]', 'data-kpi-data');
+    const sideN = +(await page.textContent('[data-side-data] h3 .n'));
+    ok(+ks === flat(pK.asis).length && /Today steps/.test(await page.textContent('[data-kpis]')), `Today tab: "${ks} Today steps" (not "0 Future steps")`);
+    ok(kd && +kd.split('/')[1] === sideN, `Today tab: information counter ${kd} matches the panel (${sideN})`);
+    await adv(false);
+
+    console.log('# R12 #8: credit limit (BPM expert): the "under $50k" path skips the review; the timer is the Credit Manager\'s');
+    await paste(R12_CREDIT);
+    const skip = await page.$$eval('.is-draft [data-loopback]', els => els.map(e => e.getAttribute('data-loopback') + ' | ' + e.textContent.replace(/\s+/g, ' ')));
+    ok(skip.some(t => /^Update the credit limit/.test(t) && /Skips to/.test(t)), 'the Yes path of "under $50k" skips to "Update the credit limit": ' + skip.join(' / '));
+    const timerOn = await page.$$eval('.is-draft .is-timer', els => els.map(e => e.closest('.is-body').querySelector('textarea.is-title').value));
+    ok(timerOn.length === 1 && timerOn[0] === 'Approve or reject the request', 'the 2-day escalation sits on the Credit Manager\'s "Approve or reject the request": ' + timerOn.join(', '));
+    const crows = await aprRows();
+    ok(crows.length && crows.every(r => !r.dept) && !crows.some(r => r.dept === 'Procurement'), 'Credit / AR / Sales: nobody is picked for you: ' + crows.map(r => r.team + '=' + (r.dept || '?')).join(', '));
+    const pidC = await saveDraft('Credit limit R12');
+    const pC = (await state()).docs.process.find(d => d.id === pidC).data;
+    const upd = flat(pC.asis).find(s => /^Update the credit limit/.test(s.title));
+    const th = allNodes(pC.asis).find(n => n.type === 'decision' && /under \$50k/.test(n.title));
+    ok(th && th.branches[0].goto === upd.id, 'saved: the Yes path jumps to "Update the credit limit"');
+    ok(upd.raci && upd.raci.a === 'Sam Wu', 'saved: "Sam Wu signs off" is Accountable: ' + JSON.stringify(upd.raci));
+    const tell = flat(pC.asis).find(s => s.title === 'Tell the customer');
+    ok(tell && JSON.stringify(tell.raci) === JSON.stringify({ i: ['Account Manager'] }), 'saved: "copies the Account Manager" is Informed');
+
+    console.log('# R12 #12: the first Save click after typing an owner works');
+    await paste('Expense claim\n1. Receive the expense claim.\n2. Check the receipts.\n3. Pay the claim.');
+    await page.fill('.is-draft input.is-who >> nth=0', 'Clerk');
+    await page.click('[data-create]');
+    ok(await page.waitForSelector('.overlay [data-pname]', { timeout: 4000 }).then(() => true).catch(() => false), 'one click on Save opens the save dialog straight after typing an owner');
+    if (await page.$('.overlay [data-act="cancel"]')) await act('cancel'); else await page.keyboard.press('Escape');
+    await settle();
+    ok((await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value)))[0] === 'Clerk', 'the typed owner is kept');
+
+    console.log('# R12 #8: Visio as the BPM expert drew it');
+    await nav('/import');
+    await page.setInputFiles('.hdr-side [data-bpmn-file]', `${OUT}/r12-eligibility.vsdx`);
+    await page.waitForSelector('.overlay [data-impsum]');
+    const vs = await page.getAttribute('.overlay [data-imp-steps]', 'data-imp-steps'), vc = await page.getAttribute('.overlay [data-imp-choices]', 'data-imp-choices');
+    ok(vs === '3' && vc === '1' && !(await page.$('.overlay [data-imp-together]')), `Visio: Start/End are not steps and "Eligible?" is a choice (${vs} steps, ${vc} choice, nothing at the same time)`);
+    const drops = await page.$$eval('.overlay [data-dropped] li', els => els.map(e => e.textContent));
+    ok(drops.length === 1, 'Visio: the loose connector is listed once: ' + drops.join(' | '));
+    await shot('r12-visio-preview');
+    await act('cancel').catch(() => page.keyboard.press('Escape'));
+  } catch (e) {
+    fail++; failures.push('r12 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r12 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r12-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
@@ -328,6 +469,7 @@ async function r11(browser, ip, errors) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R12 === '1') { await r12(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R11 === '1') { await r11(browser, ip, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
@@ -2191,6 +2333,7 @@ async function r11(browser, ip, errors) {
     await page.screenshot({ path: `${OUT}/failure.png`, fullPage: true }).catch(() => {});
   }
   if (process.env.SKIP_R11 !== '1') await r11(browser, ip, errors);
+  if (process.env.SKIP_R12 !== '1') await r12(browser, ip, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

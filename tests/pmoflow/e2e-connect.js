@@ -93,33 +93,58 @@ async function api(method, path, body) {
   ok(/after VOM-\d+/.test(await page.locator(`[data-cx-item="${k7}"]`).textContent()), 'dependencies were linked in Jira');
   await shot('04-connected-1366');
 
+  console.log('3a. R12 guardrail (expert-pmo.md repro): Done in Jira never closes a problem, never makes information available');
+  const pre = await truth();
+  const costPre = E.projectFinancials(pre.docs, 'vendor-modernization', today()).forecastCost;
+  const availPre = E.effectiveAvail(pre.docs, 'D2');
+  const hold = async (title, wid) => {
+    const r = page.locator('[data-cx-item]', { hasText: title }).first();
+    const k = await r.getAttribute('data-cx-item');
+    await page.selectOption(`[data-cx-simstatus="${k}"]`, 'Done');
+    await page.waitForSelector(`[data-cx-held="${wid}"]`, { timeout: 20000 }).catch(() => {});
+    return k;
+  };
+  const kDefect = await hold('Fix: the bank details form accepts a blank account holder', 'W12');
+  const kInfo = await hold('Set up the bank details form', 'W6');
+  const g = await truth();
+  ok(E.defectState(g.docs, 'W12') !== 'closed' && g.docs.workItem.find(d => d.id === 'W12').data.status === 'review', `${kDefect} Done in Jira: the problem is not closed; it waits in review`);
+  ok(/retest passes/.test(await page.textContent('[data-cx-held="W12"]').catch(() => '')), 'the problem shows why it waits (its retest)');
+  ok(E.effectiveAvail(g.docs, 'D2') === availPre && availPre !== 'live' && g.docs.workItem.find(d => d.id === 'W6').data.status === 'review', `${kInfo} Done in Jira: Bank remittance details is still ${availPre}, not available`);
+  ok(/Bank remittance details.+owner confirms/.test(await page.textContent('[data-cx-held="W6"]').catch(() => '')), 'the task shows why it waits (the owner confirms)');
+  const manual = JSON.parse(JSON.stringify(pre.docs)); ['W12', 'W6'].forEach(id => { manual.workItem.find(d => d.id === id).data.status = 'review'; });
+  const costNow = E.projectFinancials(g.docs, 'vendor-modernization', today()).forecastCost;
+  ok(costNow === E.projectFinancials(manual, 'vendor-modernization', today()).forecastCost, `expected cost moves only with the status (${costPre} → ${costNow})`);
+  ok(g.t.label === E.projectTruth(manual, 'vendor-modernization', today()).label, 'project status equals the same two tasks put in review by hand: ' + g.t.label);
+  ok(JSON.stringify(g.docs.dataElement) === JSON.stringify(pre.docs.dataElement) && JSON.stringify(g.docs.approval) === JSON.stringify(pre.docs.approval) && JSON.stringify(g.docs.testRun) === JSON.stringify(pre.docs.testRun), 'information, approvals and test runs untouched');
+  ok(await page.locator('[data-cx-log] .cx-le', { hasText: 'Done held' }).count() >= 2, 'sync log rows "Done held"');
+  ok(/Changed by Jira: leo\.park@northwind\.example/.test(await page.textContent('[data-cx-log]')), 'the log names the Jira identity');
+  ok(/Done held for review in PMOFlow/.test(await page.textContent('[data-cx-result]')), 'the result sentence reports the hold');
+  const hev = await api('GET', `ws/${ws}/events?limit=200`);
+  const fromJira = hev.body.events.filter(e => /^From Jira VOM-/.test(e.summary) || e.action === 'tool-change');
+  ok(fromJira.length >= 4 && fromJira.every(e => /^Jira: /.test(e.actor) && e.actor !== 'mc' && e.actor !== 'ta'), 'history records the Jira identity, never the PM or the persona: ' + [...new Set(fromJira.map(e => e.actor))].join(', '));
+  await shot('05a-held-1366');
+
   console.log('3. a status change in Jira flows back and the engine recomputes');
   const before = await truth();
-  const row = page.locator('[data-cx-item]', { hasText: 'Set up the bank details form' });
+  const row = page.locator('[data-cx-item]', { hasText: 'Send each invoice to the right approver by amount' });
   const key = await row.getAttribute('data-cx-item');
   ok(/Not started/.test(await row.textContent()), `${key} starts as Not started in PMOFlow`);
   await page.selectOption(`[data-cx-simstatus="${key}"]`, 'Done');
   await page.waitForFunction(k => /Done/.test((document.querySelector(`[data-cx-item="${k}"] [data-cx-pmo]`) || {}).textContent || ''), key, { timeout: 20000 });
   ok(true, 'PMOFlow shows the task Done after the change in Jira');
   const after = await truth();
-  const w6 = after.docs.workItem.find(d => d.id === 'W6').data;
-  ok(w6.status === 'done' && w6.doneAt === today(), 'saved through the document store: W6 done, doneAt = today');
+  const w11 = after.docs.workItem.find(d => d.id === 'W11').data;
+  ok(w11.status === 'done' && w11.doneAt === today(), 'saved through the document store: W11 done, doneAt = today');
   ok(after.t.tasks.done === before.t.tasks.done + 1, `engine recomputes on read: ${before.t.tasks.done} → ${after.t.tasks.done} tasks done`);
   const res = await page.textContent('[data-cx-result]');
   ok(new RegExp(`${before.t.tasks.done} → ${after.t.tasks.done} of`).test(res) && res.includes(after.t.label), 'result shows the project status change from the engine: ' + res.slice(0, 120));
   ok((await page.textContent('[data-cx-truth]')).trim() === after.t.label, 'header badge equals projectTruth label');
   /* R11 §4: exactly one issue changed in Jira, and the log says so */
   ok(/^1 changed issue since the last sync\.$/.test(await page.locator('[data-cx-log] .cx-le', { hasText: 'Read changes' }).first().locator('.cx-lx').textContent()), 'pull reads exactly "1 changed issue since the last sync"');
-  /* R11 §9: Done in Jira while the work it depends on is open: accepted, flagged in the log and on the task */
-  const w6deps = (w6.deps || []).map(id => after.docs.workItem.find(d => d.id === id)).filter(d => d && d.data.status !== 'done');
-  if (w6deps.length) {
-    ok(/finished before the work it depends on \(flagged\)/.test(res), 'result sentence reports the flag');
-    ok(/Finished before the work it depends on/.test(await page.textContent('[data-cx-log]')), 'sync log row: "Finished before the work it depends on"');
-    ok(/Finished before the work it depends on/.test(await page.locator(`[data-cx-early="W6"]`).textContent().catch(() => '')), 'flag shown on the task in the list');
-  } else ok(!(await page.$('[data-cx-early="W6"]')), 'no flag when its predecessors are done');
+  ok(!(await page.$('[data-cx-early="W11"]')), 'no flag: W11 depends on nothing');
   await shot('05-flowed-back');
   /* R11 §9 (Jordan's VOM-10 case): a task whose predecessors are still open is marked Done in Jira */
-  const waiting = after.docs.workItem.find(d => d.data.projectId === 'vendor-modernization' && d.data.status !== 'done' &&
+  const waiting = after.docs.workItem.find(d => d.data.projectId === 'vendor-modernization' && d.data.status !== 'done' && d.data.kind !== 'defect' && !d.data.resolves &&
     (d.data.deps || []).some(id => { const p = after.docs.workItem.find(x => x.id === id); return p && p.data.status !== 'done'; }));
   if (!waiting) ok(false, 'the seed has a task waiting on open work');
   else {
@@ -131,6 +156,10 @@ async function api(method, path, body) {
     ok(await page.locator('[data-cx-log] .cx-le', { hasText: 'Check order' }).count() >= 1, 'sync log row "Check order · Finished early"');
     const st2 = await api('GET', `ws/${ws}/state`);
     ok(st2.body.docs.workItem.find(d => d.id === waiting.id).data.status === 'done', 'the Done is accepted, not refused');
+    /* R12: "Finished before the work it depends on" stays flagged after another sync */
+    await page.click('[data-cx-sync]');
+    await page.waitForFunction(() => /already in sync|updated/.test((document.querySelector('[data-cx-result]') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
+    ok(/Finished before the work it depends on/.test(await page.textContent(`[data-cx-early="${waiting.id}"]`).catch(() => '')), 'still flagged after another sync');
     await shot('05b-finished-early');
   }
 
@@ -212,7 +241,9 @@ async function api(method, path, body) {
   ok(/Synced|First sync/.test(hist), 'history: sync');
   ok(/In Simulated Jira \(demo\): VOM-\d+ status To Do → Done/.test(hist), 'history: the change made in Jira');
   const wiEv = await api('GET', `ws/${ws}/events?ref=workItem:W6`);
-  ok(wiEv.body.events.some(e => /From Jira VOM-\d+: work item "Set up the bank details form" status Not started → Done/.test(e.summary)), 'work item history records the inbound change');
+  ok(wiEv.body.events.some(e => /From Jira VOM-\d+: work item "Set up the bank details form" status Not started → In review \(Jira said Done\)/.test(e.summary) && e.actor === 'Jira: leo.park@northwind.example'), 'work item history records the held change under the Jira identity');
+  const w11Ev = await api('GET', `ws/${ws}/events?ref=workItem:W11`);
+  ok(w11Ev.body.events.some(e => /From Jira VOM-\d+: work item "Send each invoice to the right approver by amount" status Not started → Done/.test(e.summary) && /^Jira: /.test(e.actor)), 'work item history records the inbound Done under the Jira identity');
   ok(await overflow(), 'no horizontal overflow at 1366 (connected)');
   await shot('07-reloaded-1366');
 
@@ -242,7 +273,7 @@ async function api(method, path, body) {
   ok(true, 'both connections disconnected; empty state is back');
   st = await api('GET', `ws/${ws}/state`);
   ok((st.body.docs.connection || []).length === 0, 'disconnect persisted');
-  ok(st.body.docs.workItem.find(d => d.id === 'W6').data.status === 'done', 'PMOFlow tasks stay as they are after disconnecting');
+  ok(st.body.docs.workItem.find(d => d.id === 'W11').data.status === 'done' && st.body.docs.workItem.find(d => d.id === 'W6').data.status === 'review', 'PMOFlow tasks stay as they are after disconnecting');
   const evs = await api('GET', `ws/${ws}/events?limit=200`);
   ok(evs.body.events.some(e => /Disconnected project "Vendor Onboarding Modernization"/.test(e.summary)), 'history: disconnected');
 

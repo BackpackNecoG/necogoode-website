@@ -24,6 +24,12 @@
    else (in-memory dev backend only) a random per-process key. The secret is never returned, printed or logged.
    Verify fails on: an edited entry (hash mismatch), a deleted or added tail (count/head mismatch), a fully re-hashed
    forgery (bad signature), and history that no longer matches a recorded checkpoint.
+   R12 (CONSOLIDATED-R11 #2): the hashed content includes the actor's id AND display name (actorName), so changing who an
+   entry names fails the check. The name is the one shown at export (the person's name, or the external identity such as
+   "Jira: jane@contoso.com" that sync records). Checkpoints recorded before R12 hashed without the name; they carry no `v`
+   and are not compared (v: 2 checkpoints are). A CSV export ends with a footer row
+   "# Signed head,<count>,<head hash>,<signature>,<key source>" and can be checked in the app like a JSON export.
+   Key source label: "production key" when the app setting PMOFLOW_AUDIT_KEY is set, else "development key".
    Why export time and not write time: events are appended by the shared history store (pmoflow-store.appendEvent, called
    from index.js), which this stream does not own; chaining there needs a per-workspace head row with optimistic retry.
    So: an export is sealed when it is made, and checkpoints are recorded at every export. Not guaranteed: a change made
@@ -144,15 +150,21 @@ function headSignatureOk(wsId, head) {
   const want = Buffer.from(signHead(wsId, Number(head.count), String(head.hash || '')), 'hex');
   return crypto.timingSafeEqual(want, Buffer.from(head.signature, 'hex'));
 }
-/* The hashed content of an entry: position plus the five stored fields, in a fixed order. */
-const canonical = (seq, e) => JSON.stringify([seq, String(e.at || ''), String(e.actor || ''), String(e.action || ''), String(e.ref || ''), String(e.summary || '')]);
-/* events: oldest first. Returns entries with seq, prevHash, hash. Deterministic for the same ordered input. */
-function chainEvents(wsId, events) {
+const CHAIN_V = 2;
+const nameOf = e => String(e.actorName != null ? e.actorName : (e.actor || ''));
+/* The hashed content of an entry: position, the five stored fields and the actor's display name, in a fixed order. */
+const canonical = (seq, e) => JSON.stringify([seq, String(e.at || ''), String(e.actor || ''), nameOf(e), String(e.action || ''), String(e.ref || ''), String(e.summary || '')]);
+const KEY_LABEL = { 'app-setting': 'production key', derived: 'development key', ephemeral: 'development key', missing: 'no key' };
+const keyLabel = () => KEY_LABEL[auditKeySource()] || 'development key';
+/* events: oldest first; names: {personId: name}. Returns entries with seq, actorName, prevHash, hash. Deterministic. */
+function chainEvents(wsId, events, names) {
   let prev = genesis(wsId);
+  names = names || {};
   return events.map((e, i) => {
     const seq = i + 1;
-    const hash = sha256(prev + '\n' + canonical(seq, e));
-    const out = { seq, at: e.at, actor: e.actor, action: e.action, ref: e.ref, summary: e.summary, prevHash: prev, hash };
+    const actorName = e.actorName != null ? String(e.actorName) : (names[e.actor] || String(e.actor || ''));
+    const hash = sha256(prev + '\n' + canonical(seq, Object.assign({}, e, { actorName })));
+    const out = { seq, at: e.at, actor: e.actor, actorName, action: e.action, ref: e.ref, summary: e.summary, prevHash: prev, hash };
     prev = hash;
     return out;
   });
@@ -186,6 +198,7 @@ function verifyChain(wsId, entries, anchors, opts) {
   }
   for (const a of anchors || []) {
     if (!out.ok) break;
+    if (Number(a.v) !== CHAIN_V) continue;                  /* recorded before actor names were hashed */
     const n = Number(a.n);
     if (!(n >= 1)) continue;
     if (opts.anchorsWithin && n > entries.length) continue;   /* a saved file predates later checkpoints; its own end is covered by the signed head */
@@ -197,18 +210,62 @@ function verifyChain(wsId, entries, anchors, opts) {
     : `Chain broken at entry ${out.firstBreak.seq}: ${out.firstBreak.reason}.`;
   return out;
 }
+/* No spreadsheet formula injection: a value starting with = + - @ tab CR (or a quote, so the escape round-trips) gets a
+   leading quote, which fromCSV removes again. */
 function csvCell(v) {
   let s = String(v == null ? '' : v);
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;           /* no spreadsheet formula injection */
+  if (/^[=+\-@\t\r']/.test(s)) s = "'" + s;
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
-function toCSV(entries, verify, head) {
-  const cols = ['seq', 'at', 'actor', 'actorName', 'action', 'ref', 'summary', 'prevHash', 'hash'];
-  const lines = [cols.join(',')].concat(entries.map(e => cols.map(c => csvCell(e[c])).join(',')));
+const CSV_COLS = ['seq', 'at', 'actor', 'actorName', 'action', 'ref', 'summary', 'prevHash', 'hash'];
+const HEAD_ROW = '# Signed head', FILTERED_ROW = '# Filtered export';
+function toCSV(entries, verify, head, keySource) {
+  const lines = [CSV_COLS.join(',')].concat(entries.map(e => CSV_COLS.map(c => csvCell(e[c])).join(',')));
   lines.push('');
   lines.push(csvCell('# Verify: ' + verify.summary + ' Head ' + verify.head + '. Recomputed ' + verify.at + '.'));
-  if (head) lines.push(csvCell(`# Signed head: ${head.count} entries, head ${head.hash}, signature ${head.signature} (HMAC-SHA256; check it with Verify in Admin > History).`));
+  /* the footer row the in-app check reads: entry count, head fingerprint, signature, key source */
+  if (head) lines.push([HEAD_ROW, head.count, head.hash, head.signature, keySource || keyLabel()].map(csvCell).join(','));
+  else lines.push([FILTERED_ROW, entries.length, '', '', keySource || keyLabel()].map(csvCell).join(','));
   return lines.join('\r\n') + '\r\n';
+}
+/* RFC 4180 rows (quoted cells may hold commas, quotes and line breaks). */
+function csvRows(text) {
+  const rows = []; let row = [], cell = '', q = false, i = 0;
+  const t = String(text || '').replace(/^\uFEFF/, '');
+  while (i < t.length) {
+    const c = t[i];
+    if (q) {
+      if (c === '"') { if (t[i + 1] === '"') { cell += '"'; i += 2; continue; } q = false; i++; continue; }
+      cell += c; i++; continue;
+    }
+    if (c === '"' && cell === '') { q = true; i++; continue; }
+    if (c === ',') { row.push(cell); cell = ''; i++; continue; }
+    if (c === '\r' || c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; i += (c === '\r' && t[i + 1] === '\n') ? 2 : 1; continue; }
+    cell += c; i++;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+const uncell = s => (s.charAt(0) === "'" ? s.slice(1) : s);
+/* A CSV export back into {entries, head, filtered, keySource}, or {error}. */
+function fromCSV(text) {
+  const rows = csvRows(text);
+  if (!rows.length || rows[0].join(',') !== CSV_COLS.join(',')) return { error: 'That file isn’t a PMOFlow history export (the first row should be ' + CSV_COLS.join(',') + ').' };
+  const entries = []; let head = null, filtered = false, keySource = null, i = 1;
+  for (; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.length === 1 && r[0] === '') break;
+    if (r.length !== CSV_COLS.length) return { error: `Row ${i + 1} has ${r.length} cells instead of ${CSV_COLS.length}, so the file was changed or cut.` };
+    const e = {}; CSV_COLS.forEach((c, k) => { e[c] = uncell(r[k]); });
+    e.seq = Number(e.seq);
+    entries.push(e);
+  }
+  for (; i < rows.length; i++) {
+    const r = rows[i];
+    if (r[0] === HEAD_ROW) { head = { count: Number(r[1]), hash: String(r[2] || ''), signature: String(r[3] || '') }; keySource = r[4] || null; }
+    if (r[0] === FILTERED_ROW) { filtered = true; keySource = r[4] || null; }
+  }
+  return { entries, head, filtered, keySource };
 }
 function filterEntries(entries, q) {
   const person = q.person ? String(q.person) : '';
@@ -218,9 +275,11 @@ function filterEntries(entries, q) {
     (!item || String(e.ref || '').toLowerCase().includes(item) || String(e.summary || '').toLowerCase().includes(item)) &&
     (!from || String(e.at).slice(0, 10) >= from) && (!to || String(e.at).slice(0, 10) <= to));
 }
-async function chainFor(store, ws) {
+async function chainFor(store, ws, docs) {
   const evs = (await store.listEvents(ws, { limit: AUDIT_LIMIT })).slice().reverse();   /* oldest first */
-  return chainEvents(ws.id, evs);
+  if (!docs) docs = (await store.getState(ws)).docs;
+  const names = Object.fromEntries(((docs && docs.person) || []).map(d => [d.id, d.data.name]));
+  return chainEvents(ws.id, evs, names);
 }
 
 /* ---------- persistence ---------- */
@@ -286,7 +345,7 @@ async function createSandbox({ body, req, store, send, clientIpHash, dayInput, c
     const ws = await store.createWorkspace(clientIpHash(req), { seedDate });
     send(201, { id: ws.id }, { 'Set-Cookie': wsCookie(req, ws.id, life) });
   } catch (e) {
-    if (e.status === 429) { send(429, { error: e.message }); return;   /* one plain message, nothing else (R8 §8) */ }
+    if (e.status === 429) { send(429, { error: e.message }, e.retryAfter ? { 'Retry-After': String(e.retryAfter) } : undefined); return;   /* one plain message, nothing else (R8 §8) */ }
     throw e;
   }
 }
@@ -325,39 +384,49 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
       if (method !== 'GET') { fail(405, 'method not allowed'); return true; }
       const st = await store.getState(ws);
       const s = settingsOf(st.docs);
-      const chain = await chainFor(store, ws);
+      const chain = await chainFor(store, ws, st.docs);
       const head = headOf(wsId, chain);
       const verify = verifyChain(wsId, chain, s.anchors, { head });
-      const names = Object.fromEntries((st.docs.person || []).map(d => [d.id, d.data.name]));
-      const entries = filterEntries(chain, q).map(e => Object.assign({}, e, { actorName: names[e.actor] || e.actor }));
+      const entries = filterEntries(chain, q);
       const filtered = entries.length !== chain.length;
+      const keySource = keyLabel();
       if (String(q.format || 'json') === 'csv') {
-        send(200, toCSV(entries, verify, filtered ? null : head));
+        send(200, toCSV(entries, verify, filtered ? null : head, keySource));
         return true;
       }
-      send(200, { workspace: wsId, exportedAt: new Date().toISOString(), algorithm: 'SHA-256(prevHash + "\\n" + JSON[seq, at, actor, action, ref, summary])',
-        genesis: genesis(wsId), total: chain.length, filtered, head: filtered ? null : head, verify, anchors: s.anchors, entries, limit: AUDIT_LIMIT,
-        keySource: auditKeySource() === 'app-setting' ? 'service key' : 'development key' });
+      send(200, { workspace: wsId, exportedAt: new Date().toISOString(), algorithm: 'SHA-256(prevHash + "\\n" + JSON[seq, at, actor, actorName, action, ref, summary])',
+        genesis: genesis(wsId), total: chain.length, filtered, head: filtered ? null : head, verify, anchors: s.anchors, entries, limit: AUDIT_LIMIT, keySource });
       return true;
     }
     if (rest[1] === 'verify' && rest.length === 2) {
       if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
-      if (!Array.isArray(body.entries) || body.entries.length > 5000) { fail(400, 'entries must be the array from a JSON export'); return true; }
-      if (body.filtered === true) { send(200, { verify: { ok: false, count: 0, signed: false, anchorsChecked: 0, firstBreak: null, summary: 'This export was filtered, so its chain has gaps. Export without filters to check it.' } }); return true; }
+      const filteredMsg = { verify: { ok: false, count: 0, signed: false, anchorsChecked: 0, firstBreak: null, summary: 'This export was filtered, so its chain has gaps. Export without filters to check it.' } };
+      /* R12: a CSV export is checked the same way; its footer row carries the signed head */
+      let entries = body.entries, head = isPlainObject(body.head) ? body.head : null, fileKey = null;
+      if (typeof body.csv === 'string') {
+        if (Buffer.byteLength(body.csv, 'utf8') > 4 * 1024 * 1024) { fail(413, 'That file is too large to be a PMOFlow history export.'); return true; }
+        const parsed = fromCSV(body.csv);
+        if (parsed.error) { send(200, { verify: { ok: false, count: 0, signed: false, anchorsChecked: 0, firstBreak: null, summary: parsed.error } }); return true; }
+        if (parsed.filtered) { send(200, filteredMsg); return true; }
+        entries = parsed.entries; head = parsed.head; fileKey = parsed.keySource;
+      }
+      if (!Array.isArray(entries) || entries.length > 5000) { fail(400, 'entries must be the array from a JSON export'); return true; }
+      if (body.filtered === true) { send(200, filteredMsg); return true; }
       /* the saved file must carry its signed head; checkpoints come from the server, never from the file */
       const st = await store.getState(ws);
-      send(200, { verify: verifyChain(wsId, body.entries, settingsOf(st.docs).anchors, { head: isPlainObject(body.head) ? body.head : null, requireHead: true, anchorsWithin: true }) });
+      const v = verifyChain(wsId, entries, settingsOf(st.docs).anchors, { head, requireHead: true, anchorsWithin: true });
+      send(200, { verify: Object.assign(v, { keySource: keyLabel(), fileKeySource: fileKey, format: typeof body.csv === 'string' ? 'csv' : 'json' }) });
       return true;
     }
     if (rest[1] === 'anchor' && rest.length === 2) {
       if (method !== 'POST') { fail(405, 'method not allowed'); return true; }
       const st = await store.getState(ws);
       const actor = actorOf(body);
-      const chain = await chainFor(store, ws);
+      const chain = await chainFor(store, ws, st.docs);
       const s = settingsOf(st.docs);
       const head = chain[chain.length - 1];
       if (head && !(s.anchors.length && s.anchors[s.anchors.length - 1].hash === head.hash)) {
-        s.anchors.push({ n: head.seq, hash: head.hash, at: new Date().toISOString(), by: actor });
+        s.anchors.push({ n: head.seq, hash: head.hash, at: new Date().toISOString(), by: actor, v: CHAIN_V });
         await saveSettings(store, wsId, s);
       }
       send(200, { ok: true, anchor: s.anchors[s.anchors.length - 1] || null });
@@ -470,5 +539,5 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
   return true;
 }
 
-module.exports = { handle, readCookie, wsCookie, WS_COOKIE, signHead, headOf, auditKeySource, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, filterEntries, genesis, canonical,
+module.exports = { handle, readCookie, wsCookie, WS_COOKIE, signHead, headOf, auditKeySource, keyLabel, roleError, roleOf, settingsOf, effectiveRoles, seats, chainEvents, verifyChain, toCSV, fromCSV, csvRows, filterEntries, genesis, canonical, CHAIN_V,
   ROLES, ROLE_LABEL, defaultRole };

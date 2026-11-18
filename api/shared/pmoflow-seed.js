@@ -351,11 +351,12 @@ function seed(createdAtISODate) {
     reason: 'Business check of bank capture and micro-deposit verification', requestedBy: 'dk', status: 'requested',
     log: [{ at: at(-1, 21), by: 'dk', action: 'requested' }] });
   add('grant', { id: 'G3', projectId: 'vendor-modernization', dataId: 'D1', env: 'dev', access: 'read',
-    reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ps', approvedAt: at(-27, 9),
-    expires: bizDay(day, -3), log: [{ at: at(-28, 11), by: 'mc', action: 'requested' }, { at: at(-27, 9), by: 'ps', action: 'approved' }, { at: at(-3, 0), by: 'system', action: 'expired' }] });
+    reason: 'Prototype the W-9 upload parser', requestedBy: 'mc', status: 'expired', approvedBy: 'ta', approvedAt: at(-22, 9),
+    /* R12 #7: within the 30-day cap from approval */
+    expires: bizDay(day, -3), log: [{ at: at(-23, 11), by: 'mc', action: 'requested' }, { at: at(-22, 9), by: 'ta', action: 'approved' }, { at: at(-3, 23), by: 'system', action: 'expired' }] });
   add('grant', { id: 'G4', projectId: 'access-review-automation', dataId: 'D7', env: 'dev', access: 'read',
-    reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ps', approvedAt: at(-15, 13),
-    expires: bizDay(day, 14), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ps', action: 'approved' }] });
+    reason: 'Join entitlements to managers for review campaigns', requestedBy: 'dk', status: 'active', approvedBy: 'ta', approvedAt: at(-15, 13),
+    expires: bizDay(day, 5), log: [{ at: at(-15, 10), by: 'dk', action: 'requested' }, { at: at(-15, 13), by: 'ta', action: 'approved' }] });
 
   /* R11 §2: each part is approved by its department head, never by someone who does its steps (Maya, Dev) */
   add('approval', { id: 'AP1', projectId: 'vendor-modernization', bu: 'Procurement', approver: 'rv', decision: 'approved',
@@ -412,17 +413,17 @@ function seed(createdAtISODate) {
     ev(-30, 15, 'ta', 'create', 'project:vendor-modernization', 'Created project Vendor Onboarding Modernization'),
     ev(-30, 16, 'ta', 'baseline', 'project:vendor-modernization', 'Saved baseline "Kickoff plan"'),
     ev(-3, 15, 'ta', 'create', 'project:erp-upgrade-readiness', 'Created project ERP Upgrade Readiness'),
-    ev(-28, 11, 'mc', 'request', 'grant:G3', 'Requested Dev read access to Vendor legal name & Tax ID'),
+    ev(-23, 11, 'mc', 'request', 'grant:G3', 'Requested Dev read access to Vendor legal name & Tax ID'),
     ev(-15, 17, 'mc', 'update', 'workItem:W1', 'Work item "Open W-9 and insurance uploads in the vendor portal" marked done'),
     ev(-13, 10, 'ps', 'update', 'workItem:W2', 'Work item "Sign the screening service contract" marked done'),
     ev(-4, 16, 'ps', 'update', 'workItem:W5', 'Work item "Make the extra-checks list and sign-off form" marked done'),
     ev(-2, 15, 'ps', 'create', 'testRun:TR5', 'Business check of the Compliance steps: 9 pass'),
     ev(-5, 16, 'dk', 'update', 'workItem:W9', 'Work item "Send the \"vendor is ready\" messages automatically" marked done'),
     ev(-3, 17, 'ar', 'approve', 'grant:G1', 'Approved Dev read access to Vendor master record'),
-    ev(-3, 0, 'system', 'expire', 'grant:G3', 'Dev read access to Vendor legal name & Tax ID expired'),
-    ev(-2, 16, 'mc', 'approve', 'approval:AP1', 'Procurement sign-off (step-up verified)'),
+    ev(-3, 23, 'system', 'expire', 'grant:G3', 'Dev read access to Vendor legal name & Tax ID expired'),
+    ev(-2, 16, 'rv', 'approve', 'approval:AP1', 'Procurement sign-off (step-up verified)'),
     ev(-1, 15, 'ps', 'comment', 'process:vendor-onboarding', 'Commented on Vendor Onboarding'),
-    ev(-1, 14, 'dk', 'approve', 'approval:AP2', 'IT sign-off on access review (step-up verified)'),
+    ev(-1, 14, 'sk', 'approve', 'approval:AP2', 'IT sign-off on access review (step-up verified)'),
     ev(-1, 18, 'dk', 'create', 'testRun:TR1', `Test run, ${md(-1)}: 5 pass, 1 fail`),
     ev(-1, 20, 'mc', 'comment', 'workItem:W6', 'Commented on work item "Set up the bank details form" and mentioned Tom Alvarez'),
     ev(-1, 21, 'dk', 'request', 'grant:G2', 'Requested UAT read access to Bank remittance details'),
@@ -478,6 +479,8 @@ function enrichR2(docs, day, at) {
   /* R5: PMO fields */
   docs.person.forEach(d => { d.data.dayRate = DAY_RATE[d.id] || 800; });
   docs.project.forEach(d => Object.assign(d.data, PMO[d.id] || {}, { releaseManager: d.data.owner }));
+  /* R12 #9: each baseline locks the budget it was taken with (earned value is measured against it) */
+  docs.project.forEach(d => (d.data.baselines || []).forEach(b => { if (b.budget == null && d.data.budget && d.data.budget.planned != null) b.budget = d.data.budget.planned; }));
   /* R5: an HR approver exists only if some step or trigger touches HR */
   const touchesHR = docs.process.some(p => JSON.stringify([p.data.tobe, p.data.asis]).match(/"touches":\[[^\]]*"HR"/));
   if (touchesHR) docs.person.push({ id: 'hr', data: { id: 'hr', name: 'Grace Lin', role: 'HR Business Partner', color: '#0d9488', bu: 'HR', capacity: 3, dayRate: 850 } });

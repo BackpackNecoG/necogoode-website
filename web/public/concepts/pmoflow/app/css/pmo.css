@@ -908,3 +908,8 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-evflags .pmo-evflag{margin-left:0}
 .pmo-tflags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .pmo-tflags .pmo-evflag{margin-left:0}
+/* R12 #12: the Simple "Custom…" range stays hidden until asked for; KPI tile notes sit on their own line
+   (so a phone never reads "Late1 will finish…" or "Blockingholds up 5 tasks") */
+.pmo-rep-custom[hidden]{display:none}
+.kpi > .hint{display:block;margin-top:2px;line-height:1.3}
+.pmo-noowner{color:#92400e;font-weight:600}

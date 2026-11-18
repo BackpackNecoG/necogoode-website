@@ -159,7 +159,7 @@ test('audit chain: deterministic, links verify, tampering detected', () => {
   assert.deepEqual(a, b);
   assert.equal(a[0].prevHash, admin.genesis('wsx'));
   for (let i = 1; i < a.length; i++) assert.equal(a[i].prevHash, a[i - 1].hash);
-  const want1 = crypto.createHash('sha256').update(admin.genesis('wsx') + '\n' + JSON.stringify([1, evs[0].at, 'ta', 'create', 'project:p1', 'Created project'])).digest('hex');
+  const want1 = crypto.createHash('sha256').update(admin.genesis('wsx') + '\n' + JSON.stringify([1, evs[0].at, 'ta', 'ta', 'create', 'project:p1', 'Created project'])).digest('hex');
   assert.equal(a[0].hash, want1);
   assert.equal(admin.verifyChain('wsx', a).ok, true);
   const edited = a.map(e => Object.assign({}, e)); edited[1].summary = 'Edited step (quietly changed)';
@@ -169,8 +169,10 @@ test('audit chain: deterministic, links verify, tampering detected', () => {
   assert.equal(admin.verifyChain('wsx', dropped).ok, false);
   assert.equal(admin.verifyChain('other-ws', a).ok, false);
   /* anchors: a recorded head must still match */
-  assert.equal(admin.verifyChain('wsx', a, [{ n: 2, hash: a[1].hash }]).ok, true);
-  assert.equal(admin.verifyChain('wsx', a, [{ n: 2, hash: 'f'.repeat(64) }]).ok, false);
+  assert.equal(admin.verifyChain('wsx', a, [{ n: 2, hash: a[1].hash, v: 2 }]).ok, true);
+  assert.equal(admin.verifyChain('wsx', a, [{ n: 2, hash: 'f'.repeat(64), v: 2 }]).ok, false);
+  /* R12: checkpoints recorded before actor names were hashed (no v) are not compared */
+  assert.equal(admin.verifyChain('wsx', a, [{ n: 2, hash: 'f'.repeat(64) }]).anchorsChecked, 0);
 });
 
 test('audit export over the history store: JSON, CSV, filters, anchor, verify a saved file', async () => {
@@ -209,7 +211,7 @@ test('audit export over the history store: JSON, CSV, filters, anchor, verify a 
   assert.equal(j.body.head.hash, j.body.verify.head);
   assert.match(j.body.head.signature, /^[a-f0-9]{64}$/);
   assert.equal(f.body.head, null, 'a filtered export carries no signed head');
-  assert.match(c.body, /# Signed head: \d+ entries, head [a-f0-9]{64}, signature [a-f0-9]{64}/);
+  assert.match(c.body, /\r\n# Signed head,\d+,[a-f0-9]{64},[a-f0-9]{64},(production|development) key\r\n$/);
   const good = await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries: j.body.entries, head: j.body.head });
   assert.equal(good.body.verify.ok, true, good.body.verify.summary);
   assert.equal(good.body.verify.signed, true);
@@ -352,7 +354,10 @@ test('sandbox: burst limit of 10 per network in 10 minutes, with one plain messa
   }
   const r = await createVia(ip);
   assert.equal(r.status, 429);
-  assert.deepEqual(r.body, { error: 'This network has started a lot of demos in the last few minutes. Try again in 10 minutes, or book a guided demo.' });
+  /* R12 #12: one message, one true time (the burst just happened, so the wait is the full 10 minutes) */
+  assert.deepEqual(r.body, { error: 'This network has started a lot of demos recently. You can start another in 10 minutes, or book a guided demo.' });
+  assert.equal((r.body.error.match(/\d+ minutes?|tomorrow|a minute/g) || []).length, 1, 'exactly one time in the message');
+  assert.equal(store.LIMIT_MSG.burst(1), 'This network has started a lot of demos recently. You can start another in 1 minute, or book a guided demo.');
   assert.equal(store.BURST_MAX, 10); assert.equal(store.BURST_WINDOW_MS, 600000);
   /* a returning visitor is not blocked by the limit */
   const back = await createVia(ip, 'pmoflow_ws=' + created[created.length - 1][0]);
@@ -379,6 +384,152 @@ test('sandbox: daily cap of 50 per network, with one plain message', { skip: sto
     }
     const r = await createVia(ip);
     assert.equal(r.status, 429);
-    assert.deepEqual(r.body, { error: 'This network has started a lot of demos today. Try again tomorrow, or book a guided demo.' });
+    assert.deepEqual(r.body, { error: 'This network has started a lot of demos today. You can start another tomorrow, or book a guided demo.' });
+  } finally { Date.now = realNow; }
+});
+
+/* ---------- R12 H4 (CONSOLIDATED-R11 #2): every audit attack from expert-pmo.md, on JSON and CSV, plus the new ones ---------- */
+async function auditWs() {
+  const ws = await newWs();
+  for (let i = 0; i < 4; i++) await call('PUT', `ws/${ws}/doc/risk/rk-r12${i}`, { data: { title: 'Risk ' + i, status: 'open' }, actor: i % 2 ? 'mc' : 'ta', summary: 'Logged risk ' + i });
+  /* an external identity, the way sync records it */
+  await store.appendEvent(ws, { actor: 'Jira: jane@contoso.example', action: 'sync', ref: 'workItem:W11', summary: 'From Jira VOM-11: work item status Not started → Done' });
+  /* summaries that need CSV escaping and formula protection must round-trip exactly */
+  await store.appendEvent(ws, { actor: 'ta', action: 'update', ref: 'risk:rk-x', summary: '=HYPERLINK("x"), "quoted", line\nbreak' });
+  await store.appendEvent(ws, { actor: 'ta', action: 'update', ref: 'risk:rk-y', summary: "'=already quoted" });
+  const j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+  const csv = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv' })).body;
+  return { ws, j, csv };
+}
+const vJson = async (ws, entries, head) => (await call('POST', `workspaces/${ws}/admin/audit/verify`, { entries, head })).body.verify;
+const vCsv = async (ws, csv) => (await call('POST', `workspaces/${ws}/admin/audit/verify`, { csv })).body.verify;
+/* CSV built from (possibly tampered) entries and head, in the exact export format */
+const csvOf = (entries, head, key) => admin.toCSV(entries, { summary: 'x', head: '', at: '' }, head, key || 'development key');
+
+test('R12 audit: actor id and actor name are inside the hash', async () => {
+  const { ws, j } = await auditWs();
+  assert.equal((await vJson(ws, j.entries, j.head)).ok, true);
+  const tom = j.entries.findIndex(e => e.actor === 'ta');
+  assert.equal(j.entries[tom].actorName, 'Tom Alvarez');
+  /* the expert's attack: edit actorName only */
+  const named = j.entries.map(e => Object.assign({}, e)); named[tom].actorName = 'Rosa Diaz';
+  let v = await vJson(ws, named, j.head);
+  assert.equal(v.ok, false, 'an edited actorName fails'); assert.equal(v.firstBreak.seq, tom + 1); assert.match(v.summary, /changed after it was recorded/);
+  /* edit the actor id only */
+  const id = j.entries.map(e => Object.assign({}, e)); id[tom].actor = 'rd';
+  assert.equal((await vJson(ws, id, j.head)).ok, false, 'an edited actor id fails');
+  /* the external identity is the recorded actor and name */
+  const ext = j.entries.find(e => e.action === 'sync');
+  assert.equal(ext.actor, 'Jira: jane@contoso.example'); assert.equal(ext.actorName, 'Jira: jane@contoso.example');
+  const ext2 = j.entries.map(e => Object.assign({}, e)); ext2[ext.seq - 1].actorName = 'Tom Alvarez';
+  assert.equal((await vJson(ws, ext2, j.head)).ok, false, 'relabelling a Jira change as Tom fails');
+  /* re-hash after the name edit, keep the head: the signature fails */
+  const re = admin.chainEvents(ws, named.map(e => ({ at: e.at, actor: e.actor, actorName: e.actorName, action: e.action, ref: e.ref, summary: e.summary })));
+  v = await vJson(ws, re, Object.assign({}, j.head, { hash: re[re.length - 1].hash }));
+  assert.equal(v.ok, false); assert.match(v.summary, /signature does not match/);
+  /* the algorithm string says what is hashed */
+  assert.match(j.algorithm, /actor, actorName, action/);
+});
+
+test('R12 audit: a CSV export is verifiable in the app (head and count in a footer row)', async () => {
+  const { ws, j, csv } = await auditWs();
+  const lines = csv.trimEnd().split('\r\n');
+  const foot = lines[lines.length - 1].split(',');
+  assert.equal(foot[0], '# Signed head');
+  assert.equal(Number(foot[1]), j.total, 'footer carries the count');
+  assert.equal(foot[2], j.head.hash, 'footer carries the head');
+  assert.equal(foot[3], j.head.signature);
+  /* round trip: parsing gives back exactly the exported entries */
+  const parsed = admin.fromCSV(csv);
+  assert.deepEqual(parsed.entries, j.entries.map(e => Object.assign({}, e, { seq: e.seq })));
+  assert.match(csv, /"'=HYPERLINK\(""x""\), ""quoted"", line\nbreak"/, 'formula protection in the file');
+  assert.match(csv, /,''=already quoted,/);
+  let v = await vCsv(ws, csv);
+  assert.equal(v.ok, true, v.summary); assert.equal(v.signed, true); assert.equal(v.format, 'csv');
+  assert.equal((await vCsv(ws, '﻿' + csv)).ok, true, 'the byte-order mark the app adds is fine');
+  /* every attack from the expert's report, on the CSV */
+  const E = () => parsed.entries.map(e => Object.assign({}, e));
+  /* 1. edit an entry */
+  let t = E(); t[2].summary += ' (changed)';
+  v = await vCsv(ws, csvOf(t, j.head)); assert.equal(v.ok, false); assert.equal(v.firstBreak.seq, 3);
+  /* 1b. edit by hand in the text */
+  v = await vCsv(ws, csv.replace('Logged risk 1', 'Logged risk 9')); assert.equal(v.ok, false);
+  /* 2. edit actorName */
+  t = E(); t[0].actorName = 'Someone else';
+  v = await vCsv(ws, csvOf(t, j.head)); assert.equal(v.ok, false); assert.equal(v.firstBreak.seq, 1);
+  /* 3. re-hash everything after an edit, keep the signature */
+  t = E(); t[1].summary = 'Nothing to see here';
+  let re = admin.chainEvents(ws, t);
+  v = await vCsv(ws, csvOf(re, Object.assign({}, j.head, { hash: re[re.length - 1].hash })));
+  assert.equal(v.ok, false); assert.match(v.summary, /signature does not match/);
+  /* 4. delete the tail, keep the head */
+  v = await vCsv(ws, csvOf(E().slice(0, -1), j.head)); assert.equal(v.ok, false); assert.match(v.summary, /removed from the end/);
+  /* 4b. delete the tail and fix the head's count and hash */
+  t = E().slice(0, -1);
+  v = await vCsv(ws, csvOf(t, Object.assign({}, j.head, { count: t.length, hash: t[t.length - 1].hash }))); assert.equal(v.ok, false); assert.match(v.summary, /signature does not match/);
+  /* 5. delete a middle entry and re-hash */
+  t = E(); t.splice(2, 1); re = admin.chainEvents(ws, t);
+  v = await vCsv(ws, csvOf(re, { count: re.length, hash: re[re.length - 1].hash, signature: j.head.signature })); assert.equal(v.ok, false);
+  /* 5b. delete a middle entry without re-hashing */
+  t = E(); t.splice(2, 1);
+  v = await vCsv(ws, csvOf(t, j.head)); assert.equal(v.ok, false);
+  /* 6. remove the head row */
+  v = await vCsv(ws, csv.replace(/# Signed head,[^\r\n]*\r\n$/, '')); assert.equal(v.ok, false); assert.match(v.summary, /no signed head/);
+  /* 7. a cut row, a foreign file, a filtered export, another workspace */
+  v = await vCsv(ws, csv.replace(/\r\n2,[^\r\n]*/, '\r\n2,cut')); assert.equal(v.ok, false); assert.match(v.summary, /cells instead of/);
+  v = await vCsv(ws, 'name,amount\r\nx,1\r\n'); assert.equal(v.ok, false); assert.match(v.summary, /isn’t a PMOFlow history export/);
+  const filtered = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv', person: 'ta' })).body;
+  assert.match(filtered, /\r\n# Filtered export,\d+,,,/);
+  v = await vCsv(ws, filtered); assert.equal(v.ok, false); assert.match(v.summary, /filtered/);
+  const ws2 = await newWs();
+  assert.equal((await vCsv(ws2, csv)).ok, false, 'another workspace cannot vouch for it');
+  /* JSON: the same attacks still fail (R11 suite) and the honest file passes */
+  assert.equal((await vJson(ws, j.entries, j.head)).ok, true);
+});
+
+test('R12 audit: the key source reads "production key" only when PMOFLOW_AUDIT_KEY is set', async () => {
+  const saved = process.env.PMOFLOW_AUDIT_KEY;
+  try {
+    delete process.env.PMOFLOW_AUDIT_KEY;
+    const ws = await newWs();
+    await call('PUT', `ws/${ws}/doc/risk/rk-k`, { data: { title: 'K', status: 'open' }, actor: 'ta', summary: 'Logged risk K' });
+    let j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+    assert.equal(j.keySource, 'development key');
+    let csv = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv' })).body;
+    assert.match(csv, /,development key\r\n$/);
+    assert.equal((await vCsv(ws, csv)).keySource, 'development key');
+    process.env.PMOFLOW_AUDIT_KEY = 'unit-test-production-audit-key-0123';
+    assert.equal(admin.keyLabel(), 'production key');
+    j = (await call('GET', `workspaces/${ws}/admin/audit`, null, {})).body;
+    assert.equal(j.keySource, 'production key');
+    csv = (await call('GET', `workspaces/${ws}/admin/audit`, null, { format: 'csv' })).body;
+    assert.match(csv, /,production key\r\n$/);
+    const v = await vCsv(ws, csv);
+    assert.equal(v.ok, true); assert.equal(v.keySource, 'production key'); assert.equal(v.fileKeySource, 'production key');
+    assert.ok(!csv.includes('unit-test-production-audit-key') && !JSON.stringify(j).includes('unit-test-production-audit-key'), 'the key itself never appears');
+    /* a file signed with the development key does not verify under the production key */
+    process.env.PMOFLOW_AUDIT_KEY = 'a-different-production-key-456789';
+    assert.equal((await vCsv(ws, csv)).ok, false);
+  } finally {
+    if (saved === undefined) delete process.env.PMOFLOW_AUDIT_KEY; else process.env.PMOFLOW_AUDIT_KEY = saved;
+  }
+});
+
+test('R12 sandbox: the burst message names the real wait, and Retry-After agrees', async () => {
+  const ip = testIp();
+  const realNow = Date.now;
+  const t0 = realNow();
+  let off = 0;
+  Date.now = () => t0 + off;
+  try {
+    for (let i = 0; i < store.BURST_MAX; i++) { const r = await createVia(ip); assert.equal(r.status, 201); created.push([r.body.id, hashOf(ip)]); }
+    off = 4 * 60000 + 5000;            /* 4 minutes later: the oldest leaves the window in 5 min 55 s */
+    const r = await createVia(ip);
+    assert.equal(r.status, 429);
+    assert.match(r.body.error, /You can start another in 6 minutes, or book a guided demo\.$/);
+    assert.equal(Number((r.headers || {})['Retry-After']), 355);
+    off = 10 * 60000 + 1000;           /* after the window: allowed again */
+    const ok2 = await createVia(ip);
+    assert.equal(ok2.status, 201); created.push([ok2.body.id, hashOf(ip)]);
   } finally { Date.now = realNow; }
 });

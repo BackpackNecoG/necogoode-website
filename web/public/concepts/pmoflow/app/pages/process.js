@@ -18,6 +18,39 @@ export async function loadImport() {
   if (!importMod) importMod = import('../import.js').then(() => window.PMOImport).catch(e => { importMod = null; throw e; });
   return importMod;
 }
+/* ---------- R12 #1: who approves each team's part ----------
+   The process keeps an explicit mapping from each team its steps name to the department that approves that team's part:
+   process.teamDepartments = {team: department | null} (H1's engine API). The engine works out the teams, the pick list
+   and the wording (E().teamRouting); there is no default department, ever: an unmapped team reads "Choose who approves
+   for <team>". A process saved with only a Today map is routed on Today until its Future exists. */
+const routingOf = p => {
+  if (!p) return null;
+  const view = Object.assign({}, p, { tobe: flat(p.tobe).length ? p.tobe : (p.asis || []) });
+  return eng('teamRouting', [docs(), view], null);
+};
+/* rows: [{team, department, text}]; departments: the pick list */
+export function routingRows(p) {
+  const r = routingOf(p);
+  return r ? { teams: r.teams || [], departments: (r.departments || []).map(d => d.name), text: r.text || '' } : { teams: [], departments: [], text: '' };
+}
+/* the card (process page) or panel (import draft): a select per team, or the plain mapping when read-only */
+export function approversHTML(rt, opts) {
+  opts = opts || {};
+  const gaps = rt.teams.filter(r => !r.department).length;
+  const row = r => `<div class="row d-apr ${r.department ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}">
+      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${r.department ? '' : `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`}</div>
+      <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select>`
+        : r.department ? `<span data-apr-shown>${esc(r.department)}</span>` : '<span class="hint">Not chosen</span>'}</div></div>`;
+  return `<div class="${opts.inline ? 'is-apr' : 'card'}" data-approvers="${rt.teams.length}" data-apr-gaps="${gaps}">${opts.inline ? '<h4>Who approves each team’s part</h4>' : `<h3>Who approves each team’s part${gaps ? ` <span class="n d-apr-n">${gaps} to choose</span>` : ''}</h3>`}
+    <div class="hint" style="margin:-2px 0 8px">Before launch, the department you pick signs off that team’s steps. Nothing is picked for you${opts.inline ? '; you can change it later on the process' : ''}.</div>
+    ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${rt.text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(rt.text)}</div>` : ''}</div>`;
+}
+/* {team: department|null} with the visitor's choices read back from the selects */
+export function readApproverSelects(root, map) {
+  const out = Object.assign({}, map || {});
+  root.querySelectorAll('[data-apr-sel]').forEach(el => { const k = Object.keys(out).find(x => x.toLowerCase() === el.dataset.aprSel.toLowerCase()) || el.dataset.aprSel; out[k] = el.value || null; });
+  return out;
+}
 /* RACI (R10 S2 §5): Responsible is the step's owner; Accountable / Consulted / Informed are optional people or roles */
 const raciNorm = n => { const r = (n && n.raci) || {}; const l = v => (Array.isArray(v) ? v : String(v || '').split(/\s*[,;]\s*/)).map(x => String(x).trim()).filter(Boolean); return { a: String(Array.isArray(r.a) ? r.a[0] || '' : r.a || '').trim(), c: l(r.c), i: l(r.i) }; };
 export const raciName = v => { const p = v && store.person(v); return p ? p.name : v; };
@@ -1036,8 +1069,6 @@ export function render(params) {
   const steps = flat(tobe);
   const diff = mode === 'compare' ? cmpDiff(view.A, view.B) : eng('diffProcess', [p], { nodes: {}, removed: [], changes: {} });
   const sum = diffCounts(p);
-  const tdl = [...new Set(steps.flatMap(s => s.data || []))];
-  const live = tdl.filter(d => availOf(d) === 'live').length;
   const asisById = {}; flat(asis).forEach(a => asisById[a.id] = a);
   const byId = {}; allNodes(view.nodes).forEach(n => byId[n.id] = n);
   const ctx = { pid, mode: mode === 'compare' ? 'diff' : mode, cmp: mode === 'compare', diff, asisById, byId, readonly: !!rel || mode === 'compare', edit: mode === 'edit' && !rel ? { ver } : null };
@@ -1062,7 +1093,10 @@ export function render(params) {
       ${!adv || rel || !editor ? '' : importBtn('Import diagram file (BPMN)', 'Import a diagram file (BPMN 2.0) as a new version of this process', 'd-mi')}
     </div></details>`;
   const editBtn = rel || !editor ? '' : editing ? `<button class="btn sm primary" data-edit-done>✓ Done</button>` : `<button class="btn sm d-editbtn" data-mode="edit" aria-label="Edit steps">✎ Edit<span class="d-long"> steps</span></button>`;
-  const kpis = adv ? `<div class="kpis"><div class="kpi"><b>${steps.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed</span></div><div class="kpi"><b>${live}/${tdl.length}</b><span>Information available</span></div></div>` : '';
+  /* R12 #7: the header counters describe the map being shown (Today counts Today's steps and information) */
+  const kSteps = flat(view.nodes), kData = [...new Set(kSteps.flatMap(s => s.data || []))], kLive = kData.filter(d => availOf(d) === 'live').length;
+  const kName = view.key === 'tobe' ? 'Future' : view.key === 'asis' ? 'Today' : view.key === 'compare' ? view.B.label : 'Released';
+  const kpis = adv ? `<div class="kpis" data-kpis="${esc(view.key)}"><div class="kpi" data-kpi-steps="${kSteps.length}"><b>${kSteps.length}</b><span>${esc(kName)} steps</span></div>${view.key === 'tobe' || mode === 'diff' ? `<div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed</span></div>` : ''}<div class="kpi" data-kpi-data="${kLive}/${kData.length}"><b>${kLive}/${kData.length}</b><span>Information available</span></div></div>` : '';
   /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
   const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : mode === 'raci' ? 'RACI' : 'Who’s affected';
   const vcount = flat(view.nodes).length;
@@ -1149,6 +1183,7 @@ export function render(params) {
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
     ${Object.keys(touches).length || adv ? `<div class="card" data-touches><h3>Teams involved</h3><div class="chips">${Object.entries(touches).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip touch" data-touch="${esc(t)}" title="${c} step${c === 1 ? '' : 's'}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
+    ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor })}
     ${Object.keys(systems).length ? `<div class="card" data-systems><h3>Systems touched</h3><div class="chips">${Object.entries(systems).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip d-syschip" data-system="${esc(t)}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('')}</div></div>` : ''}
     ${versionsCard}
     <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · launched' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not in a project yet.</div>'}
@@ -1525,7 +1560,9 @@ async function readDiagram(file) {
     const v = await PI.parseVsdx(await file.arrayBuffer(), { name: '' });
     const r = parseBpmn(v.bpmn, store.state.people, store.state.me);
     r.name = v.name || file.name.replace(/\.vsdx$/i, '');
-    r.dropped = (v.dropped || []).concat(r.dropped || []);
+    /* R12: a shape the Visio reader already listed is not listed again by the diagram reader */
+    const seenDrop = new Set();
+    r.dropped = (v.dropped || []).concat(r.dropped || []).filter(d => { const k = String(d.name || '').trim().toLowerCase(); if (seenDrop.has(k)) return false; seenDrop.add(k); return true; });
     r.kind = 'vsdx'; r.desc = `Imported from the Visio file ${file.name}.`;
     return r;
   }
@@ -1552,6 +1589,8 @@ export function bindImport(root, pid) {
     const asis = r.nodes, tobe = forkNodes(asis);
     const owners = [...new Set(flat(asis).map(n => n.owner).filter(Boolean))];
     const p = { id, name, desc: r.desc || `Imported from ${file.name}.`, owner: store.state.me, resources: [...new Set([store.state.me, ...owners])], version: 1, asis, tobe, released: [] };
+    /* R12 #1: the teams in the file seed who approves each team's part (a department of the same name, else nobody) */
+    p.teamDepartments = eng('seedTeamDepartments', [docs(), asis], {});
     try {
       await createImportedData(r.newData, file.name);
       const ic = importCounts(asis);
@@ -1794,6 +1833,14 @@ export function bind(root, params) {
   const ver = q.v === 'asis' ? 'asis' : 'tobe';
   drawLoops(root);
   bindRaci(root, pid);
+  /* R12 #1: choose the department that approves each team's part (saved on the process) */
+  root.querySelectorAll('[data-apr-sel]').forEach(sel => sel.onchange = async () => {
+    const p = clone(cur());
+    const base = {}; routingRows(p).teams.forEach(t => { base[t.team] = t.department || null; });
+    p.teamDepartments = readApproverSelects(root, Object.assign(base, p.teamDepartments || {}));
+    const team = sel.dataset.aprSel, dep = sel.value || null;
+    await saveProc(p, dep ? `${dep} approves ${team}'s part` : `Cleared who approves ${team}'s part`);
+  });
   const vs = root.querySelector('[data-version]');
   if (vs) vs.onchange = () => go(vs.value ? `/process/${pid}?mode=asis&rel=${encodeURIComponent(vs.value)}` : `/process/${pid}?mode=asis`);
   const vc = root.querySelector('[data-version-current]'); if (vc) vc.onclick = () => go(`/process/${pid}?mode=asis`);

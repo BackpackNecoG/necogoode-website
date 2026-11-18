@@ -318,23 +318,56 @@
   }
 
   /* ---------- inbound ---------- */
-  /* change: {key, title?, description?, status? (tool status name), assigneeEmail?, due?, updatedAt}. Description is plain text
-     (relay converts ADF / HTML). Returns {updates:[{workItemId, data, changes:[{field, from, to}]}], conflicts, skipped, log}.
-     opts: {today: 'YYYY-MM-DD', now: ISO, toolName}. conn.links[*].base is updated in place for applied/settled fields. */
+  /* change: {key, title?, description?, status? (tool status name), assigneeEmail?, due?, updatedAt, changedBy?}. Description is
+     plain text (relay converts ADF / HTML). changedBy: the email (or display name) of the person who changed it in the tool.
+     Returns {updates:[{workItemId, key, by, data, changes:[{field, from, to, held?}]}], conflicts, skipped, ignored, held}.
+     opts: {today: 'YYYY-MM-DD', now: ISO, toolName}. conn.links[*].base is updated in place for applied/settled fields.
+
+     R12 GUARDRAIL (governance never moves from sync). An inbound change may move a work item's status, and nothing else that
+     governs the project. Two kinds of work item carry governance on their status, so a "done" from the tool is HELD there:
+       - a problem fix (kind 'defect'): Done would close the problem; in PMOFlow it closes after its retest passes;
+       - a task that makes information available (resolves): Done would count as the information being available; in
+         PMOFlow its owner confirms it.
+     Held means: the work item moves to In review (when the project has that status; otherwise it keeps its status), the
+     reason is in res.held, and the tool keeps its own Done (nothing is pushed back). Approvals, tests, test runs, defect
+     fields and information records are never written here: the only document this returns is the work item. */
+  function doneLike(project, id) {
+    if (id === 'done') return true;
+    var s = ((project && project.statuses) || []).find(function (x) { return x && x.id === id; });
+    return !!(s && s.maps === 'done');
+  }
+  function heldStatus(project, w) {
+    var sts = (project && project.statuses) || [];
+    if (sts.some(function (x) { return x && x.id === 'review'; })) return 'review';
+    var rv = sts.find(function (x) { return x && x.maps === 'prog' && x.id !== 'prog'; });
+    return rv ? rv.id : (w.status && !doneLike(project, w.status) ? w.status : 'prog');
+  }
+  /* why a Done from the tool cannot be applied to this work item, or null */
+  function guardOf(w, docs, toolName) {
+    if (w.kind === 'defect') return { kind: 'problem', reason: toolName + ' says Done. A problem closes in PMOFlow only after its retest passes, so it waits in review.' };
+    if (w.resolves) {
+      var d = list(docs, 'dataElement').find(function (x) { return x.id === w.resolves; });
+      var nm = d && d.name ? '“' + d.name + '”' : 'The information';
+      return { kind: 'information', dataId: w.resolves, reason: toolName + ' says Done. ' + nm + ' counts as available only when its owner confirms it in PMOFlow, so the task waits in review.' };
+    }
+    return null;
+  }
   function applyInbound(conn, docs, changes, opts) {
     opts = opts || {};
     var toolName = opts.toolName || (TOOLS[conn.tool] || {}).name || 'the tool';
     var now = opts.now || new Date().toISOString();
     var today = opts.today || now.slice(0, 10);
-    var res = { updates: [], conflicts: [], skipped: [], ignored: [] };
+    var res = { updates: [], conflicts: [], skipped: [], ignored: [], held: [] };
     var items = projectItems(docs, conn.projectId), fields = inFields(conn);
+    var project = list(docs, 'project').find(function (p) { return p.id === conn.projectId; }) || null;
     var byWid = {};
     (changes || []).slice().sort(function (a, b) { return str(a.updatedAt).localeCompare(str(b.updatedAt)); }).forEach(function (ch) {
       var wid = workItemOfKey(conn, ch.key);
       if (!wid) { res.skipped.push({ key: ch.key, reason: 'Not linked to a PMOFlow task. PMOFlow plans the work, so add the task in PMOFlow first.' }); return; }
       var w0 = items.find(function (x) { return x.id === wid; });
       if (!w0) { res.skipped.push({ key: ch.key, workItemId: wid, reason: 'The PMOFlow task was deleted.' }); return; }
-      var entry = byWid[wid] || (byWid[wid] = { workItemId: wid, key: ch.key, data: clone(w0), changes: [] });
+      var entry = byWid[wid] || (byWid[wid] = { workItemId: wid, key: ch.key, data: clone(w0), changes: [], by: '' });
+      if (ch.changedBy) entry.by = str(ch.changedBy).trim().toLowerCase().slice(0, 120);
       var w = entry.data, link = conn.links[wid], base = link.base || (link.base = {});
       var rec = pmoRecord(w, docs, conn);
       var incoming = {};
@@ -372,6 +405,20 @@
         }
         base[f] = tv;
         if (!apply) return;
+        if (f === 'status' && doneLike(project, tv)) {
+          var g = guardOf(w, docs, toolName);
+          if (g) {
+            var hs = heldStatus(project, w);
+            base[f] = hs;                       /* the tool keeps its Done; PMOFlow's review is not pushed back as a change */
+            if (eq(b, hs) && eq(pv, hs)) return;  /* already held for this Done */
+            res.held.push({ key: ch.key, workItemId: wid, field: f, kind: g.kind, dataId: g.dataId || null, from: pv, to: hs, tool: str(ch.status), by: entry.by, reason: g.reason });
+            if (eq(pv, hs)) return;
+            entry.changes.push({ field: f, from: pv, to: hs, held: true });
+            setField(w, f, hs, docs, conn, today);
+            rec = pmoRecord(w, docs, conn);
+            return;
+          }
+        }
         entry.changes.push({ field: f, from: pv, to: tv });
         setField(w, f, tv, docs, conn, today);
         rec = pmoRecord(w, docs, conn);
@@ -444,7 +491,7 @@
       /* R11: PMOFlow's own writes are not "changes since the last sync" (a real relay filters out its service account the same way) */
       var ch = Object.keys(sim.items).map(function (k) { return sim.items[k]; }).filter(function (x) { return (!since || x.updatedAt > since) && x.updatedBy !== 'PMOFlow sync'; })
         .sort(function (a, b) { return a.updatedAt.localeCompare(b.updatedAt); })
-        .map(function (x) { return { key: x.key, title: x.title, description: x.description, status: x.status, assigneeEmail: x.assigneeEmail, due: x.due, updatedAt: x.updatedAt }; });
+        .map(function (x) { return { key: x.key, title: x.title, description: x.description, status: x.status, assigneeEmail: x.assigneeEmail, due: x.due, updatedAt: x.updatedAt, changedBy: x.changedBy || '' }; });
       var cursor = ch.length ? ch[ch.length - 1].updatedAt : (since || null);
       return { ok: true, changes: ch, cursor: cursor, detail: ch.length + ' changed ' + TOOLS[conn.tool].itemNoun + (ch.length === 1 ? '' : 's') + ' since the last sync.' };
     }
@@ -453,11 +500,13 @@
     }
     return { ok: false, detail: 'Unknown operation ' + intent.op + '.' };
   }
-  /* A person changing an item in the simulated tool. patch: {status?, title?, assigneeEmail?, due?} */
-  function simEdit(sim, key, patch, now) {
+  /* A person changing an item in the simulated tool. patch: {status?, title?, assigneeEmail?, due?}.
+     by: that person's email in the tool; without it, the issue's assignee made the change (the person doing the work). */
+  function simEdit(sim, key, patch, now, by) {
     var it = sim.items[key]; if (!it) return null;
+    var who = str(by).trim().toLowerCase() || it.assigneeEmail || '';
     ['status', 'title', 'assigneeEmail', 'due', 'description'].forEach(function (k) { if (patch && typeof patch[k] === 'string') it[k] = k === 'assigneeEmail' ? patch[k].toLowerCase() : patch[k]; });
-    it.updatedAt = now || new Date().toISOString(); it.updatedBy = 'a person in the tool';
+    it.updatedAt = now || new Date().toISOString(); it.updatedBy = 'a person in the tool'; it.changedBy = who;
     return it;
   }
 
@@ -509,7 +558,9 @@
     var tf = toolFields || { title: (conn.fields && conn.fields.title || {}).toolField || 'summary', description: (conn.fields && conn.fields.description || {}).toolField || 'description',
       due: (conn.fields && conn.fields.due || {}).toolField || 'duedate' };
     return { jql: 'project = "' + conn.projectKey + '" AND labels = pmoflow' + (since ? ' AND updated >= "' + jiraTime(since) + '"' : '') + ' ORDER BY updated ASC',
-      fields: [tf.title, tf.description, 'status', 'assignee', tf.due, 'updated'], maxResults: 100 };
+      fields: [tf.title, tf.description, 'status', 'assignee', tf.due, 'updated'], maxResults: 100,
+      /* R12: who made the change (changelog author), so PMOFlow history credits the external actor */
+      expand: 'changelog' };
   }
   function adoPullQuery(since) {
     return "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Tags] CONTAINS 'PMOFlow'" +
@@ -517,7 +568,7 @@
   }
   function adoPullFields(conn, toolFields) {
     var tf = function (f) { return (toolFields && toolFields[f]) || ((conn.fields || {})[f] || {}).toolField || TOOL_FIELDS.ado[f]; };
-    return ['System.Id', tf('title'), tf('description'), 'System.State', 'System.AssignedTo', tf('due'), 'System.ChangedDate'];
+    return ['System.Id', tf('title'), tf('description'), 'System.State', 'System.AssignedTo', tf('due'), 'System.ChangedDate', 'System.ChangedBy'];
   }
 
   /* ---------- notifications ---------- */

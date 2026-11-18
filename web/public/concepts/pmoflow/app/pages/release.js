@@ -235,7 +235,8 @@ function refView(ref, prjId) {
   if (m[1] === 'process') { const p = store.get('process', m[2]); return { text: `${p ? p.name : m[2]} (process edited)`, extra: p && p.updatedAt ? 'changed ' + fmtTime(p.updatedAt) : '', href: `/process/${m[2]}?mode=diff` }; }
   if (m[1] === 'section') { const k = (/#(\w)$/.exec(m[2]) || [])[1]; return { text: { s: 'its steps changed', d: 'its information changed', t: 'its tests changed', c: 'the launch-day plan changed' }[k] || 'this part changed', extra: '', href: k === 't' ? `/testing/${prjId}` : null }; }
   if (m[1] === 'project' || m[1] === 'cutover') return cutoverStaleView(store.get('project', m[1] === 'project' ? m[2].replace(/#.*$/, '') : prjId) || store.get('project', prjId));
-  return { text: ref, extra: '', href: null };
+  /* R12: never show an internal reference ("section:…#s:…") as text */
+  return { text: 'A related item changed', extra: '', href: null };
 }
 /* R5: editing the cutover plan after an approval makes every approval stale. */
 function cutoverStaleView(prj) { return { text: 'Launch-day plan edited', extra: `by ${pname(prj && prj.owner)}${prj && prj.cutoverUpdatedAt ? ' · ' + fmtTime(prj.cutoverUpdatedAt) : ''}`, href: null, anchor: 'cutover', cutover: true }; }
@@ -741,6 +742,7 @@ async function editCutover(prj) {
 /* Separation of duties: the data owner approves; if the owner asked for the access, the project owner approves.
    The requester never approves their own request. */
 function grantApprover(g, de, prj) {
+  const e = eng('grantApproverOf', g); if (e !== undefined) return e;   /* R12 #7: the engine's one rule */
   const a = g.requestedBy === de.owner ? prj.owner : de.owner;
   return a && a !== g.requestedBy ? a : null;
 }
@@ -764,11 +766,11 @@ function grantsCard(prj) {
     if (canRevoke && st === 'requested' && !isApprover) acts += `<button class="btn sm" data-gact="revoke" data-gid="${esc(g.id)}">Withdraw</button>`;
     const left = g.expires ? days(g.expires) : null;
     const logOpen = ui.open.has('log:' + g.id);
-    return `<tr data-grant="${esc(g.id)}"><td><a href="${link('/data/' + g.dataId)}" data-link class="rl-de">${esc(de.name)}</a><div class="hint">Owner ${esc(pname(de.owner))}</div></td>
-      <td><span class="chip" title="${esc(String(g.env || '').toUpperCase())}">${esc(envPlain(g.env))}</span></td><td>${esc(g.access)}</td>
-      <td>${av(g.requestedBy)} <span class="rl-nm">${esc(pname(g.requestedBy))}</span>${g.reason ? `<div class="hint rl-reason" data-user-text>${esc(g.reason)}</div>` : ''}</td>
-      <td>${(() => { const v = grantViewOf(g); return v ? badge(v.label, v.state === 'waiting' ? 'b-soon' : v.state === 'open' ? 'b-done' : 'b-idle') + `<span hidden data-grant-state="${esc(v.state)}"></span>` : badge(GRANT_TXT[st] || st, GRANT_CLS[st] || 'b-idle'); })()}</td>
-      <td data-expiry>${(() => { const v = grantViewOf(g);
+    return `<tr data-grant="${esc(g.id)}"><td data-label="Information"><a href="${link('/data/' + g.dataId)}" data-link class="rl-de">${esc(de.name)}</a><div class="hint">Owner ${esc(pname(de.owner))}</div></td>
+      <td data-label="For"><span class="chip" title="${esc(String(g.env || '').toUpperCase())}">${esc(envPlain(g.env))}</span></td><td data-label="Access">${esc(g.access)}</td>
+      <td data-label="Asked by">${av(g.requestedBy)} <span class="rl-nm">${esc(pname(g.requestedBy))}</span>${g.reason ? `<div class="hint rl-reason" data-user-text>${esc(g.reason)}</div>` : ''}</td>
+      <td data-label="Status">${(() => { const v = grantViewOf(g); return v ? badge(v.label, v.state === 'waiting' ? 'b-soon' : v.state === 'open' ? 'b-done' : 'b-idle') + `<span hidden data-grant-state="${esc(v.state)}"></span>` : badge(GRANT_TXT[st] || st, GRANT_CLS[st] || 'b-idle'); })()}</td>
+      <td data-label="Ends" data-expiry>${(() => { const v = grantViewOf(g);
         if (st === 'requested') return `<span data-from-approval data-asked="${esc(askedDays(g))}">${esc(askedDays(g) || grantDays(g) + ' days')} from approval</span>`;   /* R9: the card shows the duration asked for, never the maximum (the dialog enforces 1–30) */
         if (st === 'denied') return '—';
         /* R11 §3: local dates; the duration is counted from the local approval day and never shown above the maximum */
@@ -1385,8 +1387,9 @@ function simpleRender(prj, rd, params) {
       : myWait ? `<div class="rs-mine wait" data-my-notready="${esc(myWait.bu)}"><b>The ${esc(myWait.bu)} part isn’t ready for your approval yet.</b><span>${esc(waitingTxt(myWait).replace(/^Not ready for your approval yet: /, ''))} You’ll be told when it’s ready.</span></div>`
       : myDone && !live ? `<div class="rs-mine done" data-my-approved><b>Your part (${esc(myDone.bu)}) is approved.</b><span>Thank you. Nothing else is needed from you for it.</span></div>` : ''}
     ${!live ? `<div class="card rs-card"><h3>What is left before launch</h3><ol class="rs-steps" data-launch-steps>${stepRows}</ol></div>` : ''}
+    ${!live && !ready && rm !== me && gateOk && !guard.ok && eng('overrideSignerRole', prj.id, me) ? `<div class="card rs-card" data-override-card><h3>Launch early?</h3><p class="rs-p">${esc(guard.text)}.</p>${overridePanel(prj, guard)}</div>` : ''}
     ${!live && (ready || rm === me) ? `<div class="card rs-card rs-go"><h3>Launch</h3>${windowLine(prj)}${rm === me
-        ? `<button class="btn primary rs-big" data-golive ${ready ? '' : 'disabled'}>Launch now</button>${ready ? '' : `<div class="hint" data-why="notready">${!gateOk ? `You can launch when everything above is done${gOpen.length ? ` and the final checks are confirmed (${gOpen.map(t => esc(t.owner ? pname(t.owner) : 'needs an owner')).join(', ')})` : ''}.` : `Not yet: ${esc(joinAnd(guard.why))}.`}</div>`}`
+        ? `<button class="btn primary rs-big" data-golive ${ready || (gateOk && guard.override && guard.override.ok) ? '' : 'disabled'}>Launch now</button>${ready ? '' : `<div class="hint" data-why="notready">${!gateOk ? `You can launch when everything above is done${gOpen.length ? ` and the final checks are confirmed (${gOpen.map(t => esc(t.owner ? pname(t.owner) : 'needs an owner')).join(', ')})` : ''}.` : `Not yet: ${esc(joinAnd(guard.why))}.`}</div>`}${!ready && gateOk && !guard.ok ? overridePanel(prj, guard) : ''}`
         : `<div class="hint" data-why="rm">Only the <span title="${esc(glossTip.launchOwner)}">launch owner</span>, ${esc(pname(rm))}, can launch.</div>`}</div>` : ''}
     ${live ? `<div class="card rs-card" data-live-card><h3>Launched</h3><p class="rs-p">${esc(prj.name)} went live on ${esc(fmt(lastGo && lastGo.at))}${lastGo && lastGo.by ? `, launched by ${esc(pname(lastGo.by))}` : ''}. Temporary data access closed at launch.</p>
       ${approvedTeams(prj, lastGo)}
@@ -1745,11 +1748,11 @@ function overridePanel(prj, guard) {
   const ov = guard.override || {};
   const me = store.state.me;
   const role = eng('overrideSignerRole', prj.id, me);
-  const signed = (ov.signoffs || []).map(x => `<li data-override-signed="${esc(x.role)}">${av(x.by)} ${esc(x.name)} signed as ${x.role === 'pm' ? 'project manager' : 'sponsor'}${x.reason ? `: “${esc(x.reason)}”` : ''}</li>`).join('');
+  const signed = (ov.signoffs || []).map(x => `<li data-override-signed="${esc(x.role)}">${av(x.by)} ${esc(x.name)} signed as ${esc(x.label || (x.role === 'pm' ? 'project manager' : 'approver'))}${x.reason ? `: “${esc(x.reason)}”` : ''}</li>`).join('');
   const mine = role && (ov.missing || []).includes(role);
   return `<div class="rl-override" data-override-panel data-override-ok="${ov.ok ? 1 : 0}"><b>Launch early with a two-person override</b>
     <span class="hint">${esc(ov.text || '')}</span>${signed ? `<ul class="rl-ov-l">${signed}</ul>` : ''}
-    ${mine ? `<button class="btn sm danger" data-override data-override-role="${esc(role)}">Sign the override as ${role === 'pm' ? 'project manager' : 'sponsor'}…</button>` : ''}</div>`;
+    ${mine ? `<button class="btn sm danger" data-override data-override-role="${esc(role)}">Sign the override as ${esc(eng('overrideRoleLabel', prj.id, store.state.me) || (role === 'pm' ? 'project manager' : 'approver'))}…</button>` : ''}</div>`;
 }
 async function overrideLaunch(prj, role) {
   const g = launchGuard(prj);
@@ -1763,7 +1766,7 @@ async function overrideLaunch(prj, role) {
   const reason = String(r.form.reason || '').trim();
   const id = store.newId('ovr'); const at = new Date().toISOString();
   await store.save('approval', id, { id, projectId: prj.id, kind: 'launch-override', role, approver: store.state.me, decision: 'approved', stepUp: true, at, reason, guard: g.why },
-    `Signed the launch override as ${role === 'pm' ? 'project manager' : 'sponsor'} (${g.why.join('; ')}): “${reason}”`);
+    `Signed the launch override as ${eng('overrideRoleLabel', prj.id, store.state.me) || (role === 'pm' ? 'project manager' : 'approver')} (${g.why.join('; ')}): “${reason}”`);
   const ov = eng('launchOverrideStatus', prj.id, localNow()) || {};
   toast(ov.ok ? 'Override signed by two people' : 'Signed. One more person has to sign.');
 }

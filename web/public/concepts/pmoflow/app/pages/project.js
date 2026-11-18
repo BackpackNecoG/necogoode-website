@@ -152,7 +152,7 @@ function normTruth(t, j) {
     forecast, target: dateOf(t.target, t.deadline, sched.target) || j.target || null,
     finished: t.finished != null ? !!t.finished : t.allDone != null ? !!t.allDone : allDone,
     actualFinish: dateOf(t.actualFinish, sched.actualFinish), buffer, late, lateIds, pastDue, finishAfterDue, blockers,
-    stepsLeft: num(t.stepsLeft), advancedNote: t.advancedNote || st.advancedNote || null,
+    stepsLeft: num(t.stepsLeft), launchChecks: t.launchChecks && typeof t.launchChecks === 'object' ? t.launchChecks : null, advancedNote: t.advancedNote || st.advancedNote || null,
     launchSteps: ls, tests: (num(tests.passed) != null || num(tests.total) != null) ? { passed: num(tests.passed) || 0, total: num(tests.total) || 0, text: String(tests.count || tests.text || tests.label || '') } : null,
     cost: { planned: num(cost.planned, cost.budget, t.budget) || 0, actual: ac || 0, forecast: eac || 0, show: cost.show != null ? !!cost.show : true },
     ev: Object.values(ev).some(v => v != null) ? Object.assign(ev, { eac: eac != null ? eac : ev.eac }) : null,
@@ -189,6 +189,14 @@ export function changePhrase(x) {
 }
 /* R10 §5 the late split in Simple and in reports: "(1 past due, 4 will finish after their due date)". */
 export const lateSplitText = t => { const m = /\((.*)\)$/.exec(String(t.lateText || '')); return m ? m[1] : ''; };
+/* R12 #7: launch readiness in ONE phrase and ONE number: projectTruth.launchChecks ("9 checks not passed"), the same
+   count the Launch page shows. Empty when every check passes, or (live) nothing is left. */
+export function launchLeft(t) {
+  const c = t && t.launchChecks;
+  if (c && num(c.notPassed) != null) return { n: num(c.notPassed), text: num(c.notPassed) ? String(c.text || `${c.notPassed} check${c.notPassed === 1 ? '' : 's'} not passed`) : '' };
+  const n = t && t.stepsLeft != null ? t.stepsLeft : null;
+  return { n, text: n ? `${n} check${n === 1 ? '' : 's'} not passed` : '' };
+}
 /* Finished (all work done) vs forecast (open work): both are projectTruth's forecast. */
 export function finishInfo(j) {
   const t = truthOf(j);
@@ -243,15 +251,22 @@ export function gateInfo(j, s) {
   }
   if (fi.done) {
     /* never "all done" while launch steps are left: stepsLeft comes from projectTruth */
-    const t = truthOf(j), left = t.stepsLeft != null ? t.stepsLeft : launchStepsOf(j).filter(x => !x.done).length;
-    return { k: 'awaiting', fi, blocking: left, label: `All tasks done · waiting to launch${left ? ` (${plural(left, 'step')} left)` : ''}` };
+    const L = launchLeft(truthOf(j));
+    return { k: 'awaiting', fi, blocking: L.n || 0, label: `All tasks done · waiting to launch${L.text ? ` (${L.text})` : ''}` };
   }
   return { k: 'forecast', fi, label: `Forecast ${fmt(fi.date)}` };
 }
 
 /* Permissions: the item's owner or the project manager (owner) may change it. */
 export const canEditWork = (w, j) => !!w && !!j && (store.state.me === w.owner || store.state.me === j.owner);
-export const lockTitle = (w, j) => `Only ${pname(w.owner)} or ${pname(j && j.owner)} can update this`;
+export const lockTitle = (w, j) => w.owner ? `Only ${pname(w.owner)} or ${pname(j && j.owner)} can update this` : `Only ${pname(j && j.owner)} (project manager) can update this until it has an owner`;
+/* R12 #6: a task's owner in words: the person's name, or "Needs an owner: <role>" (E.ownerText). Never the PM. */
+export function ownerText(w) {
+  if (!w) return '';
+  const t = eng('ownerText', null, docs(), w);
+  if (typeof t === 'string' && t) return t;
+  return w.owner && store.person(w.owner) ? pname(w.owner) : (w.ownerRole ? `Needs an owner: ${w.ownerRole}` : 'Needs an owner');
+}
 
 /* R9 §1 labels (projectTruth): red = Will miss the deadline, amber = Some tasks late, green = On track (CSS keys stay red/amber/green). */
 export const RAG_RULE = 'Will miss the deadline: the expected finish is after the deadline, or missing information has no plan. Some tasks late: tasks are late or information is still being fixed, but the finish still meets the deadline. On track: nothing is late. Not planned: no tasks yet.';
@@ -419,7 +434,7 @@ export function taskRowHTML(w, j, fc, compact) {
     : '<span class="pmo-tick off" aria-hidden="true"></span>';
   return `<div class="pmo-task ${done ? 'is-done' : ''}" data-wid="${esc(w.id)}" id="task-${esc(w.id)}">${tick}
     <div class="pmo-task-b"><div class="t">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</div>
-      <div class="s">${compact ? '' : `${av(w.owner)} ${esc(pname(w.owner))} · `}${esc(workStepTitle(w))}</div>
+      <div class="s">${compact ? '' : `${w.owner ? av(w.owner) + ' ' : ''}<span ${w.owner ? '' : 'class="pmo-noowner" data-needs-owner'}>${esc(ownerText(w))}</span> · `}${esc(workStepTitle(w))}</div>
       <div class="s">${done ? '' : wBadge(w, f, fc) + ' '}${esc(when)}</div>${taskFlagsHTML(w, j)}</div>
     ${can && !compact ? `<button class="btn sm" data-edit-work="${esc(w.id)}" aria-label="Edit ${esc(w.title)}">Edit</button>` : ''}</div>`;
 }
@@ -980,7 +995,7 @@ function timelineHTML(j, fc, list, D, sc) {
       const wc = confBy[w.id] || [];
       const sid = shortId(w.id);
       const barTxt = wd < 6 ? '' : `${sid && wd >= 11 ? esc(sid) + ' · ' : ''}${esc(fmt(s0))} – ${esc(fmt(w.due))}`;
-      const sub = [workStepTitle(w), pname(w.owner)];
+      const sub = [workStepTitle(w), ownerText(w)];
       if (w.resolves) sub.push('unblocks ' + dataName(w.resolves));
       if (deps.length) sub.push('after ' + deps.join(', '));
       const actual = w.status === 'done' && w.doneAt ? doneDate(w) : null;
@@ -1126,7 +1141,7 @@ async function autoSchedule(j) {
     return;
   }
   const rows = moves.map(({ w, v }) => { const dd = dayDiff(v.start, w.start || w.due);
-    return `<tr data-as-row="${esc(w.id)}"><td><b>${esc(w.title)}</b><div class="hint">${esc(pname(w.owner))}</div></td><td class="pmo-nowrap">${esc(fmt(w.start))} – ${esc(fmt(w.due))}</td><td class="pmo-nowrap"><b>${esc(fmt(v.start))} – ${esc(fmt(v.due))}</b></td><td class="pmo-nowrap"><span class="pmo-var ${dd > 0 ? 'up' : dd < 0 ? 'down' : ''}">${dd > 0 ? '+' : ''}${dd}d</span></td></tr>`; }).join('');
+    return `<tr data-as-row="${esc(w.id)}"><td><b>${esc(w.title)}</b><div class="hint">${esc(ownerText(w))}</div></td><td class="pmo-nowrap">${esc(fmt(w.start))} – ${esc(fmt(w.due))}</td><td class="pmo-nowrap"><b>${esc(fmt(v.start))} – ${esc(fmt(v.due))}</b></td><td class="pmo-nowrap"><span class="pmo-var ${dd > 0 ? 'up' : dd < 0 ? 'down' : ''}">${dd > 0 ? '+' : ''}${dd}d</span></td></tr>`; }).join('');
   const body = `<p class="hint" style="margin:0">${nConf ? `Resolves ${nConf} scheduling conflict${nConf === 1 ? '' : 's'}.` : 'Tightens the plan to its dependencies.'} Durations are kept exactly, items without a conflict don’t move, and a successor starts the business day after its predecessor finishes. Nothing changes until you apply.</p>
     ${pm ? '' : `<div class="banner pmo-ro-note" style="margin:0">${esc(pmOnly(j, 'apply these moves'))}.</div>`}
     <div class="tbl-wrap"><table class="pmo-astable" data-as-table><thead><tr><th>Work item</th><th>Before</th><th>After</th><th>Shift</th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -1227,7 +1242,7 @@ function workRowHTML(w, j, fc) {
   return `<tr data-wid="${esc(w.id)}" class="${can ? '' : 'pmo-ro'} ${w.kind === 'defect' ? 'pmo-defect' : ''}">
     <td><b class="pmo-wt">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</b><div class="pmo-wsub">${w.kind ? `<span class="chip ${w.kind === 'defect' ? 'pmo-chip-defect' : ''}">${esc(KIND_LBL[w.kind] || w.kind)}</span>` : ''}${w.resolves ? `<span class="chip">${WAIT_IC} gets ${esc(dataName(w.resolves))}</span>` : ''}${fieldsOf(j).map(fd => fieldVal(w, fd) ? `<span class="chip pmo-ftag" data-ftag="${esc(fd.key)}"><small>${esc(fd.label)}</small> ${esc(fieldVal(w, fd))}</span>` : '').join('')}${risks.length ? `<span class="pmo-riskb" title="${esc(risks.map(r => r.title).join(' · '))}">⚠ ${risks.length} risk${risks.length > 1 ? 's' : ''}</span>` : ''}${w.kind === 'defect' ? `<a class="pmo-runlink" href="${link('/testing/' + encodeURIComponent(j.id) + (run ? '?run=' + encodeURIComponent(run) : ''))}" data-link>${run ? 'View test run ›' : 'Testing ›'}</a>` : ''}</div>${taskFlagsHTML(w, j)}</td>
     <td class="pmo-c-step"><div class="pmo-wstep">${esc(workStepTitle(w))}</div><div class="hint">${esc(procName(w.pid))}</div></td>
-    <td class="pmo-nowrap pmo-c-owner">${av(w.owner)} ${esc(pname(w.owner).split(' ')[0])}</td>
+    <td class="pmo-nowrap pmo-c-owner">${w.owner ? `${av(w.owner)} ${esc(pname(w.owner).split(' ')[0])}` : `<span class="pmo-noowner" data-needs-owner title="${esc(ownerText(w))}">${esc(ownerText(w))}</span>`}</td>
     <td>${statusSelect(w, j, lt)}</td>
     <td class="pmo-nowrap pmo-c-dates">${esc(fmt(w.start))} → ${esc(fmt(w.due))}</td>
     <td class="pmo-nowrap pmo-c-eff"><span class="pmo-eff">${fmtEffort(effortOf(w))}</span>${hoursOf(w) ? `<div class="hint" data-hours>${fmtHours(hoursOf(w))} logged</div>` : ''}</td>
@@ -1371,7 +1386,7 @@ export function filterItems(items, f, fc) {
     if (f.step) { const [pid, sid] = f.step.split('::'); if (w.pid !== pid || (sid && w.step !== sid)) return false; }
     if (f.data && w.resolves !== f.data && !nodeData(w.pid, w.step).includes(f.data)) return false;
     if (f.late && (w.status === 'done' || !(fc[w.id] || {}).late)) return false; /* the engine's one "late" flag */
-    if (q && ![w.title, workStepTitle(w), pname(w.owner), procName(w.pid), w.resolves ? dataName(w.resolves) : '', ...Object.values(w.custom || {})].join(' ').toLowerCase().includes(q)) return false;
+    if (q && ![w.title, workStepTitle(w), ownerText(w), procName(w.pid), w.resolves ? dataName(w.resolves) : '', ...Object.values(w.custom || {})].join(' ').toLowerCase().includes(q)) return false;
     for (const k of Object.keys(f).filter(isCF)) { const v = w.custom ? w.custom[k.slice(3)] : undefined; if (v == null || String(v) !== f[k]) return false; }
     return true;
   });
@@ -1494,7 +1509,7 @@ function cardHTML(w, j, fc, extra) {
     fieldTags(w, j),
   ].join('');
   return `<article class="pmo-card st-${esc(w.status)} ${can ? 'pmo-cdrag' : 'pmo-ro'}" data-card="${esc(w.id)}" ${can ? 'draggable="true"' : ''} tabindex="0"
-      aria-label="${esc(`${w.title}. ${statusName(w, j)}. Owner ${pname(w.owner)}. ${shortDue(w, f)}.${can ? ' Drag to move, or use the select inside the card.' : ' ' + lockTitle(w, j) + '.'}`)}" title="${esc(can ? 'Drag to move · click to edit' : lockTitle(w, j))}">
+      aria-label="${esc(`${w.title}. ${statusName(w, j)}. Owner ${ownerText(w)}. ${shortDue(w, f)}.${can ? ' Drag to move, or use the select inside the card.' : ' ' + lockTitle(w, j) + '.'}`)}" title="${esc(can ? 'Drag to move · click to edit' : lockTitle(w, j))}">
     <div class="pmo-card-h">${av(w.owner)}<b class="pmo-card-t">${esc(w.title)}</b>${can ? '' : `<span class="pmo-card-lock" data-card-lock title="${esc(lockTitle(w, j))}"><span aria-hidden="true">${LOCK}</span><span class="sr-only">${esc(lockTitle(w, j))}</span></span>`}</div>
     ${extra || ''}
     <div class="pmo-card-s">${esc(workStepTitle(w))} <span class="pmo-card-eff">· ${fmtEffort(effortOf(w))}</span></div>
@@ -1710,11 +1725,12 @@ const reports = {}; /* prj -> {loading|data|error} */
 const txt = x => x == null ? '' : typeof x === 'string' ? x : (x.text || x.title || x.summary || x.detail || JSON.stringify(x));
 /* R5 count: "not yet live" = every project data element that isn't effectively live (missing + examples + pending). */
 export function dataNotLive(j) {
-  const ids = projectData(j), by = { missing: 0, example: 0, pending: 0 };
+  const ids = projectData(j), by = { missing: 0, example: 0, pending: 0, unchecked: 0, problem: 0 };
   ids.forEach(d => { const e = effAvail(d); if (e !== 'live') by[e] = (by[e] || 0) + 1; });
-  return { n: by.missing + by.example + by.pending, of: ids.length, by };
+  return { n: Object.values(by).reduce((a, b) => a + b, 0), of: ids.length, by };
 }
-export const notLiveText = x => `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not connected yet${x.n ? ` (${[x.by.missing ? x.by.missing + ' not available yet' : '', x.by.example ? x.by.example + ' sample only' : '', x.by.pending ? x.by.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`;
+/* R12 #7: each state in the words the process and data pages use ("Not checked yet" is never called "not available yet") */
+export const notLiveText = x => { const b = x.by || {}; return `${x.n} of ${x.of} piece${x.of === 1 ? '' : 's'} of information not connected yet${x.n ? ` (${[b.missing ? b.missing + ' not available yet' : '', b.unchecked ? b.unchecked + ' not checked yet' : '', b.problem ? b.problem + ' with a problem' : '', b.example ? b.example + ' sample only' : '', b.pending ? b.pending + ' waiting for confirmation' : ''].filter(Boolean).join(', ')})` : ''}`; };
 const esc0 = x => String(x == null ? '' : x);
 /* R10.1 stream R: the report's time window. Presets are the engine's (periodWindow); the last choice is kept per project. */
 export const REPORT_PRESETS = [['this-week', 'This week'], ['last-week', 'Last week'], ['last-2-weeks', 'Last 2 weeks'], ['this-month', 'This month'], ['since-last-report', 'Since last report'], ['whole-project', 'Whole project']];
@@ -1733,7 +1749,7 @@ export function reportText(j, d) {
   const t = truthOf(j), c = t.cost;
   const B = blockingInfo(t), live = j.status === 'live';   /* R11: one blocking definition, its own words */
   const flags = [!live && t.raw && t.raw.launchFlag, ...evFlagTexts(t)].filter(Boolean);
-  const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${t.stepsLeft ? ` ${plural(t.stepsLeft, 'step')} left to launch.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
+  const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${!live && launchLeft(t).text ? ` Launch: ${launchLeft(t).text}.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, expected cost ${money(c.forecast)}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
   const o = d.overall;
   const overall = o ? `\nOVERALL\n${o.needsPurpose ? 'Purpose: not written yet (add a one-line purpose in the project settings).' : `Purpose: ${o.purpose || o.description}`}\n` +
     [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
@@ -1751,8 +1767,21 @@ export function periodPickerHTML(range, opts) {
   opts = opts || {};
   const chips = REPORT_PRESETS.filter(([k]) => !(opts.noSince && k === 'since-last-report'))
     .map(([k, l]) => `<button type="button" class="pmo-chipbtn ${range.preset === k ? 'on' : ''}" data-rep-preset="${k}" aria-pressed="${range.preset === k}">${esc(l)}</button>`).join('');
-  const custom = !isSimple() ? `<span class="pmo-rep-custom" data-rep-custom><label>From <input type="date" data-rep-from value="${esc(range.preset === 'custom' ? range.from || '' : '')}" max="${esc(today())}"></label><label>To <input type="date" data-rep-to value="${esc(range.preset === 'custom' ? range.to || '' : '')}" max="${esc(today())}"></label><button type="button" class="btn sm ${range.preset === 'custom' ? 'primary' : ''}" data-rep-apply>Use these dates</button></span>` : '';
-  return `<div class="pmo-rep-picker" data-rep-picker role="group" aria-label="Report period">${chips}${custom}</div>`;
+  /* R12 #12: Simple gets the range too, behind a small "Custom…" chip (open while a custom range is in use) */
+  const simple = isSimple(), isCustom = range.preset === 'custom';
+  const chip = simple ? `<button type="button" class="pmo-chipbtn ${isCustom ? 'on' : ''}" data-rep-custom-chip aria-expanded="${isCustom}" aria-pressed="${isCustom}">Custom…</button>` : '';
+  const custom = `<span class="pmo-rep-custom" data-rep-custom ${simple && !isCustom ? 'hidden' : ''}><label>From <input type="date" data-rep-from value="${esc(isCustom ? range.from || '' : '')}" max="${esc(today())}"></label><label>To <input type="date" data-rep-end value="${esc(isCustom ? range.to || '' : '')}" max="${esc(today())}"></label><button type="button" class="btn sm ${isCustom ? 'primary' : ''}" data-rep-apply>Use these dates</button></span>`;
+  return `<div class="pmo-rep-picker" data-rep-picker role="group" aria-label="Report period">${chips}${chip}${custom}</div>`;
+}
+/* R12: the "Custom…" chip shows or hides the From/To range (used by the project and portfolio pages) */
+export function bindPeriodPicker(root) {
+  root.querySelectorAll('[data-rep-custom-chip]').forEach(b => b.addEventListener('click', e => {
+    e.preventDefault();
+    const box = b.closest('[data-rep-picker]'); const c = box && box.querySelector('[data-rep-custom]'); if (!c) return;
+    const open = c.hasAttribute('hidden');
+    c.toggleAttribute('hidden', !open); b.setAttribute('aria-expanded', String(open));
+    if (open) { const f = c.querySelector('[data-rep-from]'); if (f) f.focus(); }
+  }));
 }
 function periodHTML(d) {
   if (!Array.isArray(d.sections)) return '';
@@ -2424,13 +2453,15 @@ async function planCard(j, opts) {
   const items = exact ? list.map(x => Object.assign({}, x, { deps: (x.deps || []).slice() })) : normalizeSuggestions(j, list);
   const fit = exact ? eng('planFit', null, docs(), j.id, today(), items) : null;
   const end = fit ? fit.forecastFinish : maxDate(items.map(x => x.due));
-  const people = [...new Set(items.map(x => x.owner || 'role:' + (x.ownerRole || '')))];
-  const ownerTxt = x => x.owner ? pname(x.owner) : (x.ownerRole ? `Needs an owner: ${x.ownerRole}` : 'Needs an owner');
+  /* R12 #6: people are people: an unfilled role is counted as "needs an owner", never as a person */
+  const people = [...new Set(items.filter(x => x.owner && store.person(x.owner)).map(x => x.owner))];
+  const unowned = items.filter(x => !(x.owner && store.person(x.owner))).length;
+  const ownerTxt = x => ownerText(x);
   /* R11 G3 §2: the suggestion is kept on the project as a draft the moment it is shown, so leaving (Cancel, Back, reload,
      another page) never loses it. Accept or Dismiss clears it. */
   if (pm) await keepDraft(j, { mode: 'card', source, note, items });
   const late = lateWarning(fit, end, j);
-  const pending = modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b> for ${plural(people.length, 'person', 'people')}.</p>
+  const pending = modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b>${people.length ? ` for ${plural(people.length, 'person', 'people')}` : ''}${unowned ? `${people.length ? ';' : ','} <span data-plan-unowned="${unowned}">${unowned} ${unowned === 1 ? 'needs' : 'need'} an owner</span>` : ''}.</p>
     ${late ? late.html : `<p class="pmo-fp-fit" data-plan-fit data-plan-finish="${esc(end || '')}">${fit ? esc(fit.message) : `Done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).`}</p>`}
     ${fit && Array.isArray(fit.unassigned) && fit.unassigned.length ? `<p class="hint pmo-fp-warn" data-plan-unassigned="${fit.unassigned.length}">${plural(fit.unassigned.length, 'task')} ${fit.unassigned.length === 1 ? 'needs' : 'need'} an owner. Pick one with Adjust, or after adding the plan.</p>` : ''}
     <ol class="pmo-fp">${items.map(x => `<li data-fp-item data-fp-owner="${esc(x.owner || '')}"><b>${esc(x.title)}</b><span class="hint">${esc(ownerTxt(x))} · ${esc(fmt(x.start))} – ${esc(fmt(x.due))}</span>${x.note ? `<span class="hint pmo-fp-note">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>
@@ -2701,7 +2732,7 @@ async function levelResources(j) {
   const { moves, before, after } = plan;
   const ovList = (arr, cls) => arr.length ? `<ul class="pmo-ovl ${cls}">${arr.slice(0, 8).map(o => `<li>${ovLine(o)}</li>`).join('')}${arr.length > 8 ? `<li class="hint">+${arr.length - 8} more</li>` : ''}</ul>` : '<div class="hint">None</div>';
   const rows = moves.map(({ w, start, due }) => { const dd = dayDiff(start, w.start || w.due);
-    return `<tr data-lv-row="${esc(w.id)}"><td><b>${esc(w.title)}</b><div class="hint">${esc(pname(w.owner))}</div></td><td class="pmo-nowrap">${esc(fmt(w.start))} – ${esc(fmt(w.due))}</td><td class="pmo-nowrap"><b>${esc(fmt(start))} – ${esc(fmt(due))}</b></td><td class="pmo-nowrap"><span class="pmo-var ${dd > 0 ? 'up' : dd < 0 ? 'down' : ''}">${dd > 0 ? '+' : ''}${dd}d</span></td></tr>`; }).join('');
+    return `<tr data-lv-row="${esc(w.id)}"><td><b>${esc(w.title)}</b><div class="hint">${esc(ownerText(w))}</div></td><td class="pmo-nowrap">${esc(fmt(w.start))} – ${esc(fmt(w.due))}</td><td class="pmo-nowrap"><b>${esc(fmt(start))} – ${esc(fmt(due))}</b></td><td class="pmo-nowrap"><span class="pmo-var ${dd > 0 ? 'up' : dd < 0 ? 'down' : ''}">${dd > 0 ? '+' : ''}${dd}d</span></td></tr>`; }).join('');
   const body = `<p class="hint" style="margin:0">Shifts work so nobody is over capacity in any week, keeping dependencies and durations. Nothing changes until you apply.</p>
     ${pm ? '' : `<div class="banner pmo-ro-note" style="margin:0">${esc(pmOnly(j, 'apply leveling'))}.</div>`}
     <div class="pmo-lv-cmp" data-lv-compare><div><h4>Overloads now <span class="n" data-lv-before>${before.length}</span></h4>${ovList(before, 'before')}</div><div><h4>After leveling <span class="n" data-lv-after>${after.length}</span></h4>${ovList(after, 'after')}</div></div>
@@ -2767,7 +2798,7 @@ export function workCSVRows(j, list) {
   const head = ['ID', 'Title', 'Process', 'Step', 'Owner', 'Status', 'Kind', 'Start', 'Due', 'Forecast', 'Schedule', 'Done on', 'Effort (days)', 'Hours logged', 'Resolves', 'Depends on', ...flds.map(f => f.label)];
   const rows = (list || projectItems(j.id)).slice().sort((a, b) => String(a.due).localeCompare(String(b.due))).map(w => {
     const f = fc[w.id] || {};
-    return [w.id, w.title, procName(w.pid), workStepTitle(w), pname(w.owner), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? doneDate(w) : (f.forecast || w.due || ''),
+    return [w.id, w.title, procName(w.pid), workStepTitle(w), ownerText(w), statusName(w, j), KIND_LBL[w.kind] || w.kind || '', w.start || '', w.due || '', w.status === 'done' ? doneDate(w) : (f.forecast || w.due || ''),
       (BADGE[schedKey(w, fc)] || BADGE.ok)[1], w.doneAt ? doneDate(w) : '', effortOf(w), Math.round(hoursOf(w) * 100) / 100, w.resolves ? dataName(w.resolves) : '',
       (w.deps || []).map(d => (store.get('workItem', depId(d)) || {}).title).filter(Boolean).join('; '), ...flds.map(fd => fieldVal(w, fd))];
   });
@@ -2851,8 +2882,9 @@ export function bind(root, params) {
   on('[data-rep-print]', () => window.print());
   /* R10.1: the report's period */
   on('[data-rep-preset]', el => openReport(cur(), { preset: el.dataset.repPreset }));
+  bindPeriodPicker(root);
   on('[data-rep-apply]', () => {
-    const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-to]');
+    const f = root.querySelector('[data-rep-from]'), t = root.querySelector('[data-rep-end]');
     const from = f && f.value, to = (t && t.value) || today();
     if (!from) { toast('Choose a start date'); return; }
     openReport(cur(), { preset: 'custom', from: from <= to ? from : to, to: from <= to ? to : from });

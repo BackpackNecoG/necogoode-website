@@ -11,7 +11,10 @@
               {op:'add', type:'workItem', id, data, label}
               {op:'remove', type:'workItem', id, from: <task data>, label} ],
      status: 'proposed'|'approved'|'applied'|'rejected',
-     impact, tolerance: {within, reasons}, approvers: [{role:'pm'|'sponsor', person, decision, at, note}],
+     impact, tolerance: {within, reasons}, approvers: [{role:'pm'|'sponsor'|'linkedPm', person, projectId?, decision, at, note, stepUp}],
+     linked: [{projectId, changeId}]   (R12: the linked entries written in other projects' logs for a cross-project knock-on)
+   A linked entry (source 'knockOn', no edits): { id, projectId: <the other project>, linkedFrom: {projectId, changeId, projectName},
+     knockOn: [its tasks that moved], impact (computed for that project), approvers (its PM), status 'applied', … }
      requestedBy, requestedAt, decidedBy, decidedAt, appliedBy, appliedAt,
      snapshots: {before: {workId: {start, due, owner}}, after: {...}}, baselines: {before, after}, processRef, ackSteps }
    Impact is computed ONLY by running the engine (projectTruth, forecastAll, dependents, latestOutcomes) on the docs
@@ -39,7 +42,7 @@
     { id: 'other', label: 'Other' },
   ];
   const STATUS_LABEL = { proposed: 'Waiting for approval', approved: 'Approved', applied: 'Applied', rejected: 'Rejected' };
-  const ROLE_LABEL = { pm: 'project manager', sponsor: 'sponsor' };
+  const ROLE_LABEL = { pm: 'project manager', sponsor: 'sponsor', linkedPm: 'project manager of another project' };
   /* "Within tolerance": the deadline is unaffected, the budget is unchanged, expected cost moves by less than 5%,
      and no department approval reopens. */
   const COST_TOLERANCE_PCT = 5;
@@ -76,6 +79,13 @@
       if (p && p.owner && p.owner !== project.owner && get(docs, 'person', p.owner)) return p.owner;
     }
     return null;
+  }
+
+  /* R12 #13: an approver's role in words: "project manager", "sponsor", "project manager of ERP Upgrade Readiness" */
+  function roleText(a, docs) {
+    if (!a) return '';
+    if (a.role === 'linkedPm') { const p = a.projectId ? get(docs, 'project', a.projectId) : null; return p && p.name ? 'project manager of ' + p.name : ROLE_LABEL.linkedPm; }
+    return ROLE_LABEL[a.role] || String(a.role || '');
   }
 
   /* ------------------------------------------------------------------ */
@@ -351,6 +361,19 @@
     if (projectA && projectA.owner) touch(projectA.owner, 'project manager');
     const sponsor = sponsorOf(docsAfter, projectId);
     if (sponsor && (deadlineMoved || budgetMoved)) touch(sponsor, 'sponsor');
+    /* R12 #13: knock-ons into OTHER projects, one entry per project, with that project's own finish before/after */
+    const crossMap = new Map();
+    knockOn.filter(k => k.projectId && k.projectId !== projectId).forEach(k => {
+      if (!crossMap.has(k.projectId)) crossMap.set(k.projectId, []);
+      crossMap.get(k.projectId).push({ id: k.id, title: k.title, owner: k.owner, from: k.from, to: k.to, due: k.due, lateAfter: k.lateAfter });
+    });
+    const crossProjects = [...crossMap.entries()].map(([pid, tasks]) => {
+      const p = get(docsAfter, 'project', pid) || get(docsBefore, 'project', pid) || {};
+      const xb = eng.projectTruth(docsBefore, pid, today), xa = eng.projectTruth(docsAfter, pid, today);
+      if (p.owner) touch(p.owner, 'project manager of ' + (p.name || 'another project') + ' (a task there moves)');
+      return { projectId: pid, name: p.name || 'another project', owner: p.owner || null, tasks: tasks.slice(0, MAX_LIST), taskCount: tasks.length,
+        finish: { before: xb ? xb.forecastFinish : null, after: xa ? xa.forecastFinish : null }, late: { before: xb ? xb.lateCount : null, after: xa ? xa.lateCount : null } };
+    }).sort((a, b) => a.name.localeCompare(b.name));
     const costB = tb.cost && tb.cost.forecast, costA = ta.cost && ta.cost.forecast;
     const costDelta = costB != null && costA != null ? r2(costA - costB) : null;
     const costPct = costDelta == null ? null : costB ? r2(costDelta / costB * 100) : (costA ? 100 : 0);
@@ -365,7 +388,7 @@
       label: { before: tb.label, after: ta.label },
       late: { before: tb.lateCount, after: ta.lateCount },
       tasks: { before: tb.tasks.total, after: ta.tasks.total },
-      knockOn: knockOn.slice(0, MAX_LIST), knockOnCount: knockOn.length,
+      knockOn: knockOn.slice(0, MAX_LIST), knockOnCount: knockOn.length, crossProjects,
       people: [...people.entries()].map(([id, why]) => ({ id, name: personName(docsAfter, id), why })).slice(0, MAX_LIST),
       approvalsReopen: reopened,
       testsRerun: testsRerun.slice(0, MAX_LIST), testsRerunCount: testsRerun.length,
@@ -399,6 +422,7 @@
     if (im.budget.moved) rest.push('sets the budget to ' + money(im.budget.after) + ' (was ' + money(im.budget.before) + ')');
     if (im.cost.delta != null && Math.abs(im.cost.delta) >= 1) rest.push((im.cost.delta > 0 ? 'raises' : 'lowers') + ' the expected cost by ' + money(Math.abs(im.cost.delta)) + ' (' + Math.abs(im.cost.pct).toFixed(1) + '%)');
     if (im.approvalsReopen.length) rest.push('reopens ' + joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval' : 'approvals'));
+    (im.crossProjects || []).forEach(x => rest.push('moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name));
     if (!rest.length) return head + '.';
     return moved || dl.moved ? head + (rest.length === 1 && !dl.moved ? ' and ' + rest[0] : ', ' + joinAnd(rest)) + '.'
       : head + '; the change ' + joinAnd(rest) + '.';
@@ -416,27 +440,72 @@
     if (im.budget.moved) reasons.push('The budget changes (' + money(im.budget.before) + ' → ' + money(im.budget.after) + ').');
     if (im.cost.pct != null && Math.abs(im.cost.pct) >= COST_TOLERANCE_PCT) reasons.push('The expected cost changes by ' + Math.abs(im.cost.pct).toFixed(1) + '% (more than ' + COST_TOLERANCE_PCT + '%).');
     if (im.approvalsReopen.length) reasons.push(joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval reopens' : 'approvals reopen') + '.');
+    /* R12 #13: a knock-on into another project needs that project's manager too */
+    const cross = (im.crossProjects || []);
+    cross.forEach(x => reasons.push('It moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name + ' (another project), so its project manager approves too.'));
     const within = !reasons.length;
     const project = get(docs, 'project', change.projectId);
     const approvers = [];
     if (!within && project && project.owner) approvers.push({ role: 'pm', person: project.owner });
     const sponsor = sponsorOf(docs, project);
     if (!within && (im.deadline.moved || im.budget.moved) && sponsor && sponsor !== (project && project.owner)) approvers.push({ role: 'sponsor', person: sponsor });
+    cross.forEach(x => { if (x.owner && get(docs, 'person', x.owner)) approvers.push({ role: 'linkedPm', person: x.owner, projectId: x.projectId }); });
     return { within, reasons, approvers };
   }
   /* approvers still to decide */
   function pendingApprovers(change) { return ((change && change.approvers) || []).filter(a => !a.decision); }
   function waitingText(change, docs) {
     const p = pendingApprovers(change);
-    return p.length ? 'Waiting for ' + joinAnd(p.map(a => personName(docs, a.person) + ' (' + ROLE_LABEL[a.role] + ')')) : '';
+    if (!p.length) return '';
+    /* one name per person, with every role they decide in ("Tom Alvarez (project manager and project manager of ERP …)") */
+    const by = new Map();
+    p.forEach(a => { if (!by.has(a.person)) by.set(a.person, []); const r = roleText(a, docs); if (!by.get(a.person).includes(r)) by.get(a.person).push(r); });
+    return 'Waiting for ' + joinAnd([...by.entries()].map(([id, roles]) => personName(docs, id) + ' (' + joinAnd(roles) + ')'));
   }
 
   /* ------------------------------------------------------------------ */
   /* traceability                                                       */
   /* ------------------------------------------------------------------ */
+  /* A project's log: its own changes, plus (R12 #13) changes of other projects still waiting for a decision that would
+     move tasks here. Once such a change is applied, the linked entry written into this project's log stands for it. */
   function changesOf(docs, projectId) {
-    return list(docs, 'planChange').filter(c => !projectId || c.projectId === projectId)
+    return list(docs, 'planChange').filter(c => !projectId || c.projectId === projectId || (pendingHere(c, projectId)))
       .sort((a, b) => String(b.requestedAt || '').localeCompare(String(a.requestedAt || '')));
+  }
+  function pendingHere(c, projectId) {
+    return (c.status === 'proposed' || c.status === 'approved') && c.projectId !== projectId &&
+      (((c.impact || {}).crossProjects || []).some(x => x.projectId === projectId) || (c.approvers || []).some(a => a.role === 'linkedPm' && a.projectId === projectId));
+  }
+  /* R12 #13: the entry written into another project's log when a change with a knock-on there is applied */
+  function linkedEntry(change, docsBefore, docsAfter, otherId, today, opts) {
+    opts = opts || {};
+    const eng = E(opts.engine);
+    const src = get(docsBefore, 'project', change.projectId) || {};
+    const x = (((change.impact || {}).crossProjects) || []).find(p => p.projectId === otherId) || null;
+    const im0 = impact(docsBefore, docsAfter, otherId, today, { change, engine: eng });
+    const tasks = x ? x.tasks : (im0 ? (im0.knockOn || []).filter(k => k.projectId === otherId) : []);
+    const srcName = src.name || 'another project';
+    /* seen from this project: only its own tasks move; the change's own project is where it came from, not "another project" */
+    let im = im0;
+    if (im0) {
+      const ko = (im0.knockOn || []).filter(k => k.projectId === otherId);
+      const mine = new Set(ko.map(k => k.owner).filter(Boolean));
+      const p = get(docsAfter, 'project', otherId) || {};
+      im = Object.assign({}, im0, { knockOn: ko, knockOnCount: ko.length, crossProjects: [], approvalsReopen: im0.approvalsReopen || [], testsRerun: [], testsRerunCount: 0,
+        people: (im0.people || []).filter(pp => mine.has(pp.id) || pp.id === p.owner).map(pp => ({ id: pp.id, name: pp.name, why: pp.id === p.owner && !mine.has(pp.id) ? ['project manager'] : ['a task moves as a knock-on'] })) });
+      im.sentence = sentenceOf(im, eng);
+    }
+    return {
+      projectId: otherId, source: 'knockOn', kinds: ['dates'], edits: [], category: change.category || null,
+      title: clean(change.title || 'Plan change', 100),
+      reason: clean('A plan change on ' + srcName + ' moves ' + plural(tasks.length, 'task') + ' here: ' + (change.reason || ''), 200),
+      linkedFrom: { projectId: change.projectId, changeId: change.id, projectName: srcName },
+      knockOn: tasks.map(t => ({ id: t.id, title: t.title, owner: t.owner || null, from: t.from, to: t.to, lateAfter: !!t.lateAfter })),
+      approvers: (change.approvers || []).filter(a => a.role === 'linkedPm' && a.projectId === otherId).map(a => clone(a)),
+      tolerance: { within: false, reasons: ['A plan change on ' + srcName + ' moves work in this project.'] },
+      impact: im,
+      requestedBy: change.requestedBy || null, requestedAt: change.requestedAt || null, decidedBy: change.decidedBy || null, decidedAt: change.decidedAt || null,
+    };
   }
   /* plan changes that touched one task (proposed, applied or rejected), newest first */
   function changesForTask(docs, taskId) {
@@ -477,6 +546,7 @@
   function logRows(changes, docs, eng) {
     const cat = id => (CATEGORIES.find(c => c.id === id) || {}).label || '';
     const rows = [LOG_COLUMNS.slice()];
+    const editsOf = c => (c.linkedFrom ? (c.knockOn || []).map(k => '“' + k.title + '”: expected finish ' + day(k.from, eng) + ' → ' + day(k.to, eng) + ' (knock-on)') : (c.edits || []).filter(e => !e.auto).map(e => editText(e, docs, eng)));
     (changes || []).forEach(c => {
       const im = c.impact || {};
       const p = get(docs, 'project', c.projectId);
@@ -488,7 +558,7 @@
         (im.cost || {}).before != null ? im.cost.before : '', (im.cost || {}).after != null ? im.cost.after : '',
         (im.approvalsReopen || []).map(a => a.bu).join('; '), im.knockOnCount != null ? im.knockOnCount : '', im.testsRerunCount != null ? im.testsRerunCount : '',
         c.tolerance ? (c.tolerance.within ? 'yes' : 'no') : '',
-        (c.edits || []).filter(e => !e.auto).map(e => editText(e, docs, eng)).join('; '), c.id || '',
+        editsOf(c).join('; '), c.id || '',
       ]);
     });
     return rows;
@@ -565,7 +635,7 @@
 
   return {
     KINDS, CATEGORIES, STATUS_LABEL, ROLE_LABEL, COST_TOLERANCE_PCT, LOG_COLUMNS,
-    buildChange, applyToDocs, conflicts, impact, needsApproval, pendingApprovers, waitingText, sponsorOf,
+    buildChange, applyToDocs, conflicts, impact, needsApproval, pendingApprovers, waitingText, sponsorOf, roleText, linkedEntry, pendingHere,
     editText, changesOf, changesForTask, snapshot, baselineOf, queueFor, logRows, toCSV, processRef, processDrift, sentenceOf,
   };
 });
