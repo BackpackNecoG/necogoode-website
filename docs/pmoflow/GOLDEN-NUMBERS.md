@@ -218,7 +218,7 @@ The seed carries dated facts for this (business-day offsets): task `createdAt`/`
 | Blockers resolved | 0 | 1: Sanctions screening result available (Tue Nov 10) |
 | Still open at the end | Bank remittance details (open 21 bd, work planned); the bank-form problem (open 1 bd) | Bank remittance details (open 19 bd) |
 | Behind at the end | **5 late (1 past due, 4 will finish after their due date)**, the same list and text as the project screen | 4 late (4 will finish after their due date), as the docs stood on Nov 13 |
-| Tests (R13: latest result of each test, per stage) | Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). 2 test runs | Try it out: 4 tests passed. 1 test run (a past week never shows today's count) |
+| Tests (R13: latest result of each test, per stage) | Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). 2 test runs | Try it out: 4 tests passed. 1 test run (a past week never shows today's count) |
 | Approvals | Procurement’s part approved by Rosa Vega; changed since, so it must be approved again | none |
 | Risks | opened: Business testing overlaps the quarter-end close | closed: Screening vendor contract held up in legal review |
 | Spent | $4,350 | $2,468.75 |
@@ -259,7 +259,7 @@ Seed day 0, Vendor Onboarding Modernization. Every testing number is `projectTru
 | Launch headline | **6 steps left** (`projectTruth.stepsLeft`) | Launch Simple, Launch Advanced title and checks card (`data-steps-left`), desktop and phone |
 | Per-team cards | AP **0/8**, Compliance **9/9**, IT **0/4**, Procurement **1/4**, Treasury **0/12** (`perBU.passed/checks`); a test may cover several teams' parts | Launch part cards, approver pages |
 | Who passed each test | Compliance: "Passed by Priya Shah (Compliance): 9 tests."; Procurement: "Passed by Priya Shah (Compliance, another department): 1 test." (`perBU[bu].passedByText`, `tests[i].passedBy`) | Approver page (Simple and Advanced), `data-passed-by-text` |
-| Report this week | "Business check: 9 tests passed (now 9 of 26 passed). Try it out: 5 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs." Re-passing a test never raises it | Status report "Tests" |
+| Report this week | "Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs." Re-passing a test never raises it | Status report "Tests" |
 | Re-approvals | **None** in the seed; Procurement's approval is marked stale in the report | Launch dialog (`data-reapprovals`), report |
 | Queue | Rosa Vega: "Approve Procurement's part again" (re-approval reaches Home before the part is ready) | Home "Waiting for you" (= `personQueue`) |
 | Departments | 6 configured: Accounts Payable (Nina Brooks), Compliance (Dave Ortiz), IT (Sam Keller), PMO (none), Procurement (Rosa Vega), Treasury (Grant Wu) | Approver panel pick list, Admin Departments tab |

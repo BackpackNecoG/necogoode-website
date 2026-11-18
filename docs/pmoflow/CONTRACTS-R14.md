@@ -132,3 +132,50 @@ Each stream owns whole files. The engine has one owner (L1). Item ids are from t
   - all unit suites, lint and your e2e suites pass (run e2e-admin alone);
   - check screenshots at 1366 and 390.
 - **Don't commit.** Report in ≤300 words with any cross-stream asks.
+
+## Appendix: R14 engine API (L1, published early; shapes are stable, items marked *landing* are being filled in)
+
+All new functions are on the shared engine (`E()` in the browser, `require('api/shared/pmoflow-engine.js')` on the server). Existing shapes are unchanged unless listed here.
+
+### Server refusals (API, every caller: task Edit, the doc API, sync). Show `error` as-is; it is plain words.
+- **403 task ownership:** a workItem's fields or hours may be changed only by its owner, the project manager, the launch owner (releaseManager) or an Admin. An unowned task may be picked up (owner set to yourself) by any Editor. Message: "Only <owner> (the task owner), <PM> (the project manager) or an Admin can change “<title>”."
+- **409 deadline guard:** a workItem write that moves the project's expected finish past its deadline (or further past it) is refused: `{error: 'Use “Change the plan” to …', reasons:[…], deadline:{finishBefore, finishAfter, target}}`. Engine: `E.deadlineBreach(docsBefore, docsAfter, projectId, today)` → `null | {finishBefore, finishAfter, target, text}` (L4 sync uses it to hold an inbound date as a plan change request).
+- **400 day off:** a due date on a weekend, US holiday or workspace day off. Engine: `E.dueDateProblem(date, docs)` → `null | {date, day:'Fri Dec 25', name:'Christmas Day', suggestion:'2026-12-24', text:'Fri Dec 25 is Christmas Day, a day off. Pick a working day, such as Thu Dec 24.'}`. The due-date picker marks days off with `E.isBusinessDay(d, docs)` / `E.holidays(docs)`.
+- **403 sponsor:** changing a project's sponsor needs an Admin or the current sponsor; nobody can make the project manager the sponsor. First-time setting (no sponsor yet) is allowed to anyone who may edit the project, except to the PM.
+- **409 rebaseline:** once a project has a saved plan (`project.baselines` non-empty), "Save plan" (any change to `baselines` through the doc API) is refused: "Use “Change the plan” to save a new plan, so the sponsor can approve it." Plan changes still write their own automatic before/after records.
+- **History:** a refused write is never logged; a write that changes no field logs nothing; the client's note is dropped when it claims a change ("A → B") the server diff does not show.
+- **Hours:** each new `workItem.time[]` entry is stamped by the server: `at` (server ISO time) and `backdated: true` when its `date` is before the person's today. `E.timeEntryText(t)` → "8 hours on Nov 10 (logged Nov 18, backdated)".
+
+### Done that needs a second person (PMO-1)
+- `E.unconfirmedDone(docs, workItemOrId)` → `{flag, reasons:['open-predecessor'|'no-hours'], text, doer}`. A Done with an open predecessor, or with 0 hours on a task with an estimate (`effortDays`), is *unconfirmed* until someone other than the doer sets `confirmedBy` (server stamps `confirmedAt`; the doer is `doneBy`, else the owner). The server refuses `confirmedBy === doer`.
+- Unconfirmed Done earns nothing (EV, % done, CPI/SPI/EAC) and its dependents are forecast as if it were still open.
+- `projectTruth.unconfirmed` → `{count, items:[{workId, title, doer, doerName, reasons, text}], text:'2 tasks marked Done need someone else to confirm them'}`.
+- `who` rows: `why: 'confirm'` (rank 44), `what: 'Confirm “<title>” is done'`, person = the project manager (or the launch owner when the PM is the doer), `workId`, `reason` (plain text).
+
+### Cost unknown (Karen 2)
+- `projectTruth.cost` adds `unknown: bool`, `unknownText: 'Cost unknown: set rates'`, `unpriced: n` (open tasks with no owner rate and no fixed cost). When `unknown`: `forecast`, `estimate`, `remaining`, `variance` are `null` and `overBudget` is `false`; `planned` (budget) still shows. Never red "over budget" from default rates. `projectFinancials` follows the same rule.
+
+### One testing counter (BPM-1) *landing*
+- `projectTruth.testing` is the ONE ledger. Every surface reads: `total` (= `cases + scripts`), `passed`, `failed`, `notRun`, `stages[]` (`{key:'system'|'uat', label, total, passed, failed, notRun}`; both stages use the same `total`), `count` ("9 of 26 tests passed"), `coverage.text`.
+- `coverage.allCovered` is true only when every changed piece of information has an item-specific case for every rule field (a generic user-origin case does not count); `coverage.specificGaps` lists pieces covered only by generic cases.
+- `E.testingLine(truth)` → one sentence for headers, Portfolio and the report, e.g. "9 of 26 tests passed (17 not passed yet: 1 failed, 16 not run)".
+
+### One blocker counter (BPM, Karen 7) *landing*
+- `projectTruth.blocking.holdsUp` = DISTINCT open tasks held (within the project); `blocking.text` "9 blocking (holds up 9 tasks)".
+- `periodReport(...).headline.lateOrBlocked` = header's `lateCount` + `blocking.count` taken from the same projectTruth; `weekly.blockersRaised` = blockers whose information became not available in the period.
+- `E.infoStateCounts(docs, projectId)` → `{notAvailable, notChecked, sampleOnly, have}`: the one split the process page and Launch both show.
+
+### Reports (PMO-7/8) *landing*
+- `lastReportStamp(project)` is an exact ISO timestamp; "since last report" compares event times, not days.
+- A past range's headline is computed `asOf` the period end; `report.asOf` = `{date, label}` ("as of Fri Nov 13" or "as of today").
+- Time stamps in the report are formatted with the viewer's offset (`opts.tzOffsetMinutes`); `E.fmtStamp(iso, tzOffsetMinutes)`.
+- "late by N business days" in the report is `projectTruth.lateness[id].days` (same as the Work tab).
+
+### Approvals (Karen 8, BPM-9) *landing*
+- A part's approval request waits until its work is done: `approvalsOf` items carry `ready:false, waitingFor:{count, titles}` while any of the part's tasks is open.
+- `approvalsOf` items carry `changedAfter: [{what, from, to}]` when the part changed after its approval ("Step 4 owner: AP clerk → AP lead").
+
+### Plan-change knock-on (PMO-9) — engine side; L3 wires it in the change module
+- `E.knockOnRedates(docsAfter, projectId, today, {exclude:[ids]})` → change edits `[{type:'workItem', id, op:'set', field:'due', from, to, label, auto:true}]` for open tasks whose expected finish lands after their due date after the change. Applying them re-dates knock-on due dates.
+- `E.pastDueWarnings(docsAfter, projectId, today)` → `[{workId, title, due, forecast, text}]` for the impact screen.
+- The `who` list no longer says "back on schedule" for a task whose expected finish equals its due date.

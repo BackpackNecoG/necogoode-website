@@ -33,3 +33,11 @@
 | 12 | Close R11 findings: team→department routing (no default) + scoped re-approval; truthful approver identity; sync guardrails; test-pass limits + step-up; one testing count; no PM fallback; launch/report/access fixes; EV vs baseline; launch-day validation; profiling depth; parser control flow; cross-project knock-on; audit actor in hash + CSV verify | 2562 e2e + 293 unit | ae88a8d (live, verified) | fixed-bar re-review running |
 | 12 review | Same 4 personas (`market-review/r12/CONSOLIDATED-R12.md`) | — | — | demo 4/4, pilot 4/4 (Karen conditional), contract 0/4; PMO expert sizes ~$19.5k/yr; bar still FAILS on testing-count contradictions, C20 (C/C/B/C), C18 (D/D/C/D) — remaining C18/C20 drivers are mostly non-code (vendor size, SOC 2/pen test timing, references, Team-plan Azure deploy) |
 | 13 | configurable departments, one testing ledger, SoD loopholes (self-assign, sponsor for deadline breach, one readiness rule), no PM fallback, sync never bends forecast/EV, EV from baseline, profiling wiring, identity/RACI, parser, report periods, Home queue, import entry points, phone polish; deadline/budget only via Change the plan (server 409) | 2740 e2e + 329 unit | cd1fa01 (live, verified) | fixed-bar re-review running |
+
+## R13 re-review (build cd1fa01) and R14 start
+- Reviewers: demo 4/4, paid pilot 4/4, contract 0/4. Largest deal: PMO director, 30 editors on Business, $23,400/yr. Consolidated: `market-review/r13/CONSOLIDATED-R13.md`.
+- R14 base (lead, commit 9fbf0bb):
+  - server-written history sentences (the client text becomes a quoted note);
+  - unowned work is never attributed to the PM in `who`;
+  - one approval-readiness rule in the Advanced list view and `decide()`.
+- R14 streams L1–L4 dispatched per CONTRACTS-R14.md. L4 is done (sync deadline holds, sponsor route, export labels, Jira-first buyer path); it was resumed for two-person department moves.
