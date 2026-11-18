@@ -41,3 +41,5 @@
   - unowned work is never attributed to the PM in `who`;
   - one approval-readiness rule in the Advanced list view and `decide()`.
 - R14 streams L1–L4 dispatched per CONTRACTS-R14.md. L4 is done (sync deadline holds, sponsor route, export labels, Jira-first buyer path); it was resumed for two-person department moves.
+- **R14 deployed:** 77461a2 (live on www.necogoode.com, verified). Unit 371, e2e 2878 (design 922, pmo 648, release 356, consistency 455, change 99, buyer 174, connect 89, admin 135), lint clean. Re-review started against the frozen worktree `/home/claude/pmoflow-r14-review`.
+- **L3 deviation (accepted):** knock-on re-dating uses `C.withKnockOn` (shift only the tasks the change moves, by the same business days), not `E.knockOnRedates` (which would erase lateness that existed before the change).
