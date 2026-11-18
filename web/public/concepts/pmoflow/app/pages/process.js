@@ -1497,7 +1497,8 @@ export function parseWho(text, p) {
   if (!t) return { owner: fallback };
   const k = t.toLowerCase().replace(/\s+—\s+.*$/, '');
   const hit = people.find(x => x.name.toLowerCase() === k) || (people.filter(x => x.name.split(' ')[0].toLowerCase() === k).length === 1 ? people.find(x => x.name.split(' ')[0].toLowerCase() === k) : null);
-  return hit ? { owner: hit.id } : { owner: fallback, ownerRole: t };
+  /* R15 (Karen r15): a role is the doer; the process owner is never filled in behind it (plan cards showed "Maya Chen") */
+  return hit ? { owner: hit.id } : { owner: null, ownerRole: t };
 }
 const peopleList = () => `<datalist id="d-people">${store.state.people.map(x => `<option value="${esc(x.name)}">${esc(x.role || '')}</option>`).join('')}</datalist>`;
 const infoList = () => `<datalist id="d-infos">${allData().map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist>`;

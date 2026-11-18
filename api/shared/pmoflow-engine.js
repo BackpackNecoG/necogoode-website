@@ -803,7 +803,12 @@
       reasons.push(nWord(unowned.length, 'task') + ' need' + (unowned.length === 1 ? 's' : '') + ' an owner');
       if (rag === 'green' && unowned.length * 2 > open.length) { rag = 'amber'; ownersOnly = true; }
     }
-    let label2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : RAG_LABEL[rag], labelAdv2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : RAG_LABEL_ADVANCED[rag];
+    // R15 (Karen r15 #1): work held up by missing information is never "On track"
+    const holding = (blockers || []).filter(b => b && b.held > 0).length;
+    let waitingInfo = false;
+    if (holding && rag === 'green') { rag = 'amber'; waitingInfo = true; }
+    const infoLabel = 'Waiting on information';
+    let label2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : waitingInfo ? infoLabel : RAG_LABEL[rag], labelAdv2 = effortOnly ? 'Behind on effort' : ownersOnly ? 'Tasks need owners' : waitingInfo ? infoLabel : RAG_LABEL_ADVANCED[rag];
     if (launchFlag && (label2 === RAG_LABEL.amber || label2 === 'Behind on effort') && !late.length) { label2 = 'Launch day is a day off'; labelAdv2 = label2; }
     return { project, items, open, allDone, finish, target, bufferDays, late, pastDue, finishAfterDue, runningLate: finishAfterDue, blockers, rag,
       label: label2, labelAdvanced: labelAdv2, reasons, fc, ev, behindEffort, today: today || null, launchFlag, unowned };

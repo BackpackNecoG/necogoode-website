@@ -1987,7 +1987,7 @@ test('R8 §2 status rules: At risk only for a missed deadline or an unplanned bl
   const g = withHoldResolver(baseDocs());
   g.workItem.forEach(e => { if (e.data.status !== 'done') { const fix = !!e.data.resolves; e.data.deps = []; e.data.start = fix ? '2026-11-05' : '2026-11-20'; e.data.due = fix ? '2026-11-10' : '2026-11-25'; e.data.status = 'idle'; } });
   const gt = E.projectTruth(deepFreeze(g), PRJ, TODAY);
-  assert.deepEqual([gt.label, gt.lateCount], ['On track', 0]);
+  assert.deepEqual([gt.label, gt.lateCount, gt.rag], ['Waiting on information', 0, 'amber']);  /* R15 lead ruling (Karen r15): a blocker holding up work is never "On track" */
   assert.match(gt.sentence, /work is planned to get it/);
   assert.ok(gt.blockers.length > 0 && gt.blockers.every(b => b.planned));
   assert.doesNotMatch(gt.sentence, /Nothing needs attention/);

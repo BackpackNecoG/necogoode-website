@@ -1179,7 +1179,14 @@ async function recordRun(prj, opts) {
   if (env === 'uat') {
     const E_ = E();
     const refused = E_ && E_.canPassTest ? newPasses.map(x => E_.canPassTest(store.state.docs, prj.id, x.caseId || x.scriptId, me)).filter(Boolean) : [];
-    if (refused.length) { ui.runOpen.delete(id); toast(refused[0].text + (refused.length > 1 ? ` (${refused.length} tests)` : '')); return; }
+    /* R15 (Jordan r15 #4): a pass the rules refuse is still sent, so the SERVER refuses it and records "Refused: …" in
+       History; the person sees the server's reason. No step-up is asked for a save that will be refused. */
+    if (refused.length) {
+      let saved = false;
+      try { await store.save('testRun', id, doc, 'Recorded test results'); saved = true; } catch (e) { /* expected: the server refused and logged it */ }
+      ui.runOpen.delete(id);
+      toast(saved ? 'Saved.' : refused[0].text + (refused.length > 1 ? ` (${refused.length} tests)` : '') + ' Nothing was saved.'); return;
+    }
     if (newPasses.length > 1) {
       if (!(await stepUp(`pass ${newPasses.length} tests at once`))) { ui.runOpen.delete(id); toast('Not saved: the extra sign-in check was not completed.'); return; }
       doc.stepUp = true;

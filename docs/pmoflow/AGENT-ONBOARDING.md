@@ -6,7 +6,7 @@
   3. `CONTRACTS.md`
   4. `CONTRACTS-R2.md`
   5. `CONTRACTS-R3.md`
-  6. `CONTRACTS-R4.md` … `CONTRACTS-R14.md`, then `CONTRACTS-R15.md` (R15 is the current round: CLOSE THE R14 REVIEW FINDINGS). Findings: `market-review/r14/CONSOLIDATED-R14.md` and the reviewer files next to it.
+  6. `CONTRACTS-R4.md` … `CONTRACTS-R15.md`, then `CONTRACTS-R16.md` (R16 is the current round: CLOSE THE R15 REVIEW FINDINGS). Findings: `market-review/r15/CONSOLIDATED-R15.md` and the reviewer files next to it.
 
   Later deltas win over earlier ones.
 - **Shared client code (lead-owned):** `web/public/concepts/pmoflow/app/{store.js, ui.js, main.js, styles.css}`. Read them; don't edit them. If you need a change, put it in your report.
