@@ -190,7 +190,12 @@ function projectOfCase(docs, dataId) {
    summary is kept only as a quoted note after it, so "Comment added" can no longer stand in for a status change. */
 const DIFF_SKIP = new Set(['id', 'updatedAt', 'createdAt', 'snapshotAt', 'fingerprint', 'cutoverUpdatedAt']);
 const PERSON_FIELDS = new Set(['owner', 'sponsor', 'releaseManager', 'testLead', 'approver', 'tester', 'assignedBy', 'requestedBy', 'by']);
-function fieldLabel(k) { return String(k).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(); }
+/* R17 #7 (PMO: "tobe forked none → true", "after wi-…" in History): internal fields are never shown, and common fields
+   read in plain words; a dependency list names the tasks */
+const FIELD_HIDE = new Set(['tobeForked', 'forkedFrom', 'evidenceResets', 'formerLeads', 'reopenedWhy', 'firstDoneAt', 'syncHold', 'stateLog', 'testRef', 'regenerated', 'resetAt']);
+const FIELD_WORD = { tobe: 'Future map', asis: 'Today map', deps: 'depends on', ownerRole: 'role', effortDays: 'effort (days)', teamDepartments: 'approving departments',
+  uatScripts: 'business check scripts', uatScenarios: 'end-to-end scenarios', cutover: 'launch-day plan', bu: 'department', pid: 'process', step: 'step', avail: 'availability' };
+function fieldLabel(k) { return FIELD_WORD[k] || String(k).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(); }
 const STATUS_WORD = { idle: 'Not started', prog: 'In progress', done: 'Done', blocked: 'Blocked', requested: 'Requested', approved: 'Approved',
   active: 'Active', expired: 'Expired', revoked: 'Revoked', rejected: 'Changes asked for', pass: 'Passed', fail: 'Failed', missing: 'Not available', pending: 'Pending' };
 function fmtVal(docs, k, v) {
@@ -199,12 +204,13 @@ function fmtVal(docs, k, v) {
   if ((k === 'status' || k === 'decision' || k === 'avail' || k === 'outcome') && STATUS_WORD[v]) return STATUS_WORD[v];
   if (Array.isArray(v)) return v.length + ' item' + (v.length === 1 ? '' : 's');
   if (typeof v === 'object') return 'set';
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
   const t = String(v); return t.length > 40 ? '“' + t.slice(0, 37) + '…”' : typeof v === 'string' ? '“' + t + '”' : t;
 }
 function changeText(docs, prevData, data) {
   const out = []; const a = prevData || {}, b = data || {};
   /* server timestamps (…At) are recorded on the event itself; they are not "changes" a person made */
-  const keys = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(k => !DIFF_SKIP.has(k) && !/At$/.test(k) && !/Ts$/.test(k) && k !== 'doneBy');
+  const keys = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(k => !DIFF_SKIP.has(k) && !FIELD_HIDE.has(k) && !/At$/.test(k) && !/Ts$/.test(k) && k !== 'doneBy');
   for (const k of keys) {
     const x = a[k], y = b[k];
     if (JSON.stringify(x === undefined ? null : x) === JSON.stringify(y === undefined ? null : y)) continue;
@@ -228,6 +234,13 @@ function changeText(docs, prevData, data) {
         const tb = eng.hoursTotals(docs, Object.assign({}, a, { time: Array.isArray(x) ? x : [] })), ta = eng.hoursTotals(docs, b);
         out.push('total ' + tb.text + ' → ' + ta.text);
       }
+      continue;
+    }
+    if (k === 'deps' && (Array.isArray(x) || Array.isArray(y))) {
+      const title = d => { const id = d && typeof d === 'object' ? (d.id || d.on) : d; const w = ((docs.workItem || []).find(z => z.id === id) || {}).data; return w ? '“' + (w.title || 'untitled task') + '”' : 'a removed task'; };
+      const was = (x || []).map(title), now = (y || []).map(title);
+      const add = now.filter(t => !was.includes(t)), rem = was.filter(t => !now.includes(t));
+      out.push([add.length ? 'now waits for ' + add.join(', ') : '', rem.length ? 'no longer waits for ' + rem.join(', ') : ''].filter(Boolean).join('; ') || 'dependencies reordered');
       continue;
     }
     if (Array.isArray(x) || Array.isArray(y)) { out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x || []) + ' → ' + fmtVal(docs, k, y || [])); continue; }
@@ -397,12 +410,25 @@ function scheduleError(prev, data, docs, today) {
     if (shift && shift.moved) { data.start = shift.start; if (shift.due) data.due = shift.due; }
   }
   const after = Object.assign({}, docs, { workItem: (docs.workItem || []).filter(d => d.id !== data.id).concat([{ id: data.id, data }]) });
+  /* R17 (P3 ask, PMO: an added dependency didn't knock on): a dependency that moves this task when other tasks wait on it
+     moves them too, so it goes through Change the plan (which shows and approves the knock-on) */
+  if (shift && shift.moved) {
+    const waiting = (docs.workItem || []).map(d => d.data).filter(w => w && w.projectId === projectId && w.id !== data.id && w.status !== 'done' && w.status !== 'cancelled'
+      && (Array.isArray(w.deps) ? w.deps : []).some(x => (x && typeof x === 'object' ? x.id || x.on : x) === data.id));
+    if (waiting.length) return { status: 409, body: { error: 'Use “Change the plan” to add this dependency: ' + shift.text + ' It also moves ' + (waiting.length === 1 ? '“' + (waiting[0].title || 'a task') + '”, which waits on it' : waiting.length + ' tasks that wait on it') + '.', reasons: [shift.text], knockOn: waiting.map(w => w.id), shift } };
+  }
   const b = eng.deadlineBreach(docs, after, projectId, today);
   if (b) return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + (shift && shift.moved ? shift.text + ' ' : '') + b.text, reasons: [b.text], deadline: b } };
   /* R15 #4 / R16 #7 (PMO): an effort or cost edit (or a new task with a cost) that raises the expected cost past the
      tolerance, or over the budget, goes through Change the plan too (a new task is planned through Change the plan's
      "add work" or the plan itself, as before) */
   const costKeys = changedKeys(prev, data).filter(k => k === 'effortDays' || k === 'cost');
+  /* R17 (P3 ask, PMO: "+ Add work item" added cost with no plan change): a NEW task on a project with a saved plan that
+     pushes the expected cost past the tolerance (or over the budget) goes through Change the plan too */
+  if (!prev && Array.isArray(project.baselines) && project.baselines.length && typeof eng.costBreach === 'function') {
+    const c = eng.costBreach(docs, after, projectId, today);
+    if (c) return { status: 409, body: { error: 'Use “Change the plan” to add this work, so the sponsor can approve the cost. ' + c.text, reasons: [c.text], cost: c } };
+  }
   if (prev && costKeys.length && Array.isArray(project.baselines) && project.baselines.length && typeof eng.costBreach === 'function') {
     const c = eng.costBreach(docs, after, projectId, today);
     if (c) return { status: 409, body: { error: 'Use “Change the plan” to change this ' + (costKeys.includes('cost') && !costKeys.includes('effortDays') ? 'cost' : prev ? 'effort' : 'work') + ', so the sponsor can approve the cost. ' + c.text, reasons: [c.text], cost: c } };
@@ -459,9 +485,9 @@ function testRunError(prev, next, actor, docs) {
       const who = [...new Set(others.map(k => personName(docs, testerOf[k])))];
       return `You can only pass tests assigned to you or unassigned ones. ${others.length} of the ${passes.length} selected test${passes.length === 1 ? '' : 's'} ${others.length === 1 ? 'is' : 'are'} assigned to ${who.join(', ')}.`;
     }
-    // R15 #5 (Jordan): whoever assigned a test (themselves included) can't pass it in ANY environment
+    // R15 #5 (Jordan): whoever assigned a test (themselves included), or built its step (R17 #5), can't pass it in ANY environment
     if (next.env !== 'uat' && typeof eng.canPassTest === 'function') {
-      const refused = passes.map(k => eng.canPassTest(flat, next.projectId, k, actor, { env: next.env || 'sit' })).filter(x => x && x.rule === 'assigner');
+      const refused = passes.map(k => eng.canPassTest(flat, next.projectId, k, actor, { env: next.env || 'sit' })).filter(x => x && (x.rule === 'assigner' || x.rule === 'builder'));   /* R17 #5: + the step's builder */
       if (refused.length) return refused.length === 1 ? refused[0].text : `${refused[0].text} (${refused.length} of the ${passes.length} selected tests can't be passed by ${personName(docs, actor)}.)`;
     }
     // R12 #4: a business-check pass is the assignee's, or (unassigned) someone's in the department that owns the
@@ -1155,6 +1181,19 @@ module.exports = async function (context, req) {
             if (f.set.ownerRole) { nd.ownerRole = f.set.ownerRole; delete nd.owner; } else if (f.set.owner) { nd.owner = f.set.owner; delete nd.ownerRole; } else continue;
             await store.putDoc(wsId, 'dataElement', f.dataId, nd);
             await store.appendEvent(wsId, { actor, action: 'update', ref: `dataElement:${f.dataId}`, summary: ai.labeler(after).scrub(`Owner of ${de.name || 'information'} follows its step: ${f.from || 'nobody'} → ${f.to || 'nobody'}`).slice(0, 300) });
+          }
+          /* R17 #3 (BPM critical): a choice whose threshold or path label changed invalidates its evidence in every project
+             not yet launched: boundary cases and scripts are regenerated (earlier results stop counting), routing tasks
+             named for the old value reopen with the new name, and launch waits until they pass again */
+          const fx = eng && typeof eng.ruleChangeEffects === 'function' ? eng.ruleChangeEffects(st.docs, after, new Date().toISOString()) : [];
+          if (fx.length) {
+            const writes = eng.ruleChangeWrites(after, fx, new Date().toISOString());
+            for (const w of writes) {
+              if (w.data) await store.putDoc(wsId, w.type, w.id, Object.assign({}, w.data, STAMPED.includes(w.type) ? { updatedAt: new Date().toISOString() } : {}));
+              else await store.deleteDoc(wsId, w.type, w.id);
+            }
+            for (const ef of fx) for (const x of ef.projects)
+              await store.appendEvent(wsId, { actor, action: 'update', ref: `project:${x.projectId}`, summary: ai.labeler(after).scrub(x.text).slice(0, 300) });
           }
         }
         const ev = await store.appendEvent(wsId, { actor, action: exists ? 'update' : 'create', ref: `${type}:${id}`,

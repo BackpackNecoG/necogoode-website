@@ -670,3 +670,9 @@ details.is-data:not([open]) > .is-pop{display:none}
   .d-have-opt span{width:100%;justify-content:center;padding:0 4px;white-space:normal;text-align:center;line-height:1.15;font-size:12px}
   .d-have ul{max-height:none}
 }
+/* R17 P2: "Restore your draft?" on the paste page; a role row in the approver panel; "Collected each run" on the edit form */
+.is-restore{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;margin:0 0 12px}
+.is-restore>span:first-child{flex:1 1 240px;min-width:0}
+.is-restore-b{display:flex;gap:6px;flex:0 0 auto}
+.d-apr-rolechip{font-size:11px;padding:1px 6px;margin-left:4px;vertical-align:1px;background:var(--bg2,#f1f5f9)}
+.d-perrunfield{margin-top:2px}

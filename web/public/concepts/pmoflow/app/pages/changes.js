@@ -121,12 +121,17 @@ function deltaDays(a, b) { return a && b && a !== b ? E().businessDaysBetween(a,
    role for that project), never assumed to be its project manager (when that manager asked, its sponsor decides). */
 function crossWho(x, approvers, status) {
   if (!approvers) return x.owner ? `${esc(pname(x.owner))} (its project manager) is told` : 'its project manager is told';
-  const a = C().crossApprover(x, approvers);
-  if (!a) return status === 'applied' ? 'no separate approval' : 'nobody else approves for it';
-  const role = C().rolesOf(a).filter(r => r.projectId === x.projectId).map(r => r.role === 'linkedSponsor' ? 'its sponsor' : r.role === 'linkedAdmin' ? 'an Admin, as it has no sponsor' : 'its project manager');
-  /* Jordan R13: the applied record says what happened, not what was asked */
-  const verb = status === 'applied' ? (a.decision === 'approved' ? 'approved it' : 'decided') : status === 'rejected' ? (a.decision === 'rejected' ? 'rejected it' : 'was asked') : 'approves too';
-  return `${esc(pname(a.person))} (${esc([...new Set(role)].join(' and ') || 'approver')}) ${verb}`;
+  /* R17 (PMO defect 3): past that project's deadline its sponsor decides too, so every approver for it is named */
+  const as = C().crossApprovers ? C().crossApprovers(x, approvers) : [C().crossApprover(x, approvers)].filter(Boolean);
+  if (!as.length) return status === 'applied' ? 'no separate approval' : 'nobody else approves for it';
+  const one = a => {
+    const role = C().rolesOf(a).filter(r => r.projectId === x.projectId).map(r => r.role === 'linkedSponsor' ? 'its sponsor' : r.role === 'linkedAdmin' ? 'an Admin, as it has no sponsor' : 'its project manager');
+    /* Jordan R13: the applied record says what happened, not what was asked */
+    const verb = status === 'applied' ? (a.decision === 'approved' ? 'approved it' : 'decided') : status === 'rejected' ? (a.decision === 'rejected' ? 'rejected it' : 'was asked') : as.length > 1 ? '' : 'approves too';
+    return `${esc(pname(a.person))} (${esc([...new Set(role)].join(' and ') || 'approver')})${verb ? ' ' + verb : ''}`;
+  };
+  const txt = joinAnd(as.map(one));
+  return (x.pastDeadline && x.deadline ? `past its ${esc(fmt(x.deadline))} deadline · ` : '') + txt + (as.length > 1 && status !== 'applied' && status !== 'rejected' ? ' approve too' : '');
 }
 /* R14 (L3 #1): an unowned task reads "Needs an owner: <role>" (E.ownerText), never a person's name */
 const ownerOf = k => { const w = store.get('workItem', k.id); return w && E().ownerText ? E().ownerText(store.state.docs, w) : k.owner ? pname(k.owner) : 'Needs an owner'; };
@@ -136,6 +141,11 @@ function endsLateHTML(im) {
   if (!L.length) return '';
   return `<div class="chg-warn" data-imp-endslate role="note"><b>${esc(im.warning || '')}</b><ul>${L.slice(0, 8).map(x => `<li><span>“${esc(x.title)}”${x.projectId !== im.projectId ? ` <small class="hint">(${esc((projectOf(x.projectId) || {}).name || 'another project')})</small>` : ''}</span><span class="hint">${esc(ownerOf(x))} · due ${esc(fmt(x.due))}, expected <b class="fail">${esc(fmt(x.expected))}</b></span></li>`).join('')}</ul>${L.length > 8 ? `<div class="hint">+${L.length - 8} more</div>` : ''}</div>`;
 }
+/* R17 (PMO defect 2): over the budget, over someone's capacity: one plain sentence each (PMOChange.planWarnings) */
+export function warningsHTML(w) {
+  const L = (w && w.sentences) || [];
+  return L.length ? `<div class="chg-warn chg-cap" data-plan-warnings role="note">${L.map((t, i) => `<p data-plan-warning="${i === 0 && w.budget ? 'budget' : 'capacity'}">${esc(t)}</p>`).join('')}</div>` : '';
+}
 function impactDetailsHTML(im, opts) {
   opts = opts || {};
   if (!im) return '<div class="hint">No impact was recorded.</div>';
@@ -144,7 +154,7 @@ function impactDetailsHTML(im, opts) {
   const ko = im.knockOn || [];
   const cost = im.cost || {};
   const tile = (lbl, before, after, note, attr) => `<div class="chg-tile" ${attr || ''}><span class="lbl">${lbl}</span><b>${before === after ? esc(after) : `${esc(before)} <span aria-hidden="true">→</span><span class="sr"> to </span> ${esc(after)}`}</b>${note ? `<span class="hint">${note}</span>` : ''}</div>`;
-  return `${opts.warn === false ? '' : endsLateHTML(im)}<div class="chg-tiles">
+  return `${opts.warn === false ? '' : endsLateHTML(im)}${warningsHTML(im.warnings)}<div class="chg-tiles">
       ${tile('Expected finish', fmt(im.finish.before), fmt(im.finish.after), fd ? `${fd > 0 ? '+' : '−'}${plural(Math.abs(fd), 'business day')}` : 'no change', 'data-imp-finish')}
       ${tile('Deadline', fmt(im.deadline.before), fmt(im.deadline.after), im.buffer.after == null ? '' : im.buffer.after >= 0 ? `${plural(im.buffer.after, 'business day')} to spare` : `<span class="fail">${plural(-im.buffer.after, 'business day')} late</span>`, 'data-imp-deadline')}
       ${tile('Expected cost', money(cost.before), money(cost.after), cost.delta ? `${cost.delta > 0 ? '+' : '−'}${money(Math.abs(cost.delta))} (${Math.abs(cost.pct).toFixed(1)}%)` : 'no change', 'data-imp-cost')}
@@ -266,6 +276,23 @@ export function taskChangesHTML(taskId) {
 }
 
 async function refresh() { await store.load(); }
+/* R17: a plan change sent from another screen (cancel a task with hours, a new dependency with a knock-on): the same route
+   the wizard uses (applied at once within tolerance, else sent for approval); the store reloads after. */
+export async function sendChange(change) {
+  await ensureAssets();
+  const r = await api('POST', '', { change });
+  await refresh();
+  return r;
+}
+/* the impact of a change before it is sent, from the same pure module the server runs */
+export function previewChange(input) {
+  const { change, errors } = C().buildChange(input, store.state.docs, { engine: E() });
+  if (errors.length) return { errors };
+  const ch = C().withKnockOn(change, store.state.docs, store.state.today, { engine: E() });
+  const im = C().impact(store.state.docs, C().applyToDocs(store.state.docs, ch, new Date().toISOString()), input.projectId, store.state.today, { change: ch, engine: E() });
+  return { errors: [], change: ch, im, need: C().needsApproval(ch, im, store.state.docs, { requester: store.state.me }) };
+}
+export const waitingWords = c => (C() && c ? C().waitingText(c, store.state.docs) : '');
 async function decide(id, decision, btn) {
   let note = '';
   if (decision === 'reject') {
@@ -320,7 +347,7 @@ export async function openChangeWizard(projectId, preset) {
   if (!j) { toast('Project not found'); return; }
   preset = preset || {};
   const tasks = tasksOf(projectId);
-  const open = tasks.filter(w => w.status !== 'done');
+  const open = tasks.filter(w => w.status !== 'done' && w.status !== 'cancelled');
   const S = {
     step: 0, kinds: new Set(preset.kinds || (preset.taskId ? ['dates'] : [])), reason: preset.reason || '', category: preset.category || '', title: '',
     dates: {}, owners: {}, removes: new Set(), adds: [], picks: new Set((preset.suggestions || []).map(s => s.id)), budget: '', target: '', pm: preset.pm || '', lo: preset.launchOwner || '', lwDay: preset.lwDay || '', lwTime: preset.lwTime || '', shiftNote: '',
@@ -330,6 +357,9 @@ export async function openChangeWizard(projectId, preset) {
   Object.entries(preset.dates || {}).forEach(([id, d]) => { const w = store.get('workItem', id); if (w && w.status !== 'done') S.dates[id] = { start: d.start || w.start, due: d.due || w.due, on: true }; });
   if (preset.taskId) { const w = store.get('workItem', preset.taskId); if (w && w.status !== 'done') S.dates[w.id] = { start: preset.start || w.start, due: preset.due || w.due, on: true }; }
   const sugg = preset.suggestions || [];
+  /* R17 (PMO): "+ Add work item" over the cost tolerance, and Cancel on a task with hours, open here with the task filled in */
+  (preset.adds || []).forEach(a => S.adds.push(Object.assign({ id: store.newId('wi'), effortDays: 1 }, a)));
+  (preset.removes || []).forEach(id => { const w = store.get('workItem', id); if (w && w.status !== 'done' && w.status !== 'cancelled') S.removes.add(id); });
 
   const ov = document.createElement('div'); ov.className = 'overlay chg-ov';
   ov.innerHTML = `<div class="modal chg-wiz" role="dialog" aria-modal="true" aria-label="Change the plan"><h2>Change the plan <small class="hint">${esc(j.name)}</small></h2><ol class="chg-steps" aria-label="Steps"></ol><div class="mb"></div><div class="mf"></div></div>`;
@@ -403,7 +433,7 @@ export async function openChangeWizard(projectId, preset) {
         <div class="frow"><div class="field"><label>Owner</label><select name="ad_owner_${i}">${people(a.owner || store.state.me)}</select></div><div class="field"><label>Step it delivers</label><select name="ad_step_${i}"><option value="">— none —</option>${stepOpts(a.step)}</select></div></div>
         <div class="frow"><div class="field"><label>Start</label><input type="date" name="ad_start_${i}" value="${esc(a.start || '')}" data-dayoff /></div><div class="field"><label>Due</label><input type="date" name="ad_due_${i}" value="${esc(a.due || '')}" data-dayoff /></div><div class="field"><label>Effort (days)</label><input type="number" name="ad_eff_${i}" min="0.5" max="200" step="0.5" value="${esc(a.effortDays || 1)}" /></div></div></div>`).join('')}
       <button class="btn sm" data-add-task>+ Add a task</button>
-      <h4 class="chg-sub">Remove tasks</h4>${open.map(w => `<label class="chg-trow chg-pick"><input type="checkbox" name="rm" value="${esc(w.id)}" ${S.removes.has(w.id) ? 'checked' : ''}/> ${taskLine(w)}</label>`).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
+      <h4 class="chg-sub">Remove tasks</h4>${open.map(w => `<label class="chg-trow chg-pick"><input type="checkbox" name="rm" value="${esc(w.id)}" ${S.removes.has(w.id) ? 'checked' : ''}/> ${taskLine(w)}${C().hasHours && C().hasHours(w) ? `<small class="hint" data-rm-cancel="${esc(w.id)}">Has hours logged, so it is cancelled, not deleted: its ${esc(String(Math.round(C().hoursLogged(w) * 100) / 100))} hours stay.</small>` : ''}</label>`).join('') || '<div class="hint">No open tasks.</div>'}</section>`);
     if (S.kinds.has('scope')) parts.push(`<section class="chg-ed" data-ed="scope"><h4>Change scope</h4>${sugg.length ? `<div class="hint">Suggested tasks for the steps that changed in the process. Untick any you don’t need.</div>${sugg.map(s => `<label class="chg-trow chg-pick"><input type="checkbox" name="sg" value="${esc(s.id)}" ${S.picks.has(s.id) ? 'checked' : ''}/> ${taskLine(s)}</label>`).join('')}`
       : '<div class="hint">The linked processes have no new changes without work. To add tasks by hand, also tick “Add or remove work”.</div>'}</section>`);
     if (S.kinds.has('budget')) parts.push(`<section class="chg-ed" data-ed="budget"><h4>Change budget</h4><div class="field"><label>New budget (USD) <small class="hint">now ${esc(money(((j.budget || {}).planned)))}</small></label><input type="number" name="budget" min="0" step="100" value="${esc(S.budget !== '' ? S.budget : ((j.budget || {}).planned ?? ''))}" /></div></section>`);
@@ -498,7 +528,8 @@ export async function openChangeWizard(projectId, preset) {
     S.busy = true; draw();
     try {
       const body = { change: { projectId, title: S.built.title, reason: S.reason, category: S.category || null, source: preset.source || 'manual', edits: S.built.edits.filter(e => !e.auto).map(e => {
-        const o = { op: e.op, type: e.type, id: e.id }; if (e.op === 'set') { o.field = e.field; o.to = e.to; } if (e.op === 'add') { o.data = e.data; if (e.fromProcess) o.fromProcess = true; } return o; }), ackSteps: preset.ackSteps } };
+        /* R17: a cancel is asked for as a remove; the server turns it into a cancel again (the task has hours) */
+        const o = { op: e.op === 'cancel' ? 'remove' : e.op, type: e.type, id: e.id }; if (e.op === 'set') { o.field = e.field; o.to = e.to; } if (e.op === 'add') { o.data = e.data; if (e.fromProcess) o.fromProcess = true; } return o; }), ackSteps: preset.ackSteps } };
       const r = await api('POST', '', body);
       close();
       await refresh();

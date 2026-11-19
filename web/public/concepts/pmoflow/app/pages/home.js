@@ -11,19 +11,39 @@ const PASTE_IC = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" st
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 /* ---------------------------------------------------------------- "Waiting for you" */
-/* R9 §2: "Waiting for you" is exactly E().personQueue(docs, me, today). The badge is its length; the header bell reads
-   the same function (queueCount). Nothing here decides what is late or what is waiting. */
+/* R9 §2: "Waiting for you" is E().personQueue(docs, me, today) (plus, R17, the second-Admin confirmations the engine does
+   not list yet). The badge is its length; the header bell reads the same function (queueCount). Nothing here decides
+   what is late. */
 export function personQueue(person) {
-  const q = eng('personQueue', [], docs(), person || store.state.me, today());
-  return Array.isArray(q) ? q : [];
+  const me = person || store.state.me;
+  const q = eng('personQueue', [], docs(), me, today());
+  const out = Array.isArray(q) ? q.slice() : [];
+  /* R17 (Jordan re-test 2): a department move or role change waiting for a second Admin is waiting for every Admin who may
+     confirm it. Added here until the engine's personQueue lists them (kind 'adminConfirm'); never twice. */
+  if (!out.some(x => x && x.kind === 'adminConfirm')) out.push(...adminConfirms(me));
+  return out;
+}
+/* who may confirm (the server's rule): an Admin who did not propose it and whom it does not move (a role change: not the
+   person it changes, unless they lose Admin by it) */
+function adminConfirms(me) {
+  const set = (store.list('workspace', w => w.id === 'settings')[0]) || null;
+  if (!me || !set) return [];
+  const admins = eng('adminsOf', [], docs()) || [];
+  if (!admins.includes(me)) return [];
+  const live = p => p && typeof p === 'object' && p.id && (!p.status || p.status === 'pending') && p.by !== me;
+  const dept = (Array.isArray(set.pendingDept) ? set.pendingDept : []).filter(p => live(p) && !(p.affected || []).includes(me))
+    .map(p => ({ kind: 'adminConfirm', id: p.id, title: `Confirm: ${p.text || 'a department change'}`, href: '/admin/departments', reason: `${pname(p.by)} proposed it; a second Admin confirms it with the extra sign-in check.`, due: null, late: false }));
+  const roles = (Array.isArray(set.pendingRoles) ? set.pendingRoles : []).filter(p => live(p) && (p.personId !== me || (p.from === 'admin' && p.to !== 'admin')))
+    .map(p => ({ kind: 'adminConfirm', id: p.id, title: `Confirm: ${p.text || 'a role change'}`, href: '/admin/people', reason: `${pname(p.by)} proposed it; a second Admin confirms it with the extra sign-in check.`, due: null, late: false }));
+  return dept.concat(roles);
 }
 export const queueCount = person => personQueue(person).length;
 export function waitingFor() { const list = personQueue(); return { list, total: list.length }; }
 
 /* §7: an approval opens that team's part page */
 const hrefOf = x => x.kind === 'approval' && x.projectId && x.id ? `/release/${encodeURIComponent(x.projectId)}?bu=${encodeURIComponent(x.id)}` : (x.href || '/');
-const KIND_IC = { confirmDone: '✓', work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', syncHold: '?', planChange: '✓', information: WAIT_IC, action: '›' };
-const KIND_CLS = { confirmDone: 'confirm', work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', syncHold: 'confirm', planChange: 'approve', information: 'notready', action: 'mention' };
+const KIND_IC = { adminConfirm: '?', confirmDone: '✓', work: '☐', fix: '☐', practice: '☐', problem: '!', approval: '✓', test: '▶', confirm: '?', syncHold: '?', planChange: '✓', information: WAIT_IC, action: '›' };
+const KIND_CLS = { adminConfirm: 'confirm', confirmDone: 'confirm', work: 'done', fix: 'done', practice: 'done', problem: 'notready', approval: 'approve', test: 'test', confirm: 'confirm', syncHold: 'confirm', planChange: 'approve', information: 'notready', action: 'mention' };
 function waitHTML() {
   const { list } = waitingFor();
   const pn = id => (store.get('project', id) || {}).name || '';
@@ -42,7 +62,7 @@ function waitHTML() {
       ? `<button class="btn primary pmo-big" data-wdone="${esc(x.id)}" aria-label="${esc((x.oneTap.label || 'Mark done') + ': ' + (x.title || ''))}">✓ ${esc(x.oneTap.label || 'Mark done')}</button>`
       : one === 'confirm' && x.id
       ? `<a class="btn primary pmo-big" data-confirm-data="${esc(x.id)}" href="${link('/data/' + encodeURIComponent(x.id) + '?confirm=1')}" data-link>${esc(x.oneTap.label || 'Confirm')}</a>`
-      : `<a class="btn primary pmo-big" href="${link(hrefOf(x))}" data-link data-wopen="${i}">${kind === 'approval' ? (x.reapproval ? 'Approve again' : 'Open the approval') : kind === 'syncHold' ? 'Check and confirm' : kind === 'test' ? 'Run it' : 'Open'}</a>`;
+      : `<a class="btn primary pmo-big" href="${link(hrefOf(x))}" data-link data-wopen="${i}">${kind === 'approval' ? (x.reapproval ? 'Approve again' : 'Open the approval') : kind === 'syncHold' || kind === 'adminConfirm' ? 'Check and confirm' : kind === 'test' ? 'Run it' : 'Open'}</a>`;
     /* R13 #12: a re-approval says why it reopened; a held Jira/ADO item says why it is held (both from the engine) */
     const why = x.reason ? `<div class="s pmo-wreason" data-wreason>${esc(x.reason)}</div>` : '';
     return `<li class="pmo-wrow" data-wkind="${esc(kind)}" data-wq="${i}"${x.id ? ` data-wid="${esc(x.id)}"` : ''}${x.reapproval ? ' data-reapproval' : ''}><span class="pmo-wic pmo-wic-${cls}" aria-hidden="true">${KIND_IC[kind] || '›'}</span>

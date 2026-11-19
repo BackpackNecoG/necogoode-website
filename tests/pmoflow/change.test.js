@@ -978,3 +978,134 @@ test('R16 (PMO disagreement 6): "knock-on: it waits on the moved work" only for 
     if (e.waits) assert.match(t, /knock-on: it waits on the moved work/); else assert.match(t, /moved: it is now expected to finish later/);
   });
 });
+
+/* ------------------------------------------------------------------ R17 P3 (R16 [own data] findings) */
+test('R17 P3 #1 (PMO defect 1): a task with logged hours is cancelled, never deleted; its hours stay', () => {
+  const docs = seedDocs();
+  const w8 = task(docs, 'W8');
+  assert.ok((w8.time || []).length > 0, 'W8 has hours in the seed');
+  const spent0 = E.projectTruth(docs, PRJ, TODAY).cost.actual;
+  const { change, errors } = C.buildChange({ projectId: PRJ, reason: 'No longer needed', edits: [{ op: 'remove', type: 'workItem', id: 'W8' }] }, docs);
+  assert.deepEqual(errors, []);
+  const e = change.edits.find(x => x.id === 'W8');
+  assert.equal(e.op, 'cancel', 'a task with hours is cancelled');
+  assert.match(C.editText(e, docs, E), /Cancelled “.+” \(its \d+(\.\d+)? hours stay\)/);
+  const after = C.applyToDocs(docs, change, '2099-01-01T00:00:00.000Z');
+  const w = task(after, 'W8');
+  assert.ok(w, 'the task is kept');
+  assert.equal(w.status, 'cancelled');
+  assert.deepEqual(w.time, w8.time, 'its hours are untouched');
+  assert.equal(E.projectTruth(after, PRJ, TODAY).cost.actual, spent0, 'Spent does not drop');
+  assert.ok(C.conflicts(after, change).includes('“' + w8.title + '” was already cancelled'), 'applying it twice is a conflict');
+  /* a task without hours is still removed */
+  const r2 = C.buildChange({ projectId: PRJ, reason: 'x', edits: [{ op: 'remove', type: 'workItem', id: 'W7' }] }, docs);
+  assert.equal(r2.change.edits.find(x => x.id === 'W7').op, 'remove');
+});
+
+test('R17 P3 #1 routes: deleting a task with hours is refused (and logged); Change the plan cancels it and keeps the hours', async () => {
+  const ws = await newWs();
+  const del = await call('DELETE', `ws/${ws.id}/doc/workItem/W8`, { actor: 'dk' });
+  assert.equal(del.status, 409, JSON.stringify(del.body));
+  assert.match(del.body.error, /has [\d.]+ hours logged, so it can’t be deleted\. Cancel it instead: the hours stay\./);
+  const d1 = await docsOf(ws.id);
+  assert.ok(task(d1, 'W8'), 'W8 is still there');
+  const evs = await store.listEvents(ws, { limit: 20 });
+  assert.ok(evs.some(e => e.action === 'refused' && e.ref === 'workItem:W8' && /hours logged/.test(e.summary)), 'the refusal is in History');
+  /* a task without hours can still be deleted by its PM */
+  const ok = await call('DELETE', `ws/${ws.id}/doc/workItem/W7`, { actor: 'ta' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  /* cancelling goes through Change the plan */
+  const p = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Not needed any more', edits: [{ op: 'remove', type: 'workItem', id: 'W8' }] } });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  let ch = p.body.change;
+  if (!p.body.applied) {
+    for (const a of ch.approvers) {
+      const r = await call('POST', `workspaces/${ws.id}/changes/${ch.id}/decide`, { actor: a.person, decision: 'approve', stepUp: STEP() });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      ch = r.body.change;
+    }
+  }
+  assert.equal(ch.status, 'applied', JSON.stringify(ch.approvers));
+  const d2 = await docsOf(ws.id);
+  const w = task(d2, 'W8');
+  assert.equal(w.status, 'cancelled');
+  assert.deepEqual(w.time, task(d1, 'W8').time);
+  const ev2 = await store.listEvents(ws, { limit: 40 });
+  assert.ok(ev2.some(e => e.ref === 'workItem:W8' && /Cancelled .+hours stay/.test(e.summary)), ev2.filter(e => e.ref === 'workItem:W8').map(e => e.summary).join(' | '));
+});
+
+test('R17 P3 #2 (PMO defect 2): accepting a plan over the budget or over a person’s capacity says so, one plain sentence each', () => {
+  const docs = seedDocs();
+  const AR = 'access-review-automation';
+  const p = docs.project.find(x => x.id === AR).data;
+  const before = E.projectTruth(docs, AR, TODAY);
+  /* a plan that puts 12 more days on Dev before the deadline */
+  const start = E.addBusinessDays(TODAY, 1);
+  const add = [1, 2, 3].map(i => ({ id: 'np' + i, data: { id: 'np' + i, projectId: AR, pid: 'access-review', title: 'New step work ' + i, owner: 'dk', status: 'idle', kind: 'build', start, due: E.addBusinessDays(start, 3), effortDays: 4, deps: [] } }));
+  const after = Object.assign({}, docs, { workItem: docs.workItem.concat(add) });
+  const w = C.planWarnings(docs, after, AR, TODAY, { people: ['dk'] });
+  const ta = E.projectTruth(after, AR, TODAY);
+  assert.ok(ta.cost.forecast > p.budget.planned, 'the plan goes over: ' + ta.cost.forecast);
+  const over = '$' + Math.round(ta.cost.forecast - p.budget.planned).toLocaleString('en-US'), bud = '$' + Math.round(p.budget.planned).toLocaleString('en-US');
+  assert.equal(w.budget.text, `This plan is ${over} over the ${bud} budget.`);
+  assert.equal(w.budget.cost, ta.cost.forecast, 'the one expected cost (projectTruth cost.forecast)');
+  assert.equal(w.capacity.length, 1);
+  assert.match(w.capacity[0].text, /^Dev Kumar has [\d.]+ days of work in \d+ working days \(room for about [\d.]+\)\.$/);
+  assert.ok(w.capacity[0].days > w.capacity[0].room);
+  assert.deepEqual(w.sentences, [w.budget.text, w.capacity[0].text]);
+  assert.ok(before.cost.forecast <= p.budget.planned, 'it was within the budget before');
+  /* nothing to say for a plan within both */
+  const small = Object.assign({}, docs, { workItem: docs.workItem.concat([{ id: 'np9', data: Object.assign({}, add[0].data, { id: 'np9', owner: 'ps', effortDays: 0.5, due: start }) }]) });
+  assert.deepEqual(C.planWarnings(docs, small, AR, TODAY, { people: ['ps'] }).sentences, []);
+});
+
+test('R17 P3 #2: a plan change (and its knock-on) carries the same budget and capacity warnings in its impact', () => {
+  const docs = seedDocs();
+  const AR = 'access-review-automation';
+  const a4 = task(docs, 'A4');
+  const { change, errors } = C.buildChange({ projectId: AR, reason: 'More work', edits: [{ op: 'set', type: 'workItem', id: 'A4', field: 'effortDays', to: 30 }] }, docs);
+  assert.deepEqual(errors, []);
+  const after = C.applyToDocs(docs, change, '2099-01-01T00:00:00.000Z');
+  const im = C.impact(docs, after, AR, TODAY, { change });
+  assert.ok(im.warnings, 'impact has warnings');
+  assert.match(im.warnings.budget.text, /^This plan is \$[\d,]+ over the \$16,000 budget\.$/);
+  assert.ok(im.warnings.capacity.some(x => x.person === a4.owner && /^Priya Shah has [\d.]+ days of work in \d+ working days/.test(x.text)), JSON.stringify(im.warnings.capacity));
+});
+
+test('R17 P3 #3 (PMO defect 3): a knock-on that pushes another project past its deadline needs that project’s sponsor', () => {
+  const docs = seedDocs();
+  const erp = docs.project.find(p => p.id === ERP).data;
+  erp.sponsor = 'nb';
+  const r0 = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const x0 = r0.im.crossProjects.find(p => p.projectId === ERP);
+  assert.ok(x0 && x0.finish.after > x0.finish.before, 'ERP finishes later');
+  /* ERP's deadline sits between its finish before and after the change */
+  erp.target = E.addBusinessDays(x0.finish.before, 1);
+  const { change, im } = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const x = im.crossProjects.find(p => p.projectId === ERP);
+  assert.equal(x.deadline, erp.target);
+  assert.equal(x.misses.after, true);
+  const need = C.needsApproval(change, im, docs, { requester: 'lp' });
+  assert.ok(need.approvers.some(a => a.person === 'nb' && C.hasRole(a, 'linkedSponsor', ERP)), JSON.stringify(need.approvers));
+  assert.ok(need.approvers.some(a => a.person === 'ta' && C.hasRole(a, 'linkedPm', ERP)), 'its PM still approves');
+  assert.ok(need.reasons.some(r => /past its .+ deadline/.test(r) && /Nina Brooks \(sponsor of ERP Upgrade Readiness\)/.test(r)), need.reasons.join(' | '));
+  /* a knock-on that stays inside ERP's deadline: its PM only */
+  erp.target = E.addBusinessDays(x0.finish.after, 5);
+  const r2 = preview(docs, [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(task(docs, 'W6').due, 25) }]);
+  const n2 = C.needsApproval(r2.change, r2.im, docs, { requester: 'lp' });
+  assert.ok(!n2.approvers.some(a => a.person === 'nb'), JSON.stringify(n2.approvers));
+});
+
+test('R17 P3 #4 (PMO partial): an added dependency knocks on the tasks that wait for the moved task', () => {
+  const docs = seedDocs();
+  const w6 = task(docs, 'W6'), w11 = task(docs, 'W11');
+  const ch = C.withKnockOn(C.buildChange({ projectId: PRJ, reason: 'W6 waits on W11', edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'deps', to: [w11.id] }] }, docs).change, docs, TODAY);
+  const after = C.applyToDocs(docs, ch, '2099-01-01T00:00:00.000Z');
+  const a6 = task(after, 'W6'), a7 = task(after, 'W7'), a10 = task(after, 'W10');
+  assert.ok(a6.start > w11.due, `W6 starts ${a6.start}, after W11 (due ${w11.due})`);
+  assert.ok(a7.start > a6.due, `W7 (waits on W6) starts ${a7.start}, after W6's new due ${a6.due}`);
+  assert.ok(a10.start > a6.due, `W10 (waits on W6) starts ${a10.start}`);
+  assert.ok(ch.edits.some(e => e.knock && e.id === 'W7' && e.waits), 'W7 moves as a knock-on');
+  assert.ok(w6.start < a6.start);
+});
+

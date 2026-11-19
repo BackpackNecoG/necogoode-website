@@ -56,7 +56,9 @@ function labeler(docs) {
   const re = ids.length ? new RegExp('(?<![\\w-])(' + ids.join('|') + ')(?![\\w-])', 'g') : null;
   const label = id => m[id] || people[id] || id;
   const scrub = v => {
-    if (typeof v === 'string') return re ? v.replace(re, id => m[id]) : v;
+    /* R17 #7 (PMO: "after wi-mwn10t3ulgw1"): a generated id that names nothing in this workspace (deleted, or not saved)
+       never shows: it reads "a removed item" */
+    if (typeof v === 'string') return (re ? v.replace(re, id => m[id]) : v).replace(/(?<![\w-])[a-z]{1,6}-(?=[a-z0-9]*\d)[a-z0-9]{9,}(?![\w-])/g, 'a removed item');
     if (Array.isArray(v)) return v.map(scrub);
     if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x)]));
     return v;

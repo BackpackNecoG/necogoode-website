@@ -960,3 +960,9 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-selftest[hidden]{display:none}
 /* R16 (N3 #3): a correction row in the hours list */
 .pmo-tcorr td{color:#7a4b00;background:#fffaf0}
+/* R17 (Jordan): another open project already changes this process */
+.pmo-np-overlap{margin-top:8px}
+.pmo-np-overlap[hidden]{display:none}
+/* R17 (PMO partial): the tasks a new dependency moves */
+.pmo-depko{margin:6px 0 0;padding-left:18px;font-size:13px}
+.pmo-depko li{margin:2px 0}

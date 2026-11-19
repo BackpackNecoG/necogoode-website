@@ -37,6 +37,26 @@ async function newWs() {
 }
 const state = async ws => (await call('GET', `ws/${ws}/state`)).body;
 const find = (st, type, id) => (st.docs[type] || []).find(d => d.id === id);
+/* R17 #4 (P1): information that feeds a new or changed step is now tested, so the seed's Compliance part also needs tests on
+   Certificate of insurance (D3) and Vendor risk tier (D8) before it is ready. These helpers add them (cases from the
+   engine, passed by Priya in the business check) so the approval tests keep testing approvals. P5 ask: bake these into the
+   rebuilt seed and drop the helpers. */
+function r17ScopeCases(docs) {
+  return engine.generateProjectTests(docs, 'vendor-modernization').filter(x => x.dataId === 'D3' || x.dataId === 'D8')
+    .flatMap(x => x.cases.map((c, i) => Object.assign({ id: 'r17' + x.dataId + '-' + i }, c)));
+}
+function r17ReadyComplianceDocs(docs) {
+  const cs = r17ScopeCases(docs);
+  cs.forEach(c => docs.testCase.push({ id: c.id, data: c }));
+  docs.testRun.push({ id: 'r17cmp', data: { id: 'r17cmp', projectId: 'vendor-modernization', env: 'uat', at: new Date(Date.now() - 120000).toISOString(), by: 'ps', stepUp: true, results: cs.map(c => ({ caseId: c.id, outcome: 'pass' })) } });
+  return docs;
+}
+async function r17ReadyCompliance(ws) {
+  const cs = r17ScopeCases((await state(ws)).docs);
+  for (const c of cs) { const r = await call('PUT', `ws/${ws}/doc/testCase/${c.id}`, { actor: 'ps', data: c }); if (r.status !== 200) throw new Error('r17 case: ' + JSON.stringify(r.body)); }
+  const r = await call('PUT', `ws/${ws}/doc/testRun/r17cmp`, { actor: 'ps', data: { id: 'r17cmp', projectId: 'vendor-modernization', env: 'uat', at: new Date(Date.now() - 120000).toISOString(), by: 'ps', stepUp: true, results: cs.map(c => ({ caseId: c.id, outcome: 'pass' })) } });
+  if (r.status !== 200) throw new Error('r17 run: ' + JSON.stringify(r.body));
+}
 
 test.after(async () => {
   for (const [id, hash] of created) await store.deleteWorkspace(id, hash).catch(() => {});
@@ -910,6 +930,7 @@ test('R5 release orchestration: gate -> go/no-go -> pipeline failure has no side
 
 test('R5 status report: not-yet-live count and email recipients', async () => {
   const ws = await newWs();
+  await r17ReadyCompliance(ws);   // R17 #4: Compliance's two newly in-scope pieces get their tests
   const r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: 'vendor-modernization' });
   const st = await state(ws);
   const notLive = r.body.facts.notLive.length;
@@ -1353,6 +1374,7 @@ test('R7 AI status report: plain-language prompt; jargon from the model is trans
 
 test('R7 approvals: saving an approval is never blocked by other failing checks; go-live still re-checks the gate', { skip: !engine && 'no engine' }, async () => {
   const ws = await newWs();
+  await r17ReadyCompliance(ws);   // R17 #4: Compliance's two newly in-scope pieces get their tests
   let st = await state(ws);
   assert.equal(engine.readiness(st.docs, 'vendor-modernization', st.today).pass, false);
   const at = new Date().toISOString();
@@ -1686,6 +1708,7 @@ test('R9 §3 seed: no seeded date lands on a Saturday or Sunday, whatever day th
 test('R9 §7 seed: Compliance is ready to approve on Vendor Onboarding Modernization; its approver is Dave Ortiz, not the tester', { skip: !(engine && engine.buReady) && 'engine without buReady' }, () => {
   for (const day of ['2026-11-04', '2026-11-07', '2026-11-09']) {
     const docs = seed(day).docs;
+    r17ReadyComplianceDocs(docs);   // R17 #4: Compliance's two newly in-scope pieces get their tests (P5: bake into the seed)
     const dave = docs.person.find(p => p.id === 'do');
     assert.deepEqual([dave.data.name, dave.data.role, dave.data.bu], ['Dave Ortiz', 'Head of Compliance', 'Compliance'], 'a selectable department head');
     const vm = docs.project.find(p => p.id === 'vendor-modernization').data;
@@ -1777,10 +1800,12 @@ test('R10.1 status report: {preset} or {from, to}; "Overall" + "This period"; pl
   assert.deepEqual([sec.completed.items, sec.completed.empty], [[], 'Nothing completed this week']);
   assert.equal(sec.behind.items[0], '5 late (1 past due, 4 will finish after their due date)');
   /* R13 #2: each test's latest result per stage, with the stage's current count (one ledger) */
-  assert.deepEqual(sec.tests.items, ['Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.']);
+  // R17 #4: 4 more seeded cases are in scope (26 → 30 business, 8 → 12 Try it out)
+  assert.deepEqual(sec.tests.items, ['Business check: 9 tests passed (now 9 of 30 passed). Try it out: 3 passed, 1 failed (now 7 of 12 passed). Latest result of each test, from 2 test runs.']);
   assert.ok(b.sections.every(s => s.items.length || s.empty || ['spend', 'schedule'].includes(s.key)), 'never an empty heading');
   assert.equal(b.overall.needsPurpose, false);
-  assert.match(b.overall.budget, /^Higher budget need expected/);
+  // R17 (P3 ask): one bottom-up expected-cost method (spent + still to do), so the seed is within its budget
+  assert.match(b.overall.budget, /^Within budget: expected cost \$47,019 against the \$48,000 budget$/);
   assert.equal(b.overall.concerns.length, 3);
   assert.equal(b.period.behindAtEnd.length, b.facts.truth.lateCount, 'the period "behind" list equals the late count the screens show');
   // a custom range and last week
@@ -1857,6 +1882,7 @@ test('R11 §2 bulk pass: only tests assigned to you or unassigned; never as some
 
 test('R11 §2 approvals: step owners, test recorders, the PM, other names and no step-up are refused; Admin is no exemption', { skip: !(engine && engine.approvalBar) && 'engine without R11' }, async () => {
   const ws = await newWs();
+  await r17ReadyCompliance(ws);   // R17 #4: Compliance's two newly in-scope pieces get their tests
   const at = () => new Date(Date.now() + 1000).toISOString();
   const appr = (id, actor, bu, extra) => put(ws, 'approval', id, actor, Object.assign({ projectId: 'vendor-modernization', bu, approver: actor, decision: 'approved', at: at(), snapshotAt: at(), stepUp: true, note: 'ok' }, extra || {}));
   let r = await appr('Q1', 'ps', 'Compliance');                        // Priya does Compliance steps (and recorded its tests)
@@ -2304,6 +2330,7 @@ const principalHeader = (email, userId) => ({ 'x-ms-client-principal': Buffer.fr
 
 test('R16 N1 #1 identity binding: a hosted sign-in binds the actor; a step-up older than 10 minutes or in the future is refused and logged', async () => {
   const ws = await newWs();
+  await r17ReadyCompliance(ws);   // R17 #4: Compliance's two newly in-scope pieces get their tests
   let st = await state(ws);
   // link Ana to her sign-in (open demo, an Admin edits the person)
   const ana = find(st, 'person', 'ar').data;
@@ -2472,4 +2499,66 @@ test('R16: anonymous delete is refused (403) and logged as refused', async () =>
   assert.equal(r.status, 403);
   const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events;
   assert.ok(ev.some(e => e.action === 'refused' && /delete risk/.test(e.summary)));
+});
+
+/* ------------------------------------------------------------------ R17 P1 */
+test('R17 #3 server: a threshold change on a process save regenerates the boundary tests, clears their results, reopens and renames the routing task, logs why', async () => {
+  const ws = await newWs();
+  const tobe = amt => [
+    { id: 'k', type: 'trigger', title: 'Credit request received', owner: 'mc', data: [] },
+    { id: 'c1', title: 'Review the credit request', owner: 'mc', data: ['r17req'], from: 'x1' },
+    { id: 'g1', type: 'decision', from: 'gx', title: 'Requested limit over $' + amt.toLocaleString('en-US') + '?', threshold: { subject: 'Requested limit', op: '>', amount: amt },
+      branches: [{ label: 'Yes', nodes: [{ id: 'c2', title: 'Controller approves the limit', owner: 'hp', data: ['r17req'] }] }, { label: 'No', nodes: [] }] },
+    { id: 'e', type: 'end', title: 'Limit set' }];
+  const proc = { name: 'Credit limit (R17)', owner: 'mc', version: 1, released: [], asis: [
+    { id: 'k', type: 'trigger', title: 'Credit request received', owner: 'mc', data: [] },
+    { id: 'x1', title: 'Review the credit request', owner: 'mc', data: ['r17req'] },
+    { id: 'gx', type: 'decision', title: 'Requested limit over $250,000?', threshold: { subject: 'Requested limit', op: '>', amount: 250000 }, branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] },
+    { id: 'e', type: 'end', title: 'Limit set' }], tobe: tobe(200000) };
+  let r = await R14put(ws, 'dataElement', 'r17req', { id: 'r17req', name: 'Credit request (R17)', avail: 'example', fields: [{ name: 'Requested limit', type: 'currency', format: 'currency', rule: 'Required', required: true }] }, 'mc');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await R14put(ws, 'process', 'r17cl', proc, 'mc'); assert.equal(r.status, 200, JSON.stringify(r.body));
+  r = await R14put(ws, 'project', 'r17cp', { id: 'r17cp', name: 'Credit limit v2 (R17)', owner: 'ta', processes: ['r17cl'], status: 'active', target: '2026-12-31' }, 'ta'); assert.equal(r.status, 200, JSON.stringify(r.body));
+  let st = await state(ws);
+  r = await R14put(ws, 'workItem', 'r17w', { id: 'r17w', projectId: 'r17cp', pid: 'r17cl', step: 'g1', title: 'Route requests over $200,000 to the Controller', owner: 'dk', status: 'idle', start: st.today, due: st.today, deps: [] }, 'ta');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const cases = engine.thresholdCases(st.docs, 'r17req').filter(c => c.threshold === 'g1');
+  assert.equal(cases.length, 2);
+  for (const [i, c] of cases.entries()) { r = await R14put(ws, 'testCase', 'r17tc' + i, Object.assign({ id: 'r17tc' + i }, c), 'ta'); assert.equal(r.status, 200, JSON.stringify(r.body)); }
+  r = await R14put(ws, 'testRun', 'r17run', { id: 'r17run', projectId: 'r17cp', env: 'uat', at: new Date(Date.now() - 60000).toISOString(), by: 'mc', results: [{ caseId: 'r17tc0', outcome: 'pass' }, { caseId: 'r17tc1', outcome: 'pass' }] }, 'mc');
+  // the change: $200,000 → $150,000
+  st = await state(ws);
+  r = await R14put(ws, 'process', 'r17cl', Object.assign({}, find(st, 'process', 'r17cl').data, { tobe: tobe(150000) }), 'mc');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  st = await state(ws);
+  const now = (st.docs.testCase || []).map(d => d.data).filter(c => c.threshold === 'g1');
+  assert.deepEqual(now.map(c => c.input).sort(), ['150000.00', '150000.01']);
+  assert.ok(!find(st, 'testCase', 'r17tc0'), 'the $200,000 cases are gone');
+  const prj = find(st, 'project', 'r17cp').data;
+  assert.equal(prj.evidenceResets.length, 1);
+  const w = find(st, 'workItem', 'r17w').data;
+  assert.equal(w.title, 'Route requests over $150,000 to the Controller');
+  const ev = await R14events(ws, 'project:r17cp');
+  assert.ok(ev.some(e => /The choice “Requested limit over \$150,000\?” changed \(over \$200,000 → over \$150,000\)/.test(e.summary)), JSON.stringify(ev.map(e => e.summary)));
+  const tp = engine.readiness(st.docs, 'r17cp', st.today).checks.find(c => c.id === 'tests-passed');
+  assert.equal(tp.pass, false);
+});
+
+test('R17 (P3 asks) server: a new task over the cost tolerance and a dependency that moves waiting tasks both go through Change the plan', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  // a new task that adds a lot of work to a project with a saved plan
+  let r = await R14put(ws, 'workItem', 'W-r17-big', { id: 'W-r17-big', projectId: 'vendor-modernization', pid: 'vendor-onboarding', step: 's3', title: 'Vendor portal rebuild', owner: 'dk', status: 'idle', start: st.today, due: engine.addBusinessDays(st.today, 9), effortDays: 10, cost: 9000, deps: [] }, 'ta');
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.match(r.body.error, /^Use “Change the plan” to add this work, so the sponsor can approve the cost\. This raises the expected cost/);
+  // a small new task is still a plain save
+  r = await R14put(ws, 'workItem', 'W-r17-small', { id: 'W-r17-small', projectId: 'vendor-modernization', pid: 'vendor-onboarding', step: 's3', title: 'Update the vendor FAQ', owner: 'dk', status: 'idle', start: st.today, due: st.today, effortDays: 0.25, deps: [] }, 'ta');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // W7, W8 and W10 wait on W6 (not started): making W6 wait for W11 moves W6, and them with it, so it is a plan change
+  const w6 = find(st, 'workItem', 'W6').data;
+  assert.ok(engine.dependencyShift(st.docs, w6, (w6.deps || []).concat(['W11']), st.today).moved, 'the fixture needs a move');
+  r = await R14put(ws, 'workItem', 'W6', Object.assign({}, w6, { deps: (w6.deps || []).concat(['W11']) }), 'ta', { today: st.today });
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.match(r.body.error, /^Use “Change the plan” to add this dependency: .* It also moves 3 tasks that wait on it\.$/);
+  assert.deepEqual(r.body.knockOn.sort(), ['W10', 'W7', 'W8']);
 });

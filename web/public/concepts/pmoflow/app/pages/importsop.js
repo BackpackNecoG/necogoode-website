@@ -5,10 +5,26 @@
    visitor's text or the visitor's choice; every piece of information is created fresh in this process and starts as
    "Not checked yet". */
 import { store } from '../store.js';
-import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, nameApproverFlow, ADD_DEPT, haveListHTML, bindHaveList, readHaveList, haveFields } from './process.js';
+import { esc, link, go, pname, modal, toast, fmtTime } from '../ui.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, roleRowsOf, nameApproverFlow, ADD_DEPT, haveListHTML, bindHaveList, readHaveList, haveFields } from './process.js';
 
-const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
+const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null, restore: undefined };
+
+/* R17 (Karen, Jordan): a pasted procedure and its draft survive a reload. They are kept in this browser only (local
+   storage, per workspace), never sent anywhere, and cleared when the process is saved or the visitor discards them. After a
+   reload the page asks "Restore your draft?" before anything else is kept. */
+const draftKey = () => `pmoflow.importDraft.${store.state.ws || 'default'}`;
+function readLocal() { try { const x = JSON.parse(localStorage.getItem(draftKey()) || 'null'); return x && (String(x.text || '').trim() || (x.draft && Array.isArray(x.draft.nodes))) ? x : null; } catch (_) { return null; } }
+function clearLocal() { try { localStorage.removeItem(draftKey()); } catch (_) { /* storage blocked: nothing kept */ } }
+function saveLocal() {
+  if (ui.restore || ui.restore === undefined) return;      /* the workspace is not loaded yet, or the visitor has not answered "Restore your draft?" yet */
+  if (!String(ui.text || '').trim() && !ui.draft) return;
+  try { localStorage.setItem(draftKey(), JSON.stringify({ v: 1, at: new Date().toISOString(), text: ui.text, draft: ui.draft, source: ui.source, notes: ui.notes })); } catch (_) { /* full or blocked: the page still works */ }
+}
+function restoreHTML(x) {
+  const n = x.draft && Array.isArray(x.draft.nodes) ? countNumbered(x.draft.nodes) : 0;
+  return `<div class="banner is-restore" data-restore role="status"><span><b>Restore your draft?</b> You have an unsaved procedure from ${esc(fmtTime(x.at))}${n ? ` with ${n} step${n === 1 ? '' : 's'} ready to check` : ''}.</span><span class="is-restore-b"><button class="btn sm primary" data-restore-yes>Restore</button><button class="btn sm" data-restore-no>Discard</button></span></div>`;
+}
 
 const SAMPLE = `# Northwind Traders — Contractor Onboarding SOP (v3)
 Purpose: bring a new independent contractor from signed engagement to first approved invoice.
@@ -326,7 +342,9 @@ function foundSummary(d) {
     systems.length ? `${n(systems.length, 'system', 'systems')} (${systems.join(', ')})` : ''].filter(Boolean);
   const last = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0] || 'no steps';
   /* R13 #9: the teams the approver panel lists (the engine's one list), never systems or documents */
-  const teams = draftRouting(d).rt.teams.map(x => x.team);
+  /* R17 (Jordan): a role ("Carrier Integration Engineer") is listed under "Who does them", never as a team */
+  const dr = draftRouting(d), roleSet = roleRowsOf(dr.rt);
+  const teams = dr.rt.teams.map(x => x.team).filter(t => !roleSet.has(t));
   /* R11 G2 §1: "9 lines → 9 steps": every numbered or bulleted line of the procedure is accounted for (live counts) */
   const lc = d.lineCount || 0;
   const linesTxt = lc ? `${lc} line${lc === 1 ? '' : 's'} → ${n(numbered, 'step', 'steps') || '0 steps'}${choices ? ', ' + n(choices, 'choice', 'choices') : ''}${pars ? `, ${pars} at the same time` : ''}` : '';
@@ -430,11 +448,13 @@ function gotoRow(g, b, bpath) {
   const t = b.goto && all.find(n => n.src === b.goto);
   const ends = b.nodes.some(n => n.type === 'end');
   const num = n => stepNo(n) ? `Step ${stepNo(n)}` : 'Choice';
-  /* "otherwise skip to step 4" jumps forward; "return to step 1" goes back */
-  const fwd = t && ui.draft.nodes.indexOf(t) > ui.draft.nodes.indexOf(g);
+  /* "otherwise skip to step 4" jumps forward; "return to step 1" goes back. R17 (Karen): "ahead" is the map's order, steps
+     on a later choice's paths included, so a later step reads "Skips to step 10", never "go back to Step 10" */
+  const ord = targets(ui.draft.nodes), ahead = n => ord.indexOf(n) > ord.indexOf(g);
+  const fwd = t && ahead(t);
   /* R9 §11: plain choices for where the path goes next: carry on, end here, or jump to a step */
   return `<div class="is-goto ${t ? 'on' : ''}" ${t ? `data-loopback="${esc(t.title)}"` : ''}>${t ? `<span class="is-ret" aria-hidden="true">${fwd ? '↷' : '↩'}</span><span>${fwd ? 'Skips to' : 'Goes back to'} <b>${esc(num(t))}: ${esc(t.title.slice(0, 60))}</b></span>` : ''}
-    <select data-goto="${esc(bpath)}" aria-label="Then"><option value="" ${!t && !ends ? 'selected' : ''}>Then: carry on to the next step</option><option value="__end" ${ends && !t ? 'selected' : ''}>Then: ends here</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>Then: ${ui.draft.nodes.indexOf(n) > ui.draft.nodes.indexOf(g) ? 'skip to' : 'go back to'} ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
+    <select data-goto="${esc(bpath)}" aria-label="Then"><option value="" ${!t && !ends ? 'selected' : ''}>Then: carry on to the next step</option><option value="__end" ${ends && !t ? 'selected' : ''}>Then: ends here</option>${all.map(n => `<option value="${esc(n.src)}" ${t === n ? 'selected' : ''}>Then: ${ahead(n) ? 'skip to' : 'go back to'} ${esc(num(n))}: ${esc(n.title.slice(0, 50))}</option>`).join('')}</select></div>`;
 }
 /* a path that stops the process: "Ends here: Stop: request rejected" */
 const endBody = (s, path) => `<div class="is-end" data-end-node data-path-end="${esc(path)}"><span class="is-endic" aria-hidden="true">■</span><span><b>Ends here</b>${s.title && !/^stop$/i.test(s.title) ? ` · ${esc(s.title.replace(/^Stop:\s*/i, ''))}` : ''}</span></div>`;
@@ -443,7 +463,7 @@ function branchHint(g, b) {
   const bits = [];
   if (n) bits.push(`${n} step${n === 1 ? '' : 's'}`);
   if (ends) bits.push('then ends here');
-  else if (b.goto) bits.push(targets(ui.draft.nodes).findIndex(x => x.src === b.goto) > ui.draft.nodes.indexOf(g) ? 'then skips ahead' : 'then goes back');
+  else if (b.goto) { const ord = targets(ui.draft.nodes); bits.push(ord.findIndex(x => x.src === b.goto) > ord.indexOf(g) ? 'then skips ahead' : 'then goes back'); }
   else if (!n) bits.push(g.type === 'parallel' ? 'no steps yet' : 'carries on to the next step');
   return esc(bits.join(', '));
 }
@@ -458,6 +478,8 @@ function gateBody(g, path) {
 }
 
 export function render() {
+  if (ui.restore === undefined && store.state.ws) ui.restore = !String(ui.text || '').trim() && !ui.draft ? readLocal() : null;
+  saveLocal();
   const d = ui.draft;
   const n = d ? countNumbered(d.nodes) : 0;
   const gates = d ? d.nodes.filter(x => x.type === 'decision').length : 0;
@@ -487,13 +509,14 @@ export function render() {
       ${s.type === 'step' ? stepBody(s, String(i), 'Step ' + stepNo(s)) : KINDS[s.type] ? kindBody(s, String(i)) : gateBody(s, String(i))}
       <div class="is-ctl"><button class="btn sm" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-mv="1" ${i === d.nodes.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm danger" data-rm aria-label="Remove">✕</button></div></li>`).join('')}</ol>
     ${nd}
-    ${draftRouting(d).rt.teams.length ? approversHTML(draftRouting(d).rt, { editable: true, inline: true }) : ''}
+    ${draftRouting(d).rt.teams.length ? approversHTML(draftRouting(d).rt, { editable: true, inline: true, roles: roleRowsOf(draftRouting(d).rt) }) : ''}
     <div class="is-foot"><button class="btn sm" data-add-step>+ Add step</button><button class="btn sm" data-add-gate>+ Add choice</button>${adv() ? '<button class="btn sm" data-add-par>+ Add “at the same time”</button>' : ''}<button class="btn primary" data-create ${d.nodes.length ? '' : 'disabled'}>Save as how it works today</button></div></div>` : '';
 
   return `<datalist id="is-people">${store.state.people.map(p => `<option value="${esc(p.name)}"></option>`).join('')}</datalist><section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · Paste a procedure</div>
       <h1>Paste a procedure you already have</h1><p>Paste your written steps. We turn them into a process map: the steps, who does each one, and the information each step needs. You check every step before anything is saved.</p></div>
     <div class="hdr-side"><div class="is-hdracts"><a class="btn" href="${link('/new')}" data-link>Start from blank</a>${importBtn('Import a Visio or BPMN file', 'Import a Visio (.vsdx) or BPMN 2.0 (.bpmn, .xml) file', 'btn')}</div>
       <span class="hint is-orimport" data-or-import>Have a diagram instead? <button type="button" class="is-linkbtn" data-pick-import>Import a Visio or BPMN file</button>.</span></div></section>
+    ${ui.restore ? restoreHTML(ui.restore) : ''}
     <div class="is-grid ${d ? 'has-draft' : ''}">
       <div class="card"><h3>Your procedure</h3>
         <div class="field"><textarea class="is-text" data-sop aria-label="Your procedure" placeholder="Paste your procedure here. Numbered steps work best.">${esc(ui.text)}</textarea></div>
@@ -540,7 +563,18 @@ export function bind(root) {
   const tp = root.querySelector('[data-templates]');
   if (tp) { tp.addEventListener('toggle', () => { ui.tplOpen = tp.open; }); tp.querySelectorAll('[data-template]').forEach(b => b.onclick = () => { readDraft(root); useTemplate(b.dataset.template); }); }
   const ta = root.querySelector('[data-sop]');
-  if (ta) ta.oninput = () => { ui.text = ta.value; const h = ta.closest('.card').querySelector('.is-foot .hint'); if (h) h.textContent = ui.text.length.toLocaleString() + ' chars'; };
+  if (ta) ta.oninput = () => { ui.text = ta.value; saveLocal(); const h = ta.closest('.card').querySelector('.is-foot .hint'); if (h) h.textContent = ui.text.length.toLocaleString() + ' chars'; };
+  const ry = root.querySelector('[data-restore-yes]');
+  if (ry) ry.onclick = () => {
+    const x = ui.restore; ui.restore = null; if (!x) return;
+    ui.text = String(x.text || ''); ui.draft = x.draft && Array.isArray(x.draft.nodes) ? x.draft : null;
+    ui.source = x.source || null; ui.notes = Array.isArray(x.notes) ? x.notes : []; ui.openData = null;
+    /* new draft nodes never reuse a restored node's id ("x12") */
+    if (ui.draft) targets(ui.draft.nodes).forEach(n => { const m = /^x(\d+)$/.exec(n && n.src || ''); if (m) srcSeq = Math.max(srcSeq, +m[1]); });
+    store.emit(); toast('Draft restored');
+  };
+  const rn = root.querySelector('[data-restore-no]');
+  if (rn) rn.onclick = () => { ui.restore = null; clearLocal(); store.emit(); toast('Draft discarded'); };
   const rerender = () => { readDraft(root); store.emit(); };
   const sm = root.querySelector('[data-sample]'); if (sm) sm.onclick = () => { readDraft(root); ui.text = SAMPLE; store.emit(); };
   const dr = root.querySelector('[data-draft]');
@@ -577,7 +611,7 @@ export function bind(root) {
   root.querySelectorAll('[data-f=who]').forEach(el => el.oninput = () => readDraft(root));
   /* R13 #1: "+ Add a department…" in a team's list (or the button under the panel) adds it for the workspace and picks it */
   const pickNew = async team => {
-    const name = await addDepartmentFlow(team);
+    const name = await addDepartmentFlow(team, null, { role: !!team && roleRowsOf(draftRouting(ui.draft).rt).has(team) });
     if (name && team && ui.draft) { const m = ui.draft.teamDepartments = Object.assign({}, ui.draft.teamDepartments || {}); const k = Object.keys(m).find(x => x.toLowerCase() === team.toLowerCase()) || team; m[k] = name; }
     store.emit();
   };
@@ -587,7 +621,8 @@ export function bind(root) {
   });
   root.querySelectorAll('[data-apr-name]').forEach(b => b.onclick = async () => { readDraft(root); await nameApproverFlow(b.dataset.aprName); store.emit(); });
   const addD = root.querySelector('[data-apr-adddept]');
-  if (addD) addD.onclick = () => { readDraft(root); const gap = draftRouting(ui.draft).rt.teams.find(t => !t.department); pickNew(gap ? gap.team : ''); };
+  /* R17: teams first (their name is offered), then roles (never offered as a department name) */
+  if (addD) addD.onclick = () => { readDraft(root); const rr = roleRowsOf(draftRouting(ui.draft).rt), gaps = draftRouting(ui.draft).rt.teams.filter(t => !t.department); const gap = gaps.find(t => !rr.has(t.team)) || gaps[0]; pickNew(gap ? gap.team : ''); };
   root.querySelectorAll('[data-f=title],[data-f=system],[data-f=wait],[data-f=party],[data-blabel],[data-nd-name]').forEach(el => el.oninput = () => readDraft(root));
   root.querySelectorAll('[data-f=direction],[data-f=calls]').forEach(el => el.onchange = () => readDraft(root));
   root.querySelectorAll('[data-dpath]').forEach(det => det.addEventListener('toggle', () => { if (det.open) ui.openData = det.dataset.dpath; else if (ui.openData === det.dataset.dpath) ui.openData = null; }));
@@ -729,6 +764,7 @@ async function createProcess() {
       `Created process “${name}” from ${d.template ? 'the ' + d.template.toLowerCase() + ' template' : 'a pasted procedure'} (${countNumbered(nodes)} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);
   } catch (e) { toast('Could not create: ' + e.message); return; }
   ui.draft = null; ui.text = ''; ui.notes = []; ui.source = null; ui.openData = null;
+  clearLocal();
   toast('Saved as how it works today');
   go(`/process/${pid}?mode=asis`);
 }

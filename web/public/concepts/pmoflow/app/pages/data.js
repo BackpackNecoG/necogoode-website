@@ -11,6 +11,10 @@ const clone = o => JSON.parse(JSON.stringify(o));
 export const MASK_NOTE = 'Statistics only; no real values are stored. In the examples every word becomes Xxxx (or XXXX, xxxx) and every digit becomes 9, so no letter is shown; separators such as - / . and spaces are kept.';
 const personOpts = sel => store.state.people.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.name)} — ${esc(x.role || '')}</option>`).join('');
 /* R8 §1: availability choices come from process.js (a tick box in Simple, the detailed select in Advanced) */
+/* a form tick box reads back as its value(s); on = any value */
+const isOn = v => v === true || [].concat(v || []).filter(Boolean).length > 0;
+/* R17 (Karen): the edit form's "Collected each run" choice, beside "We have it" */
+const perRunField = on => `<div class="field d-perrunfield"><label class="d-check d-switch d-perrunck"><input type="checkbox" role="switch" name="perRun" value="yes" data-perrun-edit ${on ? 'checked' : ''} /> <span>↻ Collected each run</span></label><span class="hint">The vendor or customer sends it every time the process runs, so it is never a one-off setup task.</span></div>`;
 
 export const SENS = { public: { label: 'Public', cls: 'd-s-public' }, internal: { label: 'Internal', cls: 'd-s-internal' }, confidential: { label: 'Confidential', cls: 'd-s-conf' }, pii: { label: 'Personal details', cls: 'd-s-pii', title: 'Personal details (PII)' } };
 export const sensBadge = k => { const v = SENS[k]; return v ? `<span class="badge d-sens ${v.cls}" title="How sensitive: ${esc(v.title || v.label)}">${esc(v.label)}</span>` : (isAdv() ? '<span class="badge b-none" title="Sensitivity not set">Sensitivity not set</span>' : ''); };
@@ -20,15 +24,21 @@ const safeUrl = u => /^https?:\/\//i.test(String(u || '').trim()) ? String(u).tr
    role; while nobody in the workspace has it, the owner of a process that uses it can check it */
 const roleHolders = role => store.state.people.filter(p => role && String(p.role || '').trim().toLowerCase() === String(role).trim().toLowerCase());
 const procOwnersOf = x => new Set(store.list('process').filter(p => [...flat(p.asis), ...flat(p.tobe)].some(s => (s.data || []).includes(x.id) || (s.subs || []).some(b => (b.data || []).includes(x.id)))).map(p => p.owner));
+/* R17 (Karen): who may confirm or change information is the engine's one rule (canConfirmInformation): a role-owned item
+   ("AP") can be confirmed by anyone in the role's department (Accounts Payable). The local rule is only a fallback. */
+const confirmBlock = x => { if (!x) return undefined; const E = window.PMOEngine; if (!E || typeof E.canConfirmInformation !== 'function') return undefined;
+  try { return E.canConfirmInformation(docs(), x.id, store.state.me); } catch (e) { console.warn('PMOEngine.canConfirmInformation failed:', e && e.message); return undefined; } };
 const canEdit = x => {
   if (!x) return false;
+  const cb = confirmBlock(x); if (cb !== undefined) return cb === null;
   const me = store.state.me;
   if (x.owner) return me === x.owner;
   const role = x.ownerRole || (eng('dataOwner', [docs(), x.id], null) || {}).role;
   const holders = roleHolders(role);
   return holders.length ? holders.some(p => p.id === me) : procOwnersOf(x).has(me);
 };
-const onlyMsg = x => `Only ${dataOwnerName(x)} (the owner) can change this`;
+const onlyMsg = x => { const cb = !x || x.owner ? null : confirmBlock(x); return cb && cb.text ? cb.text.replace(/ can confirm /, ' can change ') : `Only ${dataOwnerName(x)} (the owner) can change this`; };
+const confirmMsg = x => { const cb = confirmBlock(x); return cb && cb.text ? cb.text : `Only ${dataOwnerName(x)} (the owner) can confirm`; };
 /* disabled-state attributes for owner-only controls */
 const gate = x => canEdit(x) ? '' : `disabled aria-disabled="true" title="${esc(onlyMsg(x))}"`;
 export function ruleText(f) {
@@ -419,7 +429,7 @@ async function fieldModal(f, siblings, st, err) {
 const confirmOpened = new Set();
 /* R8 §1 Simple: the owner confirms with one tap and an optional note */
 async function confirmSimple(did, cur, save) {
-  const x = cur(); if (!canEdit(x)) { toast(`Only ${dataOwnerName(x)} (the owner) can confirm`); return; }
+  const x = cur(); if (!canEdit(x)) { toast(confirmMsg(x)); return; }
   const r = await modal({
     title: `Confirm we have '${x.name}'`,
     body: `<p style="margin:0">${esc(whyAwaitingText(x))} You own it, so your OK lets the project count on it.</p>
@@ -437,7 +447,7 @@ const whyAwaitingText = d => { const fix = store.list('workItem', w => w.resolve
 async function confirmLive(did, cur, save) {
   let err = '', vals = {}, check = null;
   for (;;) {
-    const x = cur(); if (!canEdit(x)) { toast(`Only ${dataOwnerName(x)} (the owner) can confirm`); return; }
+    const x = cur(); if (!canEdit(x)) { toast(confirmMsg(x)); return; }
     const prof = store.list('profile', p => p.dataId === did).sort((p, q) => String(q.at).localeCompare(String(p.at)))[0];
     const drift = prof ? eng('specDrift', [x, prof], []) : [];
     const blk = blockingDrift(drift);
@@ -535,6 +545,7 @@ export function bind(root, params) {
       title: 'Edit information',
       body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<div class="field"><label>Name</label><input name="name" value="${esc(vals.name)}" /></div>
         <div class="frow"><div class="field"><label>Owner</label><select name="owner">${vals.owner ? '' : `<option value="" selected>${esc(dataOwnerName(x))} (the role that does the step)</option>`}${personOpts(vals.owner)}</select></div>${availField(vals.avail)}</div>
+        ${x.producedBy ? '' : perRunField(isOn(vals.perRun))}
         <div class="frow"><div class="field"><label>How sensitive</label><select name="sensitivity"><option value="">Not set</option>${Object.entries(SENS).map(([k, v]) => `<option value="${k}" ${k === vals.sensitivity ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
         <div class="field"><label>Where it comes from</label><input name="source" value="${esc(vals.source || '')}" /></div></div>
         <div class="field"><label>Note</label><textarea name="note">${esc(vals.note || '')}</textarea></div>
@@ -548,13 +559,19 @@ export function bind(root, params) {
     /* Simple only distinguishes "we have it" from "not yet": a ticked box keeps a sample-only state (Advanced detail) */
     const avail = !isAdv() && av0 === 'missing' && x.avail === 'example' ? 'example' : av0;
     if (dup) { err = `Information called '${dup.name}' already exists. Choose a different name.`; vals = Object.assign({}, x, r.form, { avail }); continue; }
-    const d = clone(cur()); const before = d.avail, sBefore = d.sensitivity || '';
+    const d = clone(cur()); const before = d.avail, sBefore = d.sensitivity || '', runBefore = !!d.perRun;
     Object.assign(d, { name, owner: r.form.owner, avail, source: r.form.source.trim(), note: r.form.note.trim() });
+    /* R17 (Karen): "Collected each run" can be chosen (or undone) after saving: it arrives with every run, so it is there
+       (never a setup task), the same fields "Do you already have these?" saves (process.js haveFields) */
+    const run = !x.producedBy && isOn(r.form.perRun);
+    if (run) { d.perRun = true; d.avail = 'live'; if (!d.source || d.source === 'Already in use') d.source = 'Collected each run'; }
+    else { delete d.perRun; if (d.source === 'Collected each run') d.source = ''; }
     if (r.form.sensitivity) d.sensitivity = r.form.sensitivity; else delete d.sensitivity;
     if (d.avail !== 'live') { delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource; delete d.liveEvidence; } /* no longer live: the confirmation no longer stands */
     const parts = [];
     const lbl = k => isAdv() ? avOf(k).label : k === 'missing' || k === 'example' ? NOTYET : HAVE;
     if (before !== d.avail && lbl(before) !== lbl(d.avail)) parts.push(`status changed from ${lbl(before)} to ${lbl(d.avail)}`);
+    if (runBefore !== !!d.perRun) parts.push(d.perRun ? 'now collected each run' : 'no longer collected each run');
     if (sBefore !== (d.sensitivity || '')) parts.push(`sensitivity changed from ${SENS[sBefore] ? SENS[sBefore].label : 'not set'} to ${SENS[d.sensitivity] ? SENS[d.sensitivity].label : 'not set'}`);
     if (!d.owner) { delete d.owner; } else if (d.ownerRole && d.owner !== x.owner) delete d.ownerRole;
     if ((x.owner || '') !== (d.owner || '')) parts.push(`owner changed to ${d.owner ? personName(d.owner) : dataOwnerName(x)}`);
@@ -597,7 +614,7 @@ export function bind(root, params) {
     history.replaceState(history.state, '', location.pathname);
     const x = cur();
     if (effAvail(did) === 'live') toast(`We already have '${x.name}'`);
-    else if (!canEdit(x)) toast(`Only ${dataOwnerName(x)} (the owner) can confirm '${x.name}'`);
+    else if (!canEdit(x)) toast(confirmMsg(x));
     else setTimeout(openConfirm, 50);
   }
   root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {

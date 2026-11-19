@@ -545,7 +545,8 @@ async function r13(browser, errors) {
     await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
     return page.url().match(/process\/([^?/]+)/)[1];
   };
-  const aprRows = () => page.$$eval('[data-approvers] [data-apr-team]', els => els.map(e => ({ team: e.dataset.aprTeam, dept: e.dataset.aprDept })));
+  /* R17 (P2): a row is a role ("Buyer") or a team; roles are in the panel but never under "Teams involved" */
+  const aprRows = () => page.$$eval('[data-approvers] [data-apr-team]', els => els.map(e => ({ team: e.dataset.aprTeam, dept: e.dataset.aprDept, role: e.hasAttribute('data-apr-role') })));
   const same = (a, b) => JSON.stringify(a.slice().sort()) === JSON.stringify(b.slice().sort());
   const settingsOf = st => (((st.docs.workspace || []).find(d => d.id === 'settings') || {}).data || {});
   try {
@@ -562,7 +563,10 @@ async function r13(browser, errors) {
     ok(!nds.some(n => /^check\b/i.test(n)) && nds.includes('OFAC/sanctions list') && nds.includes('Bank letter'), 'information never named after the check: ' + nds.join(', '));
     const foundTeams = ((await page.textContent('[data-found-teams]')) || '').replace(/^Teams involved:\s*/, '').replace(/\.$/, '').split(/,\s*/).filter(Boolean);
     let rows = await aprRows();
-    ok(same(foundTeams, rows.map(r => r.team)), `"Teams involved" (${foundTeams.join(', ')}) equals the approver panel (${rows.map(r => r.team).join(', ')})`);
+    /* R17 (P2, Jordan): changed assertion. "Buyer" (a job title) is now a role row in the panel, mapped with the same
+       department picker, and never a team; "Teams involved" equals the panel's TEAM rows */
+    ok(same(foundTeams, rows.filter(r => !r.role).map(r => r.team)), `"Teams involved" (${foundTeams.join(', ')}) equals the approver panel's teams (${rows.filter(r => !r.role).map(r => r.team).join(', ')})`);
+    ok(rows.some(r => r.team === 'Buyer' && r.role), 'R17: the Buyer is listed in the panel as a role: ' + JSON.stringify(rows));
     ok(['Purchasing', 'Treasury', 'Credit', 'Operations', 'AP'].every(t => foundTeams.includes(t)), 'teams only: Purchasing, Treasury, Credit, Operations, AP');
 
     console.log('# R13 #1 UI: "Add a department" in the approver panel (import draft)');
@@ -602,8 +606,10 @@ async function r13(browser, errors) {
     await nav(`/process/${pidK}?mode=asis`);
     const chips = await page.$$eval('[data-touches] [data-touch]', els => els.map(e => e.dataset.touch));
     rows = await aprRows();
-    ok(chips.length && same(chips, rows.map(r => r.team)), `process page: Teams involved (${chips.join(', ')}) = approver panel (${rows.map(r => r.team).join(', ')})`);
-    const gap = rows.find(r => !r.dept);
+    /* R17 (P2): changed assertion, as above: Teams involved = the panel's team rows (the Buyer role is not a team); the
+       button offers the first TEAM without a department (a role's title is never offered as a department name) */
+    ok(chips.length && same(chips, rows.filter(r => !r.role).map(r => r.team)), `process page: Teams involved (${chips.join(', ')}) = approver panel's teams (${rows.filter(r => !r.role).map(r => r.team).join(', ')})`);
+    const gap = rows.find(r => !r.dept && !r.role);
     await page.click('[data-apr-adddept]'); await page.waitForSelector('.overlay [data-dept-name]');
     ok(await page.inputValue('.overlay [data-dept-name]') === gap.team, 'the button offers the first team without a department: ' + gap.team);
     await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/process/'), { timeout: 15000 }), act('add')]);
@@ -1294,6 +1300,202 @@ async function r16(browser, errors) {
   await ctx.close();
 }
 
+/* ---------------------------------------------------------------- R17 P2: the R16 [own data] import / process / data findings
+   Fictional Northwind procedures written from the reviewers' repros (market-review/r16 jordan.md, karen.md, expert-pmo.md). */
+const R17_BENEFITS = `Benefits Enrollment Change
+1. The employee submits a life-event change form with their member ID, the dependent's date of birth and the dependent SSN.
+2. Benefits Specialist (Ana Ruiz) verifies the supporting documents and checks eligibility.
+3. If the change adds a dependent, the Benefits Manager approves the change.
+4. Carrier Integration Engineer transmits the enrollment file to the carrier with the member ID and dependent SSN.
+5. Payroll updates the deduction amount.`;
+const R17_LAPTOP = `Contractor Laptop Provisioning
+1. The hiring manager submits a laptop request in ServiceNow.
+2. Security reviews the access request (Sam Keller).
+3. Help Desk images the laptop and records the asset tag.
+4. If the laptop is a loaner, Help Desk ships it to the contractor.
+5. Help Desk closes the request.`;
+async function r17(browser, errors) {
+  const ip = `198.51.100.${(Math.random() * 250 | 0) + 1}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r17 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r17 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const putDoc = (type, id, data, summary) => page.evaluate(async ([type, id, data, summary]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/${type}/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, actor: 'mc', summary }) })).status, [type, id, data, summary]);
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const paste = async text => {
+    await nav('/import');
+    if (await page.$('[data-restore-no]')) { await page.click('[data-restore-no]'); await settle(); }
+    await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const saveDraft = async name => {
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', name);
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    return page.url().match(/process\/([^?/]+)/)[1];
+  };
+  const procData = (st, pid) => { const p = st.docs.process.find(d => d.id === pid).data; const ids = new Set(); allNodes(p.asis).forEach(n => (n.data || []).forEach(i => ids.add(i))); return { p, des: st.docs.dataElement.filter(d => ids.has(d.id)).map(d => d.data) }; };
+  const CIE = 'Carrier Integration Engineer';
+  try {
+    await nav('/'); await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+
+    console.log('# R17 Jordan: a job title is a role (mapped with the department picker), never a new team; member ID and dependent SSN are information');
+    await paste(R17_BENEFITS);
+    const who = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
+    ok(who.includes(CIE), 'the Carrier Integration Engineer does step 4: ' + who.join(', '));
+    const found = (await page.textContent('[data-found-teams]').catch(() => '')) || '';
+    ok(!found.includes(CIE) && /Benefits/.test(found), '"Teams involved" lists teams only, never the role: ' + found);
+    const roleRow = await page.$(`[data-approvers] [data-apr-team="${CIE}"][data-apr-role]`);
+    ok(!!roleRow, 'the approver panel lists the Carrier Integration Engineer as a role');
+    ok(/Which department is the Carrier Integration Engineer in\?/.test(await page.textContent(`[data-apr-team="${CIE}"] [data-apr-ask]`).catch(() => '')), 'it asks which department the role is in');
+    await page.selectOption(`[data-apr-sel="${CIE}"]`, '__add_department__');
+    await page.waitForSelector('.overlay [data-dept-name]');
+    ok(await page.inputValue('.overlay [data-dept-name]') === '', '"+ Add a department" never offers the role\'s title as a department name');
+    await act('cancel'); await settle();
+    const opts = await page.$$eval(`[data-apr-sel="${CIE}"] option`, os => os.map(o => o.value).filter(v => v && v !== '__add_department__'));
+    const dept = opts.includes('HR') ? 'HR' : opts[0];
+    await page.selectOption(`[data-apr-sel="${CIE}"]`, dept); await settle();
+    await page.waitForSelector(`[data-apr-team="${CIE}"][data-apr-dept="${dept}"]`, { timeout: 10000 }).catch(() => {});
+    ok(await page.$eval(`[data-apr-team="${CIE}"]`, e => e.dataset.aprDept).catch(() => '') === dept, `the existing picker maps the role to ${dept}`);
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(['Member ID', 'Dependent SSN', 'Dependent date of birth'].every(n => nds.includes(n)), 'member ID, dependent SSN and date of birth are information: ' + nds.join(', '));
+    await shot('r17-roles-draft');
+
+    console.log('# R17 Karen/Jordan: the import draft survives a reload ("Restore your draft?")');
+    const nSteps = await page.$$eval('.is-draft [data-step-no]', els => els.length);
+    await page.reload(); await page.waitForSelector('#app .hdr', { timeout: 20000 }); await settle();
+    await page.waitForSelector('[data-restore]', { timeout: 10000 }).catch(() => {});
+    ok(/Restore your draft\?/.test(await page.textContent('[data-restore]').catch(() => '')), 'after a reload the page asks "Restore your draft?"');
+    ok(!(await page.$('.is-draft')), 'nothing is restored until the visitor says so');
+    await shot('r17-restore-prompt');
+    await page.click('[data-restore-yes]'); await page.waitForSelector('.is-draft', { timeout: 10000 }); await settle();
+    ok(await page.$$eval('.is-draft [data-step-no]', els => els.length) === nSteps && (await page.inputValue('[data-sop]')).startsWith('Benefits Enrollment Change'), 'Restore brings back the text and every step of the draft');
+    ok(await page.$eval(`[data-apr-team="${CIE}"]`, e => e.dataset.aprDept).catch(() => '') === dept, 'the role\'s department choice comes back too');
+    const bpid = await saveDraft('Benefits enrollment change (R17)');
+    let st = await state();
+    const B = procData(st, bpid);
+    ok((B.p.teamDepartments || {})[CIE] === dept, `saved: ${CIE} → ${dept}: ` + JSON.stringify(B.p.teamDepartments));
+    await nav('/import');
+    ok(!(await page.$('[data-restore]')), 'once saved, the draft is gone: no restore prompt');
+    await page.fill('[data-sop]', 'Scratch\n1. Payroll checks the hours.'); await page.dispatchEvent('[data-sop]', 'input');
+    await page.reload(); await page.waitForSelector('[data-restore]', { timeout: 10000 }).catch(() => {});
+    await page.click('[data-restore-no]'); await settle();
+    ok(!(await page.$('[data-restore]')) && (await page.inputValue('[data-sop]')) === '', 'Discard clears it');
+    await page.reload(); await page.waitForSelector('#app .hdr', { timeout: 20000 }); await settle();
+    ok(!(await page.$('[data-restore]')), 'and it stays discarded after another reload');
+
+    console.log('# R17 Jordan: the process page lists the role as a role, not under "Teams involved"');
+    await nav(`/process/${bpid}?mode=asis`);
+    const chips = await page.$$eval('[data-touches] [data-touch]', els => els.map(e => e.dataset.touch));
+    ok(!chips.includes(CIE) && chips.includes('Benefits'), 'Teams involved: ' + chips.join(', '));
+    ok(!!(await page.$(`[data-approvers] [data-apr-team="${CIE}"][data-apr-role]`)), 'the panel shows it as a role mapped to its department');
+
+    console.log('# R17 (P1 API): one step numbering, one team label, one confirm rule');
+    await nav(`/process/${bpid}?mode=raci`);
+    const raciNums = await page.$$eval('[data-raci-row]', els => els.map(e => [e.dataset.raciRow, +e.querySelector('.d-raci-n').textContent]));
+    const engNums = await page.evaluate(id => import('/concepts/pmoflow/app/store.js').then(m => window.PMOEngine.stepNumbers(m.store.state.docs, id, 'asis')), bpid);
+    ok(raciNums.length && raciNums.every(([id, n]) => engNums[id] === n), 'RACI numbers are the engine\'s stepNumbers: ' + JSON.stringify(raciNums));
+    await nav(`/process/${bpid}?mode=asis`);
+    const mapNums = await page.$$eval('[data-node]:not([data-gw])', els => els.map(e => [e.dataset.node, +((e.querySelector('.nh .ic') || {}).textContent || 0)]).filter(x => x[1]));
+    ok(mapNums.length && mapNums.every(([id, n]) => engNums[id] === n), 'map numbers agree: ' + JSON.stringify(mapNums));
+    const cieStep = flat(B.p.asis).find(n => n.ownerRole === CIE);
+    await nav(`/process/${bpid}/step/${cieStep.id}`);
+    ok(/Team: /.test(await page.textContent('[data-step-team]').catch(() => '')) && (await page.textContent('[data-step-team]')).includes(dept), 'the step page names one team, the role\'s department: ' + await page.textContent('[data-step-team]').catch(() => ''));
+    const apDe = B.des.find(d => d.name === 'Enrollment file');
+    ok(await putDoc('dataElement', apDe.id, Object.assign({}, apDe, { owner: undefined, ownerRole: 'AP' }), 'R17 e2e: owned by the AP role') === 200, 'Enrollment file is owned by the AP role');
+    const apPerson = (await state()).people.find(x => x.bu === 'Accounts Payable');
+    const meBefore = await page.evaluate(() => localStorage.getItem('pmoflow.me'));
+    await page.evaluate(id => localStorage.setItem('pmoflow.me', id), apPerson.id);
+    await nav(`/data/${apDe.id}`);
+    ok(await page.isVisible('[data-dedit]'), `${apPerson.name} (Accounts Payable) can confirm and edit information the AP role owns`);
+    await page.evaluate(id => localStorage.setItem('pmoflow.me', id || 'mc'), meBefore);
+    await nav(`/data/${apDe.id}`);
+    ok(/Only someone in Accounts Payable/.test(await page.textContent('.d-only').catch(() => '')), 'anyone else is told who can: ' + await page.textContent('.d-only').catch(() => ''));
+
+    console.log('# R17 Karen: "Collected each run" can be chosen after saving');
+    const sup = B.des.find(d => d.name === 'Supporting documents');
+    ok(sup && !sup.perRun, 'Supporting documents saved as "We have it"');
+    await nav(`/data/${sup.id}`);
+    await page.click('[data-dedit]'); await page.waitForSelector('.overlay [data-perrun-edit]');
+    ok(!(await page.isChecked('.overlay [data-perrun-edit]')), 'the edit form offers "Collected each run", unticked');
+    await page.check('.overlay [data-perrun-edit]');
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/dataElement/'), { timeout: 15000 }), act('save')]); await settle();
+    let sd = (await state()).docs.dataElement.find(d => d.id === sup.id).data;
+    ok(sd.perRun === true && sd.avail === 'live' && sd.source === 'Collected each run', 'saved as collected each run: ' + JSON.stringify({ perRun: sd.perRun, avail: sd.avail, source: sd.source }));
+    ok(await page.isVisible('[data-perrun]'), 'the page shows "Collected each run"');
+    await page.click('[data-dedit]'); await page.waitForSelector('.overlay [data-perrun-edit]');
+    ok(await page.isChecked('.overlay [data-perrun-edit]'), 'and the form shows it ticked');
+    await page.uncheck('.overlay [data-perrun-edit]');
+    await Promise.all([page.waitForResponse(r => r.request().method() === 'PUT' && r.url().includes('/doc/dataElement/'), { timeout: 15000 }), act('save')]); await settle();
+    sd = (await state()).docs.dataElement.find(d => d.id === sup.id).data;
+    ok(!sd.perRun && sd.source !== 'Collected each run', 'it can be undone the same way');
+
+    console.log('# R17 PMO director: "(Sam Keller)" leaves the title; Help Desk does its steps; asset tag is information');
+    await paste(R17_LAPTOP);
+    const titles = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
+    ok(titles.includes('Review the access request') && !titles.some(t => /Sam Keller/.test(t)), 'titles: ' + titles.join(' | '));
+    ok(await page.isVisible('[data-step-note]:has-text("Named in the procedure: Sam Keller")'), 'Sam Keller is the named person on the step');
+    const who2 = await page.$$eval('.is-draft input.is-who', els => els.map(e => e.value));
+    ok(who2.filter(w => w === 'Help Desk').length === 3, 'Help Desk does steps 3 to 5 (none left blank): ' + who2.join(', '));
+    ok((await page.$$eval('[data-nd-name]', els => els.map(e => e.value))).includes('Asset tag'), 'Asset tag is information');
+
+    console.log('# R17 Karen: a path to a later step reads "Skips to step N", never "go back"');
+    /* the loaner choice's No path: step 4 (on the Yes path) and step 5 both come later on the map */
+    const gsel = '.is-draft [data-goto]';
+    const noGoto = (await page.$$(gsel))[1];
+    const later = await noGoto.$$eval('option', os => os.map(o => [o.value, o.textContent]).filter(o => /Step [45]:/.test(o[1])));
+    ok(later.length === 2 && later.every(o => /Then: skip to Step [45]/.test(o[1])), 'later steps read "skip to", the one on the other path too: ' + JSON.stringify(later.map(o => o[1])));
+    await noGoto.selectOption(later.find(o => /Step 4:/.test(o[1]))[0]); await settle();
+    const lbl = await page.$$eval('.is-draft .is-goto.on', els => els.map(e => e.textContent.replace(/\s+/g, ' ').trim()));
+    ok(lbl.some(t => /Skips to Step 4/.test(t)) && !lbl.some(t => /Goes back to/.test(t)), 'the path reads "Skips to Step 4", never "Goes back to": ' + lbl.join(' | '));
+
+    console.log('# R17 Karen: a pasted 6-digit code is accepted');
+    await page.evaluate(() => { window.__r17code = import('/concepts/pmoflow/app/ui.js').then(m => m.stepUp('check a pasted code')); });
+    await page.waitForSelector('.overlay input[name=code]');
+    await page.evaluate(() => { const i = document.querySelector('.overlay input[name=code]'); i.focus(); const dt = new DataTransfer(); dt.setData('text/plain', 'Your code is 123 456'); i.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); });
+    ok(await page.inputValue('.overlay input[name=code]') === '123456', 'the pasted text fills the field with its 6 digits: ' + await page.inputValue('.overlay input[name=code]'));
+    await act('verify');
+    ok(await page.evaluate(() => window.__r17code) === true, 'and the check passes');
+
+    console.log('# R17 BPM: the New project list counts changed choices too');
+    st = await state();
+    const P = st.docs.process.find(d => d.id === bpid).data;
+    const fork = ns => (ns || []).map(n => Object.assign({}, n, { id: n.id + 'f', from: n.id }, n.branches ? { branches: n.branches.map(b => Object.assign({}, b, { nodes: fork(b.nodes) }, b.goto ? { goto: b.goto + 'f' } : {})) } : {}));
+    const tobe = fork(P.asis).map(n => n.type === 'decision' ? Object.assign({}, n, { title: 'Change adds or removes a dependent?' }) : n);
+    ok(await putDoc('process', bpid, Object.assign({}, P, { tobe }), 'R17 e2e: change one choice in Future') === 200, 'Future has one changed choice');
+    await nav('/projects'); await page.click('[data-new-project]'); await page.waitForSelector('.overlay #np-from');
+    const optTxt = await page.$eval(`.overlay #np-from option[value="${bpid}"]`, o => o.textContent);
+    ok(/1 choice changed/.test(optTxt), 'the dropdown says "1 choice changed": ' + optTxt);
+    await act('cancel');
+
+    console.log('# R17 at 390 px');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await nav('/import'); await page.fill('[data-sop]', R17_BENEFITS); await page.dispatchEvent('[data-sop]', 'input');
+    await page.reload(); await page.waitForSelector('[data-restore]', { timeout: 10000 }).catch(() => {});
+    await overflow('R17 restore prompt @390'); await page.screenshot({ path: `${OUT}/r17-restore-390.png` });
+    await page.click('[data-restore-yes]'); await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+    await overflow('R17 roles draft @390');
+    await page.evaluate(() => { const c = document.querySelector('[data-approvers]'); if (c) c.scrollIntoView(); });
+    await page.screenshot({ path: `${OUT}/r17-roles-390.png` });
+    await nav(`/data/${sup.id}`); await page.click('[data-dedit]'); await page.waitForSelector('.overlay [data-perrun-edit]');
+    await overflow('R17 edit form @390'); await page.screenshot({ path: `${OUT}/r17-edit-390.png` }); await act('cancel');
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await nav(`/data/${sup.id}`); await page.click('[data-dedit]'); await page.waitForSelector('.overlay [data-perrun-edit]');
+    await page.screenshot({ path: `${OUT}/r17-edit-1366.png` }); await act('cancel');
+    await nav(`/process/${bpid}?mode=asis`); await shot('r17-process-1366');
+  } catch (e) {
+    fail++; failures.push('r17 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r17 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r17-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
@@ -1301,6 +1503,7 @@ async function r16(browser, errors) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R17 === '1') { await r17(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R16 === '1') { await r16(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R15 === '1') { await r15(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R14 === '1') { await r14(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
@@ -2579,7 +2782,8 @@ async function r16(browser, errors) {
     const otherOnShared = (st.docs.workItem || []).map(d => d.data).some(w => w.status !== 'done' && actPrj.has(w.projectId) && (expShared.has(w.pid + '/' + w.step) || (w.resolves && (sA.data || []).includes(w.resolves))));
     ok(st0 === (otherOnShared ? 'overlap' : 'clear'), `one project on the step: ${otherOnShared ? 'Overlap (another project changes a step sharing its data)' : 'no conflicts'} (${st0})`);
     /* a second active project with open work on the same step */
-    const due5 = (() => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 7); return d.toISOString().slice(0, 10); })();
+    /* R17: the server refuses a weekend or holiday due date (today + 7 was Thanksgiving), so the fixture uses the next working day */
+    const due5 = (() => { const d = new Date(st.today + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 7); let x = d.toISOString().slice(0, 10); for (let i = 0; i < 10 && !ENG.isBusinessDay(x, st.docs); i++) { const y = new Date(x + 'T12:00:00Z'); y.setUTCDate(y.getUTCDate() + 1); x = y.toISOString().slice(0, 10); } return x; })();
     ok(await putDoc('project', 'prj-e2e-x', { id: 'prj-e2e-x', name: 'E2E Parallel Change', desc: '', owner: me, releaseManager: me, resources: [me], target: due5, processes: [vo.id], status: 'active', baselines: [] }, 'Test fixture: second project') === 200
       && await putDoc('workItem', 'wi-e2e-x', { id: 'wi-e2e-x', projectId: 'prj-e2e-x', pid: vo.id, step: sA.id, title: 'E2E parallel tweak', owner: me, status: 'idle', start: st.today, due: due5, deps: [] }, 'Test fixture: overlapping work') === 200, 'fixture: a second project changing the same step');
     await nav(`/process/${vo.id}/step/${sA.id}`);
@@ -2970,9 +3174,15 @@ async function r16(browser, errors) {
         /* R16: "Not checked yet" (information saved before R16) still reads that way and its owner can still confirm it */
         const bankDoc = (await state()).docs.dataElement.find(d => d.id === bank.id).data;
         ok(await putDoc('dataElement', bank.id, Object.assign({}, bankDoc, { avail: 'unchecked', source: '', haveAnsweredBy: undefined }), 'e2e: information as saved before R16') === 200, 'fixture: set back to "Not checked yet"');
+        /* R17 (P1 #2, Karen): changed fixture step. Information owned by a role is confirmed by someone in the role's department
+           (E.canConfirmInformation), no longer by whoever mapped the process; view it as someone the engine allows */
+        const allowed = await page.evaluate(id => import('/concepts/pmoflow/app/store.js').then(m => { const r = window.PMOEngine.canConfirmInformation(m.store.state.docs, id, m.store.state.me); return r ? r.people[0] : null; }), bank.id);
+        const meWas = await page.evaluate(() => localStorage.getItem('pmoflow.me'));
+        if (allowed) await page.evaluate(id => localStorage.setItem('pmoflow.me', id), allowed);
         await nav(`/data/${bank.id}`);
         ok(/Not checked yet/.test(await page.textContent('#app')) && !/Connected/.test(await page.textContent('.hdr')) && await page.isVisible('[data-unchecked] [data-confirm-live]'), 'R10: pasted information reads "Not checked yet" (never "Connected") and its owner can confirm it');
         await shot('r10-data-unchecked');
+        if (allowed) await page.evaluate(id => { if (id) localStorage.setItem('pmoflow.me', id); else localStorage.removeItem('pmoflow.me'); }, meWas);
       } else ok(false, 'R10: "Bank details" was created');
       /* the step count on the map follows edits and deletes */
       await nav(`/process/${vPid}?mode=asis`);
@@ -3190,6 +3400,7 @@ async function r16(browser, errors) {
   if (process.env.SKIP_R14 !== '1') await r14(browser, errors);
   if (process.env.SKIP_R15 !== '1') await r15(browser, errors);
   if (process.env.SKIP_R16 !== '1') await r16(browser, errors);
+  if (process.env.SKIP_R17 !== '1') await r17(browser, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

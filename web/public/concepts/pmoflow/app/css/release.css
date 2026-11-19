@@ -645,6 +645,8 @@
 .rs-chg{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;margin-right:4px;vertical-align:1px}
 .rs-chg.new{background:var(--prog-fill);color:var(--prog)} .rs-chg.chg{background:var(--soon-soft);color:#b45309}
 .rs-chg-l{font-size:13.5px;color:var(--ink2);margin-top:2px}
+.rs-chg-l .rs-was{display:block;overflow-wrap:anywhere}
+.rs-chg-l .rs-was::before{content:"• ";color:var(--ink3,#888)}
 .rs-same{color:var(--ink2);font-size:14px}
 .rs-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;background:var(--ink3)}
 .rs-dot.ok{background:var(--done)} .rs-dot.warn{background:#d97706} .rs-dot.bad{background:var(--late)}

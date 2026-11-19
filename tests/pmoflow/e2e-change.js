@@ -421,6 +421,154 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(/Needs approval/.test(v16b) && /launch window .+ is after the .+ deadline/.test(v16b), 'a launch window after the deadline needs approval: ' + v16b);
   await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
 
+  /* ---------------------------------------------------------------- R17 P3 (R16 [own data] findings) */
+  console.log('R17: a task with hours is cancelled, never deleted (PMO defect 1)');
+  await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); await store.reset(); });
+  await setMe('ta');
+  await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); store.setAdvanced(true); });   /* the Work table (Advanced) */
+  const openWork = async (prj) => { await page.goto(`${ROOT}/project/${prj || PRJ}?mode=work`); await page.waitForSelector('table.pmo-work', { timeout: 30000 }); await settle(600); };
+  await openWork();
+  const w8row = page.locator('tr[data-wid="W8"]');
+  ok(await w8row.locator('[data-cancel-work]').count() === 1 && await w8row.locator('button:has-text("Delete")').count() === 0, 'a task with hours offers “Cancel task”, never Delete');
+  const spent0 = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return PMOEngine.projectTruth(store.state.docs, 'vendor-modernization', store.state.today).cost.actual; });
+  await w8row.locator('[data-cancel-work]').click();
+  await page.waitForSelector('.overlay [data-cancel-dialog]');
+  const cdTxt = await page.textContent('.overlay [data-cancel-dialog]');
+  ok(/has [\d.]+ hours? logged.*so it can’t be deleted\. It is cancelled instead: the hours stay in Spent/.test(cdTxt.replace(/\s+/g, ' ')), 'the dialog says the hours stay: ' + cdTxt.replace(/\s+/g, ' ').slice(0, 160));
+  await page.fill('.overlay input[name="why"]', 'Not needed: the ERP saves vendors itself now');
+  for (const w of [1366, 390]) { await page.setViewportSize({ width: w, height: w === 390 ? 844 : 900 }); await settle(250); ok(await noOverflow(), `cancel dialog: no horizontal overflow at ${w}`); await page.screenshot({ path: `${SHOTS}/r17-cancel-${w}.png` }); }
+  await page.setViewportSize({ width: 1440, height: 1000 }); await settle(200);
+  await page.click('.overlay [data-act="cancel-task"]');
+  ok(await toastSays(/Cancelled “.+”: its hours stay|Sent for approval/), 'cancelling goes through a plan change');
+  await settle(800);
+  d = await docs();
+  const r17w8 = (d.workItem.find(x => x.id === 'W8') || {}).data;
+  const c8 = (d.planChange || []).map(x => x.data).find(c => (c.edits || []).some(e => e.id === 'W8' && e.op === 'cancel'));
+  ok(!!r17w8 && (r17w8.time || []).length > 0, 'W8 and its hours are still there');
+  ok(!!c8, 'the plan change records a cancel (not a delete): ' + (c8 ? c8.status : 'none'));
+  if (c8 && c8.status === 'proposed') {
+    for (const a of c8.approvers.filter(x => !x.decision)) {
+      await page.evaluate(async ([id, who]) => { const { store } = await import('/concepts/pmoflow/app/store.js');
+        await fetch(`/api/pmoflow/workspaces/${store.state.ws}/changes/${id}/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: who, decision: 'approve', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }) }); await store.load(); }, [c8.id, a.person]);
+    }
+  }
+  await openWork();
+  ok(await page.locator('tr[data-wid="W8"] [data-cancelled]').count() === 1, 'the Work tab shows it as Cancelled');
+  const spent1 = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); return PMOEngine.projectTruth(store.state.docs, 'vendor-modernization', store.state.today).cost.actual; });
+  ok(spent1 === spent0, `Spent is unchanged ($${Math.round(spent0)} → $${Math.round(spent1)})`);
+  /* the server refuses a plain delete of a task with hours, whoever asks */
+  /* sent from the test (not the page), so the expected 409 is not a console error */
+  const wsNow = await page.evaluate(async () => (await import('/concepts/pmoflow/app/store.js')).store.state.ws);
+  const delR = await ctx.request.delete(`http://localhost:${PORT}/api/pmoflow/ws/${wsNow}/doc/workItem/W12`, { data: { actor: 'lp' } });
+  const del = [delR.status(), ((await delR.json().catch(() => ({}))) || {}).error];
+  ok(del[0] === 409 && /hours logged, so it can’t be deleted/.test(del[1]), 'a plain DELETE of a task with hours is refused: ' + del.join(' '));
+
+  console.log('R17: “+ Add work item” over the cost tolerance goes through Change the plan (PMO partial)');
+  await page.click('[data-add-work]'); await page.waitForSelector('.overlay input[name="title"]');
+  await page.fill('.overlay input[name="title"]', 'Extra vendor checks');
+  await page.fill('.overlay input[name="effortDays"]', '6');
+  await page.selectOption('.overlay select[data-wi-owner]', 'dk');
+  await page.click('.overlay [data-act="save"]');
+  await page.waitForSelector('.overlay [data-add-refusal]', { timeout: 10000 }).catch(() => {});
+  const arTxt = (await page.textContent('.overlay [data-add-refusal]').catch(() => '')) || '';
+  ok(/Adding “Extra vendor checks”: .*(over the \$[\d,]+ budget|more than 5%|already over the budget)/.test(arTxt.replace(/\s+/g, ' ')) && /Nothing was added/.test(arTxt), 'the new task is refused with the cost reason: ' + arTxt.replace(/\s+/g, ' ').slice(0, 200));
+  await page.click('.overlay [data-act="change"]');
+  await page.waitForSelector(wiz);
+  ok(await page.isChecked(`${wiz} input[name="kind"][value="work"]`), 'Change the plan opens on “Add or remove work”');
+  await page.fill('#chg-reason', 'The auditors asked for extra checks');
+  await next();
+  ok(await page.inputValue(`${wiz} input[name="ad_title_0"]`) === 'Extra vendor checks', 'the new task is filled in');
+  await next();
+  ok(/Needs approval/.test(await page.textContent('[data-chg-verdict]')), 'it needs the sponsor’s approval');
+  /* the budget sentence shows exactly when the expected cost after the change is over the budget (R17: the cancelled task
+     no longer counts, so whether this add goes over depends on the engine's numbers) */
+  const costAfter = Number(((await page.textContent(`${wiz} [data-imp-cost] b`)).match(/\$([\d,]+)\s*$/) || [])[1].replace(/,/g, ''));
+  const budgetNow = await page.evaluate(async p => { const { store } = await import('/concepts/pmoflow/app/store.js'); return (store.get('project', p).budget || {}).planned; }, PRJ);
+  const bwN = await page.locator(`${wiz} [data-plan-warning="budget"]`).count();
+  ok(costAfter > budgetNow ? bwN === 1 && /^This plan is \$[\d,]+ over the \$[\d,]+ budget\.$/.test((await page.textContent(`${wiz} [data-plan-warning="budget"]`)).trim()) : bwN === 0,
+    `the preview's budget sentence matches the numbers ($${costAfter} vs the $${budgetNow} budget: ${bwN ? 'over, said in one sentence' : 'within, nothing said'})`);
+  await shotBoth('r17-add-over-budget', `${wiz}`);
+  await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
+  d = await docs();
+  ok(!d.workItem.some(x => x.data.title === 'Extra vendor checks'), 'nothing was added without approval');
+
+  console.log('R17: an added dependency knocks on the tasks that wait for it (PMO partial)');
+  await page.click('tr[data-wid="W6"] [data-edit-work]'); await page.waitForSelector('.overlay input[name="title"]');
+  await page.check('.overlay input[name="deps"][value="W11"]');
+  await page.click('.overlay [data-act="save"]');
+  await page.waitForSelector('.overlay [data-dep-knock]', { timeout: 10000 }).catch(() => {});
+  const dk = (await page.textContent('.overlay [data-dep-knock]').catch(() => '')) || '';
+  ok(/now waits for “.+”, so it moves to/.test(dk) && await page.locator('.overlay [data-dep-ko="W7"]').count() === 1, 'the dialog names the tasks that move with it: ' + dk.replace(/\s+/g, ' ').slice(0, 160));
+  for (const w of [1366, 390]) { await page.setViewportSize({ width: w, height: w === 390 ? 844 : 900 }); await settle(250); ok(await noOverflow(), `dependency dialog: no horizontal overflow at ${w}`); await page.screenshot({ path: `${SHOTS}/r17-dependency-${w}.png` }); }
+  await page.setViewportSize({ width: 1440, height: 1000 }); await settle(200);
+  const w7before = (await docs()).workItem.find(x => x.id === 'W7').data;
+  await page.click('.overlay [data-act="go"]');
+  ok(await toastSays(/Dependency added: \d+ tasks moved|Sent for approval/), 'sent as one plan change');
+  await settle(800);
+  d = await docs();
+  const depCh = (d.planChange || []).map(x => x.data).find(c => c.category === 'dependency' && (c.edits || []).some(e => e.id === 'W6' && e.field === 'deps'));
+  ok(depCh && depCh.edits.some(e => e.knock && e.id === 'W7'), 'the change moves W7 too (' + (depCh ? depCh.status : 'none') + ')');
+  if (depCh && depCh.status === 'applied') ok(d.workItem.find(x => x.id === 'W7').data.start > w7before.start, 'W7 starts later');
+
+  console.log('R17: Waiting for you lists a pending second-Admin confirmation (Jordan re-test 2)');
+  const prop = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js');
+    const r = await fetch(`/api/pmoflow/ws/${store.state.ws}/departments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'ta', op: { kind: 'assign', id: 'dept-treasury', personId: 'sk' } }) });
+    await store.load(); return [r.status, ((await r.json()) || {}).applied]; });
+  ok(prop[0] === 200 && prop[1] === false, 'Tom proposes moving Sam (it waits for a second Admin)');
+  await setMe('mc');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]'); await settle(500);
+  const adm = page.locator('[data-waiting] [data-wkind="adminConfirm"]');
+  ok(await adm.count() === 1 && /Confirm: .*Sam Keller/.test(await adm.innerText()), 'Maya (the other Admin) sees it in Waiting for you: ' + (await adm.count() ? (await adm.innerText()).replace(/\s+/g, ' ') : 'none'));
+  ok(/\/admin(\/departments)?$/.test(await adm.locator('a.btn').getAttribute('href')), 'it opens Admin');
+  await shotBoth('r17-waiting-admin', '[data-waiting]');
+  await setMe('ta');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]'); await settle(400);
+  ok(await page.locator('[data-waiting] [data-wkind="adminConfirm"]').count() === 0, 'never for the Admin who proposed it');
+
+  console.log('R17: new project on a process another project changes, and a plan over the budget (Jordan, PMO defect 2/4)');
+  /* a step done by a role nobody holds yet (Karen's "AP", the PMO director's "Help Desk"), so the plan has an unowned task */
+  await setMe('dk');
+  await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); const p = JSON.parse(JSON.stringify(store.get('process', 'access-review')));
+    const walk = ns => (ns || []).forEach(n => { if (!n) return; if (n.id === 'r2') { n.owner = null; n.ownerRole = 'Audit Liaison'; } (n.branches || []).forEach(b => walk(b && b.nodes)); });
+    walk(p.tobe); await store.save('process', p.id, p, 'Step 2 is done by the Audit Liaison'); });
+  await setMe('ta');
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]'); await settle(300);
+  await page.click('.sect [data-new-project]'); await page.waitForSelector('.overlay #np-from');
+  await page.fill('.overlay input[name="name"]', 'Northwind remit-to clean-up');
+  await page.selectOption('.overlay #np-from', 'vendor-onboarding');
+  await settle(200);
+  const ovl = page.locator('.overlay [data-np-overlap]');
+  ok(await ovl.isVisible() && /“Vendor Onboarding Modernization” and “ERP Upgrade Readiness” already change this process\. Two projects changing the same steps can clash/.test(await ovl.innerText()), 'the overlap is flagged before the project is created: ' + (await ovl.innerText()).slice(0, 140));
+  await page.selectOption('.overlay #np-from', 'access-review');
+  await settle(150);
+  ok(/Quarterly Access Review Automation/.test(await ovl.innerText()), 'it follows the process picked');
+  await page.selectOption('.overlay #np-from', 'vendor-onboarding');
+  await page.$eval('.overlay details.pmo-more', el => { el.open = true; });
+  await page.fill('.overlay #pf-budget', '1000');
+  await shotBoth('r17-new-project-overlap', '.overlay .modal');
+  await page.click('.overlay [data-act="create"]');
+  await page.waitForSelector('.overlay [data-first-plan]', { timeout: 20000 });
+  const bw = page.locator('.overlay [data-plan-warning="budget"]');
+  ok(await bw.count() === 1 && /^This plan is \$[\d,]+ over the \$1,000 budget\.$/.test((await bw.innerText()).trim()), 'the first plan says how far over the budget it is: ' + (await bw.count() ? await bw.innerText() : 'none'));
+  ok(/Accept anyway/.test(await page.textContent('.overlay [data-act="accept"]')), 'Accept reads “Accept anyway”');
+  const capTxt = await page.$$eval('.overlay [data-plan-warning="capacity"]', els => els.map(e => e.textContent));
+  ok(capTxt.every(t => /^.+ has [\d.]+ days? of work in \d+ working days? \(room for about [\d.]+\)\.$/.test(t)), 'capacity warnings are one plain sentence each: ' + (capTxt.join(' | ') || 'none'));
+  await shotBoth('r17-plan-warnings', '.overlay .modal');
+  await page.click('.overlay [data-act="dismiss"]'); await settle(500);
+  /* a second project on the process with the role-only step: its plan has an unowned task */
+  await page.goto(ROOT + '/'); await page.waitForSelector('[data-waiting]'); await settle(300);
+  await page.click('.sect [data-new-project]'); await page.waitForSelector('.overlay #np-from');
+  await page.fill('.overlay input[name="name"]', 'Northwind access review, phase 2');
+  await page.selectOption('.overlay #np-from', 'access-review');
+  await page.click('.overlay [data-act="create"]');
+  await page.waitForSelector('.overlay [data-first-plan]', { timeout: 20000 });
+  const unownedN = Number(await page.getAttribute('.overlay [data-plan-unowned]', 'data-plan-unowned').catch(() => '0')) || 0;
+  await page.click('.overlay [data-act="adjust"]');
+  await page.waitForSelector('.overlay [data-sg-owner]');
+  const blanks = await page.$$eval('.overlay select[data-sg-owner]', els => els.filter(s => s.value === '').map(s => s.options[s.selectedIndex].textContent));
+  ok(unownedN >= 1 && blanks.length === unownedN && blanks.every(t => /^Needs an owner/.test(t)), `Adjust: the ${unownedN} unowned task(s) show “Needs an owner”, never a person (${blanks.join(' | ') || 'none unowned'})`);
+  await page.click('.overlay [data-act="cancel"]').catch(() => {}); await settle(300);
+
   ok(errors.length === 0, 'zero console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);

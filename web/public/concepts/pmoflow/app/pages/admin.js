@@ -210,24 +210,30 @@ function deptCard(d) {
   const n = d.people.length;
   const names = d.approverNames || [];
   const who = names.length ? `Approves: <b data-dept-approvers-list>${esc(names.join(', '))}</b>`
-    : `<span data-dept-approvers-list>No named approver: anyone in ${esc(d.name)} can approve its part.</span>`;
+    : n ? `<span data-dept-approvers-list>No named approver: anyone in ${esc(d.name)} can approve its part.</span>`
+    : `<span data-dept-approvers-list>Nobody can approve its part yet: there is nobody in ${esc(d.name)}.</span>`;
   const removeWhy = n ? `Move the ${plural(n, 'person').replace(/persons$/, 'people')} in ${d.name} to another department first.` : '';
   const ppl = people().slice().sort((a, b) => a.name.localeCompare(b.name));
+  const assignForm = primary => `<form class="adm-dassign" data-dept-assign-form="${esc(d.id)}">
+        <select name="personId" aria-label="Add a person to ${esc(d.name)}" ${admin ? '' : 'disabled'}><option value="">Add a person to ${esc(d.name)}…</option>${ppl.filter(p => p.department !== d.name).map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.department ? ` (now ${esc(p.department)})` : ''}</option>`).join('')}</select>
+        <button class="btn sm${primary ? ' primary' : ''}" type="submit" ${admin ? '' : 'disabled'}>Add</button></form>`;
+  /* R17 P4 #1 (Jordan R16): a department with nobody in it can't pass its tests, so the card says what to do, with the control */
+  const emptyPath = `<div class="note" data-dept-empty><b>Add someone to ${esc(d.name)} so its tests can be passed.</b>
+        <div class="hint">Until then nobody can pass its tests or approve its part. If a project’s testing has already started, its project manager assigns the ${esc(d.name)} tests to the person you add.</div>
+        ${assignForm(true)}</div>`;
   return `<div class="card adm-dept" data-dept="${esc(d.id)}" data-dept-name="${esc(d.name)}">
       <div class="adm-dhead"><h3>${esc(d.name)} <span class="n">${plural(n, 'person').replace(/persons$/, 'people')}</span></h3>
         <div class="adm-dacts"><button class="btn sm" data-dept-rename="${esc(d.id)}" ${admin ? '' : 'disabled'}>Rename</button>
         <button class="btn sm danger" data-dept-remove="${esc(d.id)}" ${admin && !n ? '' : 'disabled'} ${removeWhy ? `title="${esc(removeWhy)}"` : ''}>Remove</button></div></div>
       <div class="adm-dwho">${who}</div>
       ${pendings().filter(p => p.departmentId === d.id || (p.kind === 'assign' && d.people.some(x => x.id === p.op.personId))).map(p => `<div class="hint adm-dpend" data-dept-pending="${esc(p.id)}">Waiting for a second Admin: ${esc(p.text)}</div>`).join('')}
-      ${n ? `<div class="adm-dppl">${d.people.map(p => `<span class="adm-chip">${av(p.id)}${esc(p.name)}</span>`).join('')}</div>` : `<div class="hint">Nobody is in ${esc(d.name)} yet. Assign people on the People tab or below.</div>`}
+      ${n ? `<div class="adm-dppl">${d.people.map(p => `<span class="adm-chip">${av(p.id)}${esc(p.name)}</span>`).join('')}</div>` : emptyPath}
       ${n && admin ? `<div class="hint adm-dwhy">${esc(removeWhy)}</div>` : ''}
       <details class="adm-dedit" data-dept-approvers="${esc(d.id)}"><summary>Choose who approves for ${esc(d.name)}</summary>
         <div class="hint">Leave everyone unticked to let anyone in the department approve. The project manager and anyone who works on or tests a part never approve it.</div>
         <div class="adm-dpick">${ppl.map(p => `<label class="adm-pick"><input type="checkbox" value="${esc(p.id)}" ${d.approvers.includes(p.id) ? 'checked' : ''} ${admin ? '' : 'disabled'} /><span>${esc(p.name)}${p.department && p.department !== d.name ? ` <small class="hint">${esc(p.department)}</small>` : ''}</span></label>`).join('')}</div>
         <button class="btn sm primary" data-dept-approvers-save="${esc(d.id)}" ${admin ? '' : 'disabled'}>Save approvers</button></details>
-      <form class="adm-dassign" data-dept-assign-form="${esc(d.id)}">
-        <select name="personId" aria-label="Add a person to ${esc(d.name)}" ${admin ? '' : 'disabled'}><option value="">Add a person to ${esc(d.name)}…</option>${ppl.filter(p => p.department !== d.name).map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.department ? ` (now ${esc(p.department)})` : ''}</option>`).join('')}</select>
-        <button class="btn sm" type="submit" ${admin ? '' : 'disabled'}>Add</button></form>
+      ${n ? assignForm(false) : ''}
     </div>`;
 }
 /* R15 (Jordan): a role change waits for a second Admin, who confirms it with the extra sign-in check; nothing changes until
@@ -259,7 +265,9 @@ function pendingHTML() {
     ${list.map(p => {
       const mine = p.by === me, affected = (p.affected || []).includes(me);
       const why = !admin ? 'Only an Admin can confirm.' : mine ? 'You proposed it, so another Admin confirms it.' : affected ? 'It moves you or changes your approval rights, so another Admin confirms it.' : '';
-      return `<div class="adm-pitem" data-pending="${esc(p.id)}"><div><b>${esc(p.text)}</b><div class="hint">Proposed by ${esc(p.byName || pname(p.by))} · ${esc(fmtTime(p.at))}${p.note ? ` · <span data-pending-note>${esc(p.note)}</span>` : ''}</div>${why ? `<div class="hint" data-pending-why>${esc(why)}</div>` : ''}</div>
+      /* R17 P4 #2 (render P1 #5): the server asks the engine which sign-offs on parts not yet launched this reopens */
+      const reo = p.reopensText ? `<div class="hint adm-dpend" data-pending-reopens>${esc(p.reopensText)}</div>` : '';
+      return `<div class="adm-pitem" data-pending="${esc(p.id)}"><div><b>${esc(p.text)}</b>${reo}<div class="hint">Proposed by ${esc(p.byName || pname(p.by))} · ${esc(fmtTime(p.at))}${p.note ? ` · <span data-pending-note>${esc(p.note)}</span>` : ''}</div>${why ? `<div class="hint" data-pending-why>${esc(why)}</div>` : ''}</div>
         <div class="adm-pacts"><button class="btn sm primary" data-pend-confirm="${esc(p.id)}" ${admin && !mine && !affected ? '' : 'disabled'}>Confirm</button>
         <button class="btn sm" data-pend-cancel="${esc(p.id)}" ${admin ? '' : 'disabled'}>${mine ? 'Withdraw' : 'Turn down'}</button></div></div>`;
     }).join('')}</div>`;
@@ -464,7 +472,8 @@ export function bind(root, params) {
   /* R14: a change either waits for a second Admin, or (first approver / one-Admin workspace) applies at once for new work */
   let lastDept = null;
   const dop = op => async () => { lastDept = await deptOp(op); };
-  const said = (wait, now) => () => (lastDept && lastDept.pending ? `Sent to a second Admin to confirm: ${wait}` : `${now} (applies to new work only)`);
+  const said = (wait, now) => () => (lastDept && lastDept.pending ? `Sent to a second Admin to confirm: ${wait}${lastDept.pending.reopensText ? '. ' + lastDept.pending.reopensText : ''}`
+    : `${now} (applies to new work only)${lastDept && lastDept.reopenedText ? '. ' + lastDept.reopenedText : ''}`);
   /* R16 N4 #1: leaving a department ends approving for it (the server does it in the same change and says so) */
   const stops = (personId, toId) => {
     const p = people().find(x => x.id === personId), from = p && p.department ? depts().find(d => d.name === p.department) : null;
@@ -510,8 +519,9 @@ export function bind(root, params) {
   on('[data-pend-confirm]', 'click', async el => {
     const id = el.dataset.pendConfirm, p = pendings().find(x => x.id === id);
     if (!(await stepUp('confirm this department change'))) { toast('Not confirmed: the extra sign-in check was not completed.'); return; }
-    act(async () => { await api('POST', '/departments/pending/' + encodeURIComponent(id) + '/confirm', { stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }); S.viewStale = true; },
-      `Confirmed: ${p ? p.text : 'the department change'}`);
+    let res = null;
+    act(async () => { res = await api('POST', '/departments/pending/' + encodeURIComponent(id) + '/confirm', { stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }); S.viewStale = true; },
+      () => `Confirmed: ${p ? p.text : 'the department change'}${res && res.reopenedText ? '. ' + res.reopenedText : ''}`);
   });
   on('[data-pend-cancel]', 'click', el => {
     const id = el.dataset.pendCancel, p = pendings().find(x => x.id === id);

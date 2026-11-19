@@ -152,7 +152,17 @@ const cyclesOf = prj => Array.isArray(prj.testCycles) ? prj.testCycles : [];
 const SELF_BOX = `<div class="pmo-selftest" data-self-test role="status" hidden>${esc(SELF_TEST_WARN)}</div>`;
 const bindSelfOnLastOverlay = () => { const ovs = document.querySelectorAll('.overlay'); bindSelfTest(ovs[ovs.length - 1], 'select[name=tester]'); };
 const warnSelf = v => { if (v && v === store.state.me) toast(SELF_TEST_WARN); };
-const testerSel = (name, v, label) => `<select name="${name}" aria-label="${esc(label || 'Tester')}"><option value="">Unassigned</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
+/* R17 #5 (BPM: the tester list offered an Approver whose save then failed): a tester list offers only people who can record
+   the test(s) in the business check (engine testRecorders: never its builder or assigner, only its part's departments).
+   The current tester stays listed, marked, so the page never hides who has it. */
+const recMemo = { at: 0, docs: null, m: new Map() };   /* one render's worth: the rules are the same for every select of a test */
+const recordersFor = (e, pid, id) => { const now = Date.now(); if (recMemo.docs !== store.state.docs || now - recMemo.at > 1500) { recMemo.docs = store.state.docs; recMemo.at = now; recMemo.m = new Map(); }
+  const k = pid + '|' + id; if (!recMemo.m.has(k)) recMemo.m.set(k, new Set(e.testRecorders(store.state.docs, pid, id, { env: 'uat' }))); return recMemo.m.get(k); };
+const recordersOf = ids => { const e = E(); const pid = ui.curPrj; if (!e || !e.testRecorders || !pid || !ids || !ids.length) return null;
+  try { const sets = ids.map(id => recordersFor(e, pid, id)); return new Set(store.state.people.map(p => p.id).filter(id => sets.every(st => st.has(id)))); } catch (err) { return null; } };
+const testerSel = (name, v, label, ids) => { const ok = recordersOf(ids ? [].concat(ids) : null);
+  const ppl = store.state.people.filter(p => !ok || ok.has(p.id) || p.id === v);
+  return `<select name="${name}" aria-label="${esc(label || 'Tester')}"><option value="">Unassigned</option>${ppl.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)}${ok && !ok.has(p.id) ? ' (can’t record it)' : ''}</option>`).join('')}</select>`; };
 const testerChip = id => id ? `<span class="ts-tester" data-tester="${esc(id)}">${av(id)} ${esc(pname(id))}</span>` : '<span class="hint">Unassigned</span>';
 
 /* R15 #13 (Jordan): the page sits in .rl-page (display: contents) so the phone tap-target rules apply to it only */
@@ -160,6 +170,7 @@ export function render(params) { return `<div class="rl-page" data-page="${'test
 function renderPage(params) {
   const prjId = params.prj;
   const prj = store.get('project', prjId);
+  ui.curPrj = prj ? prj.id : null;
   const projects = store.list('project');
   if (!prj) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Workspace</a> · Testing</div><h1>Testing</h1><p>Project not found.</p></div></section>
     <div class="home-grid">${projects.map(p => `<a class="tile" href="${link('/testing/' + p.id)}" data-link><h4>${esc(p.name)}</h4><p>${esc(p.desc || '')}</p></a>`).join('') || '<div class="empty">No projects yet.</div>'}</div>`;
@@ -308,7 +319,7 @@ function casesCard(de) {
       <span class="hint">${noSpec ? 'No spec yet: add custom cases by field name, or write the spec on the data page.' : `Generated from the spec${latestProfile(de.id) ? ' and the latest profile' : ''}. Duplicates are skipped.`}</span></div>
     ${fc.missing.length || fc.customOnly.length ? fieldCoverageNote(fc) : (de.fields || []).length ? `<div class="ts-ok" data-fields-covered>Every spec field (${(de.fields || []).length}) has at least one spec- or profile-based case.</div>` : ''}
     ${all.length ? `<div class="ts-filters" role="group" aria-label="Filter by origin">${[['all', 'All', all.length], ['spec', 'Spec', n('spec')], ['profile', 'Profile', n('profile')], ['user', 'Custom', n('user')]].map(([k, l, c]) => `<button class="ts-fb ${ui.origin === k ? 'on' : ''}" data-origin="${k}" aria-pressed="${ui.origin === k}">${l} <b>${c}</b></button>`).join('')}
-      <span class="ts-assign">${unassigned ? `<label class="hint">${unassigned} unassigned · assign to</label>${testerSel('bulkTester', '', 'Assign unassigned cases to')}<button class="btn sm" data-bulk-assign>Assign</button>` : '<span class="hint">Every case has a tester.</span>'}</span></div>
+      <span class="ts-assign">${unassigned ? `<label class="hint">${unassigned} unassigned · assign to</label>${testerSel('bulkTester', '', 'Assign unassigned cases to', all.filter(c => !c.tester).map(c => c.id).slice(0, 1))}<button class="btn sm" data-bulk-assign>Assign</button>` : '<span class="hint">Every case has a tester.</span>'}</span></div>
       ${n('profile') ? `<div class="hint ts-profnote" data-profile-cases="${n('profile')}">${n('profile')} case${n('profile') === 1 ? '' : 's'} reproduce shapes observed in the profiled extract (lengths, characters, blanks). Inputs are synthetic, never raw values.</div>` : ''}
       <div class="tbl-wrap ts-scroll"><table class="ts-tbl"><thead><tr><th>ID</th><th>Field</th><th>Kind</th><th>Input</th><th>Expect</th><th>Origin</th><th>Tester</th><th></th></tr></thead><tbody>
       ${cases.map(c => `<tr data-case="${esc(c.id)}" data-origin-row="${esc(c.origin || 'user')}"><td><code class="ts-id" data-case-label>${esc(caseLbl(c.id))}</code></td><td>${esc(c.field)}</td><td>${badge(c.kind, KIND_CLS[c.kind])}</td><td><code class="ts-in" title="${esc(c.input)}">${c.input === '' ? '<i>(empty)</i>' : short(c.input)}</code>${c.note ? `<div class="hint">${esc(c.note)}</div>` : ''}${sampleRowOf(c) != null ? `<div class="ts-row-src" data-sample-row="${esc(sampleRowOf(c))}">from sample row ${esc(sampleRowOf(c))}</div>` : ''}</td>
@@ -348,7 +359,7 @@ function scriptsCard(prj, sc) {
       <div class="ts-script-b"><div class="ts-given"><span>Given</span> ${esc(s.given)}</div>
         <ol class="ts-ssteps">${steps.map(x => `<li data-sstep="${x.n}"><div><b>${esc(x.action)}</b><div class="ts-exp"><span>Expected</span> ${esc(x.expected)}</div></div>${so[x.n] ? badge(so[x.n], OUT_CLS[so[x.n]]) : ''}</li>`).join('')}</ol>
         ${(s.data || []).length ? `<div class="chips">${(s.data || []).map(d => `<span class="chip">${esc((store.get('dataElement', d) || {}).name || d)}</span>`).join(' ')}</div>` : ''}
-        <div class="ts-script-a"><a class="rl-go" href="${link(`/process/${s.pid}?mode=diff`)}" data-link>Open step in the process ›</a>${sc.adopted ? `<span class="ts-sassign">${testerSel('st_' + s.id, s.tester, 'Tester for ' + s.title).replace('<select ', `<select data-script-tester="${esc(s.id)}" `)}</span><button class="btn sm" data-edit-script="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-script="${esc(s.id)}">Delete</button>` : '<span class="hint">Adopt the scripts to assign testers and edit steps.</span>'}</div></div></details>`;
+        <div class="ts-script-a"><a class="rl-go" href="${link(`/process/${s.pid}?mode=diff`)}" data-link>Open step in the process ›</a>${sc.adopted ? `<span class="ts-sassign">${testerSel('st_' + s.id, s.tester, 'Tester for ' + s.title, s.id).replace('<select ', `<select data-script-tester="${esc(s.id)}" `)}</span><button class="btn sm" data-edit-script="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-script="${esc(s.id)}">Delete</button>` : '<span class="hint">Adopt the scripts to assign testers and edit steps.</span>'}</div></div></details>`;
   }).join('');
   return `<div class="card" id="uat-scripts"><h3>Process UAT scripts<span class="n">${sc.list.length}${sc.adopted ? ' · adopted' : ' · generated'}</span></h3>
     ${sc.adopted
@@ -373,7 +384,7 @@ function scenariosCard(prj, scn) {
       <span class="ts-script-t">Tester: ${testerChip(s.tester)}</span></summary>
       <div class="ts-script-b"><ol class="ts-ssteps">${steps.map(x => `<li data-sstep="${x.n}"><div><b>${esc(x.action)}</b><div class="ts-exp"><span>Expected</span> ${esc(x.expected)}</div></div>${so[x.n] ? badge(so[x.n], OUT_CLS[so[x.n]]) : ''}</li>`).join('')}</ol>
         ${(s.data || []).length ? `<div class="chips">${(s.data || []).map(d => `<span class="chip">${esc((store.get('dataElement', d) || {}).name || 'Data')}</span>`).join(' ')}</div>` : ''}
-        <div class="ts-script-a">${scn.adopted ? `<span class="ts-sassign">${testerSel('sn_' + s.id, s.tester, 'Tester for ' + s.title).replace('<select ', `<select data-scn-tester="${esc(s.id)}" `)}</span><button class="btn sm" data-edit-scn="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-scn="${esc(s.id)}">Delete</button>` : '<span class="hint">Adopt the scenarios to edit, assign and record them.</span>'}</div></div></details>`;
+        <div class="ts-script-a">${scn.adopted ? `<span class="ts-sassign">${testerSel('sn_' + s.id, s.tester, 'Tester for ' + s.title, s.id).replace('<select ', `<select data-scn-tester="${esc(s.id)}" `)}</span><button class="btn sm" data-edit-scn="${esc(s.id)}">Edit</button><button class="btn sm danger" data-del-scn="${esc(s.id)}">Delete</button>` : '<span class="hint">Adopt the scenarios to edit, assign and record them.</span>'}</div></div></details>`;
   }).join('');
   return `<div class="card" id="scenarios"><h3>End-to-end scenarios<span class="n">${scn.list.length}${scn.adopted ? ' · adopted' : ' · generated'}</span></h3>
     ${scn.adopted
@@ -552,7 +563,7 @@ async function editDefect(prj, wid) {
   guard(f => !String(f.title || '').trim() ? { msg: 'A defect needs a title.', field: 'title' } : null);
   const r = await p; if (r.action !== 'save') return;
   const f = r.form; const cur = store.get('workItem', wid) || w;
-  await store.save('workItem', wid, Object.assign({}, cur, { title: f.title.trim(), severity: +f.severity, priority: f.priority, env: f.env, repro: (f.repro || '').trim(), owner: f.owner || cur.owner, updatedAt: new Date().toISOString() }), `Edited defect “${f.title.trim()}” (severity ${f.severity}, ${f.priority})`);
+  if (!(await saveOrSay('workItem', wid, Object.assign({}, cur, { title: f.title.trim(), severity: +f.severity, priority: f.priority, env: f.env, repro: (f.repro || '').trim(), owner: f.owner || cur.owner, updatedAt: new Date().toISOString() }), `Edited defect “${f.title.trim()}” (severity ${f.severity}, ${f.priority})`))) return;
   if (f.owner && f.owner !== cur.owner) await store.notify([f.owner], `${pname(store.state.me)} assigned you a defect: ${f.title.trim()}`, 'workItem:' + wid);
   toast('Defect saved');
 }
@@ -602,6 +613,8 @@ function ledgerIds(prj) {
   ledgerMemo = { docs: key, prj: prj.id, ids: tl && tl.status ? new Set(Object.keys(tl.status)) : null };
   return ledgerMemo.ids;
 }
+/* R17 #5 (BPM: a refused save showed only in the console) every save error is said on screen, in the server's words */
+async function saveOrSay(...a) { try { await store.save(...a); return true; } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused the change')); return false; } }
 function eng(name, ...args) { const e = E(); if (!e || typeof e[name] !== 'function') return undefined; try { return e[name](...args); } catch (err) { return undefined; } }
 const TONE = { green: 'ok', amber: 'warn', red: 'bad' };
 function availOf(dataId) {
@@ -806,7 +819,7 @@ async function useColumns(dataId) {
   if (!de || !prof) { toast('Check sample data first.'); return; }
   const fields = eng('specFromProfile', prof);
   if (!Array.isArray(fields) || !fields.length) { toast('The sample data has no columns to use.'); return; }
-  await store.save('dataElement', dataId, Object.assign({}, de, { fields }), `Used the ${fields.length} sample-data columns of ${de.name} as its rules to test`);
+  if (!(await saveOrSay('dataElement', dataId, Object.assign({}, de, { fields }), `Used the ${fields.length} sample-data columns of ${de.name} as its rules to test`))) return;
   toast(`${fields.length} rules to test added to ${de.name}. Next: create the tests.`);
 }
 function bindSimple(root, prj) {
@@ -866,7 +879,7 @@ export function bind(root, params) {
     const c = store.get('testCase', b.dataset.delCase); if (!c) return;
     const r = await modal({ title: 'Delete test case?', body: `<p style="margin:0">${esc(c.field)} · ${esc(c.kind)} · <code>${esc(c.input)}</code></p>`, actions: [{ id: 'del', label: 'Delete', danger: true }] });
     if (r.action !== 'del') return;
-    await store.remove('testCase', c.id, `Deleted ${c.kind} test for ${de.name}.${c.field}`); toast('Test case deleted');
+    try { await store.remove('testCase', c.id, `Deleted ${c.kind} test for ${de.name}.${c.field}`); } catch (e) { toast('Not deleted: ' + ((e && e.message) || 'the server refused it')); return; } toast('Test case deleted');
   });
 
   root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = () => resolveReq(de.id, +b.dataset.resolve));
@@ -965,7 +978,7 @@ async function editCase(de, c) {
       ${fields.length ? '' : `<div class="hint" data-nospec>${esc(de.name)} has no spec yet, so type the field name. Write the spec on the data page to generate cases automatically.</div>`}
       <div class="field"><label>Input</label><input name="input" value="${esc(c ? c.input : '')}" placeholder="Value to test (fictional)"></div>
       <div class="frow"><div class="field"><label>Expect</label><select name="expect"><option value="accept" ${c && c.expect === 'accept' ? 'selected' : ''}>Accept</option><option value="reject" ${c && c.expect === 'reject' ? 'selected' : ''}>Reject</option></select></div>
-        <div class="field"><label>Tester</label>${testerSel('tester', c ? c.tester : '')}</div></div>${SELF_BOX}
+        <div class="field"><label>Tester</label>${testerSel('tester', c ? c.tester : '', 'Tester', c ? c.id : null)}</div></div>${SELF_BOX}
       <div class="field"><label>Note</label><input name="note" value="${esc(c ? c.note || '' : '')}"></div>
       <div class="hint">Use made-up values only. Never paste real customer data into a test case.</div>`,
     actions: [{ id: 'save', label: c ? 'Save' : 'Add case', primary: true }],
@@ -976,7 +989,7 @@ async function editCase(de, c) {
   if (r.action !== 'save') return;
   const id = c ? c.id : store.newId('tc');
   const data = Object.assign({}, c || { origin: 'user', createdAt: new Date().toISOString() }, { id, dataId: de.id, field: r.form.field.trim(), kind: r.form.kind, input: r.form.input, expect: r.form.expect, note: r.form.note, tester: r.form.tester || undefined });
-  await store.save('testCase', id, data, `${c ? 'Edited' : 'Added custom'} test for ${de.name}.${data.field}${data.tester && (!c || c.tester !== data.tester) ? `; tester ${pname(data.tester)}` : ''}`);
+  if (!(await saveOrSay('testCase', id, data, `${c ? 'Edited' : 'Added custom'} test for ${de.name}.${data.field}${data.tester && (!c || c.tester !== data.tester) ? `; tester ${pname(data.tester)}` : ''}`))) return;
   toast(c ? 'Test case saved' : 'Custom case added');
 }
 
@@ -1023,7 +1036,7 @@ async function editCycle(prj, cid) {
   const next = { id: c ? c.id : store.newId('cyc'), name: f.name.trim(), env: ENVS.includes(f.env) ? f.env : 'uat', start: f.start, end: f.end, testers: f.testers || [] };
   const latest = store.get('project', prj.id) || cur;
   const list = cyclesOf(latest).filter(x => x.id !== next.id).concat([next]);
-  await store.save('project', prj.id, Object.assign({}, latest, { testCycles: list }), `${c ? 'Edited' : 'Planned'} test cycle “${next.name}” (${envTxt(next.env)}, ${fmt(next.start)}–${fmt(next.end)}, ${next.testers.map(pname).join(', ')})`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, latest, { testCycles: list }), `${c ? 'Edited' : 'Planned'} test cycle “${next.name}” (${envTxt(next.env)}, ${fmt(next.start)}–${fmt(next.end)}, ${next.testers.map(pname).join(', ')})`))) return;
   await store.notify(next.testers, `${pname(store.state.me)} named you as a tester in “${next.name}” for ${prj.name}`, 'project:' + prj.id);
   toast(c ? 'Cycle saved' : 'Cycle planned');
 }
@@ -1032,7 +1045,7 @@ async function deleteCycle(prj, cid) {
   const c = cyclesOf(cur).find(x => x.id === cid); if (!c) return;
   const r = await modal({ title: 'Delete test cycle?', body: `<p style="margin:0">${esc(c.name)}. Runs recorded in it are kept.</p>`, actions: [{ id: 'del', label: 'Delete', danger: true }] });
   if (r.action !== 'del') return;
-  await store.save('project', prj.id, Object.assign({}, cur, { testCycles: cyclesOf(cur).filter(x => x.id !== cid) }), `Deleted test cycle “${c.name}”`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { testCycles: cyclesOf(cur).filter(x => x.id !== cid) }), `Deleted test cycle “${c.name}”`))) return;
   toast('Cycle deleted');
 }
 
@@ -1061,8 +1074,11 @@ async function recordRun(prj, opts) {
   const heldMap = eng('heldTests', store.state.docs, prj.id) || {};
   /* R12 #4: in a business check, an unassigned test is passed only by the department that owns its part */
   /* R15 #5 (Jordan): whoever assigned a test (themselves included) can't pass it, in Try it out too */
-  const deptLock = id => { const b = eng('canPassTest', store.state.docs, prj.id, id, me, { env: env0 }); return b && (b.rule === 'assigner' || (env0 === 'uat' && b.rule === 'department')) ? b.text : ''; };
-  const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : deptLock(id);
+  /* R17 #5 (Karen: Rosa ticked a pass she can't give; it was refused only after the 6-digit check): every rule the server
+     applies (assigner, builder, department, joined after testing started) is shown on the row for the chosen phase, and
+     the row's "Pass" can't be picked, before any step-up */
+  const deptLock = (id, env) => { const b = eng('canPassTest', store.state.docs, prj.id, id, me, { env: env || env0 }); return b && b.rule !== 'assignee' && b.rule !== 'unknown' ? b.text : ''; };
+  const passLock = (id, tester, env) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : deptLock(id, env);
   /* R15 (Jordan disagreement 6): each row says its latest result, so a new recording never reads as "all 26 not run" */
   const tTruth = ((eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing || {});
   const ledger = tTruth.status || {};
@@ -1074,14 +1090,14 @@ async function recordRun(prj, opts) {
   const phaseOf = id => ledger[id] === 'fix' ? 'fix' : (((tTruth.phases || {})[phaseKey] || {})[id] ? PH[tTruth.phases[phaseKey][id]] || 'notRun' : 'notRun');
   const lastHint = id => { const v = tTruth.phases ? phaseOf(id) : ledger[id]; return v ? `<small class="hint" data-last-result="${esc(v)}">${esc(LAST[v] || '')}</small>` : ''; };
   const lockAttr = (id, tester) => { const t = passLock(id, tester); return t ? ` data-pass-locked="${esc(t)}"` : ''; };
-  const lockHint = (id, tester) => { const t = passLock(id, tester); return t ? `<small class="hint" data-lock-hint>${esc(t)}</small>` : ''; };
+  const lockHint = (id, tester) => { const t = passLock(id, tester); return `<small class="hint" data-lock-hint ${t ? '' : 'hidden'}>${esc(t)}</small>`; };
   const pick = (k, label, locked) => locked ? '<span class="ts-pick" aria-hidden="true"></span>' : `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
   /* Simple: no test ids and no "expect accept/reject": the value to try and what should happen, in words */
   const caseRow = ({ c, d }) => { const k = 'c:' + c.id; const nm = opts.simple ? `${d.name}${tok(c.field) !== tok(d.name) ? ' · ' + c.field : ''}` : `${d.name} ${caseLbl(c.id)} · ${c.field}`;
     const exp = opts.simple ? (c.expect === 'reject' ? 'should be rejected' : 'should be accepted') : 'expect ' + c.expect;
-    return `<div class="ts-case" data-row="${esc(k)}"${lockAttr(c.id, c.tester)}><div class="ts-case-t">${pick(k, nm, !!passLock(c.id, c.tester))}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small> ${lastHint(c.id)}${lockHint(c.id, c.tester)}</div>
+    return `<div class="ts-case" data-row="${esc(k)}" data-tid="${esc(c.id)}" data-tester="${esc(c.tester || '')}"${lockAttr(c.id, c.tester)}><div class="ts-case-t">${pick(k, nm, !!passLock(c.id, c.tester))}<b>${esc(nm)}</b> <code>${c.input === '' ? '(empty)' : short(c.input)}</code> <small data-should="${esc(c.expect)}">${esc(exp)}${c.tester ? ' · tester ' + esc(pname(c.tester)) : ''}</small> ${lastHint(c.id)}${lockHint(c.id, c.tester)}</div>
     <div class="ts-case-i">${sel('o_' + esc(k), 'Outcome')}<input name="n_${esc(k)}" placeholder="Note (required on fail)" aria-label="Note"><input name="e_${esc(k)}" placeholder="Evidence: link or text" aria-label="Evidence"></div></div>`; };
-  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-script-row ${scn ? 'data-scn-row' : ''}${lockAttr(s.id, s.tester)}><div class="ts-case-t">${pick(k, s.title, !!passLock(s.id, s.tester))}${lockHint(s.id, s.tester)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''} ${lastHint(s.id)}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
+  const scriptRow = s => { const k = 's:' + s.id; const scn = scnIds.has(s.id); return `<div class="ts-case ts-srun" data-row="${esc(k)}" data-tid="${esc(s.id)}" data-tester="${esc(s.tester || '')}" data-script-row ${scn ? 'data-scn-row' : ''}${lockAttr(s.id, s.tester)}><div class="ts-case-t">${pick(k, s.title, !!passLock(s.id, s.tester))}${lockHint(s.id, s.tester)}<b>${esc(s.title)}</b> <span class="chip">${scn ? 'End-to-end' : 'Steps'}</span>${s.tester ? ` <small>tester ${esc(pname(s.tester))}</small>` : ''} ${lastHint(s.id)}${s.given ? `<div class="ts-gwt-i"><span>Given</span> ${esc(opts.simple ? plainEnv(s.given) : s.given)}</div>` : ''}</div>
     <ol class="ts-sst">${scriptSteps(s).map(x => `<li data-step-row="${x.n}"><div class="ts-sst-t">${esc(opts.simple ? plainEnv(x.action) : x.action)}<small>Expected: ${esc(opts.simple ? plainEnv(x.expected) : x.expected)}</small></div><div class="ts-sst-i">${sel(`so_${esc(k)}_${x.n}`, 'Step ' + x.n + ' outcome')}<input name="sn_${esc(k)}_${x.n}" placeholder="Step note" aria-label="Step ${x.n} note"></div></li>`).join('')}</ol>
     <div class="ts-case-i ts-case-i2"><input name="n_${esc(k)}" placeholder="Note (required on fail if no step note)" aria-label="Script note"><input name="e_${esc(k)}" placeholder="Evidence (required to pass): link or text" aria-label="Evidence"></div></div>`; };
   const p = modal({
@@ -1132,12 +1148,21 @@ async function recordRun(prj, opts) {
     const rows = () => [...ov.querySelectorAll('.ts-case')].filter(x => !x.closest('[hidden]'));
     const upd = () => { const v = rows(); const done = v.filter(x => [...x.querySelectorAll('select')].some(s => s.value)).length; live.textContent = opts.simple ? `${done} of ${v.length} tests marked.` : `${done} of ${v.length} rows have an outcome. Rows left as Not run count against coverage.`; };
     const showErr = list => { err.hidden = false; err.innerHTML = `<b>Can't save yet</b><ul>${list.slice(0, 5).map(x => `<li>${esc(x)}</li>`).join('')}</ul>`; err.scrollIntoView({ block: 'nearest' }); };
-    envSel.onchange = () => { blk.hidden = !scriptEnv(envSel.value); upd(); };
+    /* R17 #5: locks follow the chosen phase; a locked row's "Pass" is disabled and says why */
+    const applyLocks = env => ov.querySelectorAll('.ts-case[data-tid]').forEach(row => {
+      const t = passLock(row.dataset.tid, row.dataset.tester || null, env);
+      if (t) row.setAttribute('data-pass-locked', t); else row.removeAttribute('data-pass-locked');
+      const h = row.querySelector('[data-lock-hint]'); if (h) { h.textContent = t; h.hidden = !t; }
+      row.querySelectorAll('select').forEach(sl => { const o = sl.querySelector('option[value=pass]'); if (o) { o.disabled = !!t; o.textContent = t ? 'Pass (not allowed for you)' : 'Pass'; } if (t && sl.value === 'pass') sl.value = ''; });
+      const c = row.querySelector('[data-pick]'); if (c) { c.disabled = !!t; if (t) c.checked = false; }
+    });
+    applyLocks(envOf());
+    envSel.onchange = () => { blk.hidden = !scriptEnv(envSel.value); applyLocks(envSel.value); upd(); };
     ov.querySelector('[data-reset]').onclick = e => { e.stopPropagation(); rows().forEach(x => x.querySelectorAll('select').forEach(s => { s.value = ''; })); upd(); };
-    ov.querySelector('[data-pick-all]').onchange = e => { rows().forEach(x => { const c = x.querySelector('[data-pick]'); if (c) c.checked = e.target.checked; }); };
+    ov.querySelector('[data-pick-all]').onchange = e => { rows().forEach(x => { const c = x.querySelector('[data-pick]'); if (c && !c.disabled) c.checked = e.target.checked; }); };
     ov.querySelector('[data-bulk-pass]').onclick = e => {
       e.stopPropagation();
-      const picked = rows().filter(x => { const c = x.querySelector('[data-pick]'); return c && c.checked; });
+      const picked = rows().filter(x => { const c = x.querySelector('[data-pick]'); return c && c.checked && !c.disabled && !x.hasAttribute('data-pass-locked'); });
       const note = ov.querySelector('[data-bulk-ev]').value.trim();
       const hint = ov.querySelector('[data-bulk-hint]');
       const say = t => { hint.hidden = false; hint.textContent = t; };
@@ -1234,7 +1259,7 @@ async function setDefectState(prj, w, next, extra, why) {
   const cur = store.get('workItem', w.id) || w;
   const patch = Object.assign({ defectStatus: next, status: STATUS_OF[next], updatedAt: new Date().toISOString(), stateLog: (cur.stateLog || []).concat([{ state: next, at: new Date().toISOString(), by: store.state.me }]) }, extra || {});
   if (next === 'closed') patch.doneAt = store.state.today;
-  await store.save('workItem', w.id, Object.assign({}, cur, patch), `${cur.title}: ${dsTxt(dState(cur))} → ${dsTxt(next)}${why ? ' (' + why + ')' : ''}`);
+  if (!(await saveOrSay('workItem', w.id, Object.assign({}, cur, patch), `${cur.title}: ${dsTxt(dState(cur))} → ${dsTxt(next)}${why ? ' (' + why + ')' : ''}`))) return;
 }
 /* After any run: defects whose linked item now passes become "verified" automatically, then closing is offered. */
 async function afterRun(prj, runId) {
@@ -1374,8 +1399,8 @@ async function importCi(prj) {
   const id = store.newId('run');
   const fails = results.filter(x => x.outcome === 'fail');
   ui.runOpen.add(id);
-  await store.save('testRun', id, { id, projectId: prj.id, env, at: new Date().toISOString(), by: store.state.me, source: 'ci', ciSuite: parsed.suite, ciUnmatched: unmatched, ciSkipped: skipped, ciManual: byHand, cycle: 1, results },
-    `Imported CI results (${parsed.suite}) as a ${envTxt(env)} run for ${prj.name}: ${results.length} matched (${byTitle} by title, ${byHand} by hand), ${fails.length} failed, ${skipped} skipped, ${unmatched} unmatched`);
+  try { await store.save('testRun', id, { id, projectId: prj.id, env, at: new Date().toISOString(), by: store.state.me, source: 'ci', ciSuite: parsed.suite, ciUnmatched: unmatched, ciSkipped: skipped, ciManual: byHand, cycle: 1, results },
+    `Imported CI results (${parsed.suite}) as a ${envTxt(env)} run for ${prj.name}: ${results.length} matched (${byTitle} by title, ${byHand} by hand), ${fails.length} failed, ${skipped} skipped, ${unmatched} unmatched`); } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused it')); ui.runOpen.delete(id); return; }
   toast(`CI import (${envTxt(env)}): ${results.length} matched · ${fails.length} fail · ${skipped} skipped · ${unmatched} unmatched`);
   await afterRun(prj, id);
   if (fails.length) await createDefects(prj, id, fails.map(rid), true);
@@ -1425,16 +1450,16 @@ async function createDefects(prj, runId, ids, offered) {
     if (!pick.has(rid(x))) continue;
     const wid = store.newId('def');
     const k = rid(x); const sev = Math.min(4, Math.max(1, +r.form['sev_' + k] || 2));
-    await store.save('workItem', wid, { id: wid, projectId: prj.id, pid: t.pid, step: t.step, title: t.title, owner: t.owner, status: 'idle', start: store.state.today, due, deps: [], kind: 'defect', effortDays: 1,
+    try { await store.save('workItem', wid, { id: wid, projectId: prj.id, pid: t.pid, step: t.step, title: t.title, owner: t.owner, status: 'idle', start: store.state.today, due, deps: [], kind: 'defect', effortDays: 1,
       severity: sev, priority: PRIOS.includes(r.form['pri_' + k]) ? r.form['pri_' + k] : 'Medium', env: run.env, repro: String(r.form['repro_' + k] || '').trim(), defectStatus: 'new',
       stateLog: [{ state: 'new', at: new Date().toISOString(), by: store.state.me }],
-      testRef: Object.assign({ runId }, t.ref), updatedAt: new Date().toISOString() }, `Created ${t.title} from the ${envTxt(run.env)} run (severity ${sev})`);
+      testRef: Object.assign({ runId }, t.ref), updatedAt: new Date().toISOString() }, `Created ${t.title} from the ${envTxt(run.env)} run (severity ${sev})`); } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused it')); break; }
     await store.notify([t.owner], `${pname(store.state.me)} assigned you a defect: ${t.title} (due ${fmt(due)})`, 'workItem:' + wid);
     const res = results.find(y => rid(y) === rid(x)); if (res) res.defectId = wid;
     n++;
   }
   if (n) {
-    await store.save('testRun', runId, Object.assign({}, run, { results }), `Linked ${n} defect${n === 1 ? '' : 's'} to the ${envTxt(run.env)} run`);
+    try { await store.save('testRun', runId, Object.assign({}, run, { results }), `Linked ${n} defect${n === 1 ? '' : 's'} to the ${envTxt(run.env)} run`); } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused it')); return; }
     ui.runOpen.add(runId);
     toast(`${n} defect${n === 1 ? '' : 's'} created`);
   }
@@ -1462,7 +1487,7 @@ async function adoptScripts(prj, onlyNew, quiet) {
     if (Array.isArray(s.steps) && s.steps.length) x.steps = s.steps.map((y, i) => ({ n: i + 1, action: String(y.action || ''), expected: String(y.expected || '') }));
     const owner = s.tester || stepLabel(s.pid, s.step).owner || (store.get('dataElement', (s.data || [])[0]) || {}).owner;
     if (owner) x.tester = owner; return x; }));
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), onlyNew ? `Added ${add.length} generated UAT script${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} generated UAT scripts for ${prj.name}`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScripts: next }), onlyNew ? `Added ${add.length} generated UAT script${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} generated UAT scripts for ${prj.name}`))) return;
   if (!quiet) toast(onlyNew ? `${add.length} script${add.length === 1 ? '' : 's'} added` : `${add.length} business test scripts adopted. You can edit them now.`);
 }
 
@@ -1477,7 +1502,7 @@ async function editScript(prj, sid) {
       <div class="field"><label>Given (precondition)</label><textarea name="given">${esc(s.given)}</textarea></div>
       <div class="field"><label>Steps · action and expected result</label><div class="ts-srows" data-srows>${scriptSteps(s).map(srow).join('')}</div>
         <div><button type="button" class="btn sm" data-sadd>+ Add step</button></div></div>
-      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>${SELF_BOX}
+      <div class="field"><label>Tester</label>${testerSel('tester', s.tester, 'Tester', s.id)}</div>${SELF_BOX}
       <div class="field"><label>Test data</label><div class="ts-dpick">${des.map(d => `<label><input type="checkbox" name="data" value="${esc(d.id)}" ${(s.data || []).includes(d.id) ? 'checked' : ''}> ${esc(d.name)}</label>`).join('') || '<span class="hint">No project data elements.</span>'}</div></div>`,
     actions: [{ id: 'save', label: 'Save script', primary: true }],
   });
@@ -1503,7 +1528,7 @@ async function editScript(prj, sid) {
   const f = r.form;
   const steps = stepsOf(r.root);
   const next = cur.uatScripts.map(x => x.id === sid ? Object.assign({}, x, { title: f.title.trim(), given: (f.given || '').trim(), steps: steps.map((y, i) => ({ n: i + 1, action: y.action, expected: y.expected })), when: steps[0].action, then: steps[steps.length - 1].expected, data: f.data || [], tester: f.tester || undefined }) : x);
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: next }), `Edited UAT script “${f.title.trim()}” (${steps.length} step${steps.length === 1 ? '' : 's'})`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScripts: next }), `Edited UAT script “${f.title.trim()}” (${steps.length} step${steps.length === 1 ? '' : 's'})`))) return;
   toast('Script saved');
 }
 
@@ -1512,7 +1537,7 @@ async function deleteScript(prj, sid) {
   const s = (cur.uatScripts || []).find(x => x.id === sid); if (!s) return;
   const r = await modal({ title: 'Delete UAT script?', body: `<p style="margin:0">${esc(s.title)}</p>`, actions: [{ id: 'del', label: 'Delete', danger: true }] });
   if (r.action !== 'del') return;
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScripts: cur.uatScripts.filter(x => x.id !== sid) }), `Deleted UAT script “${s.title}”`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScripts: cur.uatScripts.filter(x => x.id !== sid) }), `Deleted UAT script “${s.title}”`))) return;
   toast('Script deleted');
 }
 
@@ -1527,13 +1552,13 @@ async function adoptScenarios(prj, onlyNew) {
   const ownerOf = x => { for (const y of x.steps || []) { const o = stepLabel(x.pid, y.step).owner; if (o) return o; } return (store.get('dataElement', (x.data || [])[0]) || {}).owner; };
   const next = (onlyNew ? have : []).concat(add.map(x => Object.assign({ id: x.id, pid: x.pid, title: x.title, data: (x.data || []).slice(),
     steps: (x.steps || []).map((y, i) => ({ n: i + 1, step: y.step, action: String(y.action || ''), expected: String(y.expected || '') })) }, x.tester || ownerOf(x) ? { tester: x.tester || ownerOf(x) } : {})));
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScenarios: next }), onlyNew ? `Added ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} for ${prj.name}`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScenarios: next }), onlyNew ? `Added ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} to ${prj.name}` : `Adopted ${add.length} end-to-end scenario${add.length === 1 ? '' : 's'} for ${prj.name}`))) return;
   toast(`${add.length} scenario${add.length === 1 ? '' : 's'} ${onlyNew ? 'added' : 'adopted'}. They now count toward UAT coverage.`);
 }
 async function assignScenario(prj, sid, tester) {
   const cur = store.get('project', prj.id) || prj;
   const s = (cur.uatScenarios || []).find(x => x.id === sid); if (!s) return;
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScenarios: cur.uatScenarios.map(x => x.id === sid ? Object.assign({}, x, { tester: tester || undefined }) : x) }), tester ? `Assigned scenario “${s.title}” to ${pname(tester)}` : `Unassigned scenario “${s.title}”`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScenarios: cur.uatScenarios.map(x => x.id === sid ? Object.assign({}, x, { tester: tester || undefined }) : x) }), tester ? `Assigned scenario “${s.title}” to ${pname(tester)}` : `Unassigned scenario “${s.title}”`))) return;
   toast(tester ? `Scenario assigned to ${pname(tester)}` : 'Scenario unassigned');
 }
 async function editScenario(prj, sid) {
@@ -1545,7 +1570,7 @@ async function editScenario(prj, sid) {
     body: `<div class="field"><label>Title</label><input name="title" value="${esc(s.title)}"></div>
       <div class="field"><label>Steps · action and expected result</label><div class="ts-srows" data-srows>${scriptSteps(s).map((x, i) => srow(Object.assign({ step: ((s.steps || [])[i] || {}).step }, x), i)).join('')}</div>
         <div><button type="button" class="btn sm" data-sadd>+ Add step</button></div></div>
-      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>${SELF_BOX}`,
+      <div class="field"><label>Tester</label>${testerSel('tester', s.tester, 'Tester', s.id)}</div>${SELF_BOX}`,
     actions: [{ id: 'save', label: 'Save scenario', primary: true }],
   });
   bindSelfOnLastOverlay();
@@ -1569,7 +1594,7 @@ async function editScenario(prj, sid) {
   if (r.action !== 'save') return;
   const steps = stepsOf(r.root).map((y, i) => Object.assign({ n: i + 1 }, y));
   const latest = store.get('project', prj.id) || cur;
-  await store.save('project', prj.id, Object.assign({}, latest, { uatScenarios: latest.uatScenarios.map(x => x.id === sid ? Object.assign({}, x, { title: r.form.title.trim(), steps, tester: r.form.tester || undefined }) : x) }), `Edited scenario “${r.form.title.trim()}” (${steps.length} step${steps.length === 1 ? '' : 's'})`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, latest, { uatScenarios: latest.uatScenarios.map(x => x.id === sid ? Object.assign({}, x, { title: r.form.title.trim(), steps, tester: r.form.tester || undefined }) : x) }), `Edited scenario “${r.form.title.trim()}” (${steps.length} step${steps.length === 1 ? '' : 's'})`))) return;
   toast('Scenario saved');
 }
 async function deleteScenario(prj, sid) {
@@ -1577,7 +1602,7 @@ async function deleteScenario(prj, sid) {
   const s = (cur.uatScenarios || []).find(x => x.id === sid); if (!s) return;
   const r = await modal({ title: 'Delete scenario?', body: `<p style="margin:0">${esc(s.title)}</p><div class="hint">It stops counting toward UAT coverage.</div>`, actions: [{ id: 'del', label: 'Delete', danger: true }] });
   if (r.action !== 'del') return;
-  await store.save('project', prj.id, Object.assign({}, cur, { uatScenarios: cur.uatScenarios.filter(x => x.id !== sid) }), `Deleted scenario “${s.title}”`);
+  if (!(await saveOrSay('project', prj.id, Object.assign({}, cur, { uatScenarios: cur.uatScenarios.filter(x => x.id !== sid) }), `Deleted scenario “${s.title}”`))) return;
   toast('Scenario deleted');
 }
 
@@ -1592,7 +1617,7 @@ async function resolveReq(dataId, i) {
   if (r.action !== 'resolve') return;
   const note = (r.form.note || '').trim();
   const discovered = (de.discovered || []).map((x, j) => j === i ? Object.assign({}, x, { resolved: { by: store.state.me, at: new Date().toISOString(), note } }) : x);
-  await store.save('dataElement', de.id, Object.assign({}, de, { discovered }), `Resolved a discovered requirement on ${de.name}: ${note.slice(0, 80)}`);
+  if (!(await saveOrSay('dataElement', de.id, Object.assign({}, de, { discovered }), `Resolved a discovered requirement on ${de.name}: ${note.slice(0, 80)}`))) return;
   toast('Requirement resolved');
 }
 
@@ -1609,7 +1634,7 @@ async function logDiscovered(runId, caseId) {
   });
   if (r.action !== 'log' || !(r.form.text || '').trim()) return;
   const text = r.form.text.trim();
-  await store.save('dataElement', de.id, Object.assign({}, de, { discovered: [...(de.discovered || []), { text, fromRun: runId, caseId, at: new Date().toISOString() }] }), `Logged discovered requirement on ${de.name}`);
+  if (!(await saveOrSay('dataElement', de.id, Object.assign({}, de, { discovered: [...(de.discovered || []), { text, fromRun: runId, caseId, at: new Date().toISOString() }] }), `Logged discovered requirement on ${de.name}`))) return;
   await store.notify([de.owner], `New discovered requirement on ${de.name}: “${text.slice(0, 80)}”`, 'dataElement:' + de.id);
   toast('Requirement logged and owner notified');
 }

@@ -966,3 +966,69 @@ test('R16: inclusive thresholds and their disjointness', () => {
   assert.equal(I.thresholdsDisjoint({ subject: 'limit', op: '<=', amount: 50000 }, { subject: 'limit', op: '>', amount: 50000 }), true);
   assert.equal(I.thresholdsDisjoint({ subject: 'limit', op: '<', amount: 50000 }, { subject: 'limit', op: '>', amount: 250000 }), true);
 });
+
+/* ---------- R17 P2: the R16 [own data] parser findings (Jordan, PMO director, Karen, BPM) ---------- */
+/* Fictional Northwind procedures written from the reviewers' repros (jordan.md, expert-pmo.md) */
+const R17_BENEFITS = `Benefits Enrollment Change
+1. The employee submits a life-event change form with their member ID, the dependent's date of birth and the dependent SSN.
+2. Benefits Specialist (Ana Ruiz) verifies the supporting documents and checks eligibility.
+3. If the change adds a dependent, the Benefits Manager approves the change.
+4. Carrier Integration Engineer transmits the enrollment file to the carrier with the member ID and dependent SSN.
+5. Payroll updates the deduction amount.`;
+const R17_LAPTOP = `Contractor Laptop Provisioning
+1. The hiring manager submits a laptop request in ServiceNow.
+2. Security reviews the access request (Sam Keller).
+3. Help Desk images the laptop and records the asset tag.
+4. Help Desk ships the laptop to the contractor.`;
+test('R17 P2 parser: an unfamiliar verb after a role or team still names the doer; roles are roles, not teams', () => {
+  const b = I.parseSop(R17_BENEFITS), l = I.parseSop(R17_LAPTOP);
+  const cie = steps(b).find(n => /enrollment file/i.test(n.title));
+  assert.deepEqual([cie.ownerRole, cie.title], ['Carrier Integration Engineer', 'Transmit the enrollment file to the carrier with the member ID and dependent SSN']);
+  assert.deepEqual(cie.touches, [], 'a role with no team word belongs to no team: its department is picked, never invented');
+  assert.ok(!b.teams.includes('Carrier Integration Engineer'), 'never listed as a team: ' + b.teams.join(', '));
+  const img = steps(l).find(n => /laptop and record/i.test(n.title));
+  assert.deepEqual([img.ownerRole, img.title], ['Help Desk', 'Image the laptop and record the asset tag'], 'PMO director: step 3\'s Help Desk owner is no longer blank');
+  /* a word that is not a verb still never makes an actor ("Vendor documents are uploaded" is a passive) */
+  assert.equal(I.splitActor('Vendor documents are uploaded to the portal').actor, null);
+  assert.equal(I.splitActor('Purchase orders go to AP').actor, null);
+});
+test('R17 P2 parser: "(Sam Keller)" after the action is the named person, never part of the title', () => {
+  const l = I.parseSop(R17_LAPTOP);
+  const rev = steps(l).find(n => /access request/i.test(n.title));
+  assert.equal(rev.title, 'Review the access request');
+  assert.equal(rev.ownerRole, 'Security');
+  assert.equal(rev.note, 'Named in the procedure: Sam Keller');
+  assert.deepEqual(rev.touches, ['Security'], 'Sam is named on the Security step; nothing maps him to another department');
+  assert.ok(!/Sam Keller/.test(steps(l).map(n => n.title).join(' ')));
+});
+test('R17 P2 parser: identifiers like member ID, dependent SSN and asset tag are information', () => {
+  const b = I.parseSop(R17_BENEFITS), l = I.parseSop(R17_LAPTOP);
+  const bn = b.newData.map(x => x.name), ln = l.newData.map(x => x.name);
+  ['Member ID', 'Dependent SSN', 'Dependent date of birth'].forEach(n => assert.ok(bn.includes(n), n + ' in ' + bn.join(', ')));
+  assert.ok(!bn.includes('Dependent date'), 'never cut to "Dependent date"');
+  assert.equal(bn.filter(n => /member id/i.test(n)).length, 1, 'one item however many lines name it');
+  assert.ok(ln.includes('Asset tag'), ln.join(', '));
+  /* the member's own identifiers arrive with each run */
+  const by = n => b.newData.find(x => x.name === n) || {};
+  ['Member ID', 'Dependent SSN'].forEach(n => assert.equal(I.haveChoice(by(n)), 'run', n));
+  assert.equal(I.haveChoice(l.newData.find(x => x.name === 'Asset tag')), 'made', 'the Help Desk records the asset tag: made by that step, never collected from the contractor');
+});
+test('R17 P2 defaults: bank letter and remit-to are collected each run; paste and BPMN give the same answer', () => {
+  const r = I.parseSop(`Vendor Setup
+1. Purchasing logs the new vendor request.
+2. AP checks the bank letter and the remit-to address against the W-9.
+3. AP activates the vendor in the ERP.`);
+  const by = n => r.newData.find(x => x.name === n) || {};
+  assert.equal(I.haveChoice(by('Bank letter')), 'run', JSON.stringify(by('Bank letter')));
+  assert.equal(I.haveChoice(by('Remit-to address')), 'run', r.newData.map(x => x.name).join(', '));
+  /* BPMN: the information a task names, with the same process context the paste reader has (process.js haveDefaults) */
+  const pasted = I.parseSop(FIX('r15-credit-sop.txt'));
+  const tasks = ['Enter credit limit request', 'Pull risk score from credit bureau', 'Review and recommend', 'Controller sign-off', 'Update credit limit in ERP and notify customer'];
+  const ctx = tasks.join('. ');
+  const fromBpmn = tasks.flatMap(t => I.taskInfo(t).map(x => ({ name: x.name, choice: x.produced ? 'made' : I.perRunOf(x.name, '', t, ctx) ? 'run' : 'have' })));
+  const both = fromBpmn.filter(x => pasted.newData.some(p => p.name === x.name));
+  assert.ok(both.length >= 3, both.map(x => x.name).join(', '));
+  both.forEach(x => assert.equal(x.choice, I.haveChoice(pasted.newData.find(p => p.name === x.name)), x.name + ': paste and BPMN agree'));
+  /* an internal request stays "We have it" (R15/R16 Karen) */
+  assert.equal(I.haveChoice(I.parseSop(FIX('r15-karen-sop.txt')).newData.find(x => x.name === 'Vendor request')), 'have');
+});

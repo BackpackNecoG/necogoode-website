@@ -495,6 +495,8 @@ async function writeDeptEdit(store, wsId, docs, r, opts) {
     (d.approvers || []).forEach(id => { if (was[id]) since[id] = was[id]; else if (opts.stampApprovers && !(old.approvers || []).includes(id)) since[id] = now; else if (eng[id]) since[id] = eng[id]; });
     const out = { id: d.id, name: d.name, approvers: d.approvers || [] };
     if (Object.keys(since).length) out.approverSince = since;
+    /* R17 P4: the engine dates a removed approver (approverRemoved) so their sign-offs on parts not launched reopen; keep it */
+    if (isPlainObject(d.approverRemoved) && Object.keys(d.approverRemoved).length) out.approverRemoved = Object.assign({}, d.approverRemoved);
     return out;
   });
   const pend = opts.pending !== undefined ? opts.pending : pendingOf(docs);
@@ -511,9 +513,66 @@ async function writeDeptEdit(store, wsId, docs, r, opts) {
   await patch('person', r.people); await patch('process', r.processes); await patch('project', r.projects);
   return departments;
 }
+/* ---------- R17 P4 #2 (Jordan R16 re-test 2, render P1 #5): which sign-offs a department change reopens ----------
+   The engine decides (readiness → bu-signoff.reopened: a sign-off on a part not yet launched stops counting when its
+   approver moved out or stopped being an approver). This only asks it, before and after the change, so the pending card
+   and the confirm say exactly what the engine will do. [{projectId, project, bu, person, personName, approval, reason}] */
+const signoffCheck = (eng, docs, projectId, today) => {
+  try { return ((eng.readiness(docs, projectId, today) || {}).checks || []).find(c => c && c.id === 'bu-signoff') || null; } catch (e) { return null; }
+};
+function withEdit(docs, r) {
+  const set = settingsOf(docs).rest;
+  const depts = r.departments.map(d => Object.assign({ id: d.id, name: d.name, approvers: d.approvers || [] },
+    isPlainObject(d.approverSince) ? { approverSince: d.approverSince } : {}, isPlainObject(d.approverRemoved) ? { approverRemoved: d.approverRemoved } : {}));
+  const ws = ((docs.workspace || []).filter(x => x.id !== SETTINGS_ID)).concat([{ id: SETTINGS_ID, data: Object.assign({}, set, { id: SETTINGS_ID, departments: depts }) }]);
+  const patch = (type, list) => (docs[type] || []).map(e => { const x = (list || []).find(y => y.id === e.id); return x ? { id: e.id, data: Object.assign({}, e.data, x, { id: e.id }) } : e; });
+  return Object.assign({}, docs, { workspace: ws, person: patch('person', r.people), process: patch('process', r.processes), project: patch('project', r.projects) });
+}
+function reopensOf(docs, op, opts) {
+  const eng = engine();
+  if (!eng || !op || (op.kind !== 'assign' && op.kind !== 'approvers') || typeof eng.readiness !== 'function' || typeof eng.departmentEdit !== 'function') return [];
+  const today = (opts && opts.today) || new Date().toISOString().slice(0, 10);
+  const after = opts && opts.after ? opts.after : (() => { const r = withRevoke(docs, op, eng.departmentEdit(docs, op)); return r && r.ok ? withEdit(docs, r) : null; })();
+  if (!after) return [];
+  const projects = ((docs.project || []).map(d => Object.assign({}, d.data, { id: d.id }))).filter(p => p.status !== 'live' && p.status !== 'archived' && !(Array.isArray(p.released) && p.released.length));
+  const out = [];
+  projects.forEach(p => {
+    const was = signoffCheck(eng, docs, p.id, today), now = signoffCheck(eng, after, p.id, today);
+    if (!was || !now) return;
+    (now.reopened || []).forEach(x => {
+      if (!x || (was.reopened || []).some(y => y && y.bu === x.bu && y.person === x.person)) return;
+      const held = (was.sectionStatus || []).find(s => s.bu === x.bu);
+      if (!held || !held.approved || held.approver !== x.person) return;     /* only a sign-off that counts today reopens */
+      out.push({ projectId: p.id, project: p.name || 'a project', bu: x.bu, person: x.person, personName: personName(docs, x.person) || 'Someone',
+        approval: x.approval || null, reason: x.reason || null });
+    });
+  });
+  return out;
+}
+const possessive = n => n + (/s$/i.test(n) ? '’' : '’s');
+/* "Sam Keller’s IT sign-off on Quarterly Access Review Automation" / "… sign-offs: IT on A; Compliance on B" */
+function reopensPhrase(list) {
+  if (!list.length) return '';
+  const byPerson = {};
+  list.forEach(x => { (byPerson[x.personName] = byPerson[x.personName] || []).push(x); });
+  return Object.entries(byPerson).map(([nm, xs]) => xs.length === 1 ? `${possessive(nm)} ${xs[0].bu} sign-off on ${xs[0].project}`
+    : `${possessive(nm)} sign-offs: ${xs.map(x => `${x.bu} on ${x.project}`).join('; ')}`).join(', and ');
+}
+const again = list => (list.length === 1 ? 'It must be approved again before launch.' : 'Each must be approved again before launch.');
+const reopensText = list => (list.length ? `Confirming this reopens ${reopensPhrase(list)}, which ${list.length === 1 ? 'is' : 'are'} not launched yet. ${again(list)}` : null);
+const reopenedText = list => (list.length ? `Reopened ${reopensPhrase(list)}. ${again(list)}` : null);
+/* one History line per reopened sign-off, in the engine's words for why */
+async function logReopened(store, wsId, actor, docs, op, list) {
+  for (const x of list) {
+    const why = op.kind === 'assign' ? `${x.personName} moved out of ${x.bu} before it launched` : `${x.personName} is no longer an approver for ${x.bu}, and it has not launched`;
+    await store.appendEvent(wsId, { actor, action: 'departments', ref: 'project:' + x.projectId, summary: `Reopened ${possessive(x.personName)} ${x.bu} sign-off on ${x.project}: ${why}`.slice(0, 300) });
+  }
+}
 function pendingView(docs) {
-  return pendingOf(docs).map(p => Object.assign({}, p, { byName: personName(docs, p.by), departmentId: p.op && p.op.id || null,
-    note: null }));
+  return pendingOf(docs).map(p => {
+    const reopens = reopensOf(docs, p.op);
+    return Object.assign({}, p, { byName: personName(docs, p.by), departmentId: p.op && p.op.id || null, note: null, reopens, reopensText: reopensText(reopens) });
+  });
 }
 async function handleDepartments({ method, wsId, ws, body, store, send, fail }) {
   if (method !== 'POST') { fail(405, 'method not allowed'); return; }
@@ -557,12 +616,14 @@ async function handleDepartments({ method, wsId, ws, body, store, send, fail }) 
       const er = withRevoke(docs, pop, eng.departmentEdit(docs, pop));
       if (!er.ok) { fail(400, er.error); return; }
       if (pendingOf(docs).some(p => p.kind === pop.kind && (pop.kind === 'assign' ? p.op.personId === pop.personId : p.op.id === pop.id))) { fail(409, 'A change for this is already waiting for a second Admin. Confirm or cancel it first.'); return; }
+      const reopened = reopensOf(docs, pop);
       await writeDeptEdit(store, wsId, docs, er, { at, stampMember: pop.kind === 'assign', stampApprovers: pop.kind === 'approvers' });
       const nms = (pop.approvers || []).map(id => personName(docs, id) || 'someone');
       const sentence = first ? `Named the first approver${nms.length === 1 ? '' : 's'} for ${curD.name || 'the department'}: ${nms.join(', ')} (applies to new work only)`
         : `${t.done} (${admins(docs).length <= 1 ? 'no second Admin in this workspace' : 'no other Admin can confirm it'}; applies to new work only)`;
       await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings', summary: sentence.slice(0, 300) });
-      send(200, { ok: true, applied: true, pending: null, departments: eng.departments(await fresh()) });
+      await logReopened(store, wsId, actor, docs, pop, reopened);
+      send(200, { ok: true, applied: true, pending: null, departments: eng.departments(await fresh()), reopened, reopenedText: reopenedText(reopened) });
       return;
     }
     const r = await propose({ kind: op.kind, id: op.id == null ? null : String(op.id), personId: op.personId != null ? String(op.personId) : undefined, approvers: op.approvers }, docs);
@@ -617,11 +678,13 @@ async function decidePending({ wsId, ws, body, store, send, fail, pid, decision 
   if (!su) { fail(403, stepUpRefusal(body, at, 'Confirming a department change')); return; }
   const r = withRevoke(docs, p.op, eng.departmentEdit(docs, p.op));
   if (!r.ok) { fail(409, `This change can’t be applied any more: ${r.error} Cancel it and propose it again.`); return; }
+  const reopened = reopensOf(docs, p.op);
   await writeDeptEdit(store, wsId, docs, r, { at, pending: rest, stampMember: p.kind === 'assign', stampApprovers: p.kind === 'approvers' });
   await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings',
     summary: `${t.done} (proposed by ${personName(docs, p.by) || 'an Admin'}, confirmed by ${personName(docs, actor)} with the extra sign-in check)`.slice(0, 300) });
+  await logReopened(store, wsId, actor, docs, p.op, reopened);
   const d2 = (await store.getState(ws)).docs;
-  send(200, { ok: true, applied: true, departments: eng.departments(d2) });
+  send(200, { ok: true, applied: true, departments: eng.departments(d2), reopened, reopenedText: reopenedText(reopened) });
 }
 
 /* ---------- R15 M4 #1 (Jordan R14 re-test 2): two-person, step-up role changes ---------- */

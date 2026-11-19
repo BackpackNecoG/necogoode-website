@@ -5,7 +5,8 @@ export const BASE = (() => { const i = location.pathname.indexOf('/concepts/pmof
 export const E = () => window.PMOEngine;
 
 export const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const D = s => new Date(String(s).slice(0, 10) + 'T12:00:00');
+/* R17 (Jordan + PMO r16): a full timestamp is shown in the viewer's local day; a plain YYYY-MM-DD stays that calendar day */
+const D = s => /T\d{2}:\d{2}/.test(String(s)) ? new Date(s) : new Date(String(s).slice(0, 10) + 'T12:00:00');
 export const fmt = s => s ? D(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 export const fmtTime = s => s ? new Date(s).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
 export const days = s => Math.round((D(s) - D(store.state.today)) / 86400000);
@@ -59,6 +60,14 @@ export function modal({ title, body, actions }) {
   });
 }
 
+/* R17 (Karen, P2): a code pasted into a 6-digit field ("123 456", "Your code is 123456") fills it with its digits; the
+   field's 6-character limit used to cut a spaced paste short, so the check then failed. Every step-up dialog uses it. */
+if (typeof document !== 'undefined') document.addEventListener('paste', e => {
+  const t = e.target; if (!t || !t.matches || !t.matches('input[autocomplete="one-time-code"]')) return;
+  const dg = String(((e.clipboardData || window.clipboardData) || { getData: () => '' }).getData('text') || '').replace(/\D/g, '');
+  if (!dg) return;
+  e.preventDefault(); t.value = dg.slice(0, 6); t.dispatchEvent(new Event('input', { bubbles: true }));
+}, true);
 /* Simulated step-up. In production this is a Microsoft Entra Conditional Access authentication-context challenge. */
 export async function stepUp(actionLabel, attempt) {
   attempt = attempt || 1;
@@ -70,7 +79,7 @@ export async function stepUp(actionLabel, attempt) {
     actions: [{ id: 'verify', label: 'Verify', primary: true }],
   });
   if (r.action !== 'verify') return false;
-  if (/^\d{6}$/.test(r.form.code || '')) return true;
+  if (/^\d{6}$/.test(String(r.form.code || '').replace(/\s+/g, ''))) return true;
   return attempt < 3 ? stepUp(actionLabel, attempt + 1) : false; /* re-prompt inline, max 3 tries */
 }
 

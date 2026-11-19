@@ -264,7 +264,9 @@ function staleChanges(prj, section, a, rd) {
     const lbl = {}; (x.details || []).forEach(d => { lbl[d.ref] = d.label; });
     /* R14 (BPM-9): a task changed after approval says what changed, from → to (engine words) */
     const v = (x.changed || []).map(r => { const w = refView(r, prj.id); return (/^section:[^#]+#s:/.test(r) || /^workItem:/.test(r)) && lbl[r] ? Object.assign(w, { text: lbl[r].charAt(0).toUpperCase() + lbl[r].slice(1), href: w.href || null }) : w; });
-    return v.some(y => y.cutover) ? v : co.concat(v);
+    /* R17 #6 (BPM: the re-approval reason was overwritten): the engine's reasons as they are; a launch-day plan edit is
+       a reason only for a team whose own launch-day tasks changed (the engine says so) */
+    return v;
   }
   if (co.length) return co.concat(staleFallback(prj, section, at));
   return staleFallback(prj, section, at);
@@ -1485,8 +1487,11 @@ function simpleRender(prj, rd, params) {
     const waitLine = p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting="${p.waitN == null ? '' : p.waitN}">Waiting on:<ul class="rs-wait-lines">${p.waiting.map(t => `<li data-wait-line>${esc(String(t).charAt(0).toUpperCase() + String(t).slice(1))}</li>`).join('')}</ul></div>` : '';
     const testLine = p.perBU && (p.perBU.total || p.perBU.gapCount) ? `<div class="rs-part-s" data-part-tests="${p.perBU.passed}/${p.perBU.checks}" data-part-gaps="${p.perBU.gapCount}">Tests for this part: ${esc(p.perBU.text)}${p.perBU.failed ? `, ${p.perBU.failed} failed` : ''}</div>` : '';
     if (!live && (p.state === 'nobody' || p.state === 'blocked')) {
-      return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><a href="${href}" data-link data-part-open="${esc(p.bu)}"><b>${esc(p.bu)}</b></a>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
-        ${p.state === 'blocked' ? sodBlock(prj, p) : choosePicker(prj, p.bu)}${testLine}</div>`;
+      /* R17 #8 (BPM): an approver invited by email is counted here as on the process page */
+      const pa = p.state === 'nobody' ? eng('partApprovers', prj.id, p.bu) : null;
+      const inv = pa && pa.invitedText ? pa.invitedText : '';
+      return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><a href="${href}" data-link data-part-open="${esc(p.bu)}"><b>${esc(p.bu)}</b></a>${badge(inv ? 'Invited, not joined yet' : PART_TXT[p.state], PART_CLS[p.state])}</div>
+        ${inv ? `<div class="rs-part-s" data-part-invited>${esc(inv)}</div>` : ''}${p.state === 'blocked' ? sodBlock(prj, p) : choosePicker(prj, p.bu)}${testLine}</div>`;
     }
     const act = !live && mine && p.state !== 'approved' && p.state !== 'notready' ? `<span class="btn primary" data-part-approve="${esc(p.bu)}">${p.state === 'stale' ? 'Look again and approve' : 'Approve your part'}</span>`
       : `<span class="rl-go" data-bu-review="${esc(p.bu)}">See this part ›</span>`;
@@ -1520,8 +1525,8 @@ function simpleRender(prj, rd, params) {
       ${approvedTeams(prj, lastGo)}
       ${canRollback(prj) ? `<button class="btn danger" data-rollback>Undo the launch</button>` : `<div class="hint" data-why="rm">If something goes badly wrong, ${esc(pname(rm))} (launch owner) can undo the launch.</div>`}
       ${releases[0] && isFailedRb(releases[0]) ? `<div class="rs-fail" data-rollback-failed><b>The undo did not go through.</b> Nothing was restored; the launch is still live.</div>` : ''}</div>` : ''}
-    ${parts.length && !live ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && (canChoose(prj) && parts.some(p => p.state === 'nobody' || p.state === 'blocked'))) : ''}
     ${sec('plan', 'Launch-day plan', live ? 'Done' : planNeeds.length || ckFail('cutover-plan') ? 'Not ready yet' : gOpen.length ? `${gOpen.length} final check${gOpen.length === 1 ? '' : 's'} to confirm` : 'Ready', cutoverCard(prj), !live && (ckFail('cutover-plan') || gOpen.some(t => t.owner === me)))}
+    ${parts.length && !live ? sec('approvals', 'Approvals', `${parts.filter(p => p.state === 'approved').length} of ${parts.length} teams approved`, `<div class="rs-parts">${partRows}</div><div class="hint">Only teams whose part changed approve, once their part is ready. Two different people must approve. The project manager and the launch owner can’t approve a team’s part.</div>`, !live && (canChoose(prj) && parts.some(p => p.state === 'nobody' || p.state === 'blocked'))) : ''}
     ${sec('access', 'Temporary data access', grantsOpen ? `${grantsOpen} open` : 'None open', grantsCard(prj), !live && ckFail('grants-closed'))}
     ${live ? sec('support', 'Support after launch', hc.length ? `${hc.length} open problem${hc.length === 1 ? '' : 's'}` : 'No open problems', hypercareCard(prj, lastGo), hc.some(x => +x.severity === 1)) : ''}
     ${sec('audit', 'History', 'Every launch event, oldest first', '<div data-rl-history><div class="hint">Loading history…</div></div>', false)}
@@ -1575,21 +1580,35 @@ function simpleBuView(prj, buRaw, rd) {
   if (!p) return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> · <a href="${link('/release/' + prj.id)}" data-link>Launch</a></div><h1>${esc(buRaw)}</h1><p data-no-section>Nothing ${esc(buRaw)} does changes in ${esc(prj.name)}, so ${esc(buRaw)} doesn’t need to approve anything.</p>${back}</div></section>`;
   const s = p.s; const me = store.state.me; const live = prj.status === 'live';
   const e = E(); const nm = idNames();
-  const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const pr = store.get('process', pid); try { diffs[pid] = pr && e && e.diffProcess ? e.diffProcess(pr, store.state.docs) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
-  const stOf = x => (diffs[x.pid] || { nodes: {} }).nodes[x.step.id] || 'same';
-  const changed = s.steps.filter(x => stOf(x) !== 'same');
-  const same = s.steps.filter(x => stOf(x) === 'same');
-  const stepsHtml = changed.map(x => { const st = stOf(x); const ch = plainChanges(((diffs[x.pid] || {}).changes || {})[x.step.id], nm);
-    return `<li data-bu-step="${esc(x.step.id)}"><span class="rs-chg ${st === 'new' ? 'new' : 'chg'}">${st === 'new' ? 'New step' : 'Changed'}</span> <b>${esc(x.step.title)}</b>${ch.length && st !== 'new' ? `<div class="rs-chg-l">${ch.map(t => esc(t)).join(' · ')}</div>` : ''}</li>`; }).join('')
-    + (same.length ? `<li class="rs-same" data-bu-same>${same.length} other step${same.length === 1 ? '' : 's'} in your part ${same.length === 1 ? 'has' : 'have'} not changed: ${same.map(x => esc(x.step.title)).join(', ')}.</li>` : '');
-  const dataIds = new Set(); s.steps.forEach(x => { (x.step.data || []).forEach(d => dataIds.add(d)); (x.step.subs || []).forEach(sb => (sb.data || []).forEach(d => dataIds.add(d))); });
-  const des = [...dataIds].map(id => store.get('dataElement', id)).filter(Boolean);
-  const info = des.map(de => { const l0 = availOf(de.id); const l = hasOpenProblem(prj, de.id) ? { label: 'Has a problem', tone: 'warn' } : l0; return `<li data-bu-data="${esc(de.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(de.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span></li>`; }).join('');
+  /* R17 #1 (Karen, Jordan, BPM: "No steps"): what the approver signs comes from the engine's partChanges, the gate's own
+     rule, so a part that needs approval always lists its new, changed and removed steps (was → now), its changed
+     choices and the information those steps use. The local section is the fallback for an older engine. */
+  const pc = e && e.partChanges ? (() => { try { return e.partChanges(store.state.docs, prj.id, p.bu); } catch (err) { return null; } })() : null;
+  let stepsHtml, info, titles;
+  const SL = { new: 'New step', changed: 'Changed', removed: 'Removed' };
+  if (pc) {
+    const tidy = t => { const x = String(t).replace(/\bdata element(s?)\b/gi, 'information').replace(/\bSLA\b/g, 'time limit').replace(/^Data (added|removed)/, 'Information $1'); return x.charAt(0).toUpperCase() + x.slice(1); };
+    stepsHtml = pc.steps.map(x => `<li data-bu-step="${esc(x.id)}" data-bu-step-status="${esc(x.status)}"><span class="rs-chg ${x.status === 'new' ? 'new' : 'chg'}">${SL[x.status] || 'Changed'}</span> <b>${esc(x.title)}</b> <span class="hint" data-bu-doer>${esc(x.doer)}</span>${x.changes.length ? `<div class="rs-chg-l">${x.changes.slice(0, 5).map(t => `<span class="rs-was">${esc(tidy(t))}</span>`).join('')}</div>` : ''}</li>`).join('')
+      + pc.choices.map(c => `<li data-bu-choice="${esc(c.id)}"><span class="rs-chg ${c.status === 'new' ? 'new' : 'chg'}">${c.status === 'new' ? 'New choice' : 'Changed choice'}</span> <b>${esc(c.title)}</b>${c.changes.length ? `<div class="rs-chg-l">${c.changes.slice(0, 5).map(t => `<span class="rs-was">${esc(tidy(t))}</span>`).join('')}</div>` : ''}</li>`).join('')
+      + (pc.same.length ? `<li class="rs-same" data-bu-same>${pc.same.length} other step${pc.same.length === 1 ? '' : 's'} in your part ${pc.same.length === 1 ? 'has' : 'have'} not changed: ${pc.same.map(x => esc(x.title)).join(', ')}.</li>` : '');
+    info = pc.information.map(x => { const l0 = availOf(x.id); const l = hasOpenProblem(prj, x.id) ? { label: 'Has a problem', tone: 'warn' } : l0; return `<li data-bu-data="${esc(x.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(x.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span>${x.why === 'changed' ? ' <span class="hint">changes in this project</span>' : ''}</li>`; }).join('');
+    titles = (pc.steps.length ? pc.steps.map(x => x.title) : pc.choices.map(c => c.title)).slice(0, 3);
+  } else {
+    const diffs = {}; [...new Set(s.steps.map(x => x.pid))].forEach(pid => { const pr = store.get('process', pid); try { diffs[pid] = pr && e && e.diffProcess ? e.diffProcess(pr, store.state.docs) : { nodes: {}, changes: {} }; } catch (err) { diffs[pid] = { nodes: {}, changes: {} }; } });
+    const stOf = x => (diffs[x.pid] || { nodes: {} }).nodes[x.step.id] || 'same';
+    const changed = s.steps.filter(x => stOf(x) !== 'same');
+    const same = s.steps.filter(x => stOf(x) === 'same');
+    stepsHtml = changed.map(x => { const st = stOf(x); const ch = plainChanges(((diffs[x.pid] || {}).changes || {})[x.step.id], nm);
+      return `<li data-bu-step="${esc(x.step.id)}"><span class="rs-chg ${st === 'new' ? 'new' : 'chg'}">${st === 'new' ? 'New step' : 'Changed'}</span> <b>${esc(x.step.title)}</b>${ch.length && st !== 'new' ? `<div class="rs-chg-l">${ch.map(t => esc(t)).join(' · ')}</div>` : ''}</li>`; }).join('')
+      + (same.length ? `<li class="rs-same" data-bu-same>${same.length} other step${same.length === 1 ? '' : 's'} in your part ${same.length === 1 ? 'has' : 'have'} not changed: ${same.map(x => esc(x.step.title)).join(', ')}.</li>` : '');
+    const dataIds = new Set(); changed.forEach(x => { (x.step.data || []).forEach(d => dataIds.add(d)); (x.step.subs || []).forEach(sb => (sb.data || []).forEach(d => dataIds.add(d))); });
+    info = [...dataIds].map(id => store.get('dataElement', id)).filter(Boolean).map(de => { const l0 = availOf(de.id); const l = hasOpenProblem(prj, de.id) ? { label: 'Has a problem', tone: 'warn' } : l0; return `<li data-bu-data="${esc(de.id)}"><span class="rs-dot ${l.tone}" aria-hidden="true"></span>${esc(de.name)} <span class="rs-st ${l.tone}">${esc(l.label)}</span></li>`; }).join('');
+    titles = (changed.length ? changed : s.steps).slice(0, 3).map(x => x.step.title);
+  }
   /* R9 §7: "Tests for this part" uses the same perBU numbers as the part card */
   const pb = p.perBU;
   /* R11 §1: "N of N" includes coverage gaps and says so plainly; information the project does not change is named */
   const ev = pb ? { text: pb.total || pb.gapCount ? `${pb.text}${pb.failed ? ` · ${pb.failed} failed` : ''}${pb.notRun ? ` · ${pb.notRun} not run yet` : ''}` : 'No tests cover this part yet.', tone: pb.failed ? 'bad' : pb.notRun || pb.gapCount || !pb.total ? 'warn' : 'ok', together: evidenceLine(prj, s).together } : evidenceLine(prj, s);
-  const titles = (changed.length ? changed : s.steps).slice(0, 3).map(x => x.step.title);
   const key = prj.id + '|' + p.bu;
   const dflt = noteFactsOf(prj, p.bu, s) || `I reviewed the changes to ${titles.join(', ')}.`;
   const val = ui.attest[key] != null ? ui.attest[key] : dflt;
@@ -1618,8 +1637,8 @@ function simpleBuView(prj, buRaw, rd) {
       <h1>Approve the ${esc(p.bu)} part</h1><p class="rs-sub">${esc(prj.name)} · ${statusLine}</p></div></section>
     <div class="rs-wrap rs-bv" data-bu-view="${esc(p.bu)}" data-simple-approver>
       ${doneMsg}
-      <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li>No steps.</li>'}</ul>${teamsSystems(s)}</div>
-      <div class="card rs-card"><h3>Information your part uses</h3>${info ? `<ul class="rs-list rs-info">${info}</ul>` : '<div class="hint">Your part uses no information.</div>'}</div>
+      <div class="card rs-card"><h3>What changed in your part</h3><ul class="rs-list rs-changes">${stepsHtml || '<li data-bu-nothing>Nothing in this part changed.</li>'}</ul>${teamsSystems(s)}</div>
+      <div class="card rs-card"><h3>Information your part uses</h3>${info ? `<ul class="rs-list rs-info">${info}</ul>` : '<div class="hint">The changed steps in your part use no information.</div>'}</div>
       <div class="card rs-card"><h3>Tests for this part</h3><div class="rs-ev ${ev.tone}" data-evidence-line ${pb ? `data-part-tests="${pb.passed}/${pb.checks}" data-part-gaps="${pb.gapCount}"` : ''}>${esc(ev.text)}${ev.together ? ` <span class="rs-together" data-passed-together="${esc(ev.together)}" title="Several tests were marked passed at once with one shared note">${esc(ev.together)} marked at once with one note</span>` : ''}</div>
         ${pb && pb.notChangedText ? `<div class="hint rs-notchanged" data-not-changed>${esc(pb.notChangedText)}</div>` : ''}
         ${passedByHtml(pb)}
@@ -1907,7 +1926,11 @@ async function goLive(prj, retry, override) {
   if (!lg.ok && !(lg.override && lg.override.ok)) { toast(`Not yet: ${joinAnd(lg.why)}.`); return; }
   const procs = projectProcesses(prj);
   const sections = buSections(prj);
-  const approvers = [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a)).map(a => a.approver))];
+  /* R17 #7 (BPM: "APPROVED BY" was blank): the approvers are the gate's own current approvals (engine sectionStatus),
+     never a local section list whose team names may differ */
+  const so = (rd.checks || []).find(c => c.id === 'bu-signoff');
+  const approvers = so && Array.isArray(so.sectionStatus) ? [...new Set(so.sectionStatus.filter(x => x.approved && !x.stale && x.approver).map(x => x.approver))]
+    : [...new Set(sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a)).map(a => a.approver))];
   const openGrants = store.list('grant', g => g.projectId === prj.id && ['active', 'approved'].includes(grantStatus(g))).length;
   const excs = cycleExceptions(prj);
   const tasks = tasksOf(prj.cutover);
@@ -1928,7 +1951,7 @@ async function goLive(prj, retry, override) {
     : `<div class="rl-sum">
       <div><span class="lbl">Launch owner</span><div>${av(rm)} ${esc(pname(rm))}</div></div>
       <div><span class="lbl">Processes updated if the pipeline succeeds</span>${procs.map(p => `<div>${esc(p.name)} <b>v${esc(p.version || 1)} → v${esc((p.version || 1) + 1)}</b></div>`).join('')}</div>
-      <div><span class="lbl">Approved by</span>${approvers.map(id => `<div>${av(id)} ${esc(pname(id))}</div>`).join('')}</div>
+      <div data-golive-approvers="${approvers.length}"><span class="lbl">Approved by</span>${approvers.map(id => `<div>${av(id)} ${esc(pname(id))}</div>`).join('') || '<div>No team needed to approve</div>'}</div>
       <div><span class="lbl">Temporary data access</span><div>${openGrants} open access${openGrants === 1 ? '' : 'es'} will close if the pipeline succeeds</div></div>
       <div><span class="lbl">Approved again after changes</span><div data-reapprovals>${esc((truthOf(prj) || {}).reapprovalsText || 'None')}</div></div>
       <div><span class="lbl">What happens</span><div>Run the delivery pipeline, then update the processes, publish the new procedure, close temporary data access and tell everyone involved</div></div></div>

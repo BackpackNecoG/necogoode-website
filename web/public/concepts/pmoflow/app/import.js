@@ -71,7 +71,9 @@
     'mail maintain make map match migrate monitor move negotiate notify obtain offboard onboard open order pack pass pay perform pick place post prepare print process ' +
     'provision publish pull purchase push quote raise read receive recommend reconcile record recover refund register reject release remind remove renew reopen repair reply report request ' +
     'reserve reset resolve respond resubmit retain retrieve return revoke review route run save scan schedule screen select send set settle share ship sign sort source ' +
-    'start stamp store submit sync take tell terminate test track train transfer triage unlock update upload validate verify welcome witness write').split(' '));
+    'start stamp store submit sync take tell terminate test track train transfer triage unlock update upload validate verify welcome witness write ' +
+    /* R17 (Jordan, PMO director): "Carrier Integration Engineer transmits…", "Help Desk images the laptop" */
+    'transmit image reimage wipe').split(' '));
   /* "approves" -> "approve", "applies" -> "apply", "co-approves" -> "co-approve"; null when not a known verb's 3rd-person form */
   function verbBase(w) {
     const raw = String(w || '');
@@ -84,6 +86,23 @@
   }
   const isBase = w => { const x = String(w || '').toLowerCase(); const h = /^[a-z]+-(.+)$/.exec(x); return VERBS.has(x) || !!(h && VERBS.has(h[1])); };
   const MODAL = /^(must|should|will|shall|can|may|might|needs?|has|have|also|then|now|first|always|usually|promptly|immediately)$/i;
+  /* R17 (Jordan, PMO director): a verb the list does not know, written after a team or a capitalised job title
+     ("Carrier Integration Engineer transmits…", "Help Desk images the laptop"): its third-person form, read as that
+     verb. Never a document noun ("Vendor documents are uploaded"), never before "is/are" (a passive), never a word
+     that only looks plural. */
+  const NOT_VERB_S = /^(always|sometimes|perhaps|unless|thus|plus|across|towards|afterwards|besides|nevertheless|has|was|does|is|its|this|his|hers|ours|yours|theirs|less|news|series)$/i;
+  function looseVerb(actorWords, w, next) {
+    const x = String(w || '');
+    if (!/^[a-z]{3,}s$/.test(x) || /(ss|us|is)$/.test(x) || NOT_VERB_S.test(x) || DOC_HEADS.test(x)) return null;
+    if (!next || /^(is|are|was|were|be|been|being|of|and|or|,)$/i.test(next.replace(/[,;:.]$/, ''))) return null;
+    const ws = actorWords.filter(a => !/^(and|&|of)$/i.test(a));
+    const titled = ws.length >= 1 && ws.every(a => /^[A-Z]/.test(a));
+    const last = ws[ws.length - 1] || '';
+    if (!titled || !(isTeam(ws.join(' ')) || isTeam(ws.slice(-2).join(' ')) || (ws.length >= 2 && roleNoun(last)))) return null;
+    if (/ies$/.test(x)) return x.slice(0, -3) + 'y';
+    if (/(ch|sh|x|zz)es$/.test(x)) return x.slice(0, -2);
+    return x.slice(0, -1);
+  }
   /* R11 G2: about 60 common business systems (ERP, CRM, HR, finance, ITSM, documents, messaging). A system is the step's
      system, never a role, a team or a piece of information. Longest names first so "SAP Ariba" wins over "SAP". */
   const SYSTEMS = ['ServiceNow', 'HRIS', 'ERP', 'CRM', 'Workday', 'SAP', 'SAP Ariba', 'SuccessFactors', 'Oracle', 'Oracle Fusion', 'NetSuite', 'PeopleSoft',
@@ -157,6 +176,7 @@
       if (/^gets?$/i.test(w) && words[k + 1] && !/(ed|en)$/i.test(words[k + 1].replace(/[,;:.]$/, ''))) return { actor: canonRole(actorWords.join(' ')), action: imperative('get', words.slice(k + 1).join(' ')) };
       if (/^(is|are|was|were|be|been|gets?)$/i.test(w)) return { actor: null, action: t };
       let v = verbBase(w), restAt = k + 1;
+      if (!v) v = looseVerb(actorWords, w, words[k + 1]);
       const plural = actorWords.some(a => /^(and|&)$/i.test(a)) || /s$/i.test(actorWords[actorWords.length - 1]) && !isTeam(actorWords[actorWords.length - 1]);
       if (!v && plural && isBase(w)) v = w.toLowerCase();
       if (!v && MODAL.test(w)) {
@@ -227,13 +247,13 @@
   }
 
   /* ---------------------------------------------------------------- information (data elements) */
-  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?|masters?|limits?|history|histories|scores?|ratings?)$/i;
+  const DOC_HEADS = /^(forms?|invoices?|receipts?|reports?|statements?|certificates?|ids?|numbers?|details|records?|documents?|letters?|contracts?|agreements?|applications?|timesheets?|packets?|lists?|results?|files?|addresses|address|names?|dates?|codes?|orders?|accounts?|policy|policies|badges?|checklists?|requests?|surveys?|quotes?|quotations?|summary|summaries|logs?|registers?|licen[cs]es?|permits?|paychecks?|payslips?|cards?|plans?|schedules?|masters?|limits?|history|histories|scores?|ratings?|tags?|SSNs?|SINs?|TINs?|EINs?|DOBs?|NPIs?|VINs?)$/i;
   /* R12 (Karen): document abbreviations a procedure uses as names */
   const DOC_ABBR = { COI: 'Certificate of insurance', NDA: 'NDA', MSA: 'MSA', SOW: 'Statement of work', BAA: 'BAA', 'W9': 'W-9' };
   const NOUNISH = /^(request|review|purchase|change|check|schedule|order|payment|expense|update|access|record|screening|approval|contact|delivery|return|transfer|release|exit|welcome|termination|refund|offer|onboarding|tax|credit|time|start|end|due|ship|bill)$/i;
-  const OF_HEADS = /^(certificate|record|proof|copy|statement|letter|bill|notice|evidence|confirmation)s?$/i;
+  const OF_HEADS = /^(certificate|record|proof|copy|statement|letter|bill|notice|evidence|confirmation|date)s?$/i;
   const ADJ_STOP = /^(first|next|last|new|approved|signed|secure|completed|original|initial|updated|current|same|relevant|required|itemized|scanned|monthly|weekly|quarterly|annual|correct|valid|full|complete|missing|received|submitted|attached|uploaded|their|its|his|her|our|your|returned|known|listed|usual|main|registered|existing|official|verified|primary|preferred|same|other)$/i;
-  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?|masters?|limits?|history|histories|scores?|ratings?)$/i;
+  const GENERIC_ALONE = /^(forms?|lists?|results?|files?|names?|dates?|codes?|orders?|accounts?|requests?|emails?|cards?|plans?|logs?|details|records?|documents?|numbers?|reports?|letters?|ids?|packets?|summary|schedules?|address|addresses|statements?|policy|surveys?|checklists?|badges?|registers?|masters?|limits?|history|histories|scores?|ratings?|tags?)$/i;
   const INFO_NOUNS = [
     { re: /\bamounts?\b/i, name: 'Amount' },
     { re: /\bcost cent(re|er)s?\b/i, name: m => 'Cost cent' + m[1].toLowerCase() },
@@ -266,11 +286,12 @@
         const x = bare(words[i]); const xl = x.toLowerCase();
         if (x === ',' || x === '&' || DET.test(xl) || PREP.test(xl) || ADJ_STOP.test(xl) || /^(and|or|is|are|be|was|not|no)$/i.test(xl)) break;
         if ((isBase(xl) || verbBase(xl)) && !NOUNISH.test(xl)) break;
-        if ((ROLE_NOUNS.has(xl) || ROLE_NOUNS.has(xl.replace(/s$/, ''))) && !/^(vendor|vendors|supplier|suppliers|employee|employees|contractor|contractors|customer|customers|client|clients|tax|bank|benefits|payroll|exit)$/i.test(xl) && !/^[A-Z]{2,}$/.test(x)) break;
+        if ((ROLE_NOUNS.has(xl) || ROLE_NOUNS.has(xl.replace(/s$/, ''))) && !/^(vendor|vendors|supplier|suppliers|employee|employees|contractor|contractors|customer|customers|client|clients|tax|bank|benefits|payroll|exit|member|members|patient|patients|student|students|applicant|applicants|candidate|candidates)$/i.test(xl) && !/^[A-Z]{2,}$/.test(x)) break;
         if (/^\d/.test(x) || /[^A-Za-z0-9&/'-]/.test(x)) break;
         mods.unshift(x.split('/').map(p => /^[A-Z]{2,5}s?$/.test(p) ? p : p.toLowerCase()).join('/'));
       }
-      const head = /^ids?$/i.test(w) ? 'ID' : w.toLowerCase();
+      /* R17 (Jordan): "dependent SSN", "member ID": an identifier acronym keeps its capitals */
+      const head = /^ids?$/i.test(w) ? 'ID' : /^[A-Z]{3}s?$/.test(w) ? w : w.toLowerCase();
       if (OF_HEADS.test(w) && next && /^of$/i.test(next)) {
         const tail = [];
         for (let i = k + 2; i < words.length && tail.length < 2; i++) {
@@ -512,7 +533,8 @@
   /* R15 (Karen): details of the vendor (customer, …) the run is about: its routing numbers, tax ID, bank account and credit
      limit are written down for each vendor, never made available once */
   /* R16 (Karen): legal names and the party's own name are per-vendor fields too ("Vendor legal name", "Customer name") */
-  const PER_RUN_FIELD = /\b(routing(?:\s+and\s+account)?\s+numbers?|account\s+numbers?|bank\s+accounts?(?:\s+(?:numbers?|details))?|bank\s+details|tax\s+ids?|tins?|eins?|credit\s+limits?|remittance\s+address(?:es)?|ibans?|swift(?:\s+codes?)?|sort\s+codes?|legal\s+names?|(?:vendor|supplier|customer|client|contractor|applicant|candidate|member|patient|student|carrier|tenant|broker)\s+names?)$/i;
+  /* R17 (Karen, Jordan): the bank letter and remit-to address the vendor sends, and a member's own identifiers, too */
+  const PER_RUN_FIELD = /\b(routing(?:\s+and\s+account)?\s+numbers?|account\s+numbers?|bank\s+accounts?(?:\s+(?:numbers?|details))?|bank\s+details|tax\s+ids?|tins?|eins?|credit\s+limits?|remittance\s+address(?:es)?|ibans?|swift(?:\s+codes?)?|sort\s+codes?|legal\s+names?|(?:vendor|supplier|customer|client|contractor|applicant|candidate|member|patient|student|carrier|tenant|broker)\s+names?|bank\s+letters?|remit-?to(?:\s+(?:address(?:es)?|details))?|voided\s+(?:checks?|cheques?)|(?:member|patient|student|policy|subscriber)\s+(?:ids?|numbers?)|ssns?|sins?|dates?\s+of\s+birth|dobs?)$/i;
   /* R16 (BPM): an identity field of the party is never "produced" by a step, even when a step "sets up" or "records" it */
   const IDENTITY_FIELD = /\b(routing|account\s+numbers?|bank|tax\s+ids?|tins?|eins?|legal\s+names?|ibans?|swift|sort\s+codes?|remittance)\b/i;
   const CONTAINER = /\b(forms?|records?|logs?|lists?|registers?|files?|folders?|databases?|sheets?|spreadsheets?|reports?|systems?|masters?|portals?|letters?|packets?|documents?|certificates?)$/i;
@@ -549,6 +571,7 @@
   }
   function haveChoice(p) { return !p ? 'have' : p.producedBy ? 'made' : p.perRun ? 'run' : 'have'; }
   const PARTY_WORD = /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire|member|patient|student|carrier|tenant|broker)s?\b/i;
+  const INTERNAL_FROM = /\b(?:from|by)\s+(?:the\s+|our\s+|an?\s+)?(?:requesting|hiring|internal|business|[A-Z][\w&]*\s+)?(?:department|team|manager|unit|office|employee|staff)s?\b/i;
   function perRunOf(name, actor, line, ctxText) {
     const a = squash(actor).toLowerCase();
     const ext = EXTERNAL.test(a) ? a : '';
@@ -557,8 +580,12 @@
     /* R16 (Karen): a per-vendor field is per run in any procedure about a vendor (customer, …), whichever line names it, so
        "Routing number" and "Routing numbers" are classified the same way */
     const field = PER_RUN_FIELD.test(String(name || '')) && (() => { const pw = PARTY_WORD.exec(String(name)) || PARTY_WORD.exec(String(line || '')) || PARTY_WORD.exec(String(ctxText || '')); if (pw && !party) party = pw[1].toLowerCase(); return !!(party || /^W-\d/i.test(name)); })();
+    /* R17 (BPM): the request a run is about ("Credit limit request") arrives with each run in a procedure about a customer
+       (vendor, …), whether the text says "from the customer" (paste) or not (a BPMN task name), so both readers give the
+       same answer. A request the text says comes from inside ("from the requesting department") stays "We have it". */
+    const req = !field && !party && /\brequests?$/i.test(String(name || '')) && !INTERNAL_FROM.test(String(line || '')) && (() => { const pw = PARTY_WORD.exec(String(ctxText || '')); if (pw) party = pw[1].toLowerCase(); return !!pw; })();
     /* R16: everything a step takes in "from the customer" (or that the vendor sends) arrives with each run */
-    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)) || field || party)) return null;
+    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)) || field || req || party)) return null;
     const p = party || ((EXTERNAL_IN.exec(ctxText || '') || /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire)s?\b/i.exec(ctxText || '') || [])[1] || '').toLowerCase();
     return { perRun: true, perRunText: `Collected ${p ? `from the ${p.replace(/s$/, '')} ` : ''}each time the process runs, so it is not a one-off setup task.` };
   }
@@ -676,6 +703,10 @@
         }
       }
       if (n.ownerRole) n.ownerRole = cap(squash(n.ownerRole.replace(/^(?:the|a|an|our|your|their)\s+/i, '')));
+      /* R17 (PMO director): "Security reviews the access request (Sam Keller)": a person's name in brackets after the
+         action is who is named for the step, never part of its title or of any information name */
+      const tn = /\s*\(([A-Z][a-z'’-]+(?:\s+[A-Z][\w'’-]+){1,2})\)/.exec(action);
+      if (tn && looksName(tn[1])) { action = squash(action.replace(tn[0], ' ')); if (!n.named) n.named = tn[1]; }
       n.title = cap(tidy(stripEnd(action))) || cap(tidy(stripEnd(clause)));
       /* R12 (Karen): "Karen approves too" / "the CFO also approves": an extra approval, not a plain step */
       if (/^(approve|co-approve|sign off|authori[sz]e)\b/i.test(n.title) && (/\s+(?:too|as well)$/i.test(n.title) || /\b(?:also|additionally)\s+(?:approves?|co-approves?|signs?\s+off|authori[sz]es?)\b/i.test(clause))) {

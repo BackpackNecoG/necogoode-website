@@ -204,12 +204,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('PM: every status select enabled', await page.locator('tr[data-wid] select[data-status]:disabled').count() === 0);
   const rowsBefore = await page.locator('tr[data-wid]').count();
   check('work table lists items', rowsBefore > 3, rowsBefore);
+  /* R17 (PMO partial "scope cost"): a new task that takes a planned project over its budget now goes through Change the
+     plan. This block tests plain work-item CRUD, so the task is owned by Ana Ruiz (3 days stay inside the 5% tolerance) and the project first gets budget room through an approved plan change
+     (the way a PM would raise it); the cost guard itself is tested in e2e-change. */
+  const room = await page.evaluate(async u => { const { store } = await import(u); const prj = store.get('project', decodeURIComponent(location.pathname.split('/project/')[1]));
+    if (!(prj.baselines || []).length) return 'no saved plan';
+    const base = `/api/pmoflow/workspaces/${store.state.ws}/changes`, post = (url, b) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({ today: store.state.today }, b)) }).then(r => r.json());
+    let r = await post(base, { actor: prj.owner, change: { projectId: prj.id, reason: 'Room for the e2e work items', category: 'other', edits: [{ op: 'set', type: 'project', id: prj.id, field: 'budget', to: 1000000 }] } });
+    for (const a of ((r.change || {}).approvers || []).filter(x => !x.decision)) r = await post(`${base}/${r.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+    await store.load(); return (r.change || {}).status || r.error; }, STORE);
+  check('R17 fixture: the project has budget room for new work items', room === 'applied' || room === 'no saved plan', room);
+  await page.waitForSelector('table.pmo-work'); await settle();
   const T1 = 'E2E reconcile remit-to letters';
   await page.click('[data-add-work]'); await modalOpen();
   await page.fill('.overlay input[name="title"]', T1);
   await page.fill('.overlay input[name="start"]', '2026-11-20');
   await page.fill('.overlay input[name="due"]', '2026-11-27');
   await page.fill('.overlay input[name="effortDays"]', '3');
+  await page.selectOption('.overlay select[data-wi-owner]', 'ar');   /* R17: a priced owner, inside the 5% cost tolerance (an unowned task is priced at the default rate) */
   const depLabel = (await page.locator('.overlay .pmo-checks label span').first().innerText()).trim();
   await page.locator('.overlay .pmo-checks input[name="deps"]').first().check();
   await act('save'); await settle();
@@ -676,7 +688,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     for (let i = 2; i < nSugg; i++) await page.locator('.overlay input[name="pick"]').nth(i).uncheck();
     const SG = 'E2E suggested item (edited)';
     await page.fill('.overlay input[name="t_1"]', SG);
-    const otherOwner = await page.$eval('.overlay select[name="o_1"]', s => [...s.options].find(o => o.value !== s.value).value);
+    const otherOwner = await page.$eval('.overlay select[name="o_1"]', s => [...s.options].find(o => o.value && o.value !== s.value).value);
     await page.selectOption('.overlay select[name="o_1"]', otherOwner);
     await page.fill('.overlay input[name="e_1"]', '4');
     const s1 = await page.inputValue('.overlay input[name="s_1"]'), d1 = await page.inputValue('.overlay input[name="d_1"]');
@@ -687,7 +699,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await page.locator('.overlay .pmo-sg[data-sg="1"] summary').click();
     const depBox = page.locator('.overlay input[name="dep_1"][value="S:0"]');
     if (!(await depBox.isChecked())) await depBox.check();
-    await act('create'); await settle();
+    /* R17 (PMO partial "scope cost"): on this planned project the added work is over the 5% cost tolerance, so it is
+       added through Change the plan (a scope change listing these tasks) and an Admin approves; then the same checks */
+    await page.click('.overlay [data-act="create"]'); await settle();
+    if (await page.locator('.overlay [data-add-refusal]').count()) {
+      check('R17: suggested work over the cost tolerance goes through Change the plan', /Nothing was added/.test(await page.innerText('.overlay [data-add-refusal]')));
+      await page.click('.overlay [data-act="change"]'); await page.waitForSelector('.chg-wiz');
+      for (let k = 0; k < 2; k++) { await page.click('.chg-wiz [data-w="next"]'); await settle(); }
+      await page.click('.chg-wiz [data-w="submit"]'); await page.waitForSelector('.chg-wiz', { state: 'detached', timeout: 15000 }); await settle();
+      const st17 = await page.evaluate(async u => { const { store } = await import(u);
+        const c = store.list('planChange', x => x.reason === 'Add the suggested work').sort((a, b) => String(a.requestedAt).localeCompare(String(b.requestedAt))).pop(); if (!c) return 'no change: ' + store.list('planChange').map(x => x.reason + '/' + x.status).join('; ');
+        for (const a of (c.status === 'proposed' ? c.approvers : []).filter(x => !x.decision)) await fetch(`/api/pmoflow/workspaces/${store.state.ws}/changes/${c.id}/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: a.person, decision: 'approve', today: store.state.today, stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } }) });
+        await store.load(); return (store.get('planChange', c.id) || {}).status; }, STORE);
+      check('R17: the scope change is approved and applied', st17 === 'applied', st17);
+      await page.reload(); await page.waitForSelector('table.pmo-work'); await settle();
+    }
     await page.waitForFunction(n => document.querySelectorAll('tr[data-wid]').length >= n, countBeforeSuggest + 2, { timeout: 15000 }).catch(() => {});
     check('two suggested items created', await page.locator('tr[data-wid]').count() === countBeforeSuggest + 2);
     const sg = await page.evaluate(async ([u, t]) => { const { store } = await import(u); const w = store.list('workItem', x => x.title === t)[0]; return w && Object.assign({}, w, { depTitles: (w.deps || []).map(d => (store.get('workItem', d) || {}).title) }); }, [STORE, SG]);
@@ -995,7 +1021,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   console.log('R5 external dependencies');
   await prjGo('?mode=work', 'table.pmo-work');
-  const extW = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const mine = store.list('workItem', w => w.projectId === prj && w.status !== 'done')[0]; const ext = store.list('workItem', w => w.projectId !== prj && store.get('project', w.projectId))[0]; return mine && ext ? { mine: mine.id, ext: ext.id, title: mine.title } : null; }, [STORE, PRJ]);
+  const extW = await page.evaluate(async ([u, prj]) => { const { store } = await import(u); const mine = store.list('workItem', w => w.projectId === prj && w.status !== 'done' && !(window.PMOEngine.dependents(store.state.docs, w.id) || []).length)[0]; /* R17: a task nothing waits on (a dependency with a knock-on is a plan change: e2e-change) */ const ext = store.list('workItem', w => w.projectId !== prj && store.get('project', w.projectId))[0]; return mine && ext ? { mine: mine.id, ext: ext.id, title: mine.title } : null; }, [STORE, PRJ]);
   check('R5 external: an item in another project exists', !!extW);
   if (extW) {
     await page.click(`[data-edit-work="${extW.mine}"]`); await modalOpen();
@@ -1635,6 +1661,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const q = await queueMatches(re);
     check(`R9 home (${re.replace(/[\^]/g, '')}): Waiting for you = personQueue, badge = length`, q.ok, q);
   }
+  /* R17 #4 (P1's wider test scope): the seed's Compliance part also needs tests on Certificate of insurance (D3) and Vendor
+     risk tier (D8) before it is ready. Added here exactly as api.test.js r17ReadyCompliance does (engine cases, passed by
+     Priya in UAT), so this check keeps testing the approver's path. P5: bake them into the rebuilt seed and drop this. */
+  const r17c = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+    const cs = E.generateProjectTests(store.state.docs, 'vendor-modernization').filter(x => x.dataId === 'D3' || x.dataId === 'D8').flatMap(x => x.cases.map((c, i) => Object.assign({ id: 'r17' + x.dataId + '-' + i }, c)));
+    const put = (t, id, data) => fetch(`/api/pmoflow/ws/${store.state.ws}/doc/${t}/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'ps', data }) }).then(r => r.status);
+    const st = []; for (const c of cs) st.push(await put('testCase', c.id, c));
+    st.push(await put('testRun', 'r17cmp', { id: 'r17cmp', projectId: 'vendor-modernization', env: 'uat', at: new Date(Date.now() - 120000).toISOString(), by: 'ps', stepUp: true, results: cs.map(c => ({ caseId: c.id, outcome: 'pass' })) }));
+    await store.load(); return { n: cs.length, ok: st.every(x => x === 200), st }; }, STORE);
+  if (!r17c.ok || !r17c.n) console.log('  note: R17 Compliance tests not added', JSON.stringify(r17c));
+  await sGo('/', '[data-waiting]');
   /* Approve my part: Dave (Head of Compliance) sees it ready and approves in <= 2 taps */
   const ap = sp.locator('[data-wkind="approval"] [data-wopen]').first();
   check('R9 home: Dave has "Approve Compliance\'s part"', await ap.count() === 1 && /Approve Compliance.s part/.test(await sp.innerText('[data-wkind="approval"]')), await sp.innerText('[data-waiting]'));

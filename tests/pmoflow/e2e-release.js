@@ -387,6 +387,14 @@ The process starts when an employee asks to buy something.
       await shot('r9-part-notready');
     }
     console.log('R9 §7: the seeded ready part (Compliance, Dave Ortiz)');
+    /* R17 #4 (P1): information feeding new or changed steps is now in scope, so Compliance also needs tests on Certificate
+       of insurance and Vendor risk tier; Priya adds and passes them through the API before Dave approves (P5: bake into the seed) */
+    await st(`const E = window.PMOEngine; const base = '/api/pmoflow/ws/' + encodeURIComponent(store.state.ws) + '/doc/';
+      const cs = E.generateProjectTests(store.state.docs, a).filter(x => x.dataId === 'D3' || x.dataId === 'D8').flatMap(x => x.cases.map((c, i) => Object.assign({ id: 'r17' + x.dataId + '-' + i }, c)));
+      for (const c of cs) await fetch(base + 'testCase/' + c.id, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'ps', data: c }) });
+      await fetch(base + 'testRun/r17cmp', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'ps', data: { id: 'r17cmp', projectId: a, env: 'uat', at: new Date(Date.now() - 60000).toISOString(), by: 'ps', stepUp: true, results: cs.map(c => ({ caseId: c.id, outcome: 'pass' })) } }) });
+      await store.load();`, VM);
+    t = await truthOf(VM);
     const comp = t.approvals.find(x => x.bu === 'Compliance');
     ok(comp && comp.ready && comp.eligible.includes('do'), 'Compliance on Vendor Onboarding Modernization is ready for approval; Dave Ortiz can approve');
     await setMe('do');
@@ -484,7 +492,7 @@ The process starts when an employee asks to buy something.
       delete d.liveConfirmedBy; delete d.liveConfirmedAt; delete d.liveSource;
       await store.save('dataElement', 'D7', d, 'Approver matrix moved to the new identity source (e2e)');
       const now = new Date().toISOString();
-      await store.save('workItem', 'A9', { id: 'A9', projectId: a, pid: 'access-review', step: 'r2', title: 'Connect approver matrix to the new identity source', owner: 'ps', status: 'done', start: store.state.today, due: store.state.today, doneAt: store.state.today, deps: [], resolves: 'D7', kind: 'build', effortDays: 1, updatedAt: now }, 'Resolver for Approver matrix done (e2e)');
+      await store.save('workItem', 'A9', { id: 'A9', projectId: a, pid: 'access-review', step: 'r2', title: 'Connect approver matrix to the new identity source', owner: 'ps', status: 'done', start: store.state.today, due: store.state.today, doneAt: store.state.today, deps: [], resolves: 'D7', kind: 'build', effortDays: 0.25, updatedAt: now }, 'Resolver for Approver matrix done (e2e)');   /* R17 (P3 ask): a NEW task over the 5% cost tolerance now goes through Change the plan; this resolver is a quarter day so it stays a plain save */
     `, AR);
     await settle(800);
     ok(await st(`return window.PMOEngine.effectiveAvail(store.state.docs, 'D7');`) === 'pending', 'engine: finished resolver alone gives pending');
@@ -1023,9 +1031,10 @@ The process starts when an employee asks to buy something.
     await page.click('.overlay [data-bulk-pass]'); await settle(200);
     const evAll = await page.$$eval('.overlay .ts-case', rows => rows.filter(r => !r.closest('[hidden]') && !r.hasAttribute('data-pass-locked')).every(r => { const e = r.querySelector('input[name^="e_"]'); return [...r.querySelectorAll('select')].every(s => s.value === 'pass') && e && e.value === 'UAT evidence pack, folder VO-UAT-1'; }));
     ok(evAll, 'every selected row passed with the one evidence note');
-    /* R11 §2: "All" never selects a test assigned to someone else or held by an open problem; those rows say why */
+    /* R11 §2: "All" never selects a test assigned to someone else or held by an open problem; those rows say why.
+       R17 #5: every rule the server applies is shown on the row now (a step's builder, the assigner, a recent joiner) */
     const locked = await page.$$eval('.overlay .ts-case[data-pass-locked]', rows => rows.filter(r => !r.closest('[hidden]')).map(r => ({ pick: !!r.querySelector('[data-pick]'), passed: [...r.querySelectorAll('select')].some(s => s.value === 'pass'), hint: (r.querySelector('[data-lock-hint]') || {}).textContent || '' })));
-    ok(locked.length > 0 && locked.every(x => !x.pick && !x.passed && /Assigned to|problem to be fixed|^Only someone in /.test(x.hint)), `bulk pass leaves the ${locked.length} tests assigned to others (or held) alone, and says why`);
+    ok(locked.length > 0 && locked.every(x => !x.pick && !x.passed && /Assigned to|problem to be fixed|^Only someone in | built “| assigned the test | joined .* after /.test(x.hint)), `bulk pass leaves the ${locked.length} tests assigned to others (or held) alone, and says why`);
     /* the multi-step script fails on its last step */
     await page.evaluate(sid => {
       const row = document.querySelector(`.overlay [data-row="s:${sid}"]`); const sels = row.querySelectorAll('[data-step-row] select'); sels[sels.length - 1].value = 'fail';

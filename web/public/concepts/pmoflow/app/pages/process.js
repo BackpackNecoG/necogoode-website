@@ -56,8 +56,13 @@ export function partsFor(pid, dept) {
 const invitedTo = name => { const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase()); const ws = store.get('workspace', 'settings'); return d && ws && Array.isArray(ws.invites) ? ws.invites.filter(i => i && i.departmentId === d.id).map(i => i.email) : []; };
 /* R14 (Jordan): approver changes wait for a second Admin; the proposal is shown, never taken as approving */
 const proposedFor = name => { const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase()); const ws = store.get('workspace', 'settings'); return d && ws && Array.isArray(ws.pendingDept) ? ws.pendingDept.filter(x => x && x.status === 'pending' && x.kind === 'approvers' && x.op && x.op.id === d.id).flatMap(x => (x.op.approvers || []).map(pname)) : []; };
+/* R17 (Jordan, PMO director): a job title the procedure names as the doer ("Carrier Integration Engineer") is a ROLE,
+   never a new team: the engine marks it (teamRouting teams[].role). It is mapped with the same department picker, labelled
+   as a role, never listed under "Teams involved", and its title is never offered as a department name. */
+export const roleRowsOf = rt => new Set(((rt && rt.teams) || []).filter(r => r && r.role === true).map(r => r.team));
 export function approversHTML(rt, opts) {
   opts = opts || {};
+  const roles = opts.roles || new Set();
   /* R14: the engine marks a department with nobody to approve (teamRouting noApprover, Launch's rule) */
   /* R16 (BPM): with the process id, a part counts as approvable exactly when Launch says so: in every open project that
      changes this process somebody can approve it (a person chosen on Launch counts; the PM never does) */
@@ -71,18 +76,22 @@ export function approversHTML(rt, opts) {
   const row = r => {
     const empty = nobody(r), who = r.department ? deptApprovers(r.department) : null;
     const pn = projNote(r);
-    const sub = !r.department ? `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`
+    const isRole = roles.has(r.team);
+    const sub = !r.department ? `<div class="s d-apr-ask" data-apr-ask>${esc(isRole ? `Which department is the ${r.team} in? That department approves this role’s steps.` : r.text || 'Choose who approves for ' + r.team)}</div>`
       : empty ? `<div class="s d-apr-ask" data-apr-nobody="${esc(r.department)}">Nobody in ${esc(r.department)} can approve this part yet.${proposedFor(r.department).length ? ` <span data-apr-proposed>${esc(proposedFor(r.department).join(', '))} ${proposedFor(r.department).length === 1 ? 'is' : 'are'} proposed and wait${proposedFor(r.department).length === 1 ? 's' : ''} for a second Admin to confirm.</span>` : ''}${invitedTo(r.department).length ? ` Invited: ${esc(invitedTo(r.department).join(', '))} (they can approve once they join).` : ''}${opts.editable ? ` <button type="button" class="is-linkbtn d-apr-name" data-apr-name="${esc(r.department)}">Name an approver</button>` : ''}</div>`
       : who && who.people.length ? `<div class="s d-apr-who" data-apr-who>${esc(who.named ? 'Approves: ' : 'Any of: ')}${esc(who.people.slice(0, 3).join(', '))}${who.people.length > 3 ? ` +${who.people.length - 3}` : ''}</div>` : '';
     const subAll = sub + pn;
-    return `<div class="row d-apr ${r.department && !empty ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}" ${empty ? 'data-apr-empty' : ''}>
-      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${subAll}</div>
-      <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}<option value="${ADD_DEPT}">+ Add a department…</option></select>`
+    return `<div class="row d-apr ${r.department && !empty ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}" ${empty ? 'data-apr-empty' : ''} ${isRole ? 'data-apr-role' : ''}>
+      <div style="min-width:0"><div class="t">${esc(r.team)}${isRole ? ' <span class="chip d-apr-rolechip" title="A job title from the procedure, not a team">Role</span>' : ''}</div>${subAll}</div>
+      <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" ${isRole ? 'data-apr-role' : ''} aria-label="${isRole ? `Which department the ${esc(r.team)} is in` : `Who approves for ${esc(r.team)}`}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}<option value="${ADD_DEPT}">+ Add a department…</option></select>`
         : r.department ? `<span data-apr-shown>${esc(r.department)}</span>` : '<span class="hint">Not chosen</span>'}</div></div>`;
   };
   /* one sentence that agrees with Launch: a department nobody can approve for is a gap, never "has an approving department" */
-  const text = !opts.pid || !rt.teams.length ? rt.text : gaps ? `${rt.teams.length} team${rt.teams.length === 1 ? '' : 's'} · ${[unmappedN ? `${unmappedN} need${unmappedN === 1 ? 's' : ''} an approving department` : '', nobodyN ? `${nobodyN} ha${nobodyN === 1 ? 's' : 've'} nobody to approve` : ''].filter(Boolean).join(' · ')}`
-    : `All ${rt.teams.length} team${rt.teams.length === 1 ? '' : 's'} have someone to approve`;
+  /* the engine's own head ("4 teams and 1 role"), teamRouting's wording */
+  const nRoles = rt.teams.filter(r => r.role === true).length, nTeams = rt.teams.length - nRoles;
+  const head = `${nTeams} team${nTeams === 1 ? '' : 's'}${nRoles ? ` and ${nRoles} role${nRoles === 1 ? '' : 's'}` : ''}`;
+  const text = !opts.pid || !rt.teams.length ? rt.text : gaps ? `${head} · ${[unmappedN ? `${unmappedN} need${unmappedN === 1 ? 's' : ''} an approving department` : '', nobodyN ? `${nobodyN} ha${nobodyN === 1 ? 's' : 've'} nobody to approve` : ''].filter(Boolean).join(' · ')}`
+    : `All ${nRoles ? head : `${rt.teams.length} team${rt.teams.length === 1 ? '' : 's'}`} have someone to approve`;
   return `<div class="${opts.inline ? 'is-apr' : 'card'}" data-approvers="${rt.teams.length}" data-apr-gaps="${gaps}">${opts.inline ? '<h4>Who approves each team’s part</h4>' : `<h3>Who approves each team’s part${gaps ? ` <span class="n d-apr-n">${gaps} to choose</span>` : ''}</h3>`}
     <div class="hint" style="margin:-2px 0 8px">Before launch, the department you pick signs off that team’s steps. Nothing is picked for you${opts.inline ? '; you can change it later on the process' : ''}.</div>
     ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(text)}</div>` : ''}
@@ -105,20 +114,22 @@ async function inviteApprover(email, deptId) {
     return (j && j.error) || (r.status === 403 ? 'Only an Admin can invite people.' : 'Could not send the invite.');
   } catch (e) { return 'Could not send the invite.'; }
 }
-export async function addDepartmentFlow(team, err) {
+export async function addDepartmentFlow(team, err, opts) {
+  opts = opts || {};
   const known = (eng('departments', [docs()], []) || []).map(d => d.name);
   /* R15 (Karen 3): the team's own name is offered even when that department exists already (adding it then picks it) */
-  const suggest = team || '';
+  /* R17 (Jordan): a role's title is never offered as a department name ("Carrier Integration Engineer" is in Benefits) */
+  const suggest = opts.role ? '' : team || '';
   const r = await modal({
     title: 'Add a department',
     body: `${err ? `<div class="banner" style="margin:0 0 8px" data-dept-err>${esc(err.msg)}</div>` : ''}<div class="field"><label for="d-dept-name">Department name</label><input id="d-dept-name" name="name" data-dept-name value="${esc(err ? err.value : suggest)}" placeholder="e.g. Credit" autocomplete="off" maxlength="60" /></div>
       ${approverFields(err && err.approver, err && err.email)}
-      <div class="hint">It is added for the whole workspace, and the person you name approves its part of a project.${team ? ` Once added, it approves <b>${esc(team)}</b>’s part here.` : ''} You can leave the approver blank and name one later.</div>`,
+      <div class="hint">It is added for the whole workspace, and the person you name approves its part of a project.${team ? (opts.role ? ` Once added, the <b>${esc(team)}</b> role’s steps belong to it here.` : ` Once added, it approves <b>${esc(team)}</b>’s part here.`) : ''} You can leave the approver blank and name one later.</div>`,
     actions: [{ id: 'add', label: 'Add department', primary: true }],
   });
   if (r.action !== 'add') return null;
   const name = String(r.form.name || '').trim(), approver = String(r.form.approver || ''), email = String(r.form.email || '').trim().toLowerCase();
-  const again = msg => addDepartmentFlow(team, { msg, value: name, approver, email });
+  const again = msg => addDepartmentFlow(team, { msg, value: name, approver, email }, opts);
   /* the same plain sentences the server uses, checked here first so a typo never costs a round trip */
   if (!name) return again('Name a department.');
   if (email && !EMAIL_RE.test(email)) return again('Enter a work email address, like name@northwind.example.');
@@ -612,10 +623,18 @@ function toolbar(n, ctx) {
 const insBtn = (key, pos) => `<div class="conn d-conn"><button class="d-ins" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a step or a choice here" title="Add a step or a choice here">+</button></div>`;
 /* R7 §4: the big "Add a step" button at the end of the main list goes straight to the step dialog */
 const addStepBtn = (key, pos) => `<div class="d-addwrap"><button class="btn primary d-addstep" data-addstep data-pos="${pos}">+ Add a step</button><button class="btn sm d-addother" data-ins="${esc(key)}" data-pos="${pos}" aria-label="Add a choice or something else here">or a choice…</button></div>`;
+/* R17 (BPM "step 9 vs 10"): step numbers are the engine's one numbering (stepNumbers) for the process's own Today or
+   Future map, so the map, the RACI and every other page agree; any other map (a release, a draft) counts in order */
+export function stepNumsFor(pid, nodes) {
+  const p = pid && store.get('process', pid); if (!p || !nodes) return null;
+  const ver = nodes === p.asis ? 'asis' : nodes === p.tobe ? 'tobe' : null; if (!ver) return null;
+  if (ver === 'tobe' && !flat(p.tobe).length) return null;
+  return eng('stepNumbers', [docs(), pid, ver], null);
+}
 function canInsert(nodes, k) { if (k === 0 && nodes[0] && nodes[0].type === 'trigger') return false; if (k === nodes.length && nodes.length && nodes[nodes.length - 1].type === 'end') return false; return true; }
 
 function flowHTML(nodes, ctx, key, counter) {
-  counter = counter || { n: 0, order: allNodes(nodes).map(x => x.id) };
+  counter = counter || { n: 0, order: allNodes(nodes).map(x => x.id), nums: stepNumsFor(ctx && ctx.pid, nodes) };
   const parts = [];
   if (ctx.edit && canInsert(nodes, 0)) parts.push(insBtn(key, 0));
   nodes.forEach((n, i) => {
@@ -633,7 +652,7 @@ function flowHTML(nodes, ctx, key, counter) {
           ${(b.nodes || []).length ? `<div class="flow">${flowHTML(b.nodes, ctx, n.id + '#' + bi, counter)}${gotoLbl(b)}</div>`
             : `<div class="flow">${ctx.edit ? insBtn(n.id + '#' + bi, 0) : ''}${b.goto ? gotoLbl(b) : `<div class="passthru">${par ? 'Nothing extra on this path' : 'Carries on to the next step'}</div>`}</div>`}</div>`).join('')}</div></div>`);
     } else {
-      const idx = isStep(n) ? ++counter.n : '';
+      const idx = isStep(n) ? (++counter.n, (counter.nums && counter.nums[n.id]) || counter.n) : '';
       parts.push(nodeHTML(n, ctx, idx));
     }
   });
@@ -713,6 +732,7 @@ export function raciCsv(p, m) {
 function raciHTML(p, editable) {
   const ver = raciVer(p), nodes = p[ver] || [];
   const m = raciMatrix(nodes, raciExtra[p.id]);
+  const nums = stepNumsFor(p.id, nodes);
   if (!m.rows.length) return '<div class="empty">No steps yet. Add steps and say who does each one, then the matrix fills in.</div>';
   const cell = (r, k) => {
     const L = r.cells[k] || [], other = L.filter(x => x !== 'R'), R = L.includes('R');
@@ -724,7 +744,7 @@ function raciHTML(p, editable) {
     <div class="d-racibar"><span class="hint">${ver === 'tobe' ? 'Future' : 'Today'} map. <b>R</b> does the step · <b>A</b> signs off · <b>C</b> is asked first · <b>I</b> is told when it is done. R changes with “Who does it” on the step.</span>
       <span class="d-raciacts">${editable ? `<input class="d-raci-add" data-raci-addcol list="d-people" placeholder="Add a person or role" aria-label="Add a person or role column" /><button class="btn sm" data-raci-addbtn>Add column</button>` : ''}<button class="btn sm" data-raci-csv>Download CSV</button></span></div>
     <div class="tbl-wrap d-racitbl"><table class="d-raci-t"><thead><tr><th scope="col">Step</th>${m.cols.map(k => `<th scope="col" data-raci-colh="${esc(k)}">${k.startsWith('p:') ? av(rVal(k)) : ''}${esc(rName(k))}</th>`).join('')}</tr></thead>
-    <tbody>${m.rows.map((r, i) => `<tr data-raci-row="${esc(r.s.id)}"><th scope="row"><span class="d-raci-n">${i + 1}</span>${esc(r.s.title)}</th>${m.cols.map(k => cell(r, k)).join('')}</tr>`).join('')}</tbody></table></div>${editable ? peopleList() : ''}</div>`;
+    <tbody>${m.rows.map((r, i) => `<tr data-raci-row="${esc(r.s.id)}"><th scope="row"><span class="d-raci-n">${(nums && nums[r.s.id]) || i + 1}</span>${esc(r.s.title)}</th>${m.cols.map(k => cell(r, k)).join('')}</tr>`).join('')}</tbody></table></div>${editable ? peopleList() : ''}</div>`;
 }
 /* set column k's letter on step sid ('' clears A/C/I for that column) */
 function raciSet(node, k, L, nodes) {
@@ -1506,7 +1526,9 @@ export function render(params) {
     return { does, also, text: does ? `${pl(does)}${also ? ` +${also} involved` : ''}` : also ? `involved in ${pl(also)}` : '',
       title: `Does ${pl(does)}${also ? `; named on ${pl(also)} another team does` : ''}` };
   };
-  const teamsInv = (routingRows(p).teams || []).slice().sort((a, b) => teamCounts(b.team).does - teamCounts(a.team).does || teamCounts(b.team).also - teamCounts(a.team).also);
+  /* R17: a role is not a team: it is in the approver panel (as a role), never under "Teams involved" */
+  const roleRows = roleRowsOf(routingRows(p));
+  const teamsInv = (routingRows(p).teams || []).filter(x => !roleRows.has(x.team)).slice().sort((a, b) => teamCounts(b.team).does - teamCounts(a.team).does || teamCounts(b.team).also - teamCounts(a.team).also);
   const linked = projectsFor(pid);
   const drafts = (p.drafts || []).slice().reverse();
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
@@ -1519,7 +1541,7 @@ export function render(params) {
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
     ${teamsInv.length || adv ? `<div class="card" data-touches="${teamsInv.length}"><h3>Teams involved</h3><div class="hint" style="margin:-4px 0 8px">Steps each team does on the ${esc(vname)} map</div><div class="chips">${teamsInv.map(x => { const c = teamCounts(x.team); return `<span class="chip touch" data-touch="${esc(x.team)}" data-touch-does="${c.does}" data-touch-also="${c.also}" title="${esc(c.title)}">${esc(x.team)}${c.text ? ` · ${esc(c.text)}` : ''}</span>`; }).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
-    ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor, pid })}
+    ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor, pid, roles: roleRowsOf(routingRows(p)) })}
     ${Object.keys(systems).length ? `<div class="card" data-systems><h3>Systems touched</h3><div class="chips">${Object.entries(systems).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip d-syschip" data-system="${esc(t)}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('')}</div></div>` : ''}
     ${versionsCard}
     <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · launched' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not in a project yet.</div>'}
@@ -2234,7 +2256,7 @@ export function bind(root, params) {
     if (sel.value === ADD_DEPT) {
       const prev = (sel.closest('[data-apr-dept]') || {}).dataset ? sel.closest('[data-apr-dept]').dataset.aprDept : '';
       sel.value = prev || '';
-      const name = await addDepartmentFlow(team);
+      const name = await addDepartmentFlow(team, null, { role: sel.hasAttribute('data-apr-role') });
       if (name) await saveRoute(team, name); else store.emit();
       return;
     }
@@ -2244,8 +2266,10 @@ export function bind(root, params) {
   const addB = root.querySelector('[data-apr-adddept]');
   if (addB) addB.onclick = async () => {
     /* the first team still without a department gets the new one */
-    const gap = (routingRows(cur()).teams || []).find(t => !t.department);
-    const name = await addDepartmentFlow(gap ? gap.team : '');
+    /* R17: a team's name is a good department name, a role's title never is: teams first, then roles */
+    const rr = roleRowsOf(routingRows(cur())), gaps = (routingRows(cur()).teams || []).filter(t => !t.department);
+    const gap = gaps.find(t => !rr.has(t.team)) || gaps[0];
+    const name = await addDepartmentFlow(gap ? gap.team : '', null, { role: !!gap && rr.has(gap.team) });
     if (name && gap) await saveRoute(gap.team, name); else store.emit();
   };
   const vs = root.querySelector('[data-version]');
@@ -2491,7 +2515,7 @@ async function tellTeams(p, n, teams) {
     const id = store.newId('w');
     const title = `Tell ${joinNames(teams)}: “${n.title}” is removed from ${p.name}`;
     try {
-      await store.save('workItem', id, { id, projectId: j.id, pid: p.id, step: null, title, owner: store.state.me, status: 'idle', start: today(), due: today(), deps: [], kind: 'other', tag: 'tell-removed', teams: teams.slice(), effortDays: 1,
+      await store.save('workItem', id, { id, projectId: j.id, pid: p.id, step: null, title, owner: store.state.me, status: 'idle', start: today(), due: today(), deps: [], kind: 'other', tag: 'tell-removed', teams: teams.slice(), effortDays: 0.1, /* R17: telling a team takes under an hour; a full day tripped the server's cost guard (Change the plan) for a notification */
         note: `Removed step: “${n.title}”. ${joinNames(teams)} ${teams.length === 1 ? 'approves' : 'approve'} this change before launch.`, updatedAt: new Date().toISOString() }, `Added '${title}' to ${j.name}`);
     } catch (e) { toast('Could not add the task to tell the team: ' + e.message); return; }
   }

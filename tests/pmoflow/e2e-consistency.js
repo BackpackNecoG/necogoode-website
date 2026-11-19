@@ -91,11 +91,14 @@ function parseCSV(text) {
    from the engine instead (planned value shifts by a day there; see the doc). */
 const G = {
   vm: { id: 'vendor-modernization', label: 'Some tasks late', done: 7, total: 13, pct: 48, late: 5, lateSplit: '1 past due, 4 will finish after their due date', blocking: 1,
-    who: 7, whoShown: 5, spi: '0.79', cpi: '0.98', cost: '$48,847', planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
-    tests: '9/26', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '7/8', uat: '9/26',
+    who: 6, whoShown: 5, spi: '0.79', cpi: '0.98', cost: '$47,019',   /* R17 (P3 ask): one bottom-up expected-cost method, never BAC/CPI */ planned: '$48,000', spent: '$23,669', stepsLeft: 6, stepsDone: '1 of 7 done',
+    /* R17 #4 (P1): information feeding new or changed steps is in scope (Certificate of insurance, Vendor master record,
+       Vendor risk tier, Approver matrix), so 4 more seeded cases count; Compliance waits on its 2 new pieces' tests, so
+       "who" loses its Compliance approval row (7 → 6). P5 re-baselines when the seed is rebuilt. */
+    tests: '9/30', haveTests: '2/6', next: 'Add tests for 4 pieces of information', dev: '7/12', uat: '9/30',
     change: '5 new · 9 changed · 1 removed', deadlineBd: 29, launchBd: 28, forecastBd: 15, buffer: 14 },
-  erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$10,406', planned: '$9,000', spent: '$1,406', stepsLeft: 6,
-    tests: '0/20', haveTests: '1/2', next: 'Add tests for 1 new piece of information', dev: '0/8', uat: '0/20',
+  erp: { id: 'erp-upgrade-readiness', label: 'Behind on effort', done: 0, total: 2, pct: 0, late: 0, blocking: 1, who: 2, spi: '0.00', cpi: '0.00', cost: '$6,406',   /* R17: spent $1,406 + $5,000 still to do */ planned: '$9,000', spent: '$1,406', stepsLeft: 6,
+    tests: '0/24', haveTests: '2/6', next: 'Add tests for 4 pieces of information', dev: '0/12', uat: '0/24',   /* R17 #4 */
     change: '4 new · 6 changed · 1 removed', deadlineBd: 41, forecastBd: 16, buffer: 25 },
   procs: { 'vendor-onboarding': '4 new · 6 changed · 1 removed', 'invoice-approval': '1 new · 3 changed', 'access-review': '3 changed', 'expense-reimbursement': '1 changed' },
 };
@@ -145,13 +148,15 @@ async function goldenNumbers(browser, ymd, at, errors) {
   check('D vm header: 7 of 13 tasks done', (await txt('.pmo-shdr .pmo-sline')).includes('7 of 13 tasks done'), await txt('.pmo-shdr .pmo-sline'));
   check('D vm header: "5 late (1 past due, 4 will finish after their due date)" in Simple', /\b5 late \(1 past due, 4 will finish after their due date\)/.test(await txt('.pmo-shdr .pmo-sline')), await txt('.pmo-shdr .pmo-sline'));
   check('D vm header: expected finish and deadline', (await txt('.pmo-shdr .pmo-sline')).includes('Expected ' + fmtD(eng.vm.forecastFinish)) && (await txt('.pmo-shdr .pmo-sline')).includes('Deadline ' + fmtD(eng.vm.target)));
-  check('D vm: who needs to act = 7, 5 shown, "+2 more" opens the rest in place with their own links', (await txt('[data-who-count]')) === '7' && await page.locator('[data-who-acts] > .pmo-who-list [data-who-row], [data-who-acts] > .pmo-bl-box [data-who-row]').count() === 5
-    && /^\+2 more$/.test(await txt('[data-who-more] summary')));
+  /* R17 #4: Compliance is not ready (its 2 newly in-scope pieces need tests), so its approval row is gone: 6, "+1 more" */
+  check('D vm: who needs to act = 6, 5 shown, "+1 more" opens the rest in place with their own links', (await txt('[data-who-count]')) === '6' && await page.locator('[data-who-acts] > .pmo-who-list [data-who-row], [data-who-acts] > .pmo-bl-box [data-who-row]').count() === 5
+    && /^\+1 more$/.test(await txt('[data-who-more] summary')));
   await page.click('[data-who-more] summary');
   const moreHrefs = await page.$$eval('[data-who-more] [data-who-row]', as => as.map(a => a.getAttribute('href')));
-  check('D vm: the 2 extra rows link to the approval (Launch) and to Testing, not the Work tab', moreHrefs.length === 2 && moreHrefs.some(h => /\/release\/vendor-modernization\?bu=Compliance/.test(h)) && moreHrefs.some(h => /\/testing\/vendor-modernization/.test(h)), moreHrefs);
+  check('D vm: the extra row links to Testing, not the Work tab', moreHrefs.length === 1 && moreHrefs.some(h => /\/testing\/vendor-modernization/.test(h)), moreHrefs);
   check('D vm: steps to launch "1 of 7 done", 6 left', (await txt('[data-launch-steps] h3 .n')).toLowerCase() === G.vm.stepsDone && (await attr('[data-launch-steps]', 'data-steps-left')) === '6', [await txt('[data-launch-steps] h3 .n'), await attr('[data-launch-steps]', 'data-steps-left')]);
-  check('D vm: approvals step waits for parts whose work is not done', /Waiting for Compliance to approve its part\. Accounts Payable, IT and Treasury approve their parts once the work on them is done\. Procurement must approve again after changes\./.test(await txt('[data-ls="approvals"]')), await txt('[data-ls="approvals"]'));
+  /* R17 #4: Compliance waits too (tests to add for its 2 newly in-scope pieces) */
+  check('D vm: approvals step waits for parts whose work is not done', /Accounts Payable, Compliance, IT and Treasury approve their parts once the work on them is done\. Procurement must approve again after changes\./.test(await txt('[data-ls="approvals"]')), await txt('[data-ls="approvals"]'));
   /* Project header, Advanced: % done, EV, money */
   await page.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE); await page.waitForTimeout(300);
   for (const k of ['vm', 'erp']) {
@@ -220,7 +225,9 @@ async function goldenNumbers(browser, ymd, at, errors) {
   const hist = await page.evaluate(async u => { const { store } = await import(u); return (await store.events(null, 300)).filter(e => e.action === 'approve' && /^approval:/.test(e.ref)).map(e => [e.ref, e.actor]); }, STORE);
   const cards = await page.evaluate(async u => { const { store } = await import(u); return store.list('approval', a => a.bu && !a.kind).map(a => ['approval:' + a.id, a.approver]); }, STORE);
   check('D R12 #2 History names the approver on the card (Rosa Vega, Sam Keller), never a step owner', hist.length >= 2 && hist.every(([r, a]) => (cards.find(c => c[0] === r) || [])[1] === a) && hist.some(h => h[1] === 'rv') && hist.some(h => h[1] === 'sk'), [hist, cards]);
-  check('D R12 #9 ERP: CPI 0 and expected cost over budget (never under budget with CPI 0)', eng.erp.ev.CPI === 0 && eng.erp.cost.forecast > eng.erp.cost.planned && eng.erp.ev.bacSource === 'baseline', [eng.erp.ev.CPI, eng.erp.cost]);
+  /* R17 (P3 ask): ONE expected-cost method (bottom-up: spent + the work still to do), so the R12 #9 "over budget while CPI
+     is 0" switch is gone; spent-with-nothing-finished is flagged instead, and the expected cost is never below what is spent */
+  check('D R12 #9 ERP: CPI 0, flagged "Spent with nothing finished"; expected cost = spent + still to do (one method)', eng.erp.ev.CPI === 0 && eng.erp.ev.eacMethod === 'bottom-up' && eng.erp.cost.forecast === Math.round((eng.erp.cost.actual + eng.erp.ev.remainingEstimate) * 100) / 100 && eng.erp.cost.forecast >= eng.erp.cost.actual && (eng.erp.evFlags || []).some(f => /Spent with nothing finished/.test(f.text)) && eng.erp.ev.bacSource === 'baseline', [eng.erp.ev.CPI, eng.erp.cost]);
   for (const w of [1366, 390]) {
     await page.setViewportSize({ width: w, height: 900 });
     for (const u of ['/', '/project/' + G.vm.id, '/testing/' + G.vm.id, '/dashboard']) {
@@ -236,10 +243,11 @@ async function goldenNumbers(browser, ymd, at, errors) {
 /* R13 Part E (K1): ONE testing ledger. Every testing count the R12 reviewers flagged, asserted on every screen where it
    appears: the report, Testing (Simple and Advanced), the coverage matrix, the Launch gate and per-team cards (Simple and
    Advanced, 1366 and 390), and the approver page (who passed each test). Values: GOLDEN-NUMBERS.md "R13". */
-const G13 = { total: 26, passed: 9, cases: 8, scripts: 18, try: '7/8', uat: '9/26', gaps: 1, fields: 2, have: '1/2', gateTests: 17, stepsLeft: 6,
-  parts: { 'Accounts Payable': '0/8', Compliance: '9/9', IT: '0/4', Procurement: '1/4', Treasury: '0/12' },
+/* R17 #4 (P1): 4 more seeded cases are in scope (26 → 30; Try it out 8 → 12); 4 coverage gaps (10 spec fields) */
+const G13 = { total: 30, passed: 9, cases: 12, scripts: 18, try: '7/12', uat: '9/30', gaps: 4, fields: 10, have: '2/6', gateTests: 21, stepsLeft: 6,
+  parts: { 'Accounts Payable': '0/10', Compliance: '9/11', IT: '0/8', Procurement: '1/6', Treasury: '0/14' },
   compPassedBy: 'Passed by Priya Shah (Compliance): 9 tests.',
-  report: 'Business check: 9 tests passed (now 9 of 26 passed). Try it out: 3 passed, 1 failed (now 7 of 8 passed). Latest result of each test, from 2 test runs.' };
+  report: 'Business check: 9 tests passed (now 9 of 30 passed). Try it out: 3 passed, 1 failed (now 7 of 12 passed). Latest result of each test, from 2 test runs.' };
 async function ledgerE(browser, at, errors) {
   console.log('\nPart E: R13 one testing ledger (fresh sandbox, seed day 0)');
   const ip = `198.51.100.${(Math.random() * 200 | 0) + 20}`;
@@ -259,13 +267,13 @@ async function ledgerE(browser, at, errors) {
   /* Testing, Simple */
   await adv(false);
   await page.goto(ROOT + '/testing/' + VM); await page.waitForSelector('[data-tests-number]');
-  check('E testing Simple: 9/26, Try it out 7/8, has tests 1/2', (await attr('[data-tests-number]', 'data-tests-number')) === G13.uat && (await attr('[data-stage="try"]', 'data-try-count')) === G13.try && (await attr('[data-s2-count]', 'data-s2-count')) === G13.have);
+  check('E testing Simple: 9/30, Try it out 7/12, has tests 2/6', (await attr('[data-tests-number]', 'data-tests-number')) === G13.uat && (await attr('[data-stage="try"]', 'data-try-count')) === G13.try && (await attr('[data-s2-count]', 'data-s2-count')) === G13.have);
   /* Testing, Advanced: KPIs, trace strip, matrix */
   await adv(true);
   await page.goto(ROOT + '/testing/' + VM); await page.waitForSelector('[data-cov="dev"]');
   const kc = +(await attr('[data-kpi-cases]', 'data-kpi-cases')), ks = +(await attr('[data-kpi-scripts]', 'data-kpi-scripts'));
-  check('E testing Advanced: data cases + UAT scripts = the ledger total (8 + 18 = 26), never 14 + 18', kc === G13.cases && ks === G13.scripts && kc + ks === G13.total, [kc, ks]);
-  check('E testing Advanced: tiles 7/8 and 9/26; trace strip 9/26 and 2 spec fields; matrix 1 coverage gap',
+  check('E testing Advanced: data cases + UAT scripts = the ledger total (12 + 18 = 30)', kc === G13.cases && ks === G13.scripts && kc + ks === G13.total, [kc, ks]);
+  check('E testing Advanced: tiles 7/12 and 9/30; trace strip 9/30 and 10 spec fields; matrix 4 coverage gaps',
     (await attr('[data-cov="dev"]', 'data-cov-n')) === G13.try && (await attr('[data-cov="uat"]', 'data-cov-n')) === G13.uat && (await attr('[data-trace-uat]', 'data-trace-uat')) === G13.uat
     && +(await attr('[data-trace-fields]', 'data-trace-fields')) === G13.fields && +(await attr('[data-cov-gaps]', 'data-cov-gaps')) === G13.gaps,
     [await attr('[data-trace-uat]', 'data-trace-uat'), await attr('[data-trace-fields]', 'data-trace-fields'), await attr('[data-cov-gaps]', 'data-cov-gaps')]);
@@ -276,7 +284,7 @@ async function ledgerE(browser, at, errors) {
     await page.goto(ROOT + '/release/' + VM); await page.waitForSelector('[data-check="tests-passed"]', { timeout: 15000 });
     check(`E launch Advanced ${w}: "Not ready to launch: 6 steps left" (never "checks not passed"), checks card says 6 steps left`,
       /Not ready to launch: 6 steps left/.test(await txt('[data-gate]')) && !/checks? not passed/.test(await txt('[data-gate]')) && (await attr('[data-counts]', 'data-steps-left')) === String(G13.stepsLeft), await txt('[data-gate]'));
-    check(`E launch Advanced ${w}: the Tests row counts 17 tests not passed (26 − 9)`, (await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count')) === String(G13.gateTests), await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count'));
+    check(`E launch Advanced ${w}: the Tests row counts 21 tests not passed (30 − 9)`, (await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count')) === String(G13.gateTests), await attr('[data-check="tests-passed"] [data-check-count]', 'data-check-count'));
   }
   await page.setViewportSize({ width: 1366, height: 900 });
   /* Launch, Simple: the same phrase and number; per-team cards */
@@ -287,7 +295,7 @@ async function ledgerE(browser, at, errors) {
     check(`E launch Simple ${w}: "Not ready to launch: 6 steps left"`, (await txt('[data-launch-sentence]')) === 'Not ready to launch: 6 steps left', await txt('[data-launch-sentence]'));
     await page.evaluate(() => document.querySelectorAll('details[data-sec]').forEach(d => { d.open = true; })); await page.waitForTimeout(200);
     const parts = await page.$$eval('[data-part]', els => els.map(e => [e.dataset.part, (e.querySelector('[data-part-tests]') || { dataset: {} }).dataset.partTests || null]));
-    check(`E launch Simple ${w}: per-team cards AP 0/8, Compliance 9/9, IT 0/4, Procurement 1/4, Treasury 0/12`, Object.entries(G13.parts).every(([bu, v]) => parts.some(([b, x]) => b === bu && x === v)), parts);
+    check(`E launch Simple ${w}: per-team cards AP 0/10, Compliance 9/11, IT 0/8, Procurement 1/6, Treasury 0/14`, Object.entries(G13.parts).every(([bu, v]) => parts.some(([b, x]) => b === bu && x === v)), parts);
   }
   await page.setViewportSize({ width: 1366, height: 900 });
   /* approver page: who passed each test (Simple and Advanced) */
@@ -296,7 +304,7 @@ async function ledgerE(browser, at, errors) {
     await page.goto(ROOT + '/release/' + VM + '?bu=Compliance'); await page.waitForSelector('[data-bu-view]');
     check(`E approver page (${on ? 'Advanced' : 'Simple'}): "${G13.compPassedBy}" and one row per test with its passer`,
       (await txt('[data-passed-by-text]')) === G13.compPassedBy && await page.locator('[data-test-passer][data-passed-by="ps"]').count() === 9, await txt('[data-passed-by-text]'));
-    if (!on) check('E approver page Simple: the card count is the same 9/9', (await attr('[data-evidence-line]', 'data-part-tests')) === G13.parts.Compliance);
+    if (!on) check('E approver page Simple: the card count is the same 9/11', (await attr('[data-evidence-line]', 'data-part-tests')) === G13.parts.Compliance);
   }
   await page.goto(ROOT + '/release/' + VM + '?bu=Procurement'); await page.waitForSelector('[data-bu-view]');
   check('E approver page: a pass from another department is flagged (Procurement, Priya Shah of Compliance)', await page.locator('[data-test-passer][data-other-dept]').count() === 1 && /another department/.test(await txt('[data-passed-by-text]')));
@@ -305,7 +313,7 @@ async function ledgerE(browser, at, errors) {
   await page.goto(ROOT + '/project/' + VM); await page.waitForSelector('[data-report]');
   await page.click('[data-report]'); await page.waitForSelector('[data-psec="tests"]', { timeout: 30000 });
   const rep = await txt('[data-psec="tests"]');
-  check('E report: the Tests line uses the ledger (never a sum of runs)', !/\b14 passed\b/.test(rep) && /now 9 of 26 passed/.test(rep) && /now 7 of 8 passed/.test(rep), rep);
+  check('E report: the Tests line uses the ledger (never a sum of runs)', !/\b14 passed\b/.test(rep) && /now 9 of 30 passed/.test(rep) && /now 7 of 12 passed/.test(rep), rep);
   await ctx.close();
 }
 

@@ -119,3 +119,9 @@
 
 /* R15 (M3 #1): what a shift did (and the days off it stepped over) */
 .chg-shift-note{margin:2px 0 8px}
+
+/* R17 (PMO defect 2): over the budget or over someone's capacity, one sentence each */
+.chg-cap p{margin:0;font-weight:600}
+.chg-cap p + p{margin-top:4px}
+/* R17 (PMO defect 1): a removed task with hours is cancelled instead */
+[data-rm-cancel]{display:block;margin-top:2px;color:#7a4b00}

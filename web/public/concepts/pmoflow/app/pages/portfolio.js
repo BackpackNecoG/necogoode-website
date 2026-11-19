@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML, costKnown, costOver, costUnknownHTML, pointNav, recordReport } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML, costKnown, costOver, costUnknownHTML, costBasisText, pointNav, recordReport } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -62,11 +62,11 @@ function financialsHTML(projects) {
   const pct = n => (n / max * 100).toFixed(2);
   const row = j => {
     const f = financials(j), over = costOver(j), v = f.planned && f.known ? f.forecast - f.planned : null;
-    return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>${evFlagsHTML(j) ? `<div class="pmo-evflags">${evFlagsHTML(j)}</div>` : ''}
+    return `<tr data-fin="${esc(j.id)}"><td><a href="${link('/project/' + encodeURIComponent(j.id))}" data-link><b>${esc(j.name)}</b></a>${f.known ? `<div class="hint" data-cost-basis>Expected cost: ${esc(costBasisText(j))}</div>` : ''}${evFlagsHTML(j) ? `<div class="pmo-evflags">${evFlagsHTML(j)}</div>` : ''}
         <div class="pmo-fbars" role="img" aria-label="${esc(`${j.name}: planned ${money(f.planned || 0)}, expected ${f.known ? money(f.forecast) : 'unknown (no rates)'}, actual ${money(f.actual)}`)}">
           ${f.planned ? `<span class="pmo-fb plan" style="width:${pct(f.planned)}%"></span>` : ''}${f.known ? `<span class="pmo-fb fc ${over ? 'over' : ''}" style="width:${pct(f.forecast)}%"></span>` : ''}<span class="pmo-fb act" style="width:${pct(f.actual)}%"></span></div></td>
       <td class="pmo-num" data-fin-planned>${f.planned ? esc(money(f.planned)) : '<span class="hint">Not set</span>'}</td>
-      <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast>${f.known ? esc(money(f.forecast)) : costUnknownHTML(j)}</td>
+      <td class="pmo-num ${over ? 'fail' : ''}" data-fin-forecast ${f.known ? `title="${esc('Expected cost: ' + costBasisText(j))}"` : ''}>${f.known ? esc(money(f.forecast)) : costUnknownHTML(j)}</td>
       <td class="pmo-num" data-fin-actual>${esc(money(f.actual))}</td>
       <td class="pmo-num">${v == null ? '<span class="hint">—</span>' : `<span class="pmo-var ${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : v < 0 ? '−' : ''}${esc(money(Math.abs(v)))}</span>`}</td>
       ${evCells(earnedValue(j))}</tr>`;

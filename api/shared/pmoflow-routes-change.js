@@ -186,9 +186,38 @@ async function applyChange(store, wsId, docs, change, actor, today) {
   return { status: 200, body: { ok: true, change: stored, applied: true } };
 }
 
-async function handle({ method, seg, body, req, store, send, fail, dayInput, clientToday }) {
+/* R17 (PMO defect 1): a guard on the generic task API, ahead of it: a DELETE of a task with logged hours is refused (the
+   hours would be erased); the task is cancelled through Change the plan instead. The refusal is logged in History as
+   "Refused: …", like the doc API's own refusals. Returns true when it answered. (A new task over the cost tolerance and an
+   added dependency with a knock-on are sent through Change the plan by the Work tab; the server-side guard for a plain
+   PUT belongs in index.js scheduleError, P1.) */
+async function taskGuard({ method, seg, body, store, send }) {
+  if (seg[0] !== 'ws' || seg[2] !== 'doc' || seg[3] !== 'workItem' || seg.length !== 5 || method !== 'DELETE') return false;
+  const wsId = seg[1], id = seg[4];
+  if (!WS_RE.test(wsId || '') || !ID_RE.test(id || '')) return false;
+  const ws = await store.getWorkspace(wsId);
+  if (!ws || ws.expired) return false;
+  const st = await store.getState(ws);
+  const docs = st.docs;
+  const prev = getDoc(docs, 'workItem', id);
+  const actor = actorOf(body);
+  const refuse = async (status, msg, extra) => {
+    await store.appendEvent(wsId, { actor, action: 'refused', ref: 'workItem:' + id, summary: `Refused: delete work item “${String(((prev || (body && body.data) || {}).title) || 'untitled task').slice(0, 100)}” — ${msg}`.slice(0, 300) }).catch(() => {});
+    /* answered with send (not the route-module fail, which would log a second, rawer "Refused" line) */
+    send(status, Object.assign({ error: msg }, Array.isArray(extra) ? { reasons: extra } : extra || {}));
+    return true;
+  };
+  if (!prev || !C.hasHours(prev)) return false;
+  const h = Math.round(C.hoursLogged(prev) * 100) / 100;
+  return refuse(409, `“${prev.title || 'This task'}” has ${h} ${h === 1 ? 'hour' : 'hours'} logged, so it can’t be deleted. Cancel it instead: the hours stay.`);
+}
+
+async function handle(ctx) {
+  const { method, seg, req, store, send, fail, dayInput, clientToday } = ctx;
+  let body = ctx.body;
   /* Guard: the generic doc API must not write plan changes directly (it would skip the approval rules). */
   if (seg[0] === 'ws' && seg[2] === 'doc' && seg[3] === 'planChange' && method !== 'GET') { fail(403, 'Plan changes are recorded through “Change the plan” only.'); return true; }
+  if (await taskGuard(ctx)) return true;
   if (seg[0] !== 'workspaces' || seg[2] !== 'changes') return false;
   const wsId = seg[1];
   if (!WS_RE.test(wsId || '')) { fail(400, 'invalid workspace id'); return true; }

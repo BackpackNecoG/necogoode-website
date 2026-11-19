@@ -150,6 +150,18 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Renamed Credit to Credit and Collections/), 'department renamed');
   await page.waitForSelector('[data-dept-name="Credit and Collections"]', { timeout: 8000 }).catch(() => {});
   const cc = '[data-dept-name="Credit and Collections"]';
+  /* R17 P4 #1 (Jordan R16): a department with no members gets a clear path, with its own add-person control */
+  {
+    const empty = `${cc} [data-dept-empty]`;
+    ok(/^Add someone to Credit and Collections so its tests can be passed/.test((await page.textContent(empty).catch(() => '')).trim()), 'empty department: "Add someone to Credit and Collections so its tests can be passed"');
+    ok(await page.isVisible(`${empty} [data-dept-assign-form] select`) && await page.isEnabled(`${empty} [data-dept-assign-form] button[type=submit]`), 'the add-person control sits inside that message');
+    ok(!/anyone in Credit and Collections can approve/.test(await page.textContent(`${cc} .adm-dwho`)), 'an empty department never says "anyone in it can approve"');
+    ok((await page.$$(`${cc} [data-dept-assign-form]`)).length === 1, 'one add-person control on the card, not two');
+    await shotBoth('departments-empty');
+    await setMe('lp'); await settle(900);
+    ok(/Add someone to Credit and Collections/.test(await page.textContent(empty).catch(() => '')) && await page.$eval(`${empty} [data-dept-assign-form] button[type=submit]`, b => b.disabled), 'an Editor sees the path, with the control disabled (Admin only, explained at the top)');
+    await setMe('mc'); await settle(900);
+  }
   /* R14 (Jordan): moving a person and choosing approvers are proposed by one Admin and confirmed by another (step-up) */
   const confirmAs = async (who, re) => {
     await setMe(who); await settle(900);
@@ -228,10 +240,24 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Sent to a second Admin to confirm: Sam Keller to Procurement; Sam Keller stops approving for IT/), 'the proposal says the move ends his IT approval');
   await page.waitForSelector('[data-pending-depts] [data-pending]:has-text("Move Sam Keller")', { timeout: 8000 }).catch(() => {});
   ok(/Move Sam Keller from IT to Procurement; Sam Keller stops approving for IT/.test(await page.textContent('[data-pending-depts]').catch(() => '')), 'the waiting change says it too');
+  /* R17 P4 #2 (render P1 #5): the pending card says which sign-offs the move reopens (the engine's answer, asked by the server) */
+  {
+    const exp = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js');
+      const r = await (await fetch(`/api/pmoflow/workspaces/${store.state.ws}/admin`)).json();
+      const p = r.pendingDepartments.find(x => /Move Sam Keller/.test(x.text)); return p ? { list: p.reopens || [], text: p.reopensText } : null; });
+    const card = await page.textContent('[data-pending-depts] [data-pending]:has-text("Move Sam Keller")').catch(() => '');
+    if (exp && exp.list.length) {
+      ok(/^Confirming this reopens Sam Keller’s /.test(exp.text) && card.includes(exp.text) && await page.isVisible('[data-pending-depts] [data-pending]:has-text("Move Sam Keller") [data-pending-reopens]'), 'the pending card says the move reopens Sam\'s sign-offs: ' + exp.text);
+      ok(exp.list.every(x => card.includes(x.project)), 'it names each project not yet launched');
+    } else ok(!(await page.$('[data-pending-depts] [data-pending]:has-text("Move Sam Keller") [data-pending-reopens]')), 'no sign-off of Sam\'s counts in this sandbox, so the card says nothing extra');
+    await shotBoth('departments-move-reopens');
+    globalThis.__samReopens = exp;
+  }
   await settle(900);
   ok(/Sam Keller/.test(await page.textContent('[data-dept-name="IT"] [data-dept-approvers-list]')), 'nothing changes until confirmed');
   await confirmAs('ta', 'Move Sam Keller');
   ok(await toastSays(/Confirmed: Move Sam Keller from IT to Procurement; Sam Keller stops approving for IT/), 'a second Admin confirms it with the extra sign-in check');
+  if (globalThis.__samReopens && globalThis.__samReopens.list.length) ok(await toastSays(/Reopened Sam Keller’s /), 'the confirm toast says which sign-offs reopened');
   await page.waitForFunction(() => !/Sam Keller/.test((document.querySelector('[data-dept-name="IT"] .adm-dwho') || {}).textContent || 'Sam Keller'), null, { timeout: 8000 }).catch(() => {});
   ok(!/Sam Keller/.test(await page.textContent('[data-dept-name="IT"] .adm-dwho')), 'IT no longer says "Approves: Sam Keller"');
   ok(!(await engDepts()).find(d => d.name === 'IT').approvers.includes('sk'), 'engine: Sam is not an IT approver');

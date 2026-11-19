@@ -2,12 +2,12 @@
    /project/:prj?mode=map|timeline|work
    Also exports small PMO helpers reused by home.js and portfolio.js. */
 import { store } from '../store.js';
-import { renderChangesSection, bindChangesSection, taskChangesHTML, openChangeWizard, ensureAssets as ensureChangeAssets, bindDayOff, dayOffText, daysOffSoonHTML, rememberProject, pointNav } from './changes.js';
+import { renderChangesSection, bindChangesSection, taskChangesHTML, openChangeWizard, ensureAssets as ensureChangeAssets, bindDayOff, dayOffText, daysOffSoonHTML, rememberProject, pointNav, sendChange, previewChange, waitingWords, warningsHTML } from './changes.js';
 export { pointNav };
 import { E, esc, fmt, fmtTime, days, addDays, link, go, av, personChip, pname, modal, toast, LOCK, activityCard, bindActivity, bindComments, bindHistory, commentsPanel, historyPanel } from '../ui.js';
 
 /* ---------------------------------------------------------------- shared helpers */
-export const STATUS_LBL = { done: 'Done', prog: 'In progress', idle: 'Not started', none: 'No change' };
+export const STATUS_LBL = { done: 'Done', prog: 'In progress', idle: 'Not started', none: 'No change', cancelled: 'Cancelled' };
 export const KIND_LBL = { build: 'Build', access: 'Access', test: 'Test', defect: 'Defect', other: 'Other' };
 export const BUG = '<svg class="pmo-bug" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="Defect" role="img"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M9 6l-2-3M15 6l2-3M3 13h5M16 13h5M4 8l4 2M20 8l-4 2M4 19l4-2M20 19l-4-2"/></svg>';
 /* R10 §7: 🔒 only means "you can't edit this"; information that isn't available yet gets its own icon and words ("Waiting on …") */
@@ -185,6 +185,15 @@ export function projectStats(prj) {
   const t = j ? truthOf(j) : null;
   if (!t) return { total: 0, done: 0, pct: 0, late: 0, finish: null, target: null };
   return { total: t.total, done: t.done, pct: t.pct, late: t.late, finish: t.forecast, actualFinish: t.actualFinish, target: t.target, buffer: t.buffer };
+}
+/* R17 (BPM; P2 owns the wording, the same as process.js stepChangeCounts): the New project list names changed choices
+   too, "(1 new · 1 choice changed)", never just "(1 new)" */
+export function choiceChangeText(p) {
+  const d = eng('diffProcess', null, p) || { nodes: {} }, gws = [];
+  const w = ns => (ns || []).forEach(n => { if (!n) return; if (n.type === 'decision') gws.push(n); (n.branches || []).forEach(b => w(b.nodes)); });
+  w(p && p.tobe);
+  const ch = gws.filter(g => (d.nodes || {})[g.id] === 'changed').length, nw = gws.filter(g => (d.nodes || {})[g.id] === 'new').length;
+  return [nw ? `${nw} new choice${nw === 1 ? '' : 's'}` : '', ch ? `${ch} choice${ch === 1 ? '' : 's'} changed` : ''].filter(Boolean).join(' · ');
 }
 /* R10 §1 the ONE change phrase ("5 new · 6 changed · 1 removed") for a process or a project: E().changeSummary. */
 export function changePhrase(x) {
@@ -789,6 +798,12 @@ export function schedKey(w, fc) {
 export function wBadge(w, f, fc) {
   fc = fc || renderFc || (f && w ? { [w.id]: f } : {});
   const k = schedKey(w, fc);
+  /* R17 (Karen disagreement 1): a task the header counts as "late or held up" (projectTruth.lateOrBlocked.ids) never reads
+     "On track" or "Due soon" in a row: it is held up by information it waits on */
+  if ((k === 'ok' || k === 'soon') && w && w.projectId && w.status !== 'done') {
+    const j = store.get('project', w.projectId), lb = j ? ((truthOf(j) || {}).raw || {}).lateOrBlocked : null;
+    if (lb && (lb.ids || []).includes(w.id)) return `<span class="badge b-late" data-sched="held" data-held-up title="Held up by information it needs that isn’t available yet">Held up</span>`;
+  }
   const [cls] = BADGE[k] || BADGE.ok, label = badgeLabel(k);
   return `<span class="badge ${cls}" data-sched="${k}"${k === 'causing' ? ' data-causes-slip title="Its forecast pushes back work that depends on it"' : ''}>${label}</span>`;
 }
@@ -844,6 +859,9 @@ export function financials(j) {
 /* R14 (Karen 2): no expected cost without day rates. "Cost unknown: set rates" (a link to the rates), never a red
    "over budget" from the default rate. `over` is only ever true for a known expected cost. */
 export const costKnown = j => financials(j).known;
+/* R17 (PMO disagreement 1): the one expected cost (projectTruth cost.forecast) says how it is worked out, the same words
+   in Settings, Portfolio and the plan-change preview, so a switch of method after hours are logged is never silent */
+export const costBasisText = j => { const m = (truthOf(j).raw.cost || {}).method; return !costKnown(j) ? '' : m === 'cpi' ? 'projected from what the work has cost so far' : 'effort × each owner’s day rate'; };
 export const costOver = j => { const c = financials(j); return !!(c.known && c.planned && c.forecast > c.planned); };
 export const costUnknownText = j => truthOf(j).cost.unknownText || 'Cost unknown: set rates';
 /* inside a card that is itself a link (home tiles, portfolio cards) it is plain text: links never nest */
@@ -953,6 +971,8 @@ const folded = new Set(); /* collapsed group keys in grouped work view */
 const blPick = {}; /* prj -> baseline id for timeline overlay */
 
 /* ---------------------------------------------------------------- map */
+/* R17 (Karen "Plan card doer"): the step's doer: the person, else its role, else "Needs an owner"; never "—" */
+const stepDoerText = (pid, n) => { const d = eng('stepDoerLabel', null, docs(), pid, n); return (d && d.text) || (n.owner ? pname(n.owner) : 'Needs an owner'); };
 function nodeHTML(n, pid, prj, idx, dp) {
   if (n.type === 'end') return `<div class="node end">● ${esc(n.title)}</div>`;
   const trig = n.type === 'trigger';
@@ -988,7 +1008,7 @@ function nodeHTML(n, pid, prj, idx, dp) {
   const goAttr = trig ? '' : `data-go="/process/${esc(pid)}/step/${esc(n.id)}"`;
   return `<div class="${cls}" data-step="${esc(n.id)}" ${goAttr}>
     <div class="nh"><span class="ic">${trig ? '⚡' : idx}</span>
-      <div style="min-width:0"><div class="ttl">${esc(n.title)}</div><div class="num">${trig ? 'What starts it' : esc(pname(n.owner))}</div></div>
+      <div style="min-width:0"><div class="ttl">${esc(n.title)}</div><div class="num" data-step-doer>${trig ? 'What starts it' : esc(stepDoerText(pid, n))}</div></div>
       <div style="margin-left:auto;display:flex;gap:5px;align-items:center">${diff}${trig ? '' : av(n.owner)}</div></div>
     <div class="nb">${body}</div></div>`;
 }
@@ -1474,12 +1494,12 @@ function workRowHTML(w, j, fc) {
     <td><b class="pmo-wt">${w.kind === 'defect' ? BUG + ' ' : ''}${esc(w.title)}</b><div class="pmo-wsub">${w.kind ? `<span class="chip ${w.kind === 'defect' ? 'pmo-chip-defect' : ''}">${esc(KIND_LBL[w.kind] || w.kind)}</span>` : ''}${w.resolves ? `<span class="chip">${WAIT_IC} gets ${esc(dataName(w.resolves))}</span>` : ''}${fieldsOf(j).map(fd => fieldVal(w, fd) ? `<span class="chip pmo-ftag" data-ftag="${esc(fd.key)}"><small>${esc(fd.label)}</small> ${esc(fieldVal(w, fd))}</span>` : '').join('')}${risks.length ? `<span class="pmo-riskb" title="${esc(risks.map(r => r.title).join(' · '))}">⚠ ${risks.length} risk${risks.length > 1 ? 's' : ''}</span>` : ''}${w.kind === 'defect' ? `<a class="pmo-runlink" href="${link('/testing/' + encodeURIComponent(j.id) + (run ? '?run=' + encodeURIComponent(run) : ''))}" data-link>${run ? 'View test run ›' : 'Testing ›'}</a>` : ''}</div>${taskFlagsHTML(w, j)}</td>
     <td class="pmo-c-step"><div class="pmo-wstep">${esc(workStepTitle(w))}</div><div class="hint">${esc(procName(w.pid))}</div></td>
     <td class="pmo-nowrap pmo-c-owner">${w.owner ? `${av(w.owner)} ${esc(pname(w.owner).split(' ')[0])}` : `<span class="pmo-noowner" data-needs-owner title="${esc(ownerText(w))}">${esc(ownerText(w))}</span>`}</td>
-    <td>${statusSelect(w, j, lt)}</td>
+    <td>${w.status === 'cancelled' ? '<span class="badge b-idle" data-cancelled>Cancelled</span>' : statusSelect(w, j, lt)}</td>
     <td class="pmo-nowrap pmo-c-dates">${esc(fmt(w.start))} → ${esc(fmt(w.due))}</td>
     <td class="pmo-nowrap pmo-c-eff"><span class="pmo-eff">${fmtEffort(effortOf(w))}</span>${hoursOf(w) ? `<div class="hint" data-hours>${fmtHours(hoursOf(w))} logged</div>` : ''}</td>
     <td class="pmo-c-sched">${wBadge(w, fc[w.id], fc)}${whyBtn(w)}<div class="pmo-dl">${esc(dueLine(w, fc[w.id]))}</div></td>
     <td class="pmo-deps pmo-c-deps">${deps.length ? '<span class="pmo-c-lbl">After </span>' + deps.map(d => `<span class="dep">${esc(d.title)}${d.lbl ? ` <small class="pmo-deptype">${esc(d.lbl)}</small>` : ''}${d.projectId !== j.id ? ` <small class="pmo-ext" title="${esc('In ' + ((store.get('project', d.projectId) || {}).name || 'another project'))}">external</small>` : ''}${d.status === 'done' ? ' ✓' : ''}</span>`).join('') : '<span class="hint">—</span>'}</td>
-    <td class="pmo-nowrap"><button class="btn sm" data-log-time="${esc(w.id)}" ${canLogTime(w, j) ? '' : `disabled title="${esc(`Only the project team can log time`)}"`}>Log time</button> <button class="btn sm" data-edit-work="${esc(w.id)}" ${lt}>Edit</button> <button class="btn sm danger" data-del-work="${esc(w.id)}" aria-label="Delete ${esc(w.title)}" ${lt}>Delete</button></td></tr>`;
+    <td class="pmo-nowrap"><button class="btn sm" data-log-time="${esc(w.id)}" ${canLogTime(w, j) ? '' : `disabled title="${esc(`Only the project team can log time`)}"`}>Log time</button> <button class="btn sm" data-edit-work="${esc(w.id)}" ${lt}>Edit</button>${w.status === 'cancelled' ? '' : hoursOf(w) || (w.time || []).length ? ` <button class="btn sm danger" data-del-work="${esc(w.id)}" data-cancel-work aria-label="Cancel ${esc(w.title)}" title="It has hours logged, so it is cancelled instead of deleted: the hours stay" ${lt}>Cancel task</button>` : ` <button class="btn sm danger" data-del-work="${esc(w.id)}" aria-label="Delete ${esc(w.title)}" ${lt}>Delete</button>`}</td></tr>`;
 }
 function rollup(items) {
   const done = items.filter(w => w.status === 'done').length;
@@ -2488,7 +2508,7 @@ async function editWork(j, w, err) {
       <div class="hint">FS: starts after it finishes. SS: starts after it starts. FF: finishes after it finishes. Lag adds days (negative overlaps). External items belong to other projects; their dates drive this one.</div>` : '<div class="hint">No other work items to depend on.</div>'}
       ${blocked.size > 1 ? '<div class="hint">Items that already depend on this one are hidden to prevent loops.</div>' : ''}</div>`;
   const acts = [{ id: 'save', label: isNew ? 'Add work item' : 'Save changes', primary: true }];
-  if (!isNew) acts.unshift({ id: 'delete', label: 'Delete', danger: true });
+  if (!isNew && w.status !== 'cancelled') acts.unshift({ id: 'delete', label: (w.time || []).length ? 'Cancel task' : 'Delete', danger: true });
   ensureChangeAssets().catch(() => {});
   const pr = modal({ title: isNew ? 'Add work item' : 'Edit work item', body, actions: acts });
   bindDayOff(([...document.querySelectorAll('.overlay .modal .mb')].pop()));   /* R14 (PMO-11): days off marked as you pick */
@@ -2527,6 +2547,23 @@ async function editWork(j, w, err) {
   const planMove = isNew ? (j.baselines || []).length > 0 : ['due', 'start', 'effortDays', 'deps', 'pid', 'step', 'resolves'].some(k => JSON.stringify(prev[k] == null ? null : prev[k]) !== JSON.stringify(next[k] == null ? null : next[k]));
   const br = planMove && next.kind !== 'defect' ? deadlineBreach(j, next) : null;
   if (br) return offerChangePlan(j, next, '', br);
+  /* R17 (PMO partial "scope cost"): on a project with a saved plan, a new task that raises the expected cost past the
+     tolerance or over the budget goes through Change the plan (the engine's costBreach, the guard an effort edit meets) */
+  if (isNew && (j.baselines || []).length && next.kind !== 'defect') {
+    const D = docs(), nid = '__new_task__';
+    const cb = eng('costBreach', null, D, Object.assign({}, D, { workItem: (D.workItem || []).concat([{ id: nid, data: Object.assign({}, next, { id: nid }) }]) }), j.id, today());
+    if (cb) return offerAddThroughChange(j, next, cb);
+  }
+  /* R17 (PMO partial "added dependency"): a new dependency that moves the tasks waiting on this one is a plan change, so
+     they move with it (a plain save would move only this task) */
+  if (!isNew && next.kind !== 'defect') {
+    const added = (next.deps || []).map(depId).filter(id => !(prev.deps || []).some(d => depId(d) === id));
+    if (added.length && window.PMOChange) {
+      const pv = previewChange({ projectId: j.id, reason: `“${next.title}” now waits for ${added.map(id => `“${(store.get('workItem', id) || {}).title || 'another task'}”`).join(', ')}`, category: 'dependency', edits: [{ op: 'set', type: 'workItem', id: next.id, field: 'deps', to: next.deps }] });
+      const ko = pv.errors.length ? [] : pv.change.edits.filter(e => e.knock && e.id !== next.id && e.field === 'due');
+      if (ko.length) return addDependencyThroughChange(j, prev, next, pv, ko);
+    }
+  }
   if (isNew) {
     next.id = store.newId('wi');
     await psave('workItem', next.id, next, `Added work item “${next.title}” to step “${stepTitle(next.pid, next.step)}”`);
@@ -2558,8 +2595,56 @@ async function editWork(j, w, err) {
   await psave('workItem', next.id, next, `Edited “${next.title}”${said.length ? ': ' + said.join('; ') : ''}`);
   toast('Work item saved');
 }
+/* R17: "+ Add work item" over the cost tolerance: nothing is saved; Change the plan opens with this task filled in */
+async function offerAddThroughChange(j, next, cb) {
+  try { await ensureChangeAssets(); } catch (e) { /* the wizard says so itself */ }
+  const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal data-add-refusal><p style="margin:0">Adding “${esc(next.title)}”: ${esc(cb.text)}</p>
+      <p class="hint" style="margin:8px 0 0" data-refusal-kind="cost">Nothing was added. ${REFUSAL_WHY.cost}, so ${deciderHTML(j)} can approve it. The task is filled in for you; say why it’s needed.</p></div>`,
+    actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
+  if (r.action !== 'change') return;
+  openChangeWizard(j.id, { kinds: ['work'], category: 'scope', adds: [{ title: next.title, owner: next.owner || store.state.me, step: next.pid && next.step ? next.pid + '::' + next.step : '', start: next.start, due: next.due, effortDays: next.effortDays }] });
+}
+/* R17: a new dependency with a knock-on: say what moves, then one plan change moves them all (applied at once within
+   tolerance, else sent for approval). The task's other edits are saved as usual. */
+async function addDependencyThroughChange(j, prev, next, pv, ko) {
+  const mine = pv.change.edits.filter(e => e.id === next.id && (e.field === 'start' || e.field === 'due'));
+  const names = [...new Set(ko.map(e => e.label))];
+  const within = pv.need.within, blocked = !within && pv.need.blocked;
+  const r = await modal({ title: 'This dependency moves other tasks', body: `<div data-dep-knock><p style="margin:0">${esc(pv.change.reason || '')}${mine.length ? `, so it moves to <b>${esc(fmt((mine.find(e => e.field === 'start') || {}).to || next.start))} – ${esc(fmt((mine.find(e => e.field === 'due') || {}).to || next.due))}</b>` : ''}. ${names.length === 1 ? 'This task waits on it and moves too' : `These ${names.length} tasks wait on it and move too`}:</p>
+      <ul class="pmo-depko">${ko.slice(0, 8).map(e => `<li data-dep-ko="${esc(e.id)}">“${esc(e.label)}”: due ${esc(fmt(e.from))} → <b>${esc(fmt(e.to))}</b></li>`).join('')}</ul>${ko.length > 8 ? `<div class="hint">+${ko.length - 8} more</div>` : ''}
+      <p class="hint" style="margin:8px 0 0" data-dep-sentence>${esc(pv.im.sentence)}</p>${warningsHTML(pv.im.warnings)}
+      ${blocked ? `<div class="banner" role="alert" style="margin:8px 0 0">${esc(blocked)}</div>` : within ? '<p class="hint" style="margin:6px 0 0">Within tolerance: it applies as a plan change, so the reason and the moves are kept.</p>' : `<p class="hint" style="margin:6px 0 0" data-dep-approval>It needs approval: ${esc(pv.need.reasons.filter(Boolean).join(' '))}</p>`}</div>`,
+    actions: blocked ? [] : [{ id: 'go', label: within ? 'Add the dependency' : 'Send for approval', primary: true }] });
+  if (r.action !== 'go') return;
+  try {
+    const res = await sendChange({ projectId: j.id, reason: pv.change.reason, category: 'dependency', edits: [{ op: 'set', type: 'workItem', id: next.id, field: 'deps', to: next.deps }] });
+    toast(res.change && res.change.status === 'applied' ? `Dependency added: ${plural(names.length + 1, 'task')} moved` : 'Sent for approval: ' + waitingWords(res.change).replace(/^Waiting for /, ''));
+  } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused the change')); return; }
+  /* the task's other edits (name, status, owner, effort…) are saved as usual */
+  const cur = store.get('workItem', next.id); if (!cur) return;
+  const keep = ['deps', 'start', 'due', 'updatedAt'];
+  const rest = Object.assign({}, cur); Object.keys(next).forEach(k => { if (!keep.includes(k)) rest[k] = next[k]; });
+  if (Object.keys(rest).some(k => !keep.includes(k) && JSON.stringify(rest[k]) !== JSON.stringify(cur[k]))) { rest.updatedAt = stamp(); await psave('workItem', next.id, rest, `Edited “${next.title}”`).catch(() => {}); }
+}
+/* R17 (PMO defect 1): a task with logged hours is never deleted: it is cancelled through a plan change and keeps its hours */
+async function cancelWork(j, w) {
+  try { await ensureChangeAssets(); } catch (e) { toast('Plan changes are unavailable right now.'); return; }
+  const h = Math.round(hoursOf(w) * 100) / 100;
+  const t = eng('hoursTotals', null, docs(), w);
+  const r = await modal({ title: 'Cancel this task?', body: `<div data-cancel-dialog><p style="margin:0"><b>${esc(w.title)}</b> has <b>${esc(String(h))} ${h === 1 ? 'hour' : 'hours'}</b> logged${t && t.dollars ? ` (${esc(money(t.dollars))})` : ''}, so it can’t be deleted. It is cancelled instead: the hours stay in Spent and in History.</p>
+      <div class="field" style="margin-top:10px"><label for="pmo-cancel-why">Why? <small class="hint">Required, one line</small></label><input id="pmo-cancel-why" name="why" maxlength="200" placeholder="e.g. Not needed: the vendor portal does this now" /></div></div>`,
+    actions: [{ id: 'cancel-task', label: 'Cancel the task', danger: true }] });
+  if (r.action !== 'cancel-task') return;
+  const why = String((r.form && r.form.why) || '').trim();
+  if (!why) { toast('Say why the task is cancelled.'); return cancelWork(j, w); }
+  try {
+    const res = await sendChange({ projectId: j.id, reason: why, category: 'scope', edits: [{ op: 'remove', type: 'workItem', id: w.id }] });
+    toast(res.change && res.change.status === 'applied' ? `Cancelled “${w.title}”: its hours stay` : 'Sent for approval: ' + waitingWords(res.change).replace(/^Waiting for /, ''));
+  } catch (e) { toast('Not saved: ' + ((e && e.message) || 'the server refused the change')); }
+}
 async function deleteWork(j, w) {
   if (!canEditWork(w, j)) { toast(lockTitle(w, j)); return; }
+  if ((w.time || []).length) return cancelWork(j, w);
   const deps = projectItems(j.id).filter(x => (x.deps || []).some(d => depId(d) === w.id));
   const r = await modal({ title: 'Delete work item?', body: `<p style="margin:0">Delete <b>${esc(w.title)}</b>? This can’t be undone.</p>${deps.length ? `<div class="note">${deps.length} item${deps.length > 1 ? 's depend' : ' depends'} on it (${deps.map(d => esc(d.title)).join(', ')}). The dependency will be removed from ${deps.length > 1 ? 'them' : 'it'}.</div>` : ''}`, actions: [{ id: 'delete', label: 'Delete', danger: true }] });
   if (r.action !== 'delete') return;
@@ -2726,7 +2811,7 @@ function suggestBody(j, items, meta, ro, err) {
         <div class="pmo-sg-main"><input class="pmo-sg-t" name="t_${i}" value="${esc(x.title)}" maxlength="140" aria-label="Title of suggestion ${i + 1}" ${dis}/>
         <div class="hint">${x.tag === 'train' || x.tag === 'tell' ? 'Whole project' : x.tag === 'retire' ? `${esc(procName(x.pid))} › ${esc(workStepTitle(x))} (the new way drops it)` : `${esc(procName(x.pid))} › ${x.gateway ? '<span class="pmo-gw" data-sg-gateway>◆ gateway</span> ' : ''}${esc(stepTitle(x.pid, x.step))}`} · ${esc(KIND_LBL[x.kind] || x.kind)}${x.resolves ? ' · resolves ' + esc(dataName(x.resolves)) + ' (' + EFF_LBL[effAvail(x.resolves)] + ')' : ''}</div>${x.note ? `<div class="hint" data-sg-note>${esc(x.note)}</div>` : ''}</div></div>
       <div class="pmo-sg-f">
-        <label>Owner<select name="o_${i}" ${dis}>${people.map(p => `<option value="${esc(p.id)}" ${p.id === x.owner ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+        <label>Owner<select name="o_${i}" data-sg-owner="${i}" ${dis}><option value="" ${x.owner && store.person(x.owner) ? '' : 'selected'}>${esc(x.ownerRole ? 'Needs an owner: ' + x.ownerRole : 'Needs an owner')}</option>${people.map(p => `<option value="${esc(p.id)}" ${p.id === x.owner ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
         <label>Effort (days)<input type="number" name="e_${i}" min="0.5" max="200" step="0.5" value="${esc(x.effortDays)}" ${dis}/></label>
         <label>Start<input type="date" name="s_${i}" value="${esc(x.start)}" data-sg-start="${i}" ${dis}/></label>
         <label>Due<input type="date" name="d_${i}" value="${esc(x.due)}" ${dis}/></label></div>
@@ -2803,7 +2888,7 @@ async function suggestModal(j, items, meta, err) {
   const f = r.form;
   const picked = new Set((f.pick || []).map(Number));
   if (f.pick) items.forEach((x, i) => Object.assign(x, {
-    picked: picked.has(i), title: String(f['t_' + i] != null ? f['t_' + i] : x.title).trim(), owner: f['o_' + i] || x.owner, effortDays: f['e_' + i] != null ? Number(f['e_' + i]) : x.effortDays,
+    picked: picked.has(i), title: String(f['t_' + i] != null ? f['t_' + i] : x.title).trim(), owner: f['o_' + i] != null ? (f['o_' + i] || null) : x.owner, effortDays: f['e_' + i] != null ? Number(f['e_' + i]) : x.effortDays,
     start: f['s_' + i] || x.start, due: f['d_' + i] || x.due, deps: f['dep_' + i] || [],
   }));
   if (r.action !== 'create') { await keepDraft(j, { mode: 'adjust', source: meta.source, note: meta.note, items }); return; } /* Cancel/Back keeps the edits */
@@ -2830,6 +2915,15 @@ async function createSuggestions(j, items, picked, meta) {
         deps: x.deps.map(d => d[0] === 'S' ? ids[Number(d.slice(2))] : d.slice(2)).filter(Boolean) }; });
     const D = docs(), after = Object.assign({}, D, { workItem: (D.workItem || []).concat(ws.map(w => ({ id: w.id, data: w }))) });
     const b = eng('deadlineBreach', null, D, after, j.id, today());
+    /* R17 (PMO partial "scope cost"): over the cost tolerance or the budget, the same: nothing is half-saved */
+    const cb = !b ? eng('costBreach', null, D, after, j.id, today()) : null;
+    if (cb) {
+      await ensureChangeAssets().catch(() => {});
+      const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal data-add-refusal><p style="margin:0">Adding ${plural(ws.length, 'task')}: ${esc(cb.text)}</p>
+        <p class="hint" style="margin:8px 0 0" data-refusal-kind="cost">Nothing was added. These tasks are listed in <b>Change the plan</b> as a scope change, so ${deciderHTML(j)} can approve the cost.</p></div>`, actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
+      if (r.action === 'change') openChangeWizard(j.id, { kinds: ['scope'], category: 'scope', reason: 'Add the suggested work', suggestions: ws });
+      return;
+    }
     if (b) {
       await ensureChangeAssets().catch(() => {});
       const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal><p style="margin:0">Adding ${plural(ws.length, 'task')} would move the expected finish from <b>${esc(fmt(b.finishBefore))}</b> to <b>${esc(fmt(b.finishAfter))}</b>, past the <b>${esc(fmt(b.target))}</b> deadline.</p>
@@ -2842,10 +2936,11 @@ async function createSuggestions(j, items, picked, meta) {
   for (const i of [...picked].sort((a, b) => a - b)) {
     const x = items[i];
     const deps = x.deps.map(d => d[0] === 'S' ? ids[Number(d.slice(2))] : d.slice(2)).filter(Boolean);
-    const w = { id: ids[i], projectId: j.id, pid: x.pid, step: x.step, title: x.title.slice(0, 140), owner: x.owner, status: 'idle', kind: x.kind, start: x.start, due: x.due, deps, effortDays: x.effortDays, updatedAt: stamp() };
+    const w = { id: ids[i], projectId: j.id, pid: x.pid, step: x.step, title: x.title.slice(0, 140), owner: x.owner || null, status: 'idle', kind: x.kind, start: x.start, due: x.due, deps, effortDays: x.effortDays, updatedAt: stamp() };
+    if (!w.owner && x.ownerRole) w.ownerRole = x.ownerRole;
     if (x.resolves) w.resolves = x.resolves;
     ['note', 'tag', 'retires'].forEach(k => { if (x[k]) w[k] = x[k]; });   /* R10 §6 */
-    await psave('workItem', w.id, w, `Added suggested work “${w.title}” for ${pname(w.owner)}, ${fmt(w.start)} – ${fmt(w.due)}, ${fmtEffort(w.effortDays)} effort${deps.length ? ', after ' + deps.map(d => (store.get('workItem', d) || {}).title).filter(Boolean).join(', ') : ''} (${String(meta.source).toLowerCase() === 'ai' ? 'AI' : 'rules'} suggestion)`);
+    await psave('workItem', w.id, w, `Added suggested work “${w.title}” for ${w.owner ? pname(w.owner) : ownerText(w)}, ${fmt(w.start)} – ${fmt(w.due)}, ${fmtEffort(w.effortDays)} effort${deps.length ? ', after ' + deps.map(d => (store.get('workItem', d) || {}).title).filter(Boolean).join(', ') : ''} (${String(meta.source).toLowerCase() === 'ai' ? 'AI' : 'rules'} suggestion)`);
     n++;
   }
   toast(`Added ${n} task${n > 1 ? 's' : ''} to the plan`);
@@ -2891,6 +2986,14 @@ async function planCard(j, opts) {
   const items = exact ? list.map(x => Object.assign({}, x, { deps: (x.deps || []).slice() })) : normalizeSuggestions(j, list);
   const fit = exact ? eng('planFit', null, docs(), j.id, today(), items) : null;
   const end = fit ? fit.forecastFinish : maxDate(items.map(x => x.due));
+  /* R17 (PMO defect 2): over the budget, or more work than someone has room for: one plain sentence each, before Accept
+     (PMOChange.planWarnings on the docs with the plan added, the same warnings a plan change shows) */
+  await ensureChangeAssets().catch(() => {});
+  const planAfter = exact ? eng('withPlan', null, docs(), j.id, items)
+    : Object.assign({}, docs(), { workItem: (docs().workItem || []).concat(items.map((x, i) => ({ id: '__sug' + i, data: Object.assign({}, x, { id: '__sug' + i, projectId: j.id, status: 'idle', deps: [] }) }))) });
+  const warn = planAfter && window.PMOChange && window.PMOChange.planWarnings
+    ? window.PMOChange.planWarnings(docs(), planAfter, j.id, today(), { engine: window.PMOEngine, people: [...new Set(items.map(x => x.owner).filter(o => o && store.person(o)))] }) : null;
+  const warned = !!(warn && warn.sentences.length);
   /* R12 #6: people are people: an unfilled role is counted as "needs an owner", never as a person */
   const people = [...new Set(items.filter(x => x.owner && store.person(x.owner)).map(x => x.owner))];
   const unowned = items.filter(x => !(x.owner && store.person(x.owner))).length;
@@ -2901,11 +3004,12 @@ async function planCard(j, opts) {
   const late = lateWarning(fit, end, j);
   const pending = modal({ title: has ? 'Here’s a plan for what’s not covered yet' : 'Here’s a first plan', body: `<p class="pmo-fp-lead" data-first-plan="${items.length}">${has ? 'Tasks still needed' : 'Here’s a first plan'}: <b>${plural(items.length, 'task')}</b>${people.length ? ` for ${plural(people.length, 'person', 'people')}` : ''}${unowned ? `${people.length ? ';' : ','} <span data-plan-unowned="${unowned}">${unowned} ${unowned === 1 ? 'needs' : 'need'} an owner</span>` : ''}.</p>
     ${late ? late.html : `<p class="pmo-fp-fit" data-plan-fit data-plan-finish="${esc(end || '')}">${fit ? esc(fit.message) : `Done by about <b>${esc(fmt(end))}</b> (deadline ${esc(fmt(j.target))}).`}</p>`}
+    ${warned ? warningsHTML(warn) : ''}
     ${fit && Array.isArray(fit.unassigned) && fit.unassigned.length ? `<p class="hint pmo-fp-warn" data-plan-unassigned="${fit.unassigned.length}">${plural(fit.unassigned.length, 'task')} ${fit.unassigned.length === 1 ? 'needs' : 'need'} an owner. Pick one with Adjust, or after adding the plan.</p>` : ''}
     <ol class="pmo-fp">${items.map(x => `<li data-fp-item data-fp-owner="${esc(x.owner || '')}"><b>${esc(x.title)}</b><span class="hint">${esc(ownerTxt(x))} · ${esc(fmt(x.start))} – ${esc(fmt(x.due))}</span>${x.note ? `<span class="hint pmo-fp-note">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>
     <div class="hint">Every new or changed step gets a task, and so does information you don’t have yet, each step the new way drops, training the people who do the changed steps, and telling the teams. Each task starts after the tasks it waits for.${pm ? ' Accept adds them all. Adjust lets you change names, people and dates first.' : ''}</div>
     ${pm ? '<div class="hint" data-draft-hint>Not ready to decide? Cancel keeps this plan as a draft on the project. Dismiss throws it away.</div>' : `<div class="banner pmo-ro-note" style="margin:0">Only <b>${esc(pname(j.owner))}</b> (project manager) can add this plan.</div>`}`,
-    actions: pm ? [{ id: 'dismiss', label: 'Dismiss' }, { id: 'adjust', label: late ? late.adjust : 'Adjust' }, { id: 'accept', label: late ? late.accept : 'Accept', primary: true }] : [] });
+    actions: pm ? [{ id: 'dismiss', label: 'Dismiss' }, { id: 'adjust', label: late ? late.adjust : 'Adjust' }, { id: 'accept', label: late ? late.accept : warned ? 'Accept anyway' : 'Accept', primary: true }] : [] });
   closeOnRoute();
   const r = await pending;
   if (!pm) return;
@@ -3005,6 +3109,17 @@ export async function latestProcessIdAsync(procs) {
   return latestProcessId(arr);
 }
 /* "+ New project" (R3/R5), used by home and portfolio. Creates the project and opens it. */
+/* R17 (Jordan): a second project on the same process is flagged when it is created, not only once both have plans.
+   The open projects (not live or closed) that already link the process, in words; '' when none. */
+export function overlapText(pid) {
+  if (!pid) return '';
+  const xs = store.list('project', p => p.status !== 'live' && p.status !== 'closed' && (p.processes || []).includes(pid));
+  if (!xs.length) return '';
+  const and = a => (a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]);
+  const pms = [...new Set(xs.map(p => p.owner).filter(Boolean))].map(pname);
+  return `${and(xs.map(p => `“${p.name}”`))} already ${xs.length === 1 ? 'changes' : 'change'} this process. Two projects changing the same steps can clash: agree who changes what with ${pms.length ? and(pms) + (pms.length === 1 ? ' (its project manager)' : ' (their project managers)') : 'its project manager'}.`;
+}
+const overlapHTML = pid => { const t = overlapText(pid); return `<div class="note pmo-np-overlap" data-np-overlap role="status" ${t ? '' : 'hidden'}>${esc(t)}</div>`; };
 export async function newProject(prefill, err) {
   const me = store.state.me;
   const procs = store.list('process');
@@ -3014,7 +3129,7 @@ export async function newProject(prefill, err) {
      Everything else sits under "More options" (open by default when advanced tools are on). */
   const body = `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
     <div class="field"><label for="np-name">Project name</label><input id="np-name" name="name" maxlength="100" value="${esc(v.name)}" placeholder="e.g. Faster supplier payments" /></div>
-    <div class="field"><label for="np-from">Which process does it change?</label>${procs.length ? `<select id="np-from" name="from"><option value="" ${v.from ? '' : 'selected'}>None yet: I’ll pick one later</option>${procs.map(p => { const c = changePhrase(p); return `<option value="${esc(p.id)}" ${p.id === v.from ? 'selected' : ''} data-np-from-change="${esc(c.text)}">${esc(p.name)}${c.text ? ' (' + esc(c.text) + ')' : ''}</option>`; }).join('')}</select><div class="hint">We’ll suggest a first plan from what changes in it.</div>` : '<div class="hint">No processes yet. You can link one later.</div>'}</div>
+    <div class="field"><label for="np-from">Which process does it change?</label>${procs.length ? `<select id="np-from" name="from"><option value="" ${v.from ? '' : 'selected'}>None yet: I’ll pick one later</option>${procs.map(p => { const c = changePhrase(p), cx = choiceChangeText(p), tx = [c.text, cx].filter(Boolean).join(' · '); return `<option value="${esc(p.id)}" ${p.id === v.from ? 'selected' : ''} data-np-from-change="${esc(c.text)}" data-np-from-choices="${esc(cx)}">${esc(p.name)}${tx ? ' (' + esc(tx) + ')' : ''}</option>`; }).join('')}</select><div class="hint">We’ll suggest a first plan from what changes in it.</div>${overlapHTML(v.from)}` : '<div class="hint">No processes yet. You can link one later.</div>'}</div>
     <div class="field"><label for="np-target">Deadline</label><input id="np-target" type="date" name="target" value="${esc(v.target)}" /><div class="hint">About two months from today. Change it if you have a date in mind.</div></div>
     <details class="pmo-more" ${store.advanced ? 'open' : ''}><summary>More options</summary><div class="pmo-more-b">
     <div class="field"><label for="np-desc">Description</label><textarea id="np-desc" name="desc" maxlength="600" placeholder="What changes, and why it matters">${esc(v.desc)}</textarea></div>
@@ -3023,7 +3138,13 @@ export async function newProject(prefill, err) {
     <div class="field"><label>Team</label><div class="pmo-checks pmo-np-people">${store.state.people.map(p => `<label><input type="checkbox" name="resources" value="${esc(p.id)}" ${(v.resources || []).includes(p.id) ? 'checked' : ''}/> <span>${av(p.id)} ${esc(p.name)} <small>${esc(p.role)}</small></span></label>`).join('')}</div><div class="hint">The project manager and launch owner are always on the team.</div></div>
     ${procs.length > 1 ? `<div class="field"><label>Also link</label><div class="pmo-checks">${procs.map(p => { const c = changePhrase(p); return `<label><input type="checkbox" name="processes" value="${esc(p.id)}" ${(v.processes || []).includes(p.id) ? 'checked' : ''}/> <span><b>${esc(p.name)}</b><br/><small data-np-change="${esc(p.id)}">${flatSteps(p.tobe).length} steps${c.text ? ' · ' + esc(c.text) : ''}</small></span></label>`; }).join('')}</div></div>` : ''}
     </div></details>`;
-  const r = await modal({ title: 'New project', body, actions: [{ id: 'create', label: 'Create project', primary: true }] });
+  const pr = modal({ title: 'New project', body, actions: [{ id: 'create', label: 'Create project', primary: true }] });
+  {
+    const mb = [...document.querySelectorAll('.overlay .modal .mb')].pop();
+    const sel = mb && mb.querySelector('#np-from'), box = mb && mb.querySelector('[data-np-overlap]');
+    if (sel && box) sel.addEventListener('change', () => { const t = overlapText(sel.value); box.textContent = t; box.hidden = !t; });
+  }
+  const r = await pr;
   if (r.action !== 'create') return null;
   const f = r.form;
   const linked = [...new Set([f.from, ...(f.processes || [])].filter(Boolean))];
@@ -3070,7 +3191,7 @@ async function editSettings(j, err, prefill) {
     <div class="field"><label for="ps-sponsor">Sponsor</label><input id="ps-sponsor" data-set-sponsor readonly aria-readonly="true" value="${esc(sp0 ? pname(sp0) : 'Not set')}" />
       <div class="hint" data-sponsor-locked>Approves plan changes that move the deadline, push the finish past it, change the budget or hand over the project manager role.${sp0 ? '' : ' <b>Until a sponsor is set, an Admin approves them.</b>'} The project manager doesn’t choose the sponsor: an Admin sets it in <b>Admin › People › Project sponsors</b>.</div></div>
     ${pmoHtml}
-    <div class="hint ${costOver(j) ? 'pmo-set-over' : ''}" data-set-fin>${fin.known ? `Expected cost ${esc(money(fin.forecast))}${fin.planned ? (costOver(j) ? ` · <b class="fail" data-set-over>${esc(money(fin.forecast - fin.planned))} over the ${esc(money(fin.planned))} budget</b>` : ` · within the ${esc(money(fin.planned))} budget`) : ''}` : esc(costUnknownText(j))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
+    <div class="hint ${costOver(j) ? 'pmo-set-over' : ''}" data-set-fin>${fin.known ? `Expected cost ${esc(money(fin.forecast))} <span data-cost-basis>(${esc(costBasisText(j))})</span>${fin.planned ? (costOver(j) ? ` · <b class="fail" data-set-over>${esc(money(fin.forecast - fin.planned))} over the ${esc(money(fin.planned))} budget</b>` : ` · within the ${esc(money(fin.planned))} budget`) : ''}` : esc(costUnknownText(j))} · actual ${esc(money(fin.actual))} so far (logged hours × each person’s day rate; edit rates in Portfolio › Workload).</div>`;
   /* R16 (N1 #6, Jordan 3): once there is a plan, the launch owner also changes only through Change the plan */
   const r = await modal({ title: 'Project settings', body, actions: [{ id: 'handover', label: 'Hand over the role' }].concat(locked ? [{ id: 'handover-lo', label: 'Hand over the launch owner' }] : []).concat([{ id: 'save', label: 'Save settings', primary: true }]) });
   if (r.action === 'handover') { openChangeWizard(j.id, { kinds: ['pm'] }); return; }

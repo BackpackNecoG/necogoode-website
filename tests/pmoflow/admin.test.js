@@ -1096,3 +1096,77 @@ test('R16 step-up: confirming a department or role change refuses a step-up olde
   r = await call('POST', `workspaces/${ws}/admin/roles/pending/${rp}/confirm`, { actor: 'mc', stepUp: ago(5000) });
   assert.equal(r.status, 200, JSON.stringify(r.body));
 });
+
+/* ---------- R17 P4 #2 (Jordan R16 re-test 2, render P1 #5): a pending move that reopens sign-offs says so ---------- */
+/* An IT approval by Sam on a project not yet launched; the test writes it itself so it never depends on seeded approvals. */
+async function samSignedIT(ws) {
+  const st = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const today = new Date().toISOString().slice(0, 10);
+  const proj = st.project.map(d => d.data).find(p => p.status !== 'live' && !(p.released || []).length &&
+    ((engR16.readiness(st, p.id, today).checks || []).find(c => c.id === 'bu-signoff') || { sections: [] }).sections.includes('IT') &&
+    !(((engR16.readiness(st, p.id, today).checks || []).find(c => c.id === 'bu-signoff') || {}).sectionStatus || []).some(s => s.bu === 'IT' && (s.barred || []).some(b => b.person === 'sk')));
+  assert.ok(proj, 'a project not yet launched has an IT part');
+  const at = new Date(Date.now() - 3600000).toISOString();
+  await store.putDoc(ws, 'approval', 'r17-sk-it', { id: 'r17-sk-it', projectId: proj.id, bu: 'IT', approver: 'sk', decision: 'approved', at, stepUp: true, snapshotAt: at });
+  const after = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const sig = engR16.readiness(after, proj.id, today).checks.find(c => c.id === 'bu-signoff');
+  assert.equal((sig.sectionStatus.find(s => s.bu === 'IT') || {}).approver, 'sk', 'Sam\'s IT sign-off counts before the move');
+  return proj;
+}
+test('R17 departments: a pending move out lists the sign-offs it reopens; confirming reopens them and History says so', async () => {
+  const ws = await newWs();
+  const proj = await samSignedIT(ws);
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'sk', id: 'dept-procurement' }, actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const pend = r.body.pending;
+  assert.ok(Array.isArray(pend.reopens), 'the pending entry lists what it reopens');
+  const hit = pend.reopens.find(x => x.projectId === proj.id && x.bu === 'IT');
+  assert.ok(hit, JSON.stringify(pend.reopens));
+  assert.equal(hit.person, 'sk');
+  assert.equal(hit.project, proj.name);
+  /* the seed may hold other sign-offs of Sam's, so the sentence is checked for this one, not for being the only one */
+  assert.match(pend.reopensText, /^Confirming this reopens Sam Keller’s (IT sign-off on |sign-offs: )/, pend.reopensText);
+  assert.ok(pend.reopensText.includes(`IT sign-off on ${proj.name}`) || pend.reopensText.includes(`IT on ${proj.name}`), pend.reopensText);
+  assert.match(pend.reopensText, /not launched yet\. (It|Each) must be approved again before launch\.$/);
+  /* GET admin carries the same, for the card */
+  const g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.equal(g.pendingDepartments.find(p => p.id === pend.id).reopensText, pend.reopensText);
+  /* nothing reopens until confirmed */
+  const today = new Date().toISOString().slice(0, 10);
+  let docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+  assert.equal(engR16.readiness(docs, proj.id, today).checks.find(c => c.id === 'bu-signoff').sectionStatus.find(s => s.bu === 'IT').approver, 'sk');
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pend.id}/confirm`, { actor: 'mc', stepUp: SU() });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok((r.body.reopened || []).some(x => x.projectId === proj.id && x.bu === 'IT'), 'the confirm answer names what reopened');
+  docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const sig = engR16.readiness(docs, proj.id, today).checks.find(c => c.id === 'bu-signoff');
+  assert.equal(sig.sectionStatus.find(s => s.bu === 'IT').approved, false, 'the IT sign-off reopened');
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events.map(e => e.summary);
+  assert.ok(evs.some(s => s === `Reopened Sam Keller’s IT sign-off on ${proj.name}: Sam Keller moved out of IT before it launched`), evs.join(' | '));
+});
+test('R17 departments: a move with no sign-off to reopen says nothing extra; a lone Admin\'s move answers what reopened', async () => {
+  const ws = await newWs();
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'lp', id: 'dept-it' }, actor: 'mc' });
+  assert.deepEqual(r.body.pending.reopens, []);
+  assert.equal(r.body.pending.reopensText, null);
+  await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/cancel`, { actor: 'mc' });
+  const proj = await samSignedIT(ws);
+  assert.equal((await setRole(ws, 'ta', 'editor', 'mc')).status, 200);
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'sk', id: null }, actor: 'mc' });
+  assert.equal(r.status, 200, JSON.stringify(r.body)); assert.ok(!r.body.pending);
+  assert.ok((r.body.reopened || []).some(x => x.projectId === proj.id && x.bu === 'IT'), JSON.stringify(r.body.reopened));
+  assert.match(r.body.reopenedText || '', /^Reopened Sam Keller’s (IT sign-off on |sign-offs: IT on )/);
+});
+test('R17 departments: removing a named approver keeps the removal date, so their sign-off on a part not launched reopens', async () => {
+  const ws = await newWs();
+  const proj = await samSignedIT(ws);
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-it', approvers: ['dk'] }, actor: 'ta' });
+  assert.ok((r.body.pending.reopens || []).some(x => x.projectId === proj.id && x.bu === 'IT'), 'the pending approver change says it reopens Sam\'s sign-off');
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'mc', stepUp: SU() });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+  const it = docs.workspace.find(d => d.id === 'settings').data.departments.find(d => d.id === 'dept-it');
+  assert.ok(it.approverRemoved && it.approverRemoved.sk, 'the stored department keeps when Sam stopped approving');
+  const today = new Date().toISOString().slice(0, 10);
+  assert.equal(engR16.readiness(docs, proj.id, today).checks.find(c => c.id === 'bu-signoff').sectionStatus.find(s => s.bu === 'IT').approved, false);
+});
