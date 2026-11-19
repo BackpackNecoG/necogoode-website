@@ -141,6 +141,18 @@ function buSections(prj) {
     flat(nodes).forEach(s => {
       const per = store.person(s.owner);
       if (per && per.bu) add(per.bu, { pid: p.id, pname: p.name, step: s, via: 'owner' });
+      /* R16 (Karen + Jordan r16, own data): a step done by a ROLE ("AP") belongs to the department that role maps to
+         (process.teamDepartments, the engine's own rule), so that department's approval page lists it — never "No steps". */
+      const eng = E();
+      if (!per && eng && eng.stepTeams && eng.departmentFor) {
+        try {
+          (eng.stepTeams(store.state.docs, p.id, s) || []).forEach(team => {
+            const d = eng.departmentFor(store.state.docs, p.id, team);
+            const name = d && (d.name || d);
+            if (name && typeof name === 'string') { if (!known.has(name.toLowerCase())) known.set(name.toLowerCase(), name); add(known.get(name.toLowerCase()), { pid: p.id, pname: p.name, step: s, via: 'owner' }); }
+          });
+        } catch (err) { /* mapping unavailable: fall back to the person/tag rules above */ }
+      }
       (s.touches || []).forEach(t => { const bu = known.get(String(t || '').trim().toLowerCase()); if (bu) add(bu, { pid: p.id, pname: p.name, step: s, via: 'tag', tag: t }); });
     });
   });

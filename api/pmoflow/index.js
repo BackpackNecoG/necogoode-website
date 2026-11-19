@@ -1168,6 +1168,11 @@ module.exports = async function (context, req) {
       if (method === 'DELETE') {
         const st = await store.getState(ws);
         const prev = (st.docs[type] || []).find(d => d.id === id);
+        /* R16 (PMO r16 attack): a delete must name a person in this workspace; an anonymous delete is refused and logged */
+        if (!(st.docs.person || []).some(p => p.id === actor)) {
+          await store.appendEvent(wsId, { actor, action: 'refused', ref: `${type}:${id}`, summary: `Refused: delete ${type} — nobody in this workspace was named as making the change` });
+          return fail(403, 'Say who is making this change: deletes must come from someone in this workspace.');
+        }
         const rdel = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
         const refuseDel = async msg => { await store.appendEvent(wsId, { actor, action: 'refused', ref: `${type}:${id}`, summary: ai.labeler(st.docs).scrub(`Refused: delete ${describe(type, prev.data, st.docs)} — ${msg}`).slice(0, 300) }).catch(() => {}); return fail(403, msg); };
         if (prev && rdel) return refuseDel(rdel);

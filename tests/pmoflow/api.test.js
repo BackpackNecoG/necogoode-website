@@ -2464,3 +2464,12 @@ test('R16 N1 #7 guards: a launch window on a holiday or past the deadline; cost 
   assert.equal(engine.businessDaysBetween(r.body.doc.data.start, r.body.doc.data.due), engine.businessDaysBetween(w11.start, w11.due));
   assert.match(r.body.event.summary, /start/);
 });
+
+/* R16 lead (PMO r16 attack): a delete with no named person is refused and logged */
+test('R16: anonymous delete is refused (403) and logged as refused', async () => {
+  const ws = await newWs();
+  const r = await call('DELETE', `ws/${ws}/doc/risk/R1`, {});
+  assert.equal(r.status, 403);
+  const ev = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events;
+  assert.ok(ev.some(e => e.action === 'refused' && /delete risk/.test(e.summary)));
+});
