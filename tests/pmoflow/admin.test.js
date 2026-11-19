@@ -995,3 +995,104 @@ test('R15 audit labels: entries the system writes today are labelled server-writ
   assert.equal(admin.summaryParts('Work item "Open W-9" marked done', 'update', { seeded: true }).written, 'server');
   assert.equal(admin.summaryParts('Fixed typo', 'update').written, 'client');
 });
+
+/* ---------- R16 N4 #1 (Jordan R15 re-test 2): a move out of a department revokes approver status ---------- */
+const engR16 = require(path.join(API, 'shared/pmoflow-engine.js'));
+test('R16 departments: moving an approver out (second-Admin confirm) removes them as that department\'s approver, and says so', async () => {
+  const ws = await newWs();
+  let g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-it').approvers, ['sk'], 'seed: Sam approves for IT');
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'sk', id: 'dept-procurement' }, actor: 'ta' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.pending, 'waits for a second Admin');
+  assert.match(r.body.pending.text, /^Move Sam Keller from IT to Procurement; Sam Keller stops approving for IT$/, r.body.pending.text);
+  g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-it').approvers, ['sk'], 'nothing changes until confirmed');
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'mc', stepUp: SU() });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  const it = g.departments.find(d => d.id === 'dept-it');
+  assert.deepEqual(it.approvers, [], 'Sam no longer approves for IT');
+  assert.ok(!it.approverNames.includes('Sam Keller'), 'Departments never shows "IT approves: Sam Keller"');
+  const set = (await call('GET', `ws/${ws}/state`)).body.docs.workspace.find(d => d.id === 'settings').data;
+  const sIT = set.departments.find(d => d.id === 'dept-it');
+  assert.ok(!(sIT.approverSince || {}).sk, 'his approver since date goes too');
+  assert.equal(engR16.departmentApprovers((await call('GET', `ws/${ws}/state`)).body.docs, 'IT').ids.includes('sk'), false, 'the engine approver list agrees');
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events.map(e => e.summary);
+  assert.ok(evs.some(s => /^Moved Sam Keller from IT to Procurement; Sam Keller stops approving for IT \(proposed by Tom Alvarez, confirmed by Maya Chen with the extra sign-in check\)$/.test(s)), evs.join(' | '));
+});
+test('R16 departments: a named approver from another department keeps approving; taking someone out of their department revokes too', async () => {
+  const ws = await newWs();
+  /* Ana (Accounts Payable) is named a Compliance approver; moving her from AP to Treasury leaves her Compliance right alone */
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'approvers', id: 'dept-compliance', approvers: ['do', 'ar'] }, actor: 'mc' });
+  await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'ta', stepUp: SU() });
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'ar', id: 'dept-treasury' }, actor: 'mc' });
+  assert.equal(r.body.pending.text, 'Move Ana Ruiz from Accounts Payable to Treasury', 'no approver right is lost, so the sentence says none');
+  await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'ta', stepUp: SU() });
+  let g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-compliance').approvers.slice().sort(), ['ar', 'do']);
+  /* Nina approves for Accounts Payable; taking her out of any department revokes it (lone-Admin path applies at once) */
+  r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'nb', id: null }, actor: 'mc' });
+  assert.match(r.body.pending.text, /^Take Nina Brooks out of Accounts Payable; Nina Brooks stops approving for Accounts Payable$/);
+  assert.equal((await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'ta', stepUp: SU() })).status, 200);
+  g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-accounts-payable').approvers, []);
+});
+test('R16 departments: in a one-Admin workspace the move out applies at once and still revokes the approver right', async () => {
+  const ws = await newWs();
+  assert.equal((await setRole(ws, 'ta', 'editor', 'mc')).status, 200);
+  const r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'sk', id: 'dept-procurement' }, actor: 'mc' });
+  assert.equal(r.status, 200, JSON.stringify(r.body)); assert.ok(!r.body.pending);
+  const g = (await call('GET', `workspaces/${ws}/admin`)).body;
+  assert.deepEqual(g.departments.find(d => d.id === 'dept-it').approvers, []);
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '10' })).body.events.map(e => e.summary);
+  assert.ok(evs.includes('Moved Sam Keller from IT to Procurement; Sam Keller stops approving for IT (no second Admin in this workspace; applies to new work only)'), evs.join(' | '));
+});
+
+/* ---------- R16 N4 #2 (PMO R15 disagreement 2): "Approves now" is the change routing (E.deadlineApprover) ---------- */
+test('R16 sponsors: "Approves now" equals E.deadlineApprover for a change the project manager asks for', async () => {
+  const ws = await newWs();
+  const check = async () => {
+    const g = (await call('GET', `workspaces/${ws}/admin`)).body;
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    for (const p of g.projects) {
+      const d = engR16.deadlineApprover(docs, p.id, p.owner);
+      assert.equal(p.approvesNow, d.person, p.name);
+      assert.equal(p.approvesNowRole, d.role, p.name);
+      assert.equal(p.approvesNowName, d.person ? docs.person.find(x => x.id === d.person).data.name : null, p.name);
+    }
+    return g;
+  };
+  let g = await check();
+  assert.ok(g.projects.some(p => !p.sponsor && p.approvesNow), 'with no sponsor set, an Admin approves (never "Nobody yet")');
+  const pid = g.projects.find(p => p.owner === 'ta').id;
+  assert.equal((await call('PUT', `workspaces/${ws}/admin/sponsor/${pid}`, { actor: 'mc', sponsor: 'do' })).status, 200);
+  g = await check();
+  assert.equal(g.projects.find(p => p.id === pid).approvesNow, 'do');
+});
+
+/* ---------- R16 (PMO R15 audit: "a stamp of 2020-01-01 was accepted"): admin confirms refuse a stale or future step-up ---------- */
+test('R16 step-up: confirming a department or role change refuses a step-up older than 10 minutes or in the future', async () => {
+  const ws = await newWs();
+  const ago = ms => ({ method: 'simulated-mfa', at: new Date(Date.now() - ms).toISOString() });
+  let r = await call('POST', `ws/${ws}/departments`, { op: { kind: 'assign', personId: 'lp', id: 'dept-it' }, actor: 'mc' });
+  const pid = r.body.pending.id;
+  for (const [su, why] of [[{ method: 'simulated-mfa', at: '2020-01-01T00:00:00.000Z' }, '2020'], [ago(11 * 60000), '11 minutes old'], [ago(-60 * 60000), 'an hour in the future'], [{ method: 'simulated-mfa' }, 'no time']]) {
+    r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta', stepUp: su });
+    assert.equal(r.status, 403, why + ': ' + JSON.stringify(r.body));
+    assert.match(r.body.error, /extra sign-in check/, why);
+  }
+  const lp = (await call('GET', `ws/${ws}/state`)).body.docs.person.find(d => d.id === 'lp').data;
+  assert.equal(lp.bu, 'Treasury', 'nothing moved');
+  r = await call('POST', `workspaces/${ws}/admin/departments/pending/${pid}/confirm`, { actor: 'ta', stepUp: ago(9 * 60000) });
+  assert.equal(r.status, 200, 'a 9-minute-old check is fresh: ' + JSON.stringify(r.body));
+  const evs = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events;
+  assert.ok(evs.some(e => e.action === 'refused' && /extra sign-in check/.test(e.summary)), 'the refused confirm is in History');
+  /* roles */
+  r = await call('PUT', `workspaces/${ws}/admin/roles/ps`, { role: 'approver', actor: 'ta' });
+  const rp = r.body.pendingRole.id;
+  r = await call('POST', `workspaces/${ws}/admin/roles/pending/${rp}/confirm`, { actor: 'mc', stepUp: { method: 'simulated-mfa', at: '2020-01-01T00:00:00.000Z' } });
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  r = await call('POST', `workspaces/${ws}/admin/roles/pending/${rp}/confirm`, { actor: 'mc', stepUp: ago(5000) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+});

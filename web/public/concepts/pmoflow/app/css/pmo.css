@@ -947,3 +947,16 @@ details.pmo-tasks[open] > summary h3{margin-bottom:10px}
 .pmo-own-t b{overflow-wrap:anywhere}
 .pmo-own-item select{flex:1 1 200px;max-width:100%;min-height:36px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;font:inherit}
 .pmo-confirm-open{margin:8px 0 0;padding-left:20px}
+
+/* R16 (N3 #1, Karen): one bulk control per team in the owner picker ("Give all 4 Purchasing tasks to …") */
+.pmo-own-bulk{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding:10px 12px;background:#f7f8fb;border:1px solid var(--line);border-radius:10px}
+.pmo-own-bulk-r{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-weight:600;font-size:13.5px}
+.pmo-own-bulk-r span{flex:0 1 auto}
+.pmo-own-bulk-r select{flex:1 1 200px;max-width:100%;min-height:36px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;font-weight:400}
+/* R16 (N3 #5, Jordan 9): project view tabs are at least 32px tall (a comfortable tap target on a phone) */
+.pmo-tabs a{min-height:32px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center}
+/* R16 (N3 #6): assigning a test to yourself */
+.pmo-selftest{margin:-2px 0 8px;padding:8px 10px;border-radius:8px;background:#fff7e6;border:1px solid #f3d28b;color:#7a4b00;font-size:13px;font-weight:600}
+.pmo-selftest[hidden]{display:none}
+/* R16 (N3 #3): a correction row in the hours list */
+.pmo-tcorr td{color:#7a4b00;background:#fffaf0}

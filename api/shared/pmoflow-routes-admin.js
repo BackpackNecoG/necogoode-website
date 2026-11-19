@@ -144,17 +144,21 @@ function sponsorError(docs, actor, project, next) {
   return `Only an Admin can change the sponsor of ${project.name || 'a project'}${list.length ? ` (ask ${list.join(' or ')})` : ''}.`;
 }
 function changeMod() { try { return require('./pmoflow-change.js'); } catch (e) { return null; } }
-/* each project's manager, explicit sponsor and the sponsor that approves today (never the project manager) */
+/* each project's manager, explicit sponsor and who approves a deadline/budget change today.
+   R16 N4 #2 (PMO R15 disagreement 2): "Approves now" is the change routing itself, E.deadlineApprover for a change the
+   project manager asks for (the sponsor; with none, an Admin who is not the PM), so Admin, the change screen and the
+   API name the same person. effective/effectiveName stay as the stand-in when no sponsor is named. */
 function projectSponsors(docs) {
-  const C = changeMod();
+  const eng = engine();
   return ((docs && docs.project) || []).map(d => {
     const p = Object.assign({}, d.data, { id: d.id });
     const explicit = p.sponsor && p.sponsor !== p.owner && personName(docs, p.sponsor) ? p.sponsor : null;
-    let effective = explicit;
-    if (!effective && C && typeof C.sponsorOf === 'function') { try { effective = C.sponsorOf(docs, Object.assign({}, p, { sponsor: null }), [p.owner]) || null; } catch (e) { effective = null; } }
-    if (effective === p.owner) effective = null;
+    let now = { person: null, role: null, text: '' };
+    if (eng && typeof eng.deadlineApprover === 'function') { try { now = eng.deadlineApprover(docs, p.id, p.owner || null) || now; } catch (e) { /* keep nobody */ } }
+    const effective = explicit || (now.person && now.person !== p.owner ? now.person : null);
     return { id: p.id, name: p.name || p.id, status: p.status || null, owner: p.owner || null, ownerName: personName(docs, p.owner),
-      sponsor: explicit, sponsorName: explicit ? personName(docs, explicit) : null, effective, effectiveName: effective ? personName(docs, effective) : null };
+      sponsor: explicit, sponsorName: explicit ? personName(docs, explicit) : null, effective, effectiveName: effective ? personName(docs, effective) : null,
+      approvesNow: now.person || null, approvesNowRole: now.role || null, approvesNowName: now.person ? personName(docs, now.person) : null, approvesNowText: now.text || '' };
   });
 }
 
@@ -409,11 +413,31 @@ function view(docs, s) {
    adding it), and any change when no other Admin could confirm it (one-Admin workspace), apply at once, still stamped,
    so they count for new work only. Every sentence is server-written. */
 const MAX_PENDING = 50;
+/* R16 (PMO R15 audit, N1 #1 rule): the extra sign-in check counts only when it was completed within the last 10 minutes
+   of server time. A stamp that is older, in the future (beyond a minute of clock difference), or missing is refused,
+   never replaced by the server's time. Returns {at, method} (the stamp the server records as stepUpAt) or null. */
+const STEP_UP_MAX_AGE_MS = 10 * 60000, STEP_UP_SKEW_MS = 60000;
 const stepUpOf = (body, at) => {
   const su = body && isPlainObject(body.stepUp) ? body.stepUp : null;
   if (!su || typeof su.method !== 'string' || !su.method) return null;
-  const t = typeof su.at === 'string' && isFinite(Date.parse(su.at)) && Math.abs(Date.parse(su.at) - Date.parse(at)) < 15 * 60000 ? new Date(Date.parse(su.at)).toISOString() : at;
-  return { at: t, method: 'simulated-mfa' };
+  const eng = engine();
+  if (eng && typeof eng.stepUpProblem === 'function') { if (eng.stepUpProblem(su.at, at)) return null; }
+  else {
+    const t = typeof su.at === 'string' ? Date.parse(su.at) : NaN, now = Date.parse(at);
+    if (!isFinite(t) || !isFinite(now) || now - t > STEP_UP_MAX_AGE_MS || t - now > STEP_UP_SKEW_MS) return null;
+  }
+  return { at: new Date(Date.parse(su.at)).toISOString(), method: 'simulated-mfa' };
+};
+/* the sentence for a refused step-up: missing, expired, or stamped in the future */
+const stepUpRefusal = (body, at, what) => {
+  const su = body && isPlainObject(body.stepUp) ? body.stepUp : null;
+  const eng = engine();
+  const pr = su && su.method && eng && typeof eng.stepUpProblem === 'function' ? eng.stepUpProblem(su.at, at) : null;
+  if (pr) return `${what}: ${pr.text}`;
+  const t = su && typeof su.at === 'string' ? Date.parse(su.at) : NaN, now = Date.parse(at);
+  if (!su || !su.method) return `${what} needs the extra sign-in check. Confirm again and complete the check.`;
+  if (isFinite(t) && t - now > STEP_UP_SKEW_MS) return `${what} needs the extra sign-in check, and this one is stamped in the future. Confirm again and complete the check.`;
+  return `${what} needs the extra sign-in check from the last 10 minutes, and this one has expired or has no time. Confirm again and complete the check.`;
 };
 const pendingOf = docs => { const r = settingsOf(docs).rest; return Array.isArray(r.pendingDept) ? r.pendingDept.filter(isPlainObject) : []; };
 function deptText(docs, op) {
@@ -423,16 +447,39 @@ function deptText(docs, op) {
   if (op.kind === 'assign') {
     const p = ((docs.person || []).find(x => x.id === op.personId) || {}).data || {};
     const from = p.bu ? String(p.bu) : null, to = d ? d.name : null;
-    return { verb: to ? `moving ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `taking ${nm(op.personId)} out of ${from || 'their department'}`,
-      text: to ? `Move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Take ${nm(op.personId)} out of ${from || 'their department'}`,
-      done: to ? `Moved ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Took ${nm(op.personId)} out of ${from || 'their department'}`,
-      withdraw: to ? `move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `take ${nm(op.personId)} out of ${from || 'their department'}`, affected: [op.personId] };
+    /* R16 N4 #1 (Jordan): leaving a department ends approving for it, in the same proposal and the same confirm */
+    const lost = revokedBy(docs, op);
+    const tail = lost ? `; ${nm(op.personId)} stops approving for ${lost.name}` : '';
+    return { verb: (to ? `moving ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `taking ${nm(op.personId)} out of ${from || 'their department'}`) + tail,
+      text: (to ? `Move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Take ${nm(op.personId)} out of ${from || 'their department'}`) + tail,
+      done: (to ? `Moved ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `Took ${nm(op.personId)} out of ${from || 'their department'}`) + tail,
+      withdraw: (to ? `move ${nm(op.personId)}${from ? ` from ${from}` : ''} to ${to}` : `take ${nm(op.personId)} out of ${from || 'their department'}`) + tail,
+      affected: [op.personId], revokes: lost ? lost.id : null };
   }
   const cur = d ? d.approvers : [], next = [...new Set((op.approvers || []).map(String))];
   const add = next.filter(x => !cur.includes(x)), rm = cur.filter(x => !next.includes(x));
   const parts = [add.length ? 'add ' + add.map(nm).join(', ') : '', rm.length ? 'remove ' + rm.map(nm).join(', ') : ''].filter(Boolean).join('; ') || 'no change';
   const dn = d ? d.name : 'the department';
   return { verb: `changing ${dn} approvers (${parts})`, text: `${dn} approvers: ${parts}`, done: `Changed ${dn} approvers (${parts})`, withdraw: `change ${dn} approvers (${parts})`, affected: add.concat(rm) };
+}
+/* R16 N4 #1 (Jordan R15 re-test 2): the department a move takes someone OUT of, when they approve for it ({id, name}),
+   else null. A named approver from another department is not a member, so moving them between other departments
+   leaves that right alone; only leaving the department itself ends it. */
+function revokedBy(docs, op) {
+  if (!op || op.kind !== 'assign') return null;
+  const eng = engine(); const ds = eng ? eng.departments(docs) : [];
+  const p = ((docs.person || []).find(x => x.id === op.personId) || {}).data || {};
+  const key = s => String(s || '').trim().toLowerCase();
+  const from = p.bu ? ds.find(x => key(x.name) === key(p.bu)) : null;
+  if (!from || from.id === op.id || !(from.approvers || []).includes(op.personId)) return null;
+  return { id: from.id, name: from.name };
+}
+/* the engine's edit for a move, with the approver right of the department left taken away */
+function withRevoke(docs, op, r) {
+  const lost = revokedBy(docs, op);
+  if (!lost || !r || !r.ok) return r;
+  return Object.assign({}, r, { departments: r.departments.map(d => d.id !== lost.id ? d : Object.assign({}, d, { approvers: (d.approvers || []).filter(x => x !== op.personId) },
+    d.approverSince ? { approverSince: Object.fromEntries(Object.entries(d.approverSince).filter(([k]) => k !== op.personId)) } : {})) });
 }
 /* Writes a department edit the engine returned, keeping every other settings field and each approver's since date. */
 async function writeDeptEdit(store, wsId, docs, r, opts) {
@@ -507,7 +554,7 @@ async function handleDepartments({ method, wsId, ws, body, store, send, fail }) 
     const first = pop.kind === 'approvers' && !(curD.approvers || []).length && (pop.approvers || []).length > 0;
     const others = admins(docs).filter(a => a.id !== actor && !t.affected.includes(a.id));
     if (first || !others.length) {
-      const er = eng.departmentEdit(docs, pop);
+      const er = withRevoke(docs, pop, eng.departmentEdit(docs, pop));
       if (!er.ok) { fail(400, er.error); return; }
       if (pendingOf(docs).some(p => p.kind === pop.kind && (pop.kind === 'assign' ? p.op.personId === pop.personId : p.op.id === pop.id))) { fail(409, 'A change for this is already waiting for a second Admin. Confirm or cancel it first.'); return; }
       await writeDeptEdit(store, wsId, docs, er, { at, stampMember: pop.kind === 'assign', stampApprovers: pop.kind === 'approvers' });
@@ -567,8 +614,8 @@ async function decidePending({ wsId, ws, body, store, send, fail, pid, decision 
   if ((p.affected || []).includes(actor) || (t.affected || []).includes(actor)) { fail(403, `${personName(docs, actor)} is the person being moved or given approval rights here, so another Admin confirms their own change.`); return; }
   const at = new Date().toISOString();
   const su = stepUpOf(body, at);
-  if (!su) { fail(403, 'Confirming a department change needs the extra sign-in check. Confirm again and complete the check.'); return; }
-  const r = eng.departmentEdit(docs, p.op);
+  if (!su) { fail(403, stepUpRefusal(body, at, 'Confirming a department change')); return; }
+  const r = withRevoke(docs, p.op, eng.departmentEdit(docs, p.op));
   if (!r.ok) { fail(409, `This change can’t be applied any more: ${r.error} Cancel it and propose it again.`); return; }
   await writeDeptEdit(store, wsId, docs, r, { at, pending: rest, stampMember: p.kind === 'assign', stampApprovers: p.kind === 'approvers' });
   await store.appendEvent(wsId, { actor, action: 'departments', ref: 'workspace:settings',
@@ -852,7 +899,7 @@ async function handle({ method, seg, body, req, store, send, fail, clientIpHash,
     if (actor === p.by) { fail(403, `You proposed this change, so a second Admin confirms it${who.length ? ': ' + who.map(id => personName(docs, id)).join(' or ') : ''}.`); return true; }
     if (!who.includes(actor)) { fail(403, `${personName(docs, actor) || 'This person'} is the person this change makes an Admin, so another Admin confirms it.`); return true; }
     const at = new Date().toISOString();
-    if (!stepUpOf(body, at)) { fail(403, 'Confirming a role change needs the extra sign-in check. Confirm again and complete the check.'); return true; }
+    if (!stepUpOf(body, at)) { fail(403, stepUpRefusal(body, at, 'Confirming a role change')); return true; }
     const cur = roleOf(docs, p.personId);
     if (cur !== p.from) { fail(409, `${personName(docs, p.personId)}'s role changed since this was proposed (now ${ROLE_LABEL[cur]}). Cancel it and propose it again.`); return true; }
     if (cur === 'admin' && p.to !== 'admin' && admins(docs).length <= 1) { fail(409, 'The workspace needs at least one Admin. Make someone else an Admin first.'); return true; }

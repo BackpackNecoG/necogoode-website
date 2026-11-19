@@ -1,0 +1,12 @@
+New Vendor Onboarding Procedure (Rev. 4)
+
+1. Purchasing receives the new vendor request from the requesting department and enters it in the vendor request log.
+2. Purchasing emails the vendor our onboarding packet and requests a completed W-9, a certificate of insurance (COI), and a bank letter on bank letterhead.
+3. The vendor returns the W-9, COI and bank letter to Purchasing.
+4. Purchasing checks that the tax ID on the W-9 matches the vendor's legal name and that the COI meets our minimum coverage.
+5. AP verifies the bank letter by calling the bank using a phone number we look up ourselves, and confirms the routing number and account number.
+6. Credit runs a credit check on the vendor and sets a credit limit.
+7. If expected annual spend is over $25k, Karen (Operations Director) approves too.
+8. Treasury sets up the vendor bank account and routing numbers for ACH payment.
+9. Operations confirms the vendor can meet our delivery schedule and adds them to the approved supplier list.
+10. AP activates the vendor in the system and notifies Purchasing and the requesting department.

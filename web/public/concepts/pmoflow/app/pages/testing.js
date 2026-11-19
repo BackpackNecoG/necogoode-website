@@ -2,6 +2,7 @@
    step-level test runs with evidence and defects, discovered requirements. Route: /testing/:prj */
 import { store } from '../store.js';
 import { MASK_NOTE } from './data.js';
+import { SELF_TEST_WARN, bindSelfTest } from './project.js';
 import { E, esc, fmt as fmtDay, fmtTime, addDays, link, go, av, pname, badge, modal, toast, commentsPanel, historyPanel, bindActivity, formValues, stepUp } from '../ui.js';
 
 /* R8: timestamps render as the browser's LOCAL calendar date; plain YYYY-MM-DD dates stay as they are. */
@@ -146,6 +147,11 @@ function effAvail(dataId) {
   return (de && de.avail) || 'missing';
 }
 const cyclesOf = prj => Array.isArray(prj.testCycles) ? prj.testCycles : [];
+/* R16 (N3 #6, Jordan 1): assigning a test to yourself is allowed, but the person is told first that they can't pass it.
+   Dialogs show N3's warning under the picker (bindSelfTest); pickers that save at once say it as they save. */
+const SELF_BOX = `<div class="pmo-selftest" data-self-test role="status" hidden>${esc(SELF_TEST_WARN)}</div>`;
+const bindSelfOnLastOverlay = () => { const ovs = document.querySelectorAll('.overlay'); bindSelfTest(ovs[ovs.length - 1], 'select[name=tester]'); };
+const warnSelf = v => { if (v && v === store.state.me) toast(SELF_TEST_WARN); };
 const testerSel = (name, v, label) => `<select name="${name}" aria-label="${esc(label || 'Tester')}"><option value="">Unassigned</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === v ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
 const testerChip = id => id ? `<span class="ts-tester" data-tester="${esc(id)}">${av(id)} ${esc(pname(id))}</span>` : '<span class="hint">Unassigned</span>';
 
@@ -854,7 +860,7 @@ export function bind(root, params) {
   if (gen) gen.onclick = () => generateFor(de);
   const add = root.querySelector('[data-add-case]'); if (add) add.onclick = () => editCase(de, null);
   root.querySelectorAll('[data-origin]').forEach(b => b.onclick = () => { ui.origin = b.dataset.origin; store.emit(); });
-  const ba = root.querySelector('[data-bulk-assign]'); if (ba) ba.onclick = () => bulkAssign(de, root.querySelector('select[name=bulkTester]').value);
+  const ba = root.querySelector('[data-bulk-assign]'); if (ba) ba.onclick = () => { const v = root.querySelector('select[name=bulkTester]').value; warnSelf(v); bulkAssign(de, v); };
   root.querySelectorAll('[data-edit-case]').forEach(b => b.onclick = () => editCase(de, store.get('testCase', b.dataset.editCase)));
   root.querySelectorAll('[data-del-case]').forEach(b => b.onclick = async () => {
     const c = store.get('testCase', b.dataset.delCase); if (!c) return;
@@ -877,7 +883,7 @@ function bindProject(root, prj) {
   root.querySelectorAll('[data-edit-cycle]').forEach(b => b.onclick = () => editCycle(prj, b.dataset.editCycle));
   root.querySelectorAll('[data-del-cycle]').forEach(b => b.onclick = () => deleteCycle(prj, b.dataset.delCycle));
   root.querySelectorAll('[data-cycle-run]').forEach(b => b.onclick = () => recordRun(prj, { cycleId: b.dataset.cycleRun }));
-  root.querySelectorAll('[data-script-tester]').forEach(sel => { sel.onclick = e => e.stopPropagation(); sel.onchange = () => assignScript(prj, sel.dataset.scriptTester, sel.value); });
+  root.querySelectorAll('[data-script-tester]').forEach(sel => { sel.onclick = e => e.stopPropagation(); sel.onchange = () => { warnSelf(sel.value); assignScript(prj, sel.dataset.scriptTester, sel.value); }; });
   const ci = root.querySelector('[data-ci]'); if (ci) ci.onclick = () => importCi(prj);
   root.querySelectorAll('[data-discover]').forEach(b => b.onclick = e => { e.stopPropagation(); const [runId, caseId] = b.dataset.discover.split('|'); logDiscovered(runId, caseId); });
   root.querySelectorAll('[data-mk-defect]').forEach(b => b.onclick = async e => { e.stopPropagation(); const [runId, id] = b.dataset.mkDefect.split('|'); await createDefects(prj, runId, [id]); });
@@ -894,7 +900,7 @@ function bindProject(root, prj) {
   root.querySelectorAll('details[data-scenario]').forEach(d => d.addEventListener('toggle', () => { d.open ? ui.scriptOpen.add(d.dataset.scenario) : ui.scriptOpen.delete(d.dataset.scenario); }));
   root.querySelectorAll('[data-edit-scn]').forEach(b => b.onclick = () => editScenario(prj, b.dataset.editScn));
   root.querySelectorAll('[data-del-scn]').forEach(b => b.onclick = () => deleteScenario(prj, b.dataset.delScn));
-  root.querySelectorAll('[data-scn-tester]').forEach(sel => { sel.onclick = e => e.stopPropagation(); sel.onchange = () => assignScenario(prj, sel.dataset.scnTester, sel.value); });
+  root.querySelectorAll('[data-scn-tester]').forEach(sel => { sel.onclick = e => e.stopPropagation(); sel.onchange = () => { warnSelf(sel.value); assignScenario(prj, sel.dataset.scnTester, sel.value); }; });
   root.querySelectorAll('[data-anchor-scn]').forEach(a => a.onclick = e => { e.preventDefault(); const t = root.querySelector('#scenarios'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   const hb = root.querySelector('[data-ts-history]');
   if (hb) (async () => {
@@ -959,11 +965,12 @@ async function editCase(de, c) {
       ${fields.length ? '' : `<div class="hint" data-nospec>${esc(de.name)} has no spec yet, so type the field name. Write the spec on the data page to generate cases automatically.</div>`}
       <div class="field"><label>Input</label><input name="input" value="${esc(c ? c.input : '')}" placeholder="Value to test (fictional)"></div>
       <div class="frow"><div class="field"><label>Expect</label><select name="expect"><option value="accept" ${c && c.expect === 'accept' ? 'selected' : ''}>Accept</option><option value="reject" ${c && c.expect === 'reject' ? 'selected' : ''}>Reject</option></select></div>
-        <div class="field"><label>Tester</label>${testerSel('tester', c ? c.tester : '')}</div></div>
+        <div class="field"><label>Tester</label>${testerSel('tester', c ? c.tester : '')}</div></div>${SELF_BOX}
       <div class="field"><label>Note</label><input name="note" value="${esc(c ? c.note || '' : '')}"></div>
       <div class="hint">Use made-up values only. Never paste real customer data into a test case.</div>`,
     actions: [{ id: 'save', label: c ? 'Save' : 'Add case', primary: true }],
   });
+  bindSelfOnLastOverlay();
   guard(f => !String(f.field || '').trim() ? { msg: 'Name the field this case tests.', field: 'field' } : null);
   const r = await p;
   if (r.action !== 'save') return;
@@ -1057,9 +1064,15 @@ async function recordRun(prj, opts) {
   const deptLock = id => { const b = eng('canPassTest', store.state.docs, prj.id, id, me, { env: env0 }); return b && (b.rule === 'assigner' || (env0 === 'uat' && b.rule === 'department')) ? b.text : ''; };
   const passLock = (id, tester) => heldMap[id] ? 'Waiting for its problem to be fixed: it can’t pass yet.' : tester && tester !== me ? `Assigned to ${pname(tester)}: only they can pass it.` : deptLock(id);
   /* R15 (Jordan disagreement 6): each row says its latest result, so a new recording never reads as "all 26 not run" */
-  const ledger = ((eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing || {}).status || {};
+  const tTruth = ((eng('projectTruth', store.state.docs, prj.id, store.state.today) || {}).testing || {});
+  const ledger = tTruth.status || {};
   const LAST = { passed: 'Last result: passed', failed: 'Last result: failed', fix: 'Last result: waiting for a fix', blocked: 'Last result: blocked', notRun: 'Not run yet' };
-  const lastHint = id => ledger[id] ? `<small class="hint" data-last-result="${esc(ledger[id])}">${esc(LAST[ledger[id]] || '')}</small>` : '';
+  /* R16 N1 #10 (Jordan 3): each row shows its last result in THIS phase (Try it out or Business check), the same
+     results the phase's card counts; a test waiting for a fix says so in either phase */
+  const phaseKey = env0 === 'uat' ? 'uat' : 'system';
+  const PH = { pass: 'passed', fail: 'failed', blocked: 'blocked' };
+  const phaseOf = id => ledger[id] === 'fix' ? 'fix' : (((tTruth.phases || {})[phaseKey] || {})[id] ? PH[tTruth.phases[phaseKey][id]] || 'notRun' : 'notRun');
+  const lastHint = id => { const v = tTruth.phases ? phaseOf(id) : ledger[id]; return v ? `<small class="hint" data-last-result="${esc(v)}">${esc(LAST[v] || '')}</small>` : ''; };
   const lockAttr = (id, tester) => { const t = passLock(id, tester); return t ? ` data-pass-locked="${esc(t)}"` : ''; };
   const lockHint = (id, tester) => { const t = passLock(id, tester); return t ? `<small class="hint" data-lock-hint>${esc(t)}</small>` : ''; };
   const pick = (k, label, locked) => locked ? '<span class="ts-pick" aria-hidden="true"></span>' : `<label class="ts-pick"><input type="checkbox" data-pick="${esc(k)}" aria-label="Select ${esc(label)}"></label>`;
@@ -1189,7 +1202,7 @@ async function recordRun(prj, opts) {
     }
     if (newPasses.length > 1) {
       if (!(await stepUp(`pass ${newPasses.length} tests at once`))) { ui.runOpen.delete(id); toast('Not saved: the extra sign-in check was not completed.'); return; }
-      doc.stepUp = true;
+      doc.stepUp = true; doc.stepUpAt = new Date().toISOString(); /* R16 N1 #1: the server checks it is under 10 minutes old */
     }
   }
   /* R12 #5: the audit line uses the one testing count (runAuditText), never a local count */
@@ -1464,10 +1477,11 @@ async function editScript(prj, sid) {
       <div class="field"><label>Given (precondition)</label><textarea name="given">${esc(s.given)}</textarea></div>
       <div class="field"><label>Steps · action and expected result</label><div class="ts-srows" data-srows>${scriptSteps(s).map(srow).join('')}</div>
         <div><button type="button" class="btn sm" data-sadd>+ Add step</button></div></div>
-      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>
+      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>${SELF_BOX}
       <div class="field"><label>Test data</label><div class="ts-dpick">${des.map(d => `<label><input type="checkbox" name="data" value="${esc(d.id)}" ${(s.data || []).includes(d.id) ? 'checked' : ''}> ${esc(d.name)}</label>`).join('') || '<span class="hint">No project data elements.</span>'}</div></div>`,
     actions: [{ id: 'save', label: 'Save script', primary: true }],
   });
+  bindSelfOnLastOverlay();
   const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
   if (ov) {
     const box = ov.querySelector('[data-srows]');
@@ -1531,9 +1545,10 @@ async function editScenario(prj, sid) {
     body: `<div class="field"><label>Title</label><input name="title" value="${esc(s.title)}"></div>
       <div class="field"><label>Steps · action and expected result</label><div class="ts-srows" data-srows>${scriptSteps(s).map((x, i) => srow(Object.assign({ step: ((s.steps || [])[i] || {}).step }, x), i)).join('')}</div>
         <div><button type="button" class="btn sm" data-sadd>+ Add step</button></div></div>
-      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>`,
+      <div class="field"><label>Tester</label>${testerSel('tester', s.tester)}</div>${SELF_BOX}`,
     actions: [{ id: 'save', label: 'Save scenario', primary: true }],
   });
+  bindSelfOnLastOverlay();
   const ovs = document.querySelectorAll('.overlay'); const ov = ovs[ovs.length - 1];
   if (ov) {
     const box = ov.querySelector('[data-srows]');

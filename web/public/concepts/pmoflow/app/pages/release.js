@@ -474,8 +474,20 @@ function signoffWhy(prj, bu, open) {
   if (isOwner && isRm) return `<span class="hint" data-why="owner">Project managers can't approve their own project, and the launch owner can't approve a team's part. ${who}</span>`;
   if (isOwner) return `<span class="hint" data-why="owner">Project managers can't approve their own project. ${who}</span>`;
   if (isRm) return `<span class="hint" data-why="rm">As launch owner, ${esc(pname(rm))} can't approve a team's part (separation of duties). ${who}</span>`;
-  if (!elig.includes(meId)) return `<span class="hint" data-why="bu">${names2 ? `To try it, switch “Viewing as” to ${esc(names2)}.` : `Nobody can approve the ${esc(bu)} part yet.`}</span>`;
+  /* R16 N1 #4 (Jordan): a recent joiner, or someone who moved out, is told why, in the engine's words ("You joined
+     Compliance after its testing started, so you can't approve its part. Ask Dave Ortiz.") */
+  if (!elig.includes(meId)) {
+    const st = eng('approverStatus', prj.id, bu, meId);
+    if (st && (st.rule === 'recent-move' || st.rule === 'moved-out') && st.you) return `<span class="hint" data-why="joiner">${esc(st.you)}</span>`;
+    return `<span class="hint" data-why="bu">${names2 ? `To try it, switch “Viewing as” to ${esc(names2)}.` : `Nobody can approve the ${esc(bu)} part yet.`}</span>`;
+  }
   return '';
+}
+/* R16 N1 #4: an approval that stopped counting because its approver moved out or is no longer an approver */
+function reopenedOf(rd, bu, a) {
+  const so = rd && (rd.checks || []).find(c => c.id === 'bu-signoff');
+  const r = so && Array.isArray(so.reopened) ? so.reopened.find(x => String(x.bu).toLowerCase() === String(bu).toLowerCase()) : null;
+  return r && a && a.decision === 'approved' && a.approver === r.person ? r : null;
 }
 
 /* R9: only teams that need to approve (projectTruth.approvals) are sections; never a gate condition otherwise. */
@@ -491,7 +503,7 @@ function signoffCard(prj, rd) {
   const isOwner = meId === prj.owner;
   const rm = rmOf(prj); const isRm = meId === rm;
   const staleBy = {}; sections.forEach(s => { staleBy[s.bu] = live ? [] : staleChanges(prj, s, latestApproval(prj.id, s.bu), rd); });
-  const approved = sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a) && !(staleBy[a.bu] || []).length);
+  const approved = sections.map(s => latestApproval(prj.id, s.bu)).filter(a => counts(prj, a) && !(staleBy[a.bu] || []).length && !reopenedOf(rd, a.bu, a));
   const approvers = [...new Set(approved.map(a => a.approver))];
   const exc = (rd.checks.find(c => c.id === 'exceptions') || {}).items || [];
   const cards = sections.map(s => {
@@ -503,7 +515,8 @@ function signoffCard(prj, rd) {
     const byOwner = a && a.decision === 'approved' && a.approver === prj.owner;
     const byRm = a && a.decision === 'approved' && !byOwner && a.approver === rm;
     /* an approval by someone the rules now bar (e.g. they recorded a test since) no longer counts: the part waits again */
-    const state = !a ? 'pending' : byOwner ? 'owner' : byRm ? 'rm' : a.decision === 'approved' && barOf(prj, a) ? 'pending' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
+    const reo = live ? null : reopenedOf(rd, s.bu, a);
+    const state = !a ? 'pending' : byOwner ? 'owner' : byRm ? 'rm' : a.decision === 'approved' && (barOf(prj, a) || reo) ? 'pending' : (a.decision === 'approved' && stale.length ? 'stale' : a.decision);
     const stCls = state === 'approved' ? 'b-done' : state === 'rejected' || state === 'stale' ? 'b-late' : 'b-soon';
     const stTxt = { pending: nobody ? 'Nobody can approve yet' : 'Waiting for approval', approved: 'Approved', rejected: 'Changes asked for', stale: 'Changed: approve again', owner: 'Needs an independent approver', rm: 'Needs an independent approver' }[state];
     const tagged = s.steps.filter(x => x.via !== 'owner');
@@ -529,6 +542,7 @@ function signoffCard(prj, rd) {
       <div class="rl-bu-h"><b>${esc(s.bu)}</b>${badge(stTxt, stCls)}<a class="rl-go rl-bu-rev" href="${link(`/release/${prj.id}?bu=${encodeURIComponent(s.bu)}`)}" data-link data-bu-review="${esc(s.bu)}">Review this part ›</a></div>
       ${chosen && store.person(chosen) ? `<div class="hint" data-chosen-approver="${esc(chosen)}">Approver chosen for this part: ${av(chosen)} ${esc(pname(chosen))}</div>` : ''}
       ${tagged.length ? `<div class="rl-tagnote" data-tagnote>${s.fromTags ? 'Included because' : 'Also includes'} ${tagged.some(x => x.via === 'trigger') ? 'what starts the process or steps that list' : 'steps that list'} <span class="chip">${esc(s.bu)}</span> under <i>Teams involved</i>.</div>` : ''}
+      ${reo ? `<div class="rl-stale" data-reopened="${esc(s.bu)}"><b>Reopened:</b> ${esc(reo.reason)}.</div>` : ''}
       ${stale.length ? `<div class="rl-stale" data-stale="${esc(s.bu)}"><b>Changed after approval: approve again</b><ul>${stale.map(v => `<li ${v.cutover ? 'data-stale-cutover' : ''}>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : v.anchor ? `<a href="#${v.anchor}" data-anchor="${v.anchor}">${esc(v.text)}</a>` : esc(v.text)} <small>${esc(v.extra)}</small></li>`).join('')}</ul>${stale.some(v => v.cutover) ? '<div class="hint">A launch-day plan change affects what this team approved, so it needs approving again.</div>' : ''}</div>` : ''}
       <ol class="rl-steps">${s.steps.map(x => `<li ${x.via !== 'owner' ? `data-via-${x.via === 'trigger' ? 'trigger' : 'tag'}` : ''}><a href="${link(`/process/${x.pid}/step/${x.step.id}`)}" data-link>${x.via === 'trigger' ? 'What starts it: ' : ''}${esc(x.step.title)}</a> <small>${x.step.owner ? esc(pname(x.step.owner)) + ' · ' : ''}${esc(x.pname)}</small>${x.via !== 'owner' ? ` <span class="rl-viatag" title="In this part because of its Teams involved list">${viaTxt(x)}: ${esc(x.tag)}</span>` : ''}</li>`).join('')}</ol>
       ${a ? `<div class="rl-signed">${av(a.approver)} <span>${esc(pname(a.approver))} ${a.decision === 'approved' ? 'approved' : 'asked for changes'} · ${esc(fmtTime(a.at))}${a.stepUp ? ' · <span class="rl-mfa">extra sign-in check done</span>' : ''}</span></div>${byOwner ? `<div class="rl-ownerx" data-owner-excluded>Doesn't count: the project manager can't approve their own project.</div>` : ''}${byRm ? `<div class="rl-ownerx" data-rm-excluded>Doesn't count: the launch owner can't approve a team's part.</div>` : ''}${a.attestation || a.note ? `<div class="rl-attest" data-attestation>“${esc(a.attestation || a.note)}”</div>` : ''}` : ''}
@@ -539,8 +553,10 @@ function signoffCard(prj, rd) {
   if (live) {
     const rel = (store.list('release', r => r.projectId === prj.id && !isRollback(r) && !failedAny(r)) || []).sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))[0] || null;
     const ov = rel && rel.override;
-    return `<div class="card" id="signoff" data-signoff-live><h3>Approvals<span class="n">${approved.length ? `${approved.length} approved before launch` : 'at launch'}</span></h3>
-      <div class="rl-two ${ov ? '' : 'ok'}"><span class="rl-ic ${ov ? 'warn' : 'pass'}">${ov ? '!' : ICON.pass}</span><div><b>${ov ? 'Launched with a two-person override' : 'Approved before launch'}</b>${approvers.length ? ` · ${approvers.map(av).join('')}` : ''}<div class="hint">${ov ? `The launch summary lists what was overridden${(ov.signoffs || []).length ? ` and who signed (${esc((ov.signoffs || []).map(x => x.name).filter(Boolean).join(' and '))})` : ''}.` : 'Every team that needed to approve did so, each with the extra sign-in check.'}</div></div></div>
+    /* R16 N1 #10 (Jordan 2): the panel and the launch summary say the same thing: the approvers the launch record lists */
+    const relAppr = rel && Array.isArray(rel.approvers) ? rel.approvers.filter(Boolean) : approvers;
+    return `<div class="card" id="signoff" data-signoff-live><h3>Approvals<span class="n" data-live-approvers="${relAppr.length}">${relAppr.length ? `Approved by ${esc(relAppr.map(pname).join(' and '))} before launch` : 'at launch'}</span></h3>
+      <div class="rl-two ${ov ? '' : 'ok'}"><span class="rl-ic ${ov ? 'warn' : 'pass'}">${ov ? '!' : ICON.pass}</span><div><b>${ov ? 'Launched with a two-person override' : 'Approved before launch'}</b>${relAppr.length ? ` · ${relAppr.map(av).join('')}` : ''}<div class="hint">${ov ? `The launch summary lists what was overridden${(ov.signoffs || []).length ? ` and who signed (${esc((ov.signoffs || []).map(x => x.name).filter(Boolean).join(' and '))})` : ''}.` : 'Every team that needed to approve did so, each with the extra sign-in check.'}</div></div></div>
       ${cards ? `<div class="rl-bus">${cards}</div>` : ''}</div>`;
   }
   return `<div class="card" id="signoff"><h3>Approvals<span class="n">${approved.length}/${sections.length} approved</span></h3>
@@ -553,8 +569,10 @@ function signoffCard(prj, rd) {
 /* R15 #2: why nobody can approve a part, in the engine's words (named approvers, members, chosen, and who is barred) */
 function noApproverWhy(prj, bu) {
   const pa = eng('partApprovers', prj.id, bu);
-  if (pa && pa.notEligible && pa.notEligible.length) return pa.notEligible.map(x => x.text).join(' ');
-  return `A step or what starts the process involves ${bu}, but nobody is named to approve for ${bu} and nobody belongs to it yet.`;
+  /* R16 (N2 follow-up #3): an approver invited by email shows here as on the process page */
+  const inv = pa && pa.invitedText ? ' ' + pa.invitedText + '.' : '';
+  if (pa && pa.notEligible && pa.notEligible.length) return pa.notEligible.map(x => x.text).join(' ') + inv;
+  return `A step or what starts the process involves ${bu}, but nobody is named to approve for ${bu} and nobody belongs to it yet.` + inv;
 }
 /* R7 deadlock fix: who may approve a team's part. Its members plus anyone chosen in project.approvers {bu: personId},
    never the project manager or the launch owner. */
@@ -776,9 +794,30 @@ async function editCutover(prj) {
   const cutover = { window, windowDate: f.windowDate || '', windowStart: f.windowStart || '', windowEnd: f.windowEnd || '', windowNote: wNote, rollbackOwner: f.rollbackOwner || '', rollbackPlan: (f.rollbackPlan || '').trim(), hypercareDays: days, hypercareOwner: f.hypercareOwner || '', comms: (f.comms || '').trim(), tasks: newTasks };
   const cur = store.get('project', prj.id) || prj;
   /* R5: a cutover edit after sign-off makes every approval stale (project.cutoverUpdatedAt) */
-  await store.save('project', prj.id, Object.assign({}, cur, { cutover, cutoverUpdatedAt: new Date().toISOString() }), `Updated the launch-day plan for ${prj.name} (${newTasks.length} step${newTasks.length === 1 ? '' : 's'})`);
+  const nextP = Object.assign({}, cur, { cutover, cutoverUpdatedAt: new Date().toISOString() });
+  if (!(await saveOrOffer('project', prj.id, nextP, `Updated the launch-day plan for ${prj.name} (${newTasks.length} step${newTasks.length === 1 ? '' : 's'})`))) return;
   await store.notify([cutover.rollbackOwner, cutover.hypercareOwner, ...newTasks.map(t => t.owner)], `${pname(store.state.me)} named you in the launch-day plan for ${prj.name}`, 'project:' + prj.id);
   toast('Launch-day plan saved');
+}
+
+/* R16 (N1 #7 with N3): a save the server sends to "Change the plan" (409: a launch window past the deadline, a cost over
+   the budget, a dependency that breaks the deadline) opens N3's matching Change the plan form; any other refusal (a
+   window on a day off, 400) is said in the server's words. true when saved. */
+async function saveOrOffer(type, id, data, summary) {
+  try { await store.save(type, id, data, summary); return true; }
+  catch (e) {
+    const msg = String((e && e.message) || 'Not saved.');
+    if (e && e.status === 409 && /change the plan/i.test(msg) && (type === 'project' || type === 'workItem')) {
+      try {
+        const { offerChangePlan } = await import('./project.js');
+        const prj = type === 'project' ? data : store.get('project', data.projectId);
+        await offerChangePlan(prj, type === 'workItem' ? data : null, msg, null, null, Object.assign({ type }, e.body || {}, type === 'project' ? { project: data } : {}));
+        return false;
+      } catch (err) { /* fall through to the plain message */ }
+    }
+    toast(msg);
+    return false;
+  }
 }
 
 /* Separation of duties: the data owner approves; if the owner asked for the access, the project owner approves.
@@ -957,7 +996,9 @@ function releaseRecord(r) {
   const snap = r.snapshot || {};
   const rb = isRollback(r);
   const failed = pipePhase(r) === 'failed';
-  const exc = r.exceptions || [];
+  /* R16 N1 #10 (Jordan 6): override reasons are their own list, never under "Changed after an approval" */
+  const exc = (r.exceptions || []).filter(x => !(x && x.override));
+  const ovr = (r.exceptions || []).filter(x => x && x.override);
   const undone = rb ? undoneOf(r) : [];
   return `<div class="rl-rec" data-release="${esc(r.id)}" data-kind="${rb ? 'rollback' : 'golive'}" ${failed ? 'data-failed' : ''}>
     <div class="rl-rec-h">${badge(rb ? (failed ? 'Undo failed' : 'Undo') : failed ? 'Launch failed' : 'Launch', rb || failed ? 'b-late' : 'b-done')} <b>${esc(fmtTime(r.at))}</b> · ${failed ? 'attempted' : rb ? 'undone' : 'launched'} by ${av(r.by)} ${esc(pname(r.by))}${r.stepUp ? ` · <span class="rl-mfa" data-stepup>extra sign-in check done</span>` : ''}</div>
@@ -967,6 +1008,7 @@ function releaseRecord(r) {
       : failed ? `<div class="rl-rec-s rl-noeffect" data-no-side-effects><span class="lbl">Side effects</span><b>Nothing was promoted or published.</b> <span class="hint">No process version changed, the procedure was not published, temporary data access was left as it was, and only the launch owner was told.</span></div>`
       : `<div class="rl-rec-s"><span class="lbl">${rb ? 'Versions brought back' : 'Launched versions'}</span>${Object.keys(snap).map(pid => { const p = store.get('process', pid); return `<a class="chip" href="${link('/process/' + pid)}" data-link data-ver="${esc(pid)}">${esc(p ? p.name : pid)} · v${esc(snap[pid])}</a>`; }).join(' ') || '—'}</div>`}
     ${rb && !failed ? `<div class="rl-rec-s rl-undone" data-undone="${undone.length}"><span class="lbl">What the undo reversed</span>${undone.length ? `<ul>${undone.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<span class="hint">Nothing to undo.</span>'}</div>` : ''}
+    ${rb || failed || !ovr.length ? '' : `<div class="rl-rec-s rl-rec-ovr" data-override-reasons="${ovr.length}"><span class="lbl">Launched with a two-person override</span><ul>${ovr.map(x => `<li>${esc(String(x.summary || '').replace(/^Launched with a two-person override \([^)]*\): /, ''))}</li>`).join('')}</ul></div>`}
     ${rb || failed ? '' : `<div class="rl-rec-s rl-rec-exc" data-exceptions="${exc.length}"><span class="lbl">Changed after an approval</span>${exc.length
       ? `<ul>${exc.map(x => { const v = exceptionView(x, r.projectId); return `<li>${v.href ? `<a href="${link(v.href)}" data-link>${esc(v.text)}</a>` : esc(v.text)}${v.extra ? ` <small>${esc(v.extra)}</small>` : ''}</li>`; }).join('')}</ul>`
       : '<span class="hint">None. Nothing changed after its team approved.</span>'}</div>`}
@@ -1103,7 +1145,7 @@ async function decide(prj, bu, decision, note) {
   const id = store.newId('apr'); const at = new Date().toISOString();
   const fp = eng('sectionFingerprint', prj.id, bu);
   try {
-    await store.save('approval', id, Object.assign({ id, projectId: prj.id, bu, approver: store.state.me, decision, at, snapshotAt: at, stepUp: true, attestation, note: attestation }, fp ? { fingerprint: fp } : {}),
+    await store.save('approval', id, Object.assign({ id, projectId: prj.id, bu, approver: store.state.me, decision, at, snapshotAt: at, stepUp: true, stepUpAt: at, attestation, note: attestation }, fp ? { fingerprint: fp } : {}),
       `${decision === 'approved' ? (re ? 'Approved again' : 'Approved') : 'Asked for changes to'} the ${bu} part of ${prj.name} (extra sign-in check): “${attestation.slice(0, 120)}”`);
   } catch (e) {
     const msg = (e && (e.message || e.error)) || 'The approval was not saved.';
@@ -1427,7 +1469,8 @@ function simpleRender(prj, rd, params) {
     const href = link(`/release/${prjId}?bu=${encodeURIComponent(p.bu)}`);
     const by = p.a && (p.state === 'approved' || p.state === 'stale' || p.state === 'rejected') ? `${av(p.a.approver)} ${esc(pname(p.a.approver))}, ${esc(fmt(p.a.at))}` : p.eligible.length ? `Who can approve: ${p.eligible.map(id => esc(pname(id))).join(', ')}` : '';
     /* R9 §7: one count per part, from perBU; the card opens the part page */
-    const waitLine = p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting="${p.waitN == null ? '' : p.waitN}">${p.waitN != null ? `Waiting on ${p.waitN}: ` : 'Waiting on '}${esc(joinAnd(p.waiting))}</div>` : '';
+    /* R16 (Karen r15): one line per kind (tasks, information, tests), never one total that adds unlike things */
+    const waitLine = p.state === 'notready' ? `<div class="rs-part-s" data-part-waiting="${p.waitN == null ? '' : p.waitN}">Waiting on:<ul class="rs-wait-lines">${p.waiting.map(t => `<li data-wait-line>${esc(String(t).charAt(0).toUpperCase() + String(t).slice(1))}</li>`).join('')}</ul></div>` : '';
     const testLine = p.perBU && (p.perBU.total || p.perBU.gapCount) ? `<div class="rs-part-s" data-part-tests="${p.perBU.passed}/${p.perBU.checks}" data-part-gaps="${p.perBU.gapCount}">Tests for this part: ${esc(p.perBU.text)}${p.perBU.failed ? `, ${p.perBU.failed} failed` : ''}</div>` : '';
     if (!live && (p.state === 'nobody' || p.state === 'blocked')) {
       return `<div class="rs-part ${p.state}" data-part="${esc(p.bu)}" data-state="${p.state}"><div class="rs-part-h"><a href="${href}" data-link data-part-open="${esc(p.bu)}"><b>${esc(p.bu)}</b></a>${badge(PART_TXT[p.state], PART_CLS[p.state])}</div>
@@ -1837,7 +1880,7 @@ async function overrideLaunch(prj, role) {
   if (!(await signIn('sign the launch override for ' + prj.name))) { toast('Extra sign-in check not completed. Nothing was signed.'); return; }
   const reason = String(r.form.reason || '').trim();
   const id = store.newId('ovr'); const at = new Date().toISOString();
-  await store.save('approval', id, { id, projectId: prj.id, kind: 'launch-override', role, approver: store.state.me, decision: 'approved', stepUp: true, at, reason, guard: g.why },
+  await store.save('approval', id, { id, projectId: prj.id, kind: 'launch-override', role, approver: store.state.me, decision: 'approved', stepUp: true, stepUpAt: at, at, reason, guard: g.why },
     `Signed the launch override as ${eng('overrideRoleLabel', prj.id, store.state.me) || (role === 'pm' ? 'project manager' : 'approver')} (${g.why.join('; ')}): “${reason}”`);
   const ov = eng('launchOverrideStatus', prj.id, localNow()) || {};
   toast(ov.ok ? 'Override signed by two people' : 'Signed. One more person has to sign.');

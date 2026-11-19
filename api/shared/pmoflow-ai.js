@@ -310,7 +310,9 @@ function atRiskLine(w) {
   const wait = w.waitingOn ? `waiting on ${q(w.waitingOn)}` : '';
   if (w.daysPastDue > 0) {
     const exp = w.forecast ? `expected ${fd(w.forecast)}` : '';
-    return `${q(w.title)} (${w.owner}) is late by ${plural(w.lateDays != null ? w.lateDays : w.daysPastDue, 'business day')} (was due ${fd(w.due)})` + [exp, wait].filter(Boolean).map(x => `; ${x}`).join('');
+    /* R16 N1 #10 (Jordan 5): the engine's one wording: "1 business day past due; expected to finish 6 business days late" */
+    const late = w.lateDays != null && w.lateDays > 0 ? `; expected to finish ${plural(w.lateDays, 'business day')} late` : '';
+    return `${q(w.title)} (${w.owner}) is ${plural(w.daysPastDue, 'business day')} past due (was due ${fd(w.due)})${late}` + [exp, wait].filter(Boolean).map(x => `; ${x}`).join('');
   }
   const exp = w.forecast ? `expected ${fd(w.forecast)}, after its ${fd(w.due)} due date` : `will finish after its ${fd(w.due)} due date`;
   return `${q(w.title)} (${w.owner}) is late: ${exp}` + (wait ? `; ${wait}` : '');

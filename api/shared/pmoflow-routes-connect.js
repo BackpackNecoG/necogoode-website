@@ -13,7 +13,8 @@
      POST   workspaces/:ws/connections/:id/sim               a person changes an item "in Jira" (demo); flows back like a webhook
      POST   workspaces/:ws/connections/:id/notify            preview + simulated delivery of a notification {event}
      POST   workspaces/:ws/connections/:id/rotate            rotate the project's signing secret
-     POST   workspaces/:ws/connections/:id/replay            re-send the last signed intent (shows the replay refusal) */
+     POST   workspaces/:ws/connections/:id/replay            re-send the last signed intent (shows the replay refusal)
+     POST   workspaces/:ws/connections/:id/clear-hold        R16: the person a held Done names clears it {workItemId, confirmOpen?} */
 const crypto = require('crypto');
 const S = require('./pmoflow-sync');
 const seedMod = require('./pmoflow-seed');
@@ -424,6 +425,26 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const out = await runSync({ store, wsId, actor: actor || 'anonymous', today }, conn, st, { outbound: true });
     await store.putDoc(wsId, TYPE, id, conn);
     send(200, { ok: true, connection: publicConn(conn), summary: out.sum, sentence: syncSentence(conn, out.sum), before: out.before, after: out.after, changed: what });
+    return true;
+  }
+
+  /* R16 N4 #5 (PMO R15 re-test 1): the person a hold names clears an out-of-order Done here. With work it depends on still
+     open, the first call only returns the warning (the PM confirm's words); the second, with confirmOpen: true, marks it
+     Done by that person, unconfirmed, so it earns nothing until someone else confirms it. Server-written History. */
+  if (sub === 'clear-hold') {
+    const wid = String(body.workItemId || '');
+    const w0 = ((docs.workItem || []).find(d => d.id === wid) || {}).data;
+    if (!w0 || w0.projectId !== conn.projectId) { fail(404, 'That task isn’t in the connected project.'); return true; }
+    const r = S.clearHold(docs, wid, actor, { engine: engine(), today, now: new Date().toISOString() });
+    if (!r.ok) { fail(/ can’t clear the hold\.$/.test(r.error) ? 403 : 409, r.error); return true; }
+    if (r.warning && body.confirmOpen !== true) { send(200, { ok: true, needsConfirm: true, warning: r.warning, open: r.open }); return true; }
+    await store.putDoc(wsId, 'workItem', wid, Object.assign({}, r.data, { updatedAt: new Date().toISOString() }));
+    const tn = (S.TOOLS[conn.tool] || {}).name || 'tool';
+    const openTxt = r.open.length ? r.open.slice(0, 3).map(o => `“${o.title}”`).join(', ') + (r.open.length > 3 ? ` and ${r.open.length - 3} more` : '') : '';
+    const summary = `Cleared the ${tn} hold on “${w0.title || wid}”${r.data.holdCleared.key ? ` (${r.data.holdCleared.key})` : ''}: ` +
+      (r.open.length ? `marked Done while ${openTxt} ${r.open.length === 1 ? 'is' : 'are'} still open, so it counts only once someone else confirms it` : 'marked Done; the work it depends on is finished');
+    await store.appendEvent(wsId, { actor, action: 'sync-hold-cleared', ref: 'workItem:' + wid, summary: summary.slice(0, 300) });
+    send(200, { ok: true, cleared: true, workItem: r.data, sentence: summary });
     return true;
   }
 

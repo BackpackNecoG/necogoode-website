@@ -33,6 +33,8 @@
     { id: 'budget', label: 'Change budget' },
     { id: 'deadline', label: 'Change deadline' },
     { id: 'pm', label: 'Hand over the project manager role' },
+    { id: 'launchOwner', label: 'Hand over the launch owner role' },
+    { id: 'launchWindow', label: 'Move the launch window' },
   ];
   const CATEGORIES = [
     { id: 'client', label: 'Client request' },
@@ -48,7 +50,10 @@
      and no department approval reopens. */
   const COST_TOLERANCE_PCT = 5;
   const TASK_FIELDS = ['start', 'due', 'owner', 'effortDays', 'title', 'deps'];
-  const PROJECT_FIELDS = ['target', 'budget', 'owner'];
+  const PROJECT_FIELDS = ['target', 'budget', 'owner', 'releaseManager', 'launchWindow'];
+  /* R16: the launch window is project.cutover.window ("2026-12-12 07:30–10:00"); its day is the first date in it */
+  const windowDay = w => { const m = /(\d{4}-\d{2}-\d{2})/.exec(String(w && typeof w === 'object' ? w.start || '' : w || '')); return m ? m[1] : null; };
+  const windowOf = p => (p && p.cutover && p.cutover.window) || null;
   const ID_RE = /^[\w.-]{1,64}$/;
   const MAX_EDITS = 120, MAX_LIST = 60;
 
@@ -133,9 +138,11 @@
     }
     if (e.op === 'remove') return 'Removed “' + (e.label || (e.from && e.from.title) || 'a task') + '”';
     if (e.type === 'project' && e.field === 'owner') return 'Project manager ' + personName(docs, e.from) + ' → ' + personName(docs, e.to);
+    if (e.type === 'project' && e.field === 'releaseManager') return 'Launch owner ' + personName(docs, e.from) + ' → ' + personName(docs, e.to);
+    if (e.type === 'project' && e.field === 'launchWindow') return 'Launch window ' + (e.from ? String(e.from) : 'not set') + ' → ' + String(e.to);
     if (e.type === 'project') return FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng);
     if (e.field === 'title') return 'Renamed ' + valueText('title', e.from) + ' → ' + valueText('title', e.to);
-    return '“' + (e.label || 'a task') + '”: ' + FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng) + (e.knock ? ' (knock-on: it waits on the moved work)' : '');
+    return '“' + (e.label || 'a task') + '”: ' + FIELD_LABEL[e.field] + ' ' + valueText(e.field, e.from, docs, eng) + ' → ' + valueText(e.field, e.to, docs, eng) + (e.knock ? (e.waits === false ? ' (moved: it is now expected to finish later)' : ' (knock-on: it waits on the moved work)') : '');
   }
 
   /* ------------------------------------------------------------------ */
@@ -152,6 +159,8 @@
       if (e.type === 'project' && e.field === 'target') k.add('deadline');
       if (e.type === 'project' && e.field === 'budget') k.add('budget');
       if (e.type === 'project' && e.field === 'owner') k.add('pm');
+      if (e.type === 'project' && e.field === 'releaseManager') k.add('launchOwner');
+      if (e.type === 'project' && e.field === 'launchWindow') k.add('launchWindow');
     });
     return KINDS.map(x => x.id).filter(x => k.has(x));
   }
@@ -176,6 +185,10 @@
     if (b) parts.push('Set the budget to ' + money(b.to));
     const pm = edits.find(e => e.type === 'project' && e.field === 'owner');
     if (pm) parts.push('Hand the project manager role to ' + personName(docs, pm.to));
+    const lo = edits.find(e => e.type === 'project' && e.field === 'releaseManager');
+    if (lo) parts.push('Hand the launch owner role to ' + personName(docs, lo.to));
+    const lw = edits.find(e => e.type === 'project' && e.field === 'launchWindow');
+    if (lw) parts.push('Move the launch window to ' + day(windowDay(lw.to), eng));
     const s = parts.slice(0, 2).join(', ') + (parts.length > 2 ? ' and more' : '');
     return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Plan change';
   }
@@ -248,6 +261,23 @@
           from = project.owner || null;
           if (!get(docs, 'person', to)) { errors.push('Pick the new project manager.'); return; }
           if (to !== from && project.sponsor && to === project.sponsor) { errors.push(personName(docs, to) + ' is the sponsor, so they can’t also be the project manager. Pick someone else, or ask an Admin to change the sponsor first.'); return; }
+        }
+        else if (e.field === 'releaseManager') {
+          /* R16 (N1 #6, Jordan 3): handing over the launch owner role is a plan change the sponsor (or an Admin) approves */
+          from = project.releaseManager || project.owner || null;
+          if (!get(docs, 'person', to)) { errors.push('Pick the new launch owner.'); return; }
+          if (to !== from && project.sponsor && to === project.sponsor) { errors.push(personName(docs, to) + ' is the sponsor, so they can’t also be the launch owner. Pick someone else, or ask an Admin to change the sponsor first.'); return; }
+        }
+        else if (e.field === 'launchWindow') {
+          /* R16 (N1 #7, PMO re-test 10): the launch window moves through a plan change; never onto a day off */
+          to = clean(typeof to === 'object' && to ? to.start || '' : to, 80);
+          const d = windowDay(to);
+          if (!isDay(d)) { errors.push('Pick a real day for the launch window.'); return; }
+          from = windowOf(project);
+          if (to !== from) {
+            const en = E(eng);
+            if (!en.isBusinessDay(d, docs)) { const h = en.holidayName(d, docs); errors.push('The launch window can’t be on ' + day(d, en) + ' (' + (h || 'a ' + WEEKDAY[new Date(d + 'T12:00:00Z').getUTCDay()]) + '): that’s a day off. Pick a business day.'); return; }
+          }
         }
         else { to = +to; if (!(to >= 0) || !isFinite(to) || to > 1e9) { errors.push('Enter the budget as a number of dollars.'); return; } from = budgetOf(project); }
         const out = { op: 'set', type: 'project', id: projectId, field: e.field, from, to, label: project.name || 'the project' };
@@ -336,6 +366,8 @@
         mine.forEach(x => {
           if (x.field === 'budget') d.budget = Object.assign({}, d.budget || {}, { planned: x.to });
           else if (x.field === 'owner') { d.owner = x.to; d.resources = [...new Set([x.to].concat(d.resources || [], x.from ? [x.from] : []))]; }   /* both stay on the team */
+          else if (x.field === 'launchWindow') d.cutover = Object.assign({}, d.cutover || {}, { window: x.to });
+          else if (x.field === 'releaseManager') { d.releaseManager = x.to; d.resources = [...new Set([x.to].concat(d.resources || []))]; }
           else d[x.field] = x.to;
         });
         return { id: e.id, data: d };
@@ -354,8 +386,8 @@
         else if (!same(w[e.field] === undefined ? null : w[e.field], e.from)) out.push('“' + (e.label || 'a task') + '” ' + (FIELD_LABEL[e.field] || e.field) + ' changed');
       } else if (e.op === 'set' && e.type === 'project') {
         const p = get(docs, 'project', e.id);
-        const cur = !p ? undefined : e.field === 'budget' ? budgetOf(p) : e.field === 'owner' ? (p.owner || null) : (p.target || null);
-        if (!p || !same(cur, e.from)) out.push((e.field === 'budget' ? 'the budget' : e.field === 'owner' ? 'the project manager' : 'the deadline') + ' changed');
+        const cur = !p ? undefined : e.field === 'budget' ? budgetOf(p) : e.field === 'owner' ? (p.owner || null) : e.field === 'releaseManager' ? (p.releaseManager || p.owner || null) : e.field === 'launchWindow' ? windowOf(p) : (p.target || null);
+        if (!p || !same(cur, e.from)) out.push((e.field === 'budget' ? 'the budget' : e.field === 'owner' ? 'the project manager' : e.field === 'releaseManager' ? 'the launch owner' : e.field === 'launchWindow' ? 'the launch window' : 'the deadline') + ' changed');
       } else if (e.op === 'add') {
         if (get(docs, 'workItem', e.id)) out.push('a task with the same id already exists');
       } else if (e.op === 'remove') {
@@ -422,8 +454,13 @@
     const pmMoved = !!(projectB && projectA && projectB.owner !== projectA.owner);
     if (pmMoved && projectB.owner) touch(projectB.owner, 'hands over the project manager role');
     if (projectA && projectA.owner) touch(projectA.owner, pmMoved ? 'becomes the project manager' : 'project manager');
+    const loB = projectB ? projectB.releaseManager || projectB.owner || null : null, loA = projectA ? projectA.releaseManager || projectA.owner || null : null;
+    /* R16: the launch owner moves when project.releaseManager changes (a PM hand-over with "same as the project manager"
+       moves it implicitly, and that is the PM hand-over's own reason) */
+    const loMoved = !!(projectB && projectA && (projectB.releaseManager || null) !== (projectA.releaseManager || null) && loB !== loA);
+    if (loMoved) { touch(loB, 'hands over the launch owner role'); touch(loA, 'becomes the launch owner'); }
     const sponsor = sponsorOf(docsAfter, projectId);
-    if (sponsor && (deadlineMoved || budgetMoved || pmMoved)) touch(sponsor, 'sponsor');
+    if (sponsor && (deadlineMoved || budgetMoved || pmMoved || loMoved)) touch(sponsor, 'sponsor');
     /* R12 #13: knock-ons into OTHER projects, one entry per project, with that project's own finish before/after */
     const crossMap = new Map();
     knockOn.filter(k => k.projectId && k.projectId !== projectId).forEach(k => {
@@ -450,6 +487,9 @@
       budget: { before: budgetOf(projectB), after: budgetOf(projectA), moved: budgetMoved },
       pm: { before: projectB ? projectB.owner || null : null, after: projectA ? projectA.owner || null : null, moved: pmMoved,
         beforeName: projectB && projectB.owner ? personName(docsBefore, projectB.owner) : null, afterName: projectA && projectA.owner ? personName(docsAfter, projectA.owner) : null },
+      launchWindow: (() => { const b = windowOf(projectB), a = windowOf(projectA), da = windowDay(a), dl = projectA && projectA.target;
+        return { before: b, after: a, moved: !same(b, a), day: da, pastDeadline: !!(da && isDay(dl) && da > dl), deadline: dl || null }; })(),
+      launchOwner: { before: loB, after: loA, moved: loMoved, beforeName: loB ? personName(docsBefore, loB) : null, afterName: loA ? personName(docsAfter, loA) : null },
       label: { before: tb.label, after: ta.label },
       late: { before: tb.lateCount, after: ta.lateCount },
       tasks: { before: tb.tasks.total, after: ta.tasks.total },
@@ -505,6 +545,12 @@
     const succ = {}; work.forEach(w => depsOf(w).forEach(d => { (succ[d.id] = succ[d.id] || []).push(w.id); }));
     const reach = id => (succ[id] || []).forEach(x => { if (!cand.has(x) && !touched.has(x)) { cand.add(x); reach(x); } });
     touched.forEach(reach);
+    /* R16 (N1 ask, PMO disagreement 6): only tasks that wait on the edited work (through dependencies) are "knock-on: it
+       waits on the moved work"; a task that only finishes later is re-dated too, but says so in its own words */
+    const waitsOn = new Set(cand);
+    /* R16 (N1 #7, PMO bypass): a task given a new dependency (and no new dates of its own) moves to start after it */
+    const dated = new Set(base.filter(e => e.type === 'workItem' && e.op === 'set' && (e.field === 'start' || e.field === 'due')).map(e => e.id));
+    base.filter(e => e.type === 'workItem' && e.op === 'set' && e.field === 'deps' && !e.auto && !dated.has(e.id)).forEach(e => cand.add(e.id));
     work.forEach(w => { if (!touched.has(w.id) && fb[w.id] && fa[w.id] && isDay(fa[w.id].forecast) && (!isDay(fb[w.id].forecast) || fa[w.id].forecast > fb[w.id].forecast)) { cand.add(w.id); reach(w.id); } });
     [...cand].forEach(id => { if (!open(idx[id]) || !isDay(idx[id].due)) cand.delete(id); });
     /* pass 1: forward through the links, in dependency order, on the planned dates */
@@ -552,8 +598,9 @@
       work.forEach(w => {
         const p = plan[w.id]; if (!p) return;
         const label = w.title || 'untitled task';
-        if (isDay(w.start) && p.start && p.start !== w.start) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'start', from: w.start, to: p.start, label, auto: true, knock: true });
-        if (p.due !== w.due) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'due', from: w.due, to: p.due, label, auto: true, knock: true });
+        const waits = waitsOn.has(w.id) || touched.has(w.id);
+        if (isDay(w.start) && p.start && p.start !== w.start) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'start', from: w.start, to: p.start, label, auto: true, knock: true, waits });
+        if (p.due !== w.due) out.push({ op: 'set', type: 'workItem', id: w.id, field: 'due', from: w.due, to: p.due, label, auto: true, knock: true, waits });
       });
       return out;
     };
@@ -615,6 +662,8 @@
     const rest = [];
     if (im.budget.moved) rest.push('sets the budget to ' + money(im.budget.after) + ' (was ' + money(im.budget.before) + ')');
     if (im.pm && im.pm.moved) rest.push('hands the project manager role from ' + (im.pm.beforeName || 'the project manager') + ' to ' + (im.pm.afterName || 'someone else'));
+    if (im.launchWindow && im.launchWindow.moved && im.launchWindow.day) rest.push('moves the launch window to ' + day(im.launchWindow.day, eng) + (im.launchWindow.pastDeadline ? ' (after the deadline)' : ''));
+    if (im.launchOwner && im.launchOwner.moved) rest.push('hands the launch owner role from ' + (im.launchOwner.beforeName || 'the launch owner') + ' to ' + (im.launchOwner.afterName || 'someone else'));
     if (im.cost.delta != null && Math.abs(im.cost.delta) >= 1) rest.push((im.cost.delta > 0 ? 'raises' : 'lowers') + ' the expected cost by ' + money(Math.abs(im.cost.delta)) + ' (' + Math.abs(im.cost.pct).toFixed(1) + '%)');
     if (im.approvalsReopen.length) rest.push('reopens ' + joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval' : 'approvals'));
     (im.crossProjects || []).forEach(x => rest.push('moves ' + plural(x.taskCount != null ? x.taskCount : x.tasks.length, 'task') + ' in ' + x.name));
@@ -647,6 +696,14 @@
     if (im.budget.moved) reasons.push('The budget changes (' + money(im.budget.before) + ' → ' + money(im.budget.after) + ').');
     const pmMoved = !!(im.pm && im.pm.moved);
     if (pmMoved) reasons.push('The project manager changes (' + personName(docs, im.pm.before) + ' → ' + personName(docs, im.pm.after) + ').');
+    const loMoved = !!(im.launchOwner && im.launchOwner.moved);
+    /* R16 (N1 #7): a launch window moved after the deadline needs the sponsor */
+    const lwLate = !!(im.launchWindow && im.launchWindow.moved && im.launchWindow.pastDeadline);
+    if (lwLate) reasons.push('The launch window (' + day(im.launchWindow.day) + ') is after the ' + day(im.launchWindow.deadline) + ' deadline.');
+    if (loMoved) reasons.push('The launch owner changes (' + personName(docs, im.launchOwner.before) + ' → ' + personName(docs, im.launchOwner.after) + ').');
+    /* R16 (N1 #7, PMO re-test 3): a change that takes the expected cost over the planned budget is never within tolerance */
+    const overBudget = !im.budget.moved && im.budget.after != null && im.cost.after != null && im.cost.after > im.budget.after && !(im.cost.before != null && im.cost.before >= im.cost.after);
+    if (overBudget) reasons.push('The expected cost goes over the ' + money(im.budget.after) + ' budget (' + money(im.cost.before) + ' → ' + money(im.cost.after) + ').');
     if (im.cost.pct != null && Math.abs(im.cost.pct) >= COST_TOLERANCE_PCT) reasons.push('The expected cost changes by ' + Math.abs(im.cost.pct).toFixed(1) + '% (more than ' + COST_TOLERANCE_PCT + '%).');
     if (im.approvalsReopen.length) reasons.push(joinAnd(im.approvalsReopen.map(a => a.bu + '’s')) + ' ' + (im.approvalsReopen.length === 1 ? 'approval reopens' : 'approvals reopen') + '.');
     /* R12 #13: a knock-on into another project needs that project's manager too */
@@ -664,7 +721,7 @@
     const missing = [];
     /* R15 (M1 #3): the stored sponsor decides; with no sponsor, an Admin who did not ask (never the PM, nor either PM of a
        hand-over) */
-    const pmEx = pmMoved ? [im.pm.before, im.pm.after].filter(Boolean) : [];
+    const pmEx = (pmMoved ? [im.pm.before, im.pm.after] : []).concat(loMoved ? [im.launchOwner.before, im.launchOwner.after] : []).filter(Boolean);
     const decider = [];
     const sponsorFor = (prj, role, pid) => {
       const d = deciderOf(docs, prj, requester, pid ? [] : pmEx, opts.engine);
@@ -673,10 +730,11 @@
     };
     /* this project's manager (never for a hand-over of their own role), or the sponsor for them when they asked */
     if (!pmMoved && project.owner && get(docs, 'person', project.owner) && project.owner !== requester) need.push({ role: 'pm', person: project.owner });
-    if (breach || im.budget.moved || pmMoved || !need.length) sponsorFor(project, 'sponsor');
-    if (breach || im.budget.moved || pmMoved) reasons.push(decider[0] && decider[0].role === 'admin'
-      ? (pmMoved ? 'A new project manager' : breach ? 'A change past the deadline' : 'A budget change') + ' needs the sponsor’s approval; no sponsor is set, so an Admin approves.'
-      : (pmMoved ? 'A new project manager' : breach ? 'A change past the deadline' : 'A budget change') + ' needs the sponsor’s approval.');
+    const sponsorWhy = pmMoved ? 'A new project manager' : loMoved ? 'A new launch owner' : breach || lwLate ? 'A change past the deadline' : im.budget.moved ? 'A budget change' : 'Going over the budget';
+    if (breach || lwLate || im.budget.moved || pmMoved || loMoved || overBudget || !need.length) sponsorFor(project, 'sponsor');
+    if (breach || lwLate || im.budget.moved || pmMoved || loMoved || overBudget) reasons.push(decider[0] && decider[0].role === 'admin'
+      ? sponsorWhy + ' needs the sponsor’s approval; no sponsor is set, so an Admin approves.'
+      : sponsorWhy + ' needs the sponsor’s approval.');
     /* each other project's manager, or its sponsor when its manager asked */
     cross.forEach(x => {
       const other = get(docs, 'project', x.projectId);

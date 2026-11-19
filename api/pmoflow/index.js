@@ -43,6 +43,13 @@ function parseBody(req) {
   if (typeof b === 'object' && !Buffer.isBuffer(b)) return b;
   try { const j = JSON.parse(Buffer.isBuffer(b) ? b.toString('utf8') : String(b)); return j && typeof j === 'object' ? j : null; } catch (e) { return null; }
 }
+/* R16 N1 #1: the hosted sign-in (Azure Static Web Apps) as the platform passes it: base64 JSON {userId, userDetails,
+   identityProvider, userRoles}. null without one (the open demo). */
+function principalOf(req) {
+  const h = req && req.headers ? (req.headers['x-ms-client-principal'] || req.headers['X-MS-CLIENT-PRINCIPAL']) : null;
+  if (!h) return null;
+  try { const p = JSON.parse(Buffer.from(String(h), 'base64').toString('utf8')); return p && typeof p === 'object' && (p.userId || p.userDetails) ? p : null; } catch (e) { return null; }
+}
 const actorOf = b => (typeof b.actor === 'string' && ID_RE.test(b.actor) ? b.actor : 'anonymous');
 const summaryOf = (b, dflt) => (typeof b.summary === 'string' && b.summary.trim() ? b.summary.trim().slice(0, 300) : dflt);
 const isPlainObject = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -211,8 +218,16 @@ function changeText(docs, prevData, data) {
       const eng = engine(); const was = new Set((Array.isArray(x) ? x : []).map(t => JSON.stringify(t)));
       const added = y.filter(t => !was.has(JSON.stringify(t)));
       const removed = (Array.isArray(x) ? x : []).length - (y.length - added.length);
-      if (added.length) out.push('hours logged: ' + added.slice(0, 3).map(t => (eng && eng.timeEntryText ? eng.timeEntryText(t) : (t.hours + ' hours')) + (t.by ? ' by ' + personName(docs, t.by) : '')).join('; '));
+      const pos = added.filter(t => !(+t.hours < 0)), neg = added.filter(t => +t.hours < 0);
+      const line = l => l.slice(0, 3).map(t => (eng && eng.timeEntryText ? eng.timeEntryText(t) : (t.hours + ' hours')) + (t.by ? ' by ' + personName(docs, t.by) : '')).join('; ');
+      if (pos.length) out.push('hours logged: ' + line(pos));
+      if (neg.length) out.push('hours corrected: ' + line(neg));
       if (removed > 0) out.push(removed + ' hours entr' + (removed === 1 ? 'y' : 'ies') + ' removed');
+      /* R16 N1 #2: History shows the hours and dollars before and after */
+      if ((added.length || removed > 0) && eng && typeof eng.hoursTotals === 'function') {
+        const tb = eng.hoursTotals(docs, Object.assign({}, a, { time: Array.isArray(x) ? x : [] })), ta = eng.hoursTotals(docs, b);
+        out.push('total ' + tb.text + ' → ' + ta.text);
+      }
       continue;
     }
     if (Array.isArray(x) || Array.isArray(y)) { out.push(fieldLabel(k) + ' ' + fmtVal(docs, k, x || []) + ' → ' + fmtVal(docs, k, y || [])); continue; }
@@ -225,7 +240,13 @@ function serverSummary(body, base, changes) {
   /* R14 PMO-A2: the person's note is kept, quoted after the server's sentence, but neutralised so it can never look
      like a server-written change ("$48,000 → $90,000" reads "$48,000 to $90,000" inside the quote) */
   note = note.replace(/\s*(→|->|=>)\s*/g, ' to ');
-  return base + (changes ? ': ' + changes : '') + (note && note !== base ? ' (note: “' + note.replace(/[“”]/g, '"') + '”)' : '');
+  /* R16 N1 (flaky e2e "R6 history: resize summarised"): History keeps 300 characters, so a long change list is shortened
+     here, never the person's note at the end ("Resized … on the timeline (+2d)") */
+  const tail = note && note !== base ? ' (note: “' + note.replace(/[“”]/g, '"') + '”)' : '';
+  let ch = changes ? ': ' + changes : '';
+  const room = 280 - base.length - tail.length;
+  if (ch.length > room) ch = room > 12 ? ch.slice(0, room - 1).replace(/[;,]?\s*\S*$/, '') + '…' : '';
+  return base + ch + tail;
 }
 function personName(docs, id) { const p = ((docs.person || []).find(d => d.id === id) || {}).data; return p ? p.name : 'the assigned person'; }
 
@@ -345,7 +366,7 @@ function confirmError(prev, data, actor, docs) {
 }
 /* R14 PMO-S1/PMO-11: a task write that moves the project's finish past its deadline goes through Change the plan; a due
    date is a working day. Status-only writes (Done, hours, problem states) are never refused for the deadline. */
-const SCHEDULE_KEYS = ['due', 'start', 'effortDays', 'deps', 'pid', 'step', 'resolves', 'projectId', 'status'];
+const SCHEDULE_KEYS = ['due', 'start', 'effortDays', 'cost', 'deps', 'pid', 'step', 'resolves', 'projectId', 'status'];
 function scheduleError(prev, data, docs, today) {
   const eng = engine();
   if (!eng || typeof eng.deadlineBreach !== 'function') return null;
@@ -368,13 +389,23 @@ function scheduleError(prev, data, docs, today) {
   if (!project) return null;
   /* a brand-new task in a project still being planned (no saved plan yet) is part of drafting the plan */
   if (!prev && !(Array.isArray(project.baselines) && project.baselines.length)) return null;
+  /* R16 N1 #7 (PMO): an added dependency moves the dependent's start (and due, keeping its length) to after the work it
+     now waits on; if that breaks the deadline, the deadline guard below refuses it */
+  let shift = null;
+  if (prev && changed.includes('deps') && typeof eng.dependencyShift === 'function') {
+    shift = eng.dependencyShift(docs, prev, data.deps, today);
+    if (shift && shift.moved) { data.start = shift.start; if (shift.due) data.due = shift.due; }
+  }
   const after = Object.assign({}, docs, { workItem: (docs.workItem || []).filter(d => d.id !== data.id).concat([{ id: data.id, data }]) });
   const b = eng.deadlineBreach(docs, after, projectId, today);
-  if (b) return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + b.text, reasons: [b.text], deadline: b } };
-  /* R15 #4 (PMO): an effort edit that raises the expected cost past the tolerance goes through Change the plan too */
-  if (prev && changed.includes('effortDays') && Array.isArray(project.baselines) && project.baselines.length && typeof eng.costBreach === 'function') {
+  if (b) return { status: 409, body: { error: 'Use “Change the plan” to move this work past the deadline, so the sponsor can approve it. ' + (shift && shift.moved ? shift.text + ' ' : '') + b.text, reasons: [b.text], deadline: b } };
+  /* R15 #4 / R16 #7 (PMO): an effort or cost edit (or a new task with a cost) that raises the expected cost past the
+     tolerance, or over the budget, goes through Change the plan too (a new task is planned through Change the plan's
+     "add work" or the plan itself, as before) */
+  const costKeys = changedKeys(prev, data).filter(k => k === 'effortDays' || k === 'cost');
+  if (prev && costKeys.length && Array.isArray(project.baselines) && project.baselines.length && typeof eng.costBreach === 'function') {
     const c = eng.costBreach(docs, after, projectId, today);
-    if (c) return { status: 409, body: { error: 'Use “Change the plan” to change this effort, so the sponsor can approve the cost. ' + c.text, reasons: [c.text], cost: c } };
+    if (c) return { status: 409, body: { error: 'Use “Change the plan” to change this ' + (costKeys.includes('cost') && !costKeys.includes('effortDays') ? 'cost' : prev ? 'effort' : 'work') + ', so the sponsor can approve the cost. ' + c.text, reasons: [c.text], cost: c } };
   }
   return null;
 }
@@ -467,6 +498,17 @@ function approvalError(prev, next, actor, docs) {
   if (next.decision !== 'approved') return null;
   const bar = eng.approvalBar(docs, next.projectId, next.bu, actor);
   if (bar) return bar.text;
+  /* R16 N1 #4 (Jordan): only someone who may approve this part now (still in the department or a named or chosen
+     approver, and not a recent joiner) approves it; the refusal says why, to the person ("You joined …") */
+  /* R16 N1 #5 (Jordan): a part with nothing to sign can't be approved (its approval would never count) */
+  if (typeof eng.buReady === 'function' && next.bu && !next.kind) {
+    const nb = eng.buReady(docs, next.projectId, next.bu);
+    if (nb && nb.needed === false) return nb.sentence;
+  }
+  if (typeof eng.approverStatus === 'function' && next.bu && !next.kind) {
+    const as = eng.approverStatus(docs, next.projectId, next.bu, actor);
+    if (as && !as.eligible) return as.you || as.text;
+  }
   /* R13 #3: ONE approval-readiness rule for Simple and Advanced: a part is approved only when it is ready */
   if (typeof eng.buReady === 'function' && next.bu && !next.kind) {
     const br = eng.buReady(docs, next.projectId, next.bu);
@@ -782,6 +824,57 @@ module.exports = async function (context, req) {
       return out;
     };
     const pendingLogs = [];
+    /* R16 N1 #1 (PMO top 1): identity binding and fresh step-ups, for every workspace write (route modules included).
+       - Hosted sign-in (Azure Static Web Apps puts x-ms-client-principal on the request; a browser can't set it there):
+         the actor is the person linked to that sign-in. Acting as anyone else is refused (403) and logged.
+       - Every step-up the write carries is checked against the server clock: older than 10 minutes, or in the
+         future, is refused (403) and logged. The server then records its own time (stepUpAt / stepUp.at).
+       - The open demo (no principal) keeps the "Viewing as" switcher; the step-up check still applies. */
+    if (modWs && method !== 'GET') {
+      const eng = engine();
+      const nowIso = new Date().toISOString();
+      const gateRefuse = async (msg, ref) => {
+        try { await store.appendEvent(modWs, { actor: actorOf(body || {}), action: 'refused', ref: String(ref || ('route:' + seg.slice(2, 4).join('/'))).slice(0, 100), summary: `Refused: ${String(msg).replace(/\s+/g, ' ')}`.slice(0, 300) }); } catch (e) { /* the refusal stands */ }
+        return fail(403, msg);
+      };
+      const principal = principalOf(req);
+      let gateDocs = null;
+      const docsNow = async () => { if (gateDocs) return gateDocs; const w = await store.getWorkspace(modWs); gateDocs = w && !w.expired ? (await store.getState(w)).docs : null; return gateDocs; };
+      if (principal && eng && typeof eng.personForPrincipal === 'function') {
+        const docs = await docsNow();
+        if (docs) {
+          const pid = eng.personForPrincipal(docs, principal);
+          const who = String(principal.userDetails || 'this sign-in').slice(0, 80);
+          if (!pid) return gateRefuse(`${who} isn't linked to anyone in this workspace. Ask an Admin to add you.`);
+          if (typeof body.actor === 'string' && body.actor && body.actor !== pid)
+            return gateRefuse(`You're signed in as ${personName(docs, pid)}, so you can't act as ${personName(docs, body.actor)}.`);
+          body.actor = pid;
+        }
+      }
+      if (eng && typeof eng.stepUpProblem === 'function') {
+        if (isPlainObject(body.stepUp)) {
+          const pr = eng.stepUpProblem(body.stepUp.at, nowIso);
+          if (pr) return gateRefuse(pr.text);
+          body.stepUp = { method: 'simulated-mfa', at: nowIso };
+          body.stepUpAt = nowIso;
+        }
+        /* a claimed step-up on an approval or a test-run doc (data.stepUp): its stamp is stepUp.at, else stepUpAt, else at */
+        if (seg[0] === 'ws' && seg[2] === 'doc' && ['approval', 'testRun'].includes(seg[3]) && method === 'PUT' && isPlainObject(body.data) && body.data.stepUp) {
+          const d = body.data;
+          const docs = await docsNow();
+          const prev = docs ? (((docs[seg[3]] || []).find(x => x.id === seg[4]) || {}).data || null) : null;
+          const same = prev && prev.stepUp && (() => { const strip = o => JSON.stringify(Object.keys(o || {}).filter(k => !['updatedAt', 'stepUpAt', 'stepUp'].includes(k)).sort().map(k => [k, o[k]])); return strip(prev) === strip(d); })();
+          if (same) { d.stepUp = prev.stepUp; if (prev.stepUpAt) d.stepUpAt = prev.stepUpAt; else delete d.stepUpAt; }
+          else {
+            const stamp = isPlainObject(d.stepUp) ? d.stepUp.at : (d.stepUpAt || d.at);
+            const pr = eng.stepUpProblem(stamp, nowIso);
+            if (pr) return gateRefuse(pr.text, `${seg[3]}:${seg[4]}`);
+            if (isPlainObject(d.stepUp)) d.stepUp = { method: 'simulated-mfa', at: nowIso };
+            d.stepUpAt = nowIso;
+          }
+        }
+      }
+    }
     for (const mod of ROUTE_MODULES) {
       const handled = await mod.handle({ method, seg, body, req, store, send, fail: modFail, clientIpHash, dayInput, clientToday });
       if (pendingLogs.length) await Promise.all(pendingLogs);
@@ -910,6 +1003,11 @@ module.exports = async function (context, req) {
         /* R10 S5: workspace roles (Viewer / Approver / admin-only settings) */
         const rd = ADMIN_ROUTES && ADMIN_ROUTES.roleError ? ADMIN_ROUTES.roleError(st.docs, actor, type) : null;
         if (rd) return refuse(403, rd);
+        /* R16 N1 #1: the link between a person and their hosted sign-in (email, principalId) is set by an Admin only */
+        if (type === 'person' && ['email', 'principalId'].some(k => ((prev && prev.data[k]) || null) !== (data[k] || null))) {
+          const role = ADMIN_ROUTES && typeof ADMIN_ROUTES.roleOf === 'function' ? ADMIN_ROUTES.roleOf(st.docs, actor) : null;
+          if (role !== 'admin') return refuse(403, 'Only an Admin can link a person to their sign-in.');
+        }
         /* R5 [S]: permissions */
         const denied = permissionError(type, prev && prev.data, data, actor, st.docs);
         if (denied) return refuse(403, denied);
@@ -918,6 +1016,22 @@ module.exports = async function (context, req) {
           if (bad) return refuse(400, bad);
           const g = projectGuardError(prev && prev.data, data, actor, st.docs);
           if (g) return refuse(g.status, g.body);
+          /* R16 N1 #6 (Jordan): once a project has work, the launch owner changes only through "Change the plan" (a
+             plan change the sponsor approves), never in one click */
+          if (prev && prev.data && (st.docs.workItem || []).some(w => w.data && w.data.projectId === id) &&
+            (prev.data.releaseManager || prev.data.owner || null) !== (data.releaseManager || data.owner || null) && (prev.data.owner || null) === (data.owner || null))
+            return refuse(409, `Use “Change the plan” to hand the launch owner role to ${personName(st.docs, data.releaseManager || data.owner)}, so the sponsor can approve it.`);
+          /* R16 N1 #7 (PMO): a launch window on a day off is refused; past the deadline it goes through Change the plan */
+          {
+            const eng = engine();
+            const wv = x => (x && x.cutover && x.cutover.window) || null;
+            if (eng && typeof eng.launchWindowGuard === 'function' && JSON.stringify(wv(prev && prev.data)) !== JSON.stringify(wv(data)) && wv(data)) {
+              const lw = eng.launchWindowGuard(Object.assign({}, st.docs, { project: (st.docs.project || []).filter(d => d.id !== id).concat([{ id, data }]) }), id, wv(data));
+              if (lw) return refuse(lw.kind === 'day-off' ? 400 : 409, { error: lw.text, window: lw });
+            }
+          }
+          /* R16 N1 #5: formerLeads is the server's (kept from the stored project) */
+          if (prev && Array.isArray(prev.data.formerLeads)) data.formerLeads = prev.data.formerLeads; else delete data.formerLeads;
         }
         /* R14 PMO-A1/S1/PMO-11/PMO-1: task ownership, the deadline guard, working-day due dates, second-person confirmation */
         if (type === 'workItem') {
@@ -925,6 +1039,13 @@ module.exports = async function (context, req) {
           if (own) return refuse(403, own);
           const cf = confirmError(prev && prev.data, data, actor, st.docs);
           if (cf) return refuse(403, cf);
+          /* R16 N1 #2 (PMO): hours are append-only: a plain save can add entries, never remove or lower one; a correction
+             is a reversing (negative) entry with a reason */
+          {
+            const eng = engine();
+            const tp = eng && typeof eng.timeEntryProblem === 'function' && (prev || Array.isArray(data.time)) ? eng.timeEntryProblem(prev && prev.data.time, data.time) : null;
+            if (tp) return refuse(409, tp.text);
+          }
           const sc = scheduleError(prev && prev.data, data, st.docs, today);
           if (sc) return refuse(sc.status, sc.body);
           stampWorkItem(prev && prev.data, data, actor, today, st.docs);
@@ -981,10 +1102,15 @@ module.exports = async function (context, req) {
         if (type === 'project') {
           const prevFL = prev && Array.isArray(prev.data.forecastLog) ? prev.data.forecastLog : [];
           const prevRL = prev && Array.isArray(prev.data.reportLog) ? prev.data.reportLog : [];
-          const nextRL = Array.isArray(data.reportLog) ? data.reportLog : [];
-          const added = nextRL.filter(x => x && x.date === today && !prevRL.some(y => y && y.date === today)).slice(0, 1);
+          /* R16 N1 #3 (PMO regression): only a report that is SENT or EXPORTED is recorded (body.report.action), never a
+             preview. A client reportLog / lastReportAt is ignored; the server writes them. One entry per day. */
+          const rep = isPlainObject(body.report) && ['send', 'export'].includes(body.report.action) ? body.report : null;
+          const added = rep && !prevRL.some(y => y && y.date === today) ? [{ preset: typeof rep.preset === 'string' ? rep.preset.slice(0, 20) : null, action: rep.action }] : [];
           const nowIso = new Date().toISOString();
-          if (prevRL.length || added.length) data.reportLog = prevRL.concat(added.map(x => ({ date: today, at: nowIso, preset: x.preset || null }))).slice(-30); else delete data.reportLog;
+          if (prevRL.length || added.length) data.reportLog = prevRL.concat(added.map(x => ({ date: today, at: nowIso, preset: x.preset || null, action: x.action }))).slice(-30); else delete data.reportLog;
+          if (added.length) { data.lastReportAt = today; data.lastReportAtTime = nowIso; }
+          else if (prev) { ['lastReportAt', 'lastReportAtTime'].forEach(k => { if (prev.data[k] != null) data[k] = prev.data[k]; else delete data[k]; }); }
+          else { delete data.lastReportAt; delete data.lastReportAtTime; }
           let fl = prevFL.slice();
           if (added.length) {
             const eng = engine();

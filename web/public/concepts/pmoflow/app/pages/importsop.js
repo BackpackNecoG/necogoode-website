@@ -6,7 +6,7 @@
    "Not checked yet". */
 import { store } from '../store.js';
 import { esc, link, go, pname, modal, toast } from '../ui.js';
-import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, nameApproverFlow, ADD_DEPT } from './process.js';
+import { loadImport, UNCHECKED, importBtn, bindImport, timerText, eng, docs, approversHTML, readApproverSelects, addDepartmentFlow, nameApproverFlow, ADD_DEPT, haveListHTML, bindHaveList, readHaveList, haveFields } from './process.js';
 
 const ui = { text: '', draft: null, source: null, notes: [], busy: false, openData: null, tplOpen: false, PI: null };
 
@@ -131,10 +131,12 @@ function normalize(res) {
   const stepNames = allSteps(nodes, []).flatMap(st => (st.newData || []).map(nm => ({ name: nm, reason: 'Named in your procedure.', step: undefined, _src: st.src })));
   let newData = (Array.isArray(res && res.newData) ? res.newData : []).map(x => typeof x === 'string' ? { name: x } : x).concat(stepNames)
     .filter(x => x && String(x.name || '').trim())
-    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: false, perRun: x.perRun === true || undefined, perRunText: x.perRun === true ? String(x.perRunText || 'Collected each time the process runs.') : undefined }))
+    .map(x => ({ name: cleanTitle(x.name), reason: String(x.reason || ''), step: x.step != null ? x.step : x.stepTitle, exists: false, perRun: x.perRun === true || undefined, perRunText: x.perRun === true ? String(x.perRunText || 'Collected each time the process runs.') : undefined, producedBy: typeof x.producedBy === 'string' ? x.producedBy : undefined }))
     .filter(x => { const k = strip(x.name); if (seen.has(k)) return false; seen.add(k); return true; });
   /* R14 (Karen 9): the reader can also work out per-run documents itself when the server did not say (AI drafts) */
-  if (ui.PI && ui.PI.perRunOf) newData.forEach(x => { if (x.perRun) return; const st = allSteps(nodes, []).find(y => (y.newData || []).some(n => strip(n) === strip(x.name))); const pr = ui.PI.perRunOf(x.name, st && st.ownerRole, st ? st.title : '', ui.text); if (pr) Object.assign(x, pr); });
+  /* R16 (BPM): an AI draft: information first named as something its step makes is produced by that step */
+  if (ui.PI && ui.PI.outputOf) newData.forEach(x => { if (x.producedBy || x.perRun) return; const st = allSteps(nodes, []).find(y => (y.newData || []).some(n => strip(n) === strip(x.name))); if (st && ui.PI.outputOf(x.name, st.title)) x.producedBy = st.src; });
+  if (ui.PI && ui.PI.perRunOf) newData.forEach(x => { if (x.perRun || x.producedBy) return; const st = allSteps(nodes, []).find(y => (y.newData || []).some(n => strip(n) === strip(x.name))); const pr = ui.PI.perRunOf(x.name, st && st.ownerRole, st ? st.title : '', ui.text); if (pr) Object.assign(x, pr); });
   const skipped = newData.filter(x => !isDataNoun(x.name)).map(x => x.name);
   newData = newData.filter(x => isDataNoun(x.name)).map(x => Object.assign(x, { create: !x.exists }));
   let notes = res && (res.notes || res.note || res.warnings);
@@ -418,6 +420,11 @@ function kindBody(s, path) {
    steps on a choice's paths included, so "Step 6" here is "Step 6" on the map */
 export function numberedOrder(nodes) { const out = []; const w = ns => (ns || []).forEach(n => { if (!n) return; if (n.type === 'step' || KINDS[n.type]) out.push(n); else (n.branches || []).forEach(b => w(b.nodes)); }); w(nodes); return out; }
 const stepNo = n => { const k = numberedOrder(ui.draft.nodes).indexOf(n); return k >= 0 ? k + 1 : 0; };
+/* R16 (BPM): "Made by step 6" for information a step of the draft produces (the step still in the draft) */
+const madeBy = x => { if (!x || !x.producedBy || !ui.draft) return ''; const t = targets(ui.draft.nodes).find(n => n.src === x.producedBy); const k = t ? stepNo(t) : 0; return k ? `Made by step ${k}` : ''; };
+/* R16 (Karen): the usual answer to "Do you already have these?" */
+const runWhy = t => { const m = /from the ([a-z ]+?) each time/i.exec(String(t || '')); return m ? `The ${m[1]} sends it each time` : 'Comes in each time the process runs'; };
+const haveDefault = x => madeBy(x) ? 'made' : x.perRun ? 'run' : 'have';
 function gotoRow(g, b, bpath) {
   const all = targets(ui.draft.nodes).filter(n => n !== g && n.type !== 'end' && !b.nodes.includes(n));
   const t = b.goto && all.find(n => n.src === b.goto);
@@ -467,7 +474,7 @@ export function render() {
   const nd = newData.length ? `<div class="is-newdata" data-newdata><h4>New information this procedure needs</h4>
       <p class="hint">We found information the procedure needs that isn't in your workspace yet. Each ticked one is added to the step shown, and whoever does that step looks after it.</p>
       ${newData.map((x, i) => `<label class="is-nd ${x.exists ? 'dup' : ''}" data-nd="${i}"><input type="checkbox" data-nd-create="${i}" ${x.create ? 'checked' : ''} ${x.exists ? 'disabled' : ''}>
-        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${x.perRun && !x.exists ? `<small class="is-perrun" data-perrun>↻ ${esc(x.perRunText || 'Collected each time the process runs.')}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small><small class="is-ndown" data-nd-owner="${esc(ownTxt(x.target))}">Owner: ${esc(ownTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
+        <span><input class="is-nd-name" data-nd-name="${i}" value="${esc(x.name)}" aria-label="New information name" ${x.exists ? 'disabled' : ''}>${x.reason ? `<small>${esc(plainNote(x.reason))}</small>` : ''}${madeBy(x) && !x.exists ? `<small class="is-perrun is-made" data-made>⚙ ${esc(madeBy(x))}: nobody collects it</small>` : x.perRun && !x.exists ? `<small class="is-perrun" data-perrun>↻ ${esc(x.perRunText || 'Collected each time the process runs.')}</small>` : ''}${x.exists ? '<small class="is-dupmsg">Already exists: not created again.</small>' : x.target ? `<small class="is-ndtgt" data-nd-target>Adds to ${esc(tgtTxt(x.target))}</small><small class="is-ndown" data-nd-owner="${esc(ownTxt(x.target))}">Owner: ${esc(ownTxt(x.target))}</small>` : ''}</span></label>`).join('')}</div>` : '';
 
   const draftHtml = d ? `<div class="card is-draft"><h3>Your process, ready to check${adv() ? `<span class="is-src ${ui.source === 'AI' ? 'ai' : 'rules'}">${esc(ui.source)}</span>` : ''}<span class="n">${n} steps${gates ? ` · ${gates} choice${gates === 1 ? '' : 's'}` : ''}${pars ? ` · ${pars} at the same time` : ''}${kinds ? ` · ${kinds} wait/message` : ''}</span></h3>
     ${found}
@@ -628,6 +635,9 @@ async function createProcess() {
   const isStepText = t => !t || /^(?:step\s+)?\d+[.):]\s/i.test(t) || steps.some(x => strip(x.title) === strip(t)) || numberedLines(ui.text).some(l => strip(l.body).startsWith(strip(t)));
   /* R10: the description carries no step count (a count written into text goes stale after edits) */
   let nameVal = !isStepText(given) ? given : deriveName(ui.text), err = '', descVal = d.desc || (d.template ? `From the ${d.template.toLowerCase()} template.` : 'From a pasted procedure.'), trigVal = d.trigger || '';
+  /* R16 (Karen): "Do you already have these?" on the same screen, every answer filled in already */
+  const stepTitle = x => { const t = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))); return t ? `${stepNo(t) ? 'Step ' + stepNo(t) + ': ' : ''}${t.title}` : ''; };
+  const have = picks.map(x => ({ name: cleanTitle(x.name), choice: x.choice || haveDefault(x), madeText: madeBy(x), why: x.perRun && !madeBy(x) ? runWhy(x.perRunText) : stepTitle(x).slice(0, 90), perRunText: x.perRunText, src: x }));
   let r;
   for (;;) {
     const pr = modal({
@@ -636,40 +646,25 @@ async function createProcess() {
       <div class="field"><label>Description</label><textarea name="desc">${esc(descVal)}</textarea></div>
       <div class="field"><label>What starts it</label><input name="trigger" value="${esc(trigVal)}" placeholder="e.g. An employee submits a claim"></div>
       ${steps.some(x => !x.owner && !x.ownerRole) ? `<div class="is-ownerprompt" data-create-noowner>${steps.filter(x => !x.owner && !x.ownerRole).length} step${steps.filter(x => !x.owner && !x.ownerRole).length === 1 ? ' has' : 's have'} nobody doing it yet. You can save now and add who does it later; before launch every step needs someone.</div>` : ''}
-      ${picks.length ? `<div class="hint" data-create-data="${picks.length}">Also creates ${picks.length} piece${picks.length === 1 ? '' : 's'} of information and adds each to its step: ${picks.map(x => esc(x.name.trim())).join(', ')}.</div>` : ''}
+      ${picks.length ? `<div class="hint" data-create-data="${picks.length}">Also creates ${picks.length} piece${picks.length === 1 ? '' : 's'} of information and adds each to its step.</div>${haveListHTML(have)}` : ''}
       <div class="hint">This opens on <b>Today</b>. When you open <b>Future</b>, it starts as a copy you can change.</div>`,
       actions: [{ id: 'create', label: 'Save as how it works today', primary: true }],
     });
     const mm = [...document.querySelectorAll('.overlay .modal')].pop();
     const ni = mm && mm.querySelector('[data-pname]'); if (ni && !ni.value) setTimeout(() => ni.focus(), 0);
+    if (mm) { mm.classList.add('is-savemodal'); bindHaveList(mm, have); }
     r = await pr;
+    readHaveList(r.root, have); have.forEach(h => { h.src.choice = h.choice; });
     if (r.action !== 'create') return;
     if (cleanTitle(r.form.name)) break;
     nameVal = ''; descVal = r.form.desc || ''; trigVal = r.form.trigger || ''; err = 'Give the process a name.';
   }
   const name = cleanTitle(r.form.name);
 
-  /* 1. create the ticked data elements, remembering name -> id for linking */
+  /* 1. an id for each ticked piece of information, remembering name -> id for linking (saved after the map is built, so
+     "Made by step N" can name the step's saved id) */
   const made = new Map();
-  try {
-    for (const x of picks) {
-      const id = store.newId('D');
-      /* R8: the owner is whoever does the step it belongs to (a person, or the role as text), never the importer */
-      const st = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))) || {};
-      /* R10: the role that does the step is shown as the owner; the person importing is accountable for checking it,
-         so someone can confirm it ("Not checked yet" -> "We have it") */
-      /* R11 G2 §4: the owner saved is the owner the preview showed: the step's person, else its role (never the importer) */
-      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { ownerRole: st.ownerRole } : {};
-      /* information the procedure already uses today: "We have it" (R8 §1), described, not blocked */
-      /* R10: "Not checked yet" until its owner confirms it (never "Connected" without a source) */
-      /* R14 (Karen 9): a document sent on every run (a W-9, a certificate of insurance) is collected by the process itself:
-         marked "collected each run", never "Not checked yet" (which would make a one-off "Make W-9 available" task) */
-      const run = x.perRun ? { avail: 'live', perRun: true, source: 'Collected each run', note: x.perRunText || 'Collected each time the process runs.' } : null;
-      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, run || { source: '', avail: 'unchecked', note: x.reason ? plainNote(x.reason) : `Used by the “${name}” process.` }, { fields: [], samples: [], discovered: [] }),
-        `Created information “${cleanTitle(x.name)}” from ${d.template ? 'a template' : 'a pasted procedure'}`);
-      made.set(strip(x.name), id);
-    }
-  } catch (e) { toast('Could not create data: ' + e.message); return; }
+  for (const x of picks) made.set(strip(x.name), store.newId('D'));
   /* every created element is added to the data requirements of the step shown next to it in the draft */
   picks.forEach(x => {
     const id = made.get(strip(x.name)); if (!id) return;
@@ -713,6 +708,22 @@ async function createProcess() {
   const resources = [...new Set(steps.map(s => s.owner).filter(Boolean))];
   /* R12 #1: who approves each team's part, as shown in the draft (a team nobody chose stays unchosen) */
   const teamDepartments = draftRouting(d).map;
+  /* 3. the information, with the answer given on "Do you already have these?" */
+  try {
+    for (const h of have) {
+      const x = h.src; const id = made.get(strip(x.name)); if (!id) continue;
+      /* R8: the owner is whoever does the step it belongs to (a person, or the role as text), never the importer */
+      const st = targets(nodes).find(n => n.src === (x.target || targetOf(nodes, x))) || {};
+      /* R11 G2 §4: the owner saved is the owner the preview showed: the step's person, else its role (never the importer) */
+      const own = st.owner ? { owner: st.owner } : st.ownerRole ? { ownerRole: st.ownerRole } : {};
+      /* R16 (Karen): "We have it" / "Collected each run" / "Not yet" / "Made by step N" replace R10's "Not checked yet",
+         which silently turned every item into a setup task and a blocker */
+      const ans = haveFields(h, { producedBy: h.choice === 'made' ? idOf.get(x.producedBy) : undefined, verb: 'saved' });
+      Object.keys(ans).forEach(k => ans[k] === undefined && delete ans[k]);
+      await store.save('dataElement', id, Object.assign({ id, name: cleanTitle(x.name) }, own, ans, { fields: [], samples: [], discovered: [] }),
+        `Created information “${cleanTitle(x.name)}” from ${d.template ? 'a template' : 'a pasted procedure'} (${({ have: 'we have it', run: 'collected each run', notyet: 'not yet', made: String(h.madeText || 'made by a step').toLowerCase() })[h.choice]})`);
+    }
+  } catch (e) { toast('Could not create data: ' + e.message); return; }
   try {
     await store.save('process', pid, { id: pid, name, desc: (r.form.desc || '').trim(), owner: store.state.me, resources, version: 1, asis, tobe, released: [], teamDepartments },
       `Created process “${name}” from ${d.template ? 'the ' + d.template.toLowerCase() + ' template' : 'a pasted procedure'} (${countNumbered(nodes)} steps${made.size ? `, ${made.size} new piece${made.size === 1 ? '' : 's'} of information` : ''})`);

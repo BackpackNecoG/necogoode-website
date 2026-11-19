@@ -838,7 +838,7 @@ test('R15 BPM-1: an auto-approve path ends there; "go to step 5" is just carryin
   assert.equal(yes.goto, undefined, 'the auto-approved path never flows on into the review');
   const no = auto.branches.find(b => b.label === 'No');
   assert.ok(!no.nodes.length && no.goto == null, '"Otherwise, go to step 5" is the next step: no jump at all: ' + JSON.stringify(no));
-  assert.deepEqual(auto.threshold, { subject: 'requested limit', op: '<', amount: 50000, compound: true }, 'two conditions: the No path is not "over $50,000"');
+  assert.deepEqual(auto.threshold, { subject: 'requested limit', op: '<=', amount: 50000, compound: true }, 'two conditions: the No path is not "over $50,000"');
   /* RACI (BPM 5): the Controller is Accountable on the over-$250,000 path */
   const big = t.find(n => n.type === 'decision' && /250,000/.test(n.title));
   assert.deepEqual([big.branches[0].nodes[0].title, big.branches[0].nodes[0].raci], ['Sign off before the limit is changed', { a: 'Controller (Sam Wu)' }]);
@@ -872,7 +872,9 @@ test('R15 Karen: "(COI)" is one item; "AP verifies…" is an AP step; per-vendor
   assert.ok(!/AP verifies/.test(four[0].note || ''), 'no longer a note on the Vendor step');
   assert.deepEqual(four[1].touches, ['AP']);
   const by = n => r.newData.find(x => x.name === n) || {};
-  ['W-9', 'Certificate of insurance', 'Bank letter', 'Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].forEach(n => assert.equal(by(n).perRun, true, n + ' is collected each run: ' + JSON.stringify(by(n))));
+  /* R16 (BPM new defect): "Credit records the credit limit": the limit is produced by that step, not collected each run, so
+     it left this list (see the R16 test below) */
+  ['W-9', 'Certificate of insurance', 'Bank letter', 'Routing numbers', 'W-9 tax ID', 'Vendor bank account'].forEach(n => assert.equal(by(n).perRun, true, n + ' is collected each run: ' + JSON.stringify(by(n))));
   assert.ok(!by('Supplier list').perRun && !by('Vendor request form').perRun, 'a shared list and the request form are not per run');
   const spend = tops(r).find(n => n.type === 'decision');
   assert.deepEqual(spend.branches[1].nodes.map(n => [n.title, n.ownerRole]), [['Approve', 'Purchasing manager']], '"Purchasing manager approval is enough" is the Purchasing manager approving');
@@ -880,8 +882,74 @@ test('R15 Karen: "(COI)" is one item; "AP verifies…" is an AP step; per-vendor
 });
 
 test('R15: thresholds written "$50,000 or less" / "$1M or more"', () => {
-  assert.deepEqual(I.thresholdOf('Requested limit is $50,000 or less?'), { subject: 'requested limit', op: '<', amount: 50000 });
-  assert.deepEqual(I.thresholdOf('Spend $1M or more?'), { subject: 'spend', op: '>', amount: 1000000 });
+  assert.deepEqual(I.thresholdOf('Requested limit is $50,000 or less?'), { subject: 'requested limit', op: '<=', amount: 50000 });
+  assert.deepEqual(I.thresholdOf('Spend $1M or more?'), { subject: 'spend', op: '>=', amount: 1000000 });
+});
+
+/* ---------- R16 N2: "Do you already have these?" (Karen), outputs vs collected (BPM), Visio nested roles ---------- */
+test('R16 Karen: per-vendor fields are collected each run, the same way whatever the wording ("Routing number" = "Routing numbers")', () => {
+  const r = I.parseSop(FIX('r15-karen-sop.txt'));
+  const by = n => r.newData.find(x => x.name === n) || {};
+  const names = r.newData.map(x => x.name);
+  assert.equal(names.filter(n => /^routing numbers?$/i.test(n)).length, 1, 'one item for "routing number" and "routing numbers": ' + names.join(', '));
+  assert.deepEqual(by('Routing number').steps, ['s5', 's9'], 'used by both steps that name it');
+  ['W-9', 'Certificate of insurance', 'Bank letter', 'Tax ID', 'Vendor legal name', 'Routing number', 'Account number', 'Vendor bank account'].forEach(n =>
+    assert.equal(I.haveChoice(by(n)), 'run', n + ' is collected each run: ' + JSON.stringify(by(n))));
+  assert.equal(by('Credit limit').producedBy, 's6', 'Credit sets the credit limit in step 6');
+  assert.equal(I.haveChoice(by('Credit limit')), 'made');
+  ['Vendor request log', 'Supplier list', 'Delivery schedule'].forEach(n => assert.equal(I.haveChoice(by(n)), 'have', n + ' defaults to "We have it"'));
+  /* "Karen (Operations Director) approves too": the Operations Director, Karen named (so Operations' steps on the map
+     and in "Teams involved" agree) */
+  const also = walk(r.nodes).find(n => n.type === 'step' && /^Also approve/.test(n.title));
+  assert.deepEqual([also.ownerRole, also.note], ['Operations Director', 'Named in the procedure: Karen']);
+  assert.deepEqual(I.splitActor('Karen (Operations Director) approves too'), { actor: 'Operations Director', name: 'Karen', action: 'Approve too' });
+  /* Karen's 16 items no longer become setup tasks: nothing defaults to "Not yet" */
+  assert.ok(!r.newData.some(x => I.haveChoice(x) === 'notyet'));
+});
+
+test('R16 BPM: information a step produces (the credit limit the ERP is updated with) is "produced by" that step, not collected', () => {
+  const v = I.parseSop(FIX('r15-vendor-sop.txt'));
+  const cl = v.newData.find(x => x.name === 'Credit limit');
+  const st = walk(v.nodes).find(n => n.id === cl.producedBy);
+  assert.ok(st && /credit check/i.test(st.title), 'produced by the credit-check step: ' + JSON.stringify(cl));
+  assert.ok(!cl.perRun, 'not "collected each run"');
+  const c = I.parseSop(FIX('r15-credit-sop.txt'));
+  const by = n => c.newData.find(x => x.name === n) || {};
+  assert.match(walk(c.nodes).find(n => n.id === by('Credit limit').producedBy).title, /^Update the credit limit in the ERP/);
+  assert.ok(!by('Credit limit').perRun && !/customer each time/.test(by('Credit limit').perRunText || ''), 'never "Collected from the customer each time"');
+  ['Account number', 'Bank account', 'Customer name'].forEach(n => assert.equal(I.haveChoice(by(n)), 'run', n));
+  assert.equal(I.haveChoice(by('Requested limit')), 'run', 'the customer asks for a limit on every request');
+  /* an identity field is never "produced" (Treasury sets up the vendor bank account from the vendor's bank letter) */
+  assert.ok(!v.newData.find(x => x.name === 'Vendor bank account').producedBy);
+  assert.equal(I.outputOf('Credit limit', 'AR Specialist updates the credit limit in the ERP'), true);
+  assert.equal(I.outputOf('Bank account', 'Treasury sets up the vendor bank account'), false);
+  assert.equal(I.outputOf('Credit limit request', 'Sales rep receives a credit limit request'), false);
+  /* a form a step updates already exists; a record a step creates is made by it */
+  assert.equal(I.outputOf('Employee exit form', 'HR Manager updates the employee exit form in HRIS'), false);
+  assert.equal(I.outputOf('Vendor master record', 'AP creates the vendor master record'), true);
+});
+
+test('R16 BPM: a Visio shape "Controller sign-off (Controller (Sam Wu))" is done by the Controller role with Sam Wu named', async () => {
+  const v = await I.parseVsdx(fs.readFileSync(path.join(__dirname, 'fixtures/r15-credit.vsdx')));
+  const x = I.parseXml(v.bpmn);
+  const names = I._all(x, 'userTask').concat(I._all(x, 'task')).map(e => e.attrs.name);
+  assert.ok(names.includes('Controller sign-off'), names.join(' | '));
+  assert.ok(I._all(x, 'lane').map(e => e.attrs.name).includes('Controller (Sam Wu)'));
+  assert.deepEqual(I.roleAndName('Controller (Sam Wu)'), { role: 'Controller', name: 'Sam Wu' });
+});
+
+test('R16 BPM: a diagram without data objects still names its information from the task names', () => {
+  assert.deepEqual(I.taskInfo('Enter credit limit request'), [{ name: 'Credit limit request', produced: false }]);
+  assert.deepEqual(I.taskInfo('Pull risk score from credit bureau'), [{ name: 'Risk score', produced: false }]);
+  assert.deepEqual(I.taskInfo('Update credit limit in ERP and notify customer'), [{ name: 'Credit limit', produced: true }]);
+  assert.deepEqual(I.taskInfo('Review and recommend'), []);
+});
+
+test('R16 BPM: every number a choice tests is a threshold (the risk score 60 → 65 change is a threshold change)', () => {
+  assert.deepEqual(I.thresholdsOf('Requested limit $50,000 or less and risk score 60 or below?'), [
+    { subject: 'requested limit', op: '<', amount: 50000, money: true }, { subject: 'risk score', op: '<', amount: 60, money: false }]);
+  assert.deepEqual(I.thresholdsOf('Requested limit over $250,000?'), [{ subject: 'requested limit', op: '>', amount: 250000, money: true }]);
+  assert.deepEqual(I.thresholdsOf('Risk score above 70?'), [{ subject: 'risk score', op: '>', amount: 70, money: false }]);
 });
 
 test('the web copy is byte-identical', () => {
@@ -891,3 +959,10 @@ test('the web copy is byte-identical', () => {
 });
 
 module.exports = { vsdxFixture };
+
+/* R16 lead (N1 ask): "or less" / "or more" include the amount; "<= X" and ">= X" can both hold at X */
+test('R16: inclusive thresholds and their disjointness', () => {
+  assert.equal(I.thresholdsDisjoint({ subject: 'limit', op: '<=', amount: 50000 }, { subject: 'limit', op: '>=', amount: 50000 }), false);
+  assert.equal(I.thresholdsDisjoint({ subject: 'limit', op: '<=', amount: 50000 }, { subject: 'limit', op: '>', amount: 50000 }), true);
+  assert.equal(I.thresholdsDisjoint({ subject: 'limit', op: '<', amount: 50000 }, { subject: 'limit', op: '>', amount: 250000 }), true);
+});

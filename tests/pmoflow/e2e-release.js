@@ -51,6 +51,33 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
     await page.waitForSelector('.overlay input[name=code]', { state: 'detached' });
     await settle();
   };
+  /* R16 N1 #6: the launch owner changes only through "Change the plan": propose, the approver decides (step-up), apply */
+  const setLaunchOwner = (projectId, to, sponsor) => page.evaluate(async ([pid, who, spon]) => {
+    const { store } = await import('/concepts/pmoflow/app/store.js');
+    const base = '/api/pmoflow/workspaces/' + encodeURIComponent(store.state.ws) + '/changes';
+    const post = async (u, b) => { const r = await fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+    const propose = () => post(base, { actor: store.state.me, change: { projectId: pid, title: 'Hand the launch owner role over (e2e)', reason: 'e2e setup', category: 'owner', source: 'manual', edits: [{ op: 'set', type: 'project', id: pid, field: 'releaseManager', to: who }] } });
+    /* when nobody else could approve it (no sponsor, and the only other Admin is the new launch owner), an Admin (Maya)
+       names Dave Ortiz as the sponsor first, the setup Change the plan asks for */
+    if (spon) {
+      const p0 = store.get('project', pid);
+      const put = await fetch('/api/pmoflow/ws/' + encodeURIComponent(store.state.ws) + '/doc/project/' + encodeURIComponent(pid), { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', data: Object.assign({}, p0, { sponsor: spon }), summary: 'Sponsor set (e2e)' }) });
+      if (put.status !== 200) return 'sponsor ' + put.status;
+      await store.load();
+    }
+    const r = await propose();
+    if (r.status !== 200) return 'propose ' + r.status + ' ' + JSON.stringify(r.body);
+    const ch = r.body.change;
+    if (r.body.applied || (ch && ch.status === 'applied')) { await store.load(); return 'applied'; }
+    for (const a of (ch.approvers || []).filter(x => !x.decision)) {
+      const d = await post(base + '/' + encodeURIComponent(ch.id) + '/decide', { actor: a.person, decision: 'approve', note: 'ok (e2e)', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+      if (d.status !== 200) return 'decide ' + d.status + ' ' + JSON.stringify(d.body);
+      if (d.body && d.body.change && d.body.change.status === 'applied') { await store.load(); return 'applied'; }   /* approval applies it */
+    }
+    const ap = await post(base + '/' + encodeURIComponent(ch.id) + '/apply', { actor: store.state.me });
+    await store.load();
+    return ap.status === 200 ? 'applied' : 'apply ' + ap.status + ' ' + JSON.stringify(ap.body);
+  }, [projectId, to, sponsor || null]);
   const st = (fn, arg) => page.evaluate(async ([src, a]) => { const { store } = await import('/concepts/pmoflow/app/store.js'); return (new Function('store', 'a', 'return (async () => {' + src + '})()'))(store, a); }, [fn, arg]);
   const rd = p => st(`return window.PMOEngine.readiness(store.state.docs, a, store.state.today);`, p);
   const check = async (p, id) => (await rd(p)).checks.find(c => c.id === id);
@@ -561,7 +588,7 @@ The process starts when an employee asks to buy something.
     ok(await st(`const t = store.get('project', a).cutover.tasks.find(x => x.id === ${JSON.stringify(gngId)}); return t.done && t.doneBy === 'ps';`, AR), 'Priya confirmed her own go/no-go task (server accepted the owner tick)');
     /* the release manager can't sign a BU section */
     await setMe('ta');
-    await st(`const p = store.get('project', a); await store.save('project', a, Object.assign({}, p, { releaseManager: 'ps' }), 'Release manager set to Priya Shah (e2e)');`, AR); await settle(700);
+    { const lo = await setLaunchOwner(AR, 'ps'); ok(lo === 'applied', 'launch owner handed to Priya Shah through Change the plan: ' + lo); } await settle(700);
     await setMe('ps');
     /* R9 §13 / R11 §2 separation of duties, set up explicitly: Priya is the launch owner and does Compliance's steps, and
        Dave Ortiz records a Compliance test result himself (an Admin makes him an Editor first; results are always
@@ -599,7 +626,7 @@ The process starts when an employee asks to buy something.
     ok(await roleApi('do', 'approver') === 200, 'Dave Ortiz is an Approver again');
     await setAdv(true); await open('/release/' + AR);
     await setMe('ta');
-    await st(`const p = store.get('project', a); await store.save('project', a, Object.assign({}, p, { releaseManager: 'mc' }), 'Release manager set to Maya Chen (e2e)');`, AR); await settle(700);
+    { const lo = await setLaunchOwner(AR, 'mc', 'do'); ok(lo === 'applied', 'launch owner handed to Maya Chen through Change the plan: ' + lo); } await settle(700);
     ok(/Maya Chen/.test(await txt('[data-rm]')), 'header shows the new release manager, Maya Chen');
     const signAll = async () => {
       for (let k = 0; k < 3; k++) {

@@ -1,7 +1,9 @@
 /* Data element detail (stream D): /data/:did — header, spec editor, resolution plan, impact, profile, discovered requirements. */
 import { store } from '../store.js';
 import { E, esc, fmt, fmtTime, link, av, personChip, pname, LOCK, modal, toast, activityCard, bindActivity } from '../ui.js';
-import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName, UNCHECKED } from './process.js';
+import { eng, docs, today, flat, projectsFor, workBadge, stepBadge, notFound, confirmBox, dupDataName, effAvail, effDot, humanPat, needsLive, avOf, awaitingText, usage, EVID, evidenceTag, blockingDrift, caseLbl, availInfo, isAdv, whoOf, HAVE, NOTYET, availField, availFrom, AVAIL_OPT, dataOwnerName, personName, UNCHECKED, madeLabel } from './process.js';
+/* R16 (BPM): the step that makes this information, numbered on the Today map of the process that holds it */
+const madeText = x => { const p = store.list('process').find(q => flat(q.asis || []).some(n => n.id === x.producedBy)); return p ? `${madeLabel(x, p.asis)} of ${p.name}` : 'Made by a step'; };
 
 const clone = o => JSON.parse(JSON.stringify(o));
 /* R14 (BPM): what the masked examples actually show (the engine's maskValue): every word becomes Xxxx, XXXX or xxxx and
@@ -67,9 +69,11 @@ export function profileLines(profile, drift, fields, status) {
     const parts = [`${filled} value${filled === 1 ? '' : 's'}`];
     if (nulls && !mine.some(d => d.issue === 'required-nulls')) parts.push(`${nulls} empty`);
     mine.forEach(d => parts.push(shortIssue(d.detail)));
-    const sig = colSignals(c).concat(warns.filter(w => normName(w.column) === normName(c.name)).map(w => plainDetail(w.text).replace(/\.$/, '')));
-    const low = parts.join(', ').toLowerCase();
-    [...new Set(sig)].forEach(x => { if (!low.includes(x.toLowerCase())) parts.push(x); });
+    /* R16: the engine's warning text starts "bank_account: …"; on the column's own line it is said once, without the prefix */
+    const unPre = t => String(t).replace(new RegExp('^\\s*' + String(c.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'i'), '');
+    const sig = colSignals(c).concat(warns.filter(w => normName(w.column) === normName(c.name)).map(w => unPre(plainDetail(w.text)).replace(/\.$/, '')));
+    const seenSig = new Set();
+    [...new Set(sig)].forEach(x => { const k = x.toLowerCase(); const low = parts.join(', ').toLowerCase(); if (seenSig.has(k) || low.includes(k)) return; seenSig.add(k); parts.push(x); });
     const ruled = (fields || []).some(f => normName(f.name) === normName(c.name));
     if (!mine.length && !sig.length) parts.push(ruled ? 'all match the rules' : (c.patterns || [])[0] ? 'usually ' + humanPat(c.patterns[0].pattern) : 'no rule yet');
     return { name: c.name, text: parts.join(', '), bad: mine.length > 0 || sig.length > 0, warn: sig.length > 0 };
@@ -223,7 +227,7 @@ export function render(params) {
       ${d.resolved || !owner ? '' : `<div class="r"><button class="btn sm" data-resolve="${i}">Mark fixed</button></div>`}</div>`).join('') + (open && !owner ? `<div class="d-only">${LOCK} ${esc(onlyMsg(x))}</div>` : '') : '<div class="s">Nothing yet. Anything testing finds that the rules missed lands here.</div>'}</div>`;
 
   return `<section class="hdr"><div><div class="crumbs"><a href="${link('/')}" data-link>Home</a> › <a href="${link('/processes')}" data-link>Processes</a> › Information</div><h1>${esc(x.name)}</h1>${x.note ? `<p class="d-desc">${esc(x.note)}</p>` : ''}
-    <div class="res"><span class="lbl">Owner</span>${ownerHTML(x, users.concat(asisUsers))}<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span><span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}${x.perRun ? `<span class="chip d-perrun" data-perrun title="${esc(x.note || 'Collected each time the process runs')}">↻ Collected each run</span>` : ''}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
+    <div class="res"><span class="lbl">Owner</span>${ownerHTML(x, users.concat(asisUsers))}${x.perRun || x.producedBy ? '' : `<span class="chip" title="Where it comes from">${esc(x.source || 'Source not set')}</span>`}<span class="chip" data-eff="${eff}" data-avail="${esc(info.key)}">${effDot(did)}${esc(info.label)}</span>${eff === 'live' && adv ? evidenceTag(x) : ''}${sensBadge(x.sensitivity)}${x.perRun ? `<span class="chip d-perrun" data-perrun title="${esc(x.note || 'Collected each time the process runs')}">↻ Collected each run</span>` : ''}${x.producedBy ? `<span class="chip d-perrun d-made" data-made title="${esc(x.note || '')}">⚙ ${esc(madeText(x))}</span>` : ''}</div>${eff === 'live' && confirmedBy ? `<div class="d-confirmed" data-confirmed>✓ ${confirmedBy}</div>` : ''}</div>
     <div class="hdr-side">${owner ? '<div class="d-ownerrow d-right"><button class="btn" data-dedit>Edit</button></div>' : `<div class="d-ownerrow d-right"><span class="d-only">${LOCK} ${esc(onlyMsg(x))}</span></div>`}<div class="kpis"><div class="kpi" data-kpi-tobe><b>${users.length}</b><span>Future steps</span></div><div class="kpi" data-kpi-asis><b>${asisUsers.length}</b><span>Today steps</span></div>${adv ? `<div class="kpi"><b>${procCount}</b><span>Processes</span></div>` : ''}<div class="kpi"><b style="color:${downstream.length && !ready ? 'var(--late)' : 'inherit'}">${downstream.length}</b><span>Work waiting for it</span></div></div></div></section>
   ${confirmAll}
   ${confirm}
@@ -438,6 +442,9 @@ async function confirmLive(did, cur, save) {
     const drift = prof ? eng('specDrift', [x, prof], []) : [];
     const blk = blockingDrift(drift);
     const lastCheck = check || x.check || null;
+    /* R16 (BPM): "matches the rules" only when the sample has no warning either (a shared bank account is a warning) */
+    const pstat = eng('dataProfileStatus', [docs(), x.id], null) || { warnings: [] };
+    if (!Array.isArray(pstat.warnings)) pstat.warnings = [];
     const sel = vals.ev || (prof && !blk.length ? 'profile' : '');
     const opt = (v, dis, inner) => `<label class="d-evopt ${dis ? 'd-evdis' : ''}" data-evopt="${v}"><input type="radio" name="ev" value="${v}" ${sel === v && !dis ? 'checked' : ''} ${dis ? 'disabled' : ''} /><div>${inner}</div></label>`;
     const pr = modal({
@@ -445,7 +452,8 @@ async function confirmLive(did, cur, save) {
       body: `${err ? `<div class="banner d-err" role="alert">${esc(err)}</div>` : ''}<p style="margin:0">You are confirming, as the owner, that the steps can now get <b>${esc(x.name)}</b> from where it really comes from.</p>
         <div class="field"><label>Where it comes from</label><input name="source" value="${esc(vals.source != null ? vals.source : (x.liveSource || x.source || ''))}" placeholder="e.g. ERP vendor master API (read)" /></div>
         <div class="field"><label id="d-ev-l">Proof</label><div class="d-evs" role="radiogroup" aria-labelledby="d-ev-l">
-          ${opt('profile', !prof || blk.length, `<b>Latest sample data check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest check · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} difference${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : '<span class="pass">matches the rules</span>'}
+          ${opt('profile', !prof || blk.length, `<b>Latest sample data check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="d-confprof" data-confprof>${prof ? `Latest check · ${esc(prof.rows)} rows · ${esc(fmtTime(prof.at))} · ${drift.length ? `${drift.length} difference${drift.length === 1 ? '' : 's'}, <b class="${blk.length ? 'fail' : 'pass'}" data-blocking="${blk.length}">${blk.length} blocking</b>` : pstat.warnings.length ? `<b class="fail" data-prof-warn="${pstat.warnings.length}">${pstat.warnings.length} warning${pstat.warnings.length === 1 ? '' : 's'} to look at</b>` : '<span class="pass">matches the rules</span>'}
+            ${pstat.warnings.length ? `<ul class="d-blklist">${pstat.warnings.slice(0, 5).map(w => `<li>${esc(plainDetail(w.text))}</li>`).join('')}</ul>` : ''}
             ${blk.length ? `<ul class="d-blklist">${blk.slice(0, 5).map(d => `<li>${esc(d.field)}: ${esc(plainDetail(d.detail))}</li>`).join('')}</ul><div class="fail">Blocked: fix the differences and check again, or use other proof.</div>` : drift.length ? '<div class="hint">Only columns with no rule differ; they do not block.</div>' : ''}` : '<span class="hint">No sample data check yet. Run one in Testing to use this.</span>'}</div>`)}
           ${opt('check', false, `<b>Connection check</b> <span class="badge d-ev d-ev-ok">Strong</span><div class="hint">A simulated check that we can reach <b data-probe-target>${esc(vals.source != null ? vals.source : (x.liveSource || x.source || '')) || 'the source above'}</b>. It must pass.</div>
             <div class="d-checkrow"><button type="button" class="btn sm" data-run-check>Run connection check</button><span data-check-result aria-live="polite" class="${lastCheck ? (lastCheck.ok ? 'pass' : 'fail') : 'hint'}">${lastCheck ? `${lastCheck.ok ? '✓ Passed' : '✗ Failed'} ${esc(fmtTime(lastCheck.at))}: ${esc(lastCheck.detail || '')}` : 'Not run yet.'}</span></div>`)}

@@ -67,6 +67,7 @@
       <li><span class="tag now">In place</span> <b>Access is granted for testing one project.</b> The owner of the information approves it, it expires, and it closes automatically at launch. The live demo shows this.</li>
       <li><span class="tag now">In place</span> <b>Sample checks return statistics only</b> (lengths, blanks, characters), never the values. No values are kept.</li>
       <li><span class="tag now">In place</span> <b>A step-up check at sensitive moments:</b> approvals, go-live and access grants. In your tenant this is Microsoft Entra Conditional Access authentication context. (The demo accepts any 6 digits.)</li>
+      <li><span class="tag now">In place</span> <b>Step-ups expire after 10 minutes.</b> The server checks each one against its own clock and refuses a check that is more than 10 minutes old or dated more than a minute in the future. Each refusal is recorded in History.</li>
     </ul>
   </div>
 </section>
@@ -76,6 +77,7 @@
     <h2 id="signin-h">Sign-in with Microsoft Entra ID</h2>
     <ul class="fact-list">
       <li><b>Single sign-on with Microsoft Entra ID</b> on the Business and Enterprise plans.</li>
+      <li><span class="tag now">In place</span> <b>Hosted sign-in binds actions to the signed-in person.</b> When you sign in with Microsoft on the hosted site, the server takes who you are from the sign-in and makes each change as you. A change sent in someone else’s name is refused and recorded in History. The open demo has no sign-in, so its “Viewing as” switcher still lets you act as anyone.</li>
       <li><b>Your Conditional Access rules apply</b>, including compliant devices, and sessions are short: the 24-hour single-page-app refresh-token limit is inherited from your tenant.</li>
       <li><span class="tag planned">Planned</span> <b>SCIM user provisioning</b> on the Enterprise plan.</li>
     </ul>
@@ -90,7 +92,7 @@
       <li><span class="tag now">In place</span> <b>Separate approvers.</b> Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.</li>
       <li><span class="tag now">In place</span> <b>Passing tests.</b> People pass only tests assigned to them or to no one, and a test linked to an open problem can’t pass until it is fixed.</li>
       <li><span class="tag now">In place</span> <b>Two people for launch overrides.</b> Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.</li>
-      <li><span class="tag now">In place</span> <b>Department changes.</b> Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it, and nothing changes until then. In a workspace with one Admin, those changes apply at once and History says so. Each membership and approver keeps the date it started.</li>
+      <li><span class="tag now">In place</span> <b>Department changes.</b> Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it, and nothing changes until then. In a workspace with one Admin, those changes apply at once and History says so. Moving someone out of a department also ends their approving for it, in the same change. Each membership and approver keeps the date it started.</li>
       <li><span class="tag now">In place</span> <b>Recent moves.</b> Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.</li>
       <li><span class="tag now">In place</span> <b>No Admin exemption.</b> The server checks every rule above, for Admins too.</li>
       <li><span class="tag now">In place</span> <b>Each department approves only its own part</b> of a process change.</li>

@@ -708,14 +708,17 @@ test('R4/R9 report wording: late-by is business days past due, one word "late", 
   const all = [r.body.headline, r.body.summary, ...r.body.highlights, ...r.body.risks, ...r.body.asks].join('\n');
   assert.ok(!/\(s\)/.test(all), 'no "(s)" placeholders');
   assert.ok(!/\b1 days\b|\b1 items\b|\b1 work items\b|\b1 business days\b|\b(?:[02-9]|\d{2,}) (business )?day\b/.test(all), 'plurals agree with counts');
-  assert.ok(!/past due|running late|behind plan/i.test(all), 'R9 §1: Simple says "late", nothing else');
+  /* R16 N1 #10 (Jordan 5): "past due" is now part of the one lateness wording ("1 business day past due; expected to
+     finish 6 business days late"); other synonyms stay banned */
+  assert.ok(!/running late|behind plan/i.test(all), 'R9 §1: no other words for late');
+  assert.ok(!/past due/i.test(all.replace(/\b\d+ business days? past due\b/g, '')), '"past due" only in the one lateness wording');
   assert.ok(!/\b\d+ days?\b/.test(all.replace(/\b\d+ business days?\b/g, '').replace(/Support after launch:[^\n]*/g, '')), 'R9 §3: lateness is in business days');
   const w6 = r.body.risks.find(x => x.startsWith('“Set up the bank details form”'));
   assert.ok(w6, 'task titles are quoted “X”');
   const w6due = find(st, 'workItem', 'W6').data.due;
   /* R14 (PMO list 5): "late by N" is the Work tab's one lateness number (projectTruth.lateness), not just the days past due */
   const lateBy = engine ? engine.projectTruth(st.docs, 'vendor-modernization', st.today).lateness.W6.days : null;
-  if (lateBy != null) assert.ok(w6.includes(`late by ${lateBy} business day${lateBy === 1 ? '' : 's'}`), w6);
+  if (lateBy != null) assert.ok(w6.includes(`expected to finish ${lateBy} business day${lateBy === 1 ? '' : 's'} late`), w6);
   void w6due;
   /* R9 §13: "waiting on" only along a real dependency edge */
   const docs = st.docs, wt = id => find(st, 'workItem', id).data;
@@ -1382,8 +1385,13 @@ test('R7 project.approvers: the chosen approver may not be the PM or the launch 
   assert.equal(r.status, 200, JSON.stringify(r.body));
   /* an unchanged choice never blocks other edits (the engine ignores it if it becomes ineligible) */
   const now = find(await state(ws), 'project', 'vendor-modernization').data;
+  /* R16 N1 #6: the launch owner now changes only through "Change the plan" (409 on a plain save); the unchanged choice
+     still never blocks another edit, and approversError still ignores a choice that became ineligible */
   r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, now, { releaseManager: 'ps' }) });
+  assert.equal(r.status, 409, JSON.stringify(r.body)); assert.match(r.body.error, /Use “Change the plan” to hand the launch owner role to Priya Shah/);
+  r = await call('PUT', `ws/${ws}/doc/project/vendor-modernization`, { actor: 'ta', data: Object.assign({}, now, { desc: 'Scope clarified (unchanged approver choice)' }) });
   assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(fn._internal.approversError({ owner: 'ta', releaseManager: 'ps', approvers: { PMO: 'ps' } }, { owner: 'ta', releaseManager: 'ps', approvers: { PMO: 'ps' } }, st.docs), null, 'an unchanged choice that became ineligible never blocks');
   assert.equal(fn._internal.approversError(null, { owner: 'ta', approvers: { PMO: 'mc' } }, st.docs), null);
 });
 
@@ -1752,7 +1760,7 @@ test('R9 §1/§13 report: cost line only with a budget or rates; Simple label; q
     atRisk: [{ title: 'Set up the bank details form', owner: 'Leo Park', due: '2026-11-03', daysPastDue: 1 }] };
   facts.summary = { sentence: 'Expected Nov 25, 2026. 1 task is late; first: “Set up the bank details form” (Leo Park).', label: 'Some tasks late', rag: 'amber', source: 'rules' };
   const out = ai.statusRules(facts);
-  assert.ok(out.risks[0].startsWith('“Set up the bank details form” (Leo Park) is late by 1 business day'), out.risks[0]);
+  assert.ok(out.risks[0].startsWith('“Set up the bank details form” (Leo Park) is 1 business day past due'), out.risks[0]);   /* R16 N1 #10 wording */
   assert.ok(!/Rules-based/.test(JSON.stringify(out)));
 });
 
@@ -2162,8 +2170,11 @@ test('R14 PMO-7 server: a Done saved after the last report shows in "since last 
   const ws = await newWs();
   const st = await state(ws);
   const prj = find(st, 'project', 'vendor-modernization').data;
-  const stamp = new Date(Date.now() - 60000).toISOString();   /* the report went out a minute ago */
-  assert.equal((await R14put(ws, 'project', prj.id, Object.assign({}, prj, { lastReportAt: stamp }), prj.owner)).status, 200);
+  /* R16 N1 #3: the report is recorded by SENDING it (the server stamps lastReportAt; a client value is ignored) */
+  const sent = await R14put(ws, 'project', prj.id, Object.assign({}, prj), prj.owner, { report: { action: 'send', preset: 'this-week' } });
+  assert.equal(sent.status, 200);
+  const stamp = sent.body.doc.data.lastReportAtTime;
+  assert.ok(stamp && Date.now() - Date.parse(stamp) < 60000, 'the server stamps the send time');
   const w11 = find(st, 'workItem', 'W11').data;
   const done = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { status: 'done', time: [{ by: 'dk', date: st.today, hours: 6 }] }), 'dk');
   assert.equal(done.status, 200);
@@ -2249,7 +2260,10 @@ test('R15 #3/#4/#5/#6 server: the PM changes hands through Change the plan; star
   const p2 = find(st, 'project', prj.id).data;
   r = await R14put(ws, 'project', prj.id, Object.assign({}, p2, { forecastLog: [{ date: '2026-01-01', finish: '2026-01-02' }] }), 'ta');
   assert.deepEqual((r.body.doc && r.body.doc.data.forecastLog) || p2.forecastLog, p2.forecastLog);
+  /* R16 N1 #3: a report is recorded when it is sent (body.report), never from a client reportLog value */
   r = await R14put(ws, 'project', prj.id, Object.assign({}, p2, { reportLog: (p2.reportLog || []).concat([{ date: today, preset: 'this-week' }]), forecastLog: [] }), 'ta', { today });
+  assert.deepEqual(r.body.doc ? r.body.doc.data.reportLog || [] : p2.reportLog || [], p2.reportLog || [], 'a client reportLog value records nothing');
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, p2, { forecastLog: [] }), 'ta', { today, report: { action: 'send', preset: 'this-week' } });
   assert.equal(r.status, 200);
   const fl = r.body.doc.data.forecastLog;
   assert.ok(fl.length === (p2.forecastLog || []).filter(x => x.date !== today).length + 1 && fl[fl.length - 1].date === today && fl[fl.length - 1].at, JSON.stringify(fl));
@@ -2278,4 +2292,175 @@ test('R15 #1 server: a new task made from a role step is the role\'s, never the 
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual([r.body.doc.data.owner, r.body.doc.data.ownerRole], [undefined, 'Treasury Analyst']);
   void s3;
+});
+
+/* ------------------------------------------------------------------ R16 N1 */
+async function callH(method, p, body, headers) {
+  const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+  await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: Object.assign({ 'x-forwarded-for': '127.0.0.1' }, headers || {}), params: { path: p }, query: {}, body });
+  return ctx.res;
+}
+const principalHeader = (email, userId) => ({ 'x-ms-client-principal': Buffer.from(JSON.stringify({ identityProvider: 'aad', userId: userId || 'u-' + email, userDetails: email, userRoles: ['authenticated'] })).toString('base64') });
+
+test('R16 N1 #1 identity binding: a hosted sign-in binds the actor; a step-up older than 10 minutes or in the future is refused and logged', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  // link Ana to her sign-in (open demo, an Admin edits the person)
+  const ana = find(st, 'person', 'ar').data;
+  let r = await R14put(ws, 'person', 'ar', Object.assign({}, ana, { email: 'ana.ruiz@northwind.example' }), 'ta');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const H = principalHeader('Ana.Ruiz@northwind.example');
+  // forged actor under Ana's sign-in: refused and logged
+  const w = (st.docs.workItem || []).map(d => d.data).find(x => x.owner === 'ar' && x.status !== 'done');
+  r = await callH('PUT', `ws/${ws}/doc/workItem/${w.id}`, { actor: 'ta', data: Object.assign({}, w, { title: w.title + ' (edited)' }) }, H);
+  assert.equal(r.status, 403); assert.match(r.body.error, /signed in as Ana Ruiz, so you can't act as Tom Alvarez/);
+  let ev = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events;
+  assert.ok(ev.some(e => e.action === 'refused' && /signed in as Ana Ruiz/.test(e.summary)), 'the forged actor is in History');
+  // no actor: the signed-in person is the actor
+  r = await callH('PUT', `ws/${ws}/doc/workItem/${w.id}`, { data: Object.assign({}, w, { title: w.title + ' (edited)' }) }, H);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.event.actor, 'ar');
+  // a sign-in linked to nobody
+  r = await callH('PUT', `ws/${ws}/doc/workItem/${w.id}`, { actor: 'ar', data: w }, principalHeader('stranger@example.com'));
+  assert.equal(r.status, 403); assert.match(r.body.error, /isn't linked to anyone in this workspace/);
+  // step-ups: 2020 (stale) and tomorrow (future) are refused, in the open demo too; a fresh one is recorded with server time
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true, stepUp: { method: 'simulated-mfa', at: '2020-01-01T00:00:00.000Z' } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /more than 10 minutes ago/);
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true, stepUp: { method: 'simulated-mfa', at: new Date(Date.now() + 3600e3).toISOString() } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /dated in the future/);
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true, stepUp: { method: 'simulated-mfa', at: new Date(Date.now() - 11 * 60000).toISOString() } });
+  assert.equal(r.status, 403);
+  r = await call('POST', `ws/${ws}/golive/access-review-automation`, { actor: 'ta', simulateFailure: true, stepUp: { method: 'simulated-mfa', at: new Date(Date.now() - 9 * 60000).toISOString() } });
+  assert.notEqual(r.status, 403, 'a 9-minute-old step-up passes the check (the launch itself may still wait on readiness)');
+  assert.ok(!/sign-in check/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
+  // an approval stamped 2020 is refused; a fresh one records stepUpAt
+  const at0 = '2020-01-01T00:00:00.000Z';
+  r = await call('PUT', `ws/${ws}/doc/approval/apr-r16-${rnd()}`, { actor: 'do', data: { projectId: 'vendor-modernization', bu: 'Compliance', approver: 'do', decision: 'approved', at: at0, snapshotAt: at0, stepUp: true, note: 'ok' } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /extra sign-in check/);
+  ev = (await call('GET', `ws/${ws}/events`, null, { limit: '20' })).body.events;
+  assert.ok(ev.filter(e => e.action === 'refused' && /extra sign-in check/.test(e.summary)).length >= 3, 'stale step-ups are in History');
+  const atNow = new Date().toISOString();
+  r = await call('PUT', `ws/${ws}/doc/approval/apr-r16-${rnd()}`, { actor: 'do', data: { projectId: 'vendor-modernization', bu: 'Compliance', approver: 'do', decision: 'approved', at: atNow, snapshotAt: atNow, stepUp: true, note: 'ok' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.doc.data.stepUp === true && Date.now() - Date.parse(r.body.doc.data.stepUpAt) < 60000, 'the server records stepUpAt with its own clock');
+  // a role-change confirm with a stale step-up is refused by the same gate (route modules included)
+  r = await call('POST', `workspaces/${ws}/admin/roles/pending/none/confirm`, { actor: 'ta', stepUp: { method: 'simulated-mfa', at: at0 } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /more than 10 minutes ago/);
+  void st;
+});
+
+test('R16 N1 #2 hours are append-only: no removal or reduction by a plain save; a reversing entry with a reason; History shows hours and dollars', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const w = (st.docs.workItem || []).map(d => d.data).find(x => x.projectId === 'vendor-modernization' && Array.isArray(x.time) && x.time.length >= 2);
+  assert.ok(w, 'a seeded task with hours');
+  const total0 = engine.hoursTotals(st.docs, w);
+  // removing entries: refused (409) and logged
+  let r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { time: w.time.slice(0, 1) }), w.owner);
+  assert.equal(r.status, 409); assert.match(r.body.error, /Use “Correct hours”/);
+  // lowering an entry: refused
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { time: [Object.assign({}, w.time[0], { hours: 1 })].concat(w.time.slice(1)) }), w.owner);
+  assert.equal(r.status, 409);
+  // a negative entry with no reason: refused
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { time: w.time.concat([{ by: w.owner, date: st.today, hours: -2 }]) }), w.owner);
+  assert.equal(r.status, 409); assert.match(r.body.error, /needs a reason/);
+  // a reversing entry with a reason: accepted, net hours go down, History shows hours and dollars before → after
+  const corr = engine.reverseEntry(w.time[0], 2, 'Double-logged', w.owner, st.today);
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, w, { time: w.time.concat([corr]) }), w.owner);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const total1 = engine.hoursTotals((await state(ws)).docs, r.body.doc.data);
+  assert.equal(total1.hours, total0.hours - 2);
+  assert.match(r.body.event.summary, /hours corrected: −2 hours on .* \(correction: “Double-logged”\)/);
+  assert.match(r.body.event.summary, /total \d+ hours \(\$[\d,]+\) → \d+ hours \(\$[\d,]+\)/);
+  // can't go below zero
+  r = await R14put(ws, 'workItem', w.id, Object.assign({}, r.body.doc.data, { time: r.body.doc.data.time.concat([engine.reverseEntry(w.time[0], 999, 'oops', w.owner, st.today)]) }), w.owner);
+  assert.equal(r.status, 409);
+});
+
+test('R16 N1 #3 a report preview never logs; only send or export writes reportLog and forecastLog', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  // the preview (the status-report route) writes nothing
+  let r = await call('POST', `ws/${ws}/ai/status-report`, { projectId: prj.id, preset: 'this-week' });
+  assert.equal(r.status, 200);
+  st = await state(ws);
+  assert.deepEqual(find(st, 'project', prj.id).data.reportLog || [], prj.reportLog || []);
+  // a client save that adds a reportLog entry (the old preview path) writes nothing either
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { reportLog: (prj.reportLog || []).concat([{ date: st.today, preset: 'this-week' }]), lastReportAt: st.today }), 'ta');
+  st = await state(ws);
+  assert.deepEqual(find(st, 'project', prj.id).data.reportLog || [], prj.reportLog || []);
+  assert.equal(find(st, 'project', prj.id).data.lastReportAt || null, prj.lastReportAt || null);
+  // send: one entry with the server's time and the forecast
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, prj), 'ta', { report: { action: 'send', preset: 'this-week' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const d = r.body.doc.data;
+  assert.equal(d.reportLog.slice(-1)[0].action, 'send');
+  assert.equal(d.forecastLog.slice(-1)[0].date, st.today);
+  assert.equal(d.lastReportAt, st.today);
+});
+
+test('R16 N1 #5/#6 the launch owner changes only through Change the plan; a part with nothing to sign can\'t be approved', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  let r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { releaseManager: 'mc' }), 'ta');
+  assert.equal(r.status, 409); assert.match(r.body.error, /Use “Change the plan” to hand the launch owner role to Maya Chen/);
+  const ev = await R14events(ws, 'project:' + prj.id);
+  assert.ok(ev.some(e => e.action === 'refused' && /launch owner/.test(e.summary)));
+  // a client can't write formerLeads
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { formerLeads: ['ps'], desc: 'x' }), 'ta');
+  assert.equal(r.status, 200); assert.equal(r.body.doc.data.formerLeads, undefined);
+  // PMO has nothing to sign: an approval of it is refused
+  const at = new Date().toISOString();
+  r = await call('PUT', `ws/${ws}/doc/approval/apr-pmo-${rnd()}`, { actor: 'ps', data: { projectId: prj.id, bu: 'PMO', approver: 'ps', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'ok' } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /PMO's part did not change/);
+});
+
+test('R16 N1 #4 server: someone who moved out of a department can\'t approve its part, and is told why', async () => {
+  const ws = await newWs();
+  let st = await state(ws);
+  // Sam moves to Treasury (one Admin proposes, a second confirms; in a one-Admin case it applies at once)
+  let r = await call('POST', `ws/${ws}/departments`, { actor: 'ta', op: { kind: 'assign', personId: 'sk', id: 'dept-treasury' } });
+  if (r.body && r.body.pending) r = await call('POST', `workspaces/${ws}/admin/departments/pending/${r.body.pending.id}/confirm`, { actor: 'mc', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  st = await state(ws);
+  assert.equal(find(st, 'person', 'sk').data.bu, 'Treasury');
+  const it = engine.departments(st.docs).find(d => d.name === 'IT');
+  assert.ok(!it.approvers.includes('sk'), 'IT no longer names Sam: ' + JSON.stringify(it));
+  const at = new Date().toISOString();
+  r = await call('PUT', `ws/${ws}/doc/approval/apr-it-${rnd()}`, { actor: 'sk', data: { projectId: 'access-review-automation', bu: 'IT', approver: 'sk', decision: 'approved', at, snapshotAt: at, stepUp: true, note: 'again' } });
+  assert.equal(r.status, 403); assert.match(r.body.error, /^You moved out of IT, so you no longer approve its part/);
+  const so = engine.readiness(st.docs, 'access-review-automation', st.today).checks.find(c => c.id === 'bu-signoff');
+  assert.ok(so.reopened.some(x => x.bu === 'IT' && x.person === 'sk'), JSON.stringify(so.reopened));
+});
+
+test('R16 N1 #7 guards: a launch window on a holiday or past the deadline; cost over budget; an added dependency moves the start', async () => {
+  const ws = await newWs();
+  const st = await state(ws);
+  const prj = find(st, 'project', 'vendor-modernization').data;
+  // the launch window
+  const xmasYear = prj.target.slice(0, 4);
+  let r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { cutover: Object.assign({}, prj.cutover, { window: xmasYear + '-12-25 07:30–10:00' }) }), 'ta');
+  assert.equal(r.status, 400); assert.match(r.body.error, /can’t be on \w{3} Dec 25, (Christmas Day|a weekend)/);   /* the year follows the seed day */
+  const late = engine.addBusinessDays(prj.target, 5);
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { cutover: Object.assign({}, prj.cutover, { window: late + ' 07:30–10:00' }) }), 'ta');
+  assert.equal(r.status, 409); assert.match(r.body.error, /Use “Change the plan” to move the launch past the .* deadline/);
+  const inside = engine.addBusinessDays(prj.target, -2);
+  r = await R14put(ws, 'project', prj.id, Object.assign({}, prj, { cutover: Object.assign({}, prj.cutover, { window: inside + ' 07:30–10:00' }) }), 'ta');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // a cost that takes the expected cost over the budget
+  const w11 = find(st, 'workItem', 'W11').data;
+  r = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { cost: 20000 }), 'ta');
+  assert.equal(r.status, 409); assert.match(r.body.error, /Use “Change the plan” to change this cost/); assert.match(r.body.error, /over the \$48,000 budget/);
+  // an added dependency moves the dependent's start after the work it waits on, keeping its length
+  const w8 = find(st, 'workItem', 'W8').data;
+  const fc = engine.forecastAll(st.docs, st.today);
+  const need = engine.addBusinessDays(fc.W8.forecast || w8.due, 1);
+  r = await R14put(ws, 'workItem', 'W11', Object.assign({}, w11, { deps: ['W8'] }), 'ta', { today: st.today });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(need > w11.start, 'the fixture needs a move');
+  assert.equal(r.body.doc.data.start, need);
+  assert.equal(engine.businessDaysBetween(r.body.doc.data.start, r.body.doc.data.due), engine.businessDaysBetween(w11.start, w11.due));
+  assert.match(r.body.event.summary, /start/);
 });

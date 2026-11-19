@@ -453,25 +453,44 @@ export async function pickOwners(j) {
   const t = truthOf(j);
   const row = rawWho(t).find(x => x.ref === 'owners:' + j.id);
   const ids = row && Array.isArray(row.items) ? row.items : [];
-  const tasks = ids.map(id => store.get('workItem', id)).filter(w => w && w.status !== 'done' && !(w.owner && store.person(w.owner)));
+  /* R16 (N3 #1, Karen 4): the picker lists exactly the tasks "Choose owners for N tasks" counts (row.items), so the
+     title and the list never disagree */
+  const tasks = ids.map(id => store.get('workItem', id)).filter(Boolean);
   if (!tasks.length) { toast('Every open task has an owner.'); return; }
   const pm = isPM(j);
-  const opts = w => {
-    const role = String(w.ownerRole || '').trim().toLowerCase();
-    const ppl = store.state.people.slice().sort((a, b) => (role && String(b.role || '').toLowerCase().includes(role) ? 1 : 0) - (role && String(a.role || '').toLowerCase().includes(role) ? 1 : 0) || a.name.localeCompare(b.name));
-    return `<option value="">${esc(w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner')}</option>` + ppl.map(p => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.role)}</option>`).join('');
-  };
+  const roleOf = w => String(w.ownerRole || '').trim();
+  const fits = (p, role) => { const r = role.toLowerCase(); return !!r && (String(p.role || '').toLowerCase().includes(r) || String(p.bu || '').toLowerCase().includes(r)); };
+  const sorted = role => store.state.people.slice().sort((a, b) => (fits(b, role) ? 1 : 0) - (fits(a, role) ? 1 : 0) || a.name.localeCompare(b.name));
+  const opts = w => `<option value="">${esc(roleOf(w) ? 'Needs an owner: ' + roleOf(w) : 'Needs an owner')}</option>` + sorted(roleOf(w)).map(p => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.role)}</option>`).join('');
+  /* R16 (N3 #1, Karen, Rule #1): ONE obvious control per team: "Give all 4 Purchasing tasks to [person]". Picking a
+     person fills that team's rows; each row can still be changed before saving. */
+  const teams = [];
+  tasks.forEach(w => { const r = roleOf(w); if (!r) return; const x = teams.find(y => y.role.toLowerCase() === r.toLowerCase()); if (x) x.ids.push(w.id); else teams.push({ role: r, ids: [w.id] }); });
+  const bulk = pm && tasks.length > 1 ? teams.filter(x => x.ids.length > 1) : [];
+  const bulkHTML = bulk.length ? `<div class="pmo-own-bulk" data-owner-bulk>${bulk.map((x, i) => `<label class="pmo-own-bulk-r" data-owner-bulk-team="${esc(x.role)}"><span>Give all ${esc(plural(x.ids.length, x.role + ' task'))} to</span>
+      <select data-owner-bulk-sel="${i}" aria-label="Give all ${esc(x.role)} tasks to"><option value="">Choose a person…</option>${sorted(x.role).map(p => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></label>`).join('')}</div>` : '';
   const body = `<p class="hint" style="margin:0">${pm ? `Pick who does each task. ${plural(tasks.length, 'task')} ${tasks.length === 1 ? 'has' : 'have'} no owner yet.` : `Only ${esc(pname(j.owner))} (project manager) assigns owners. These tasks have none yet:`}</p>
-    <div class="pmo-own-list" data-owner-picker>${tasks.map(w => `<div class="pmo-own-item" data-owner-task="${esc(w.id)}"><div class="pmo-own-t"><b>${esc(w.title)}</b><span class="hint">${esc(workStepTitle(w))} · due ${esc(fmt(w.due))}</span></div>
+    ${bulkHTML}
+    <div class="pmo-own-list" data-owner-picker>${tasks.map(w => `<div class="pmo-own-item" data-owner-task="${esc(w.id)}" data-owner-role="${esc(roleOf(w))}"><div class="pmo-own-t"><b>${esc(w.title)}</b><span class="hint">${roleOf(w) ? esc(roleOf(w)) + ' · ' : ''}${esc(workStepTitle(w))} · due ${esc(fmt(w.due))}</span></div>
       ${pm ? `<select name="own_${esc(w.id)}" aria-label="Owner of ${esc(w.title)}">${opts(w)}</select>` : `<span class="pmo-noowner">${esc(ownerText(w))}</span>`}</div>`).join('')}</div>`;
-  const r = await modal({ title: `Choose owners for ${plural(tasks.length, 'task')}`, body, actions: pm ? [{ id: 'save', label: 'Save owners', primary: true }] : [] });
+  const wire = () => document.querySelectorAll('.overlay [data-owner-bulk-sel]').forEach(sel => sel.addEventListener('change', () => {
+    const x = bulk[+sel.dataset.ownerBulkSel]; if (!x || !sel.value) return;
+    x.ids.forEach(id => { const s = document.querySelector(`.overlay select[name="own_${CSS.escape(id)}"]`); if (s) s.value = sel.value; });
+  }));
+  const shown = modal({ title: `Choose owners for ${plural(tasks.length, 'task')}`, body, actions: pm ? [{ id: 'save', label: 'Save owners', primary: true }] : [] });
+  requestAnimationFrame(wire);
+  const r = await shown;
   if (r.action !== 'save') return;
   const picks = tasks.map(w => [w, r.form['own_' + w.id]]).filter(([, v]) => v && store.person(v));
   if (!picks.length) { toast('No owner picked'); return; }
+  /* R16 (Karen 3/4): every pick shows on this page at once (one local update, one re-render), so no count reads a
+     half-saved list; the server then gets them one after another, each checked on its own */
+  const nexts = picks.map(([w, v]) => [w, v, Object.assign({}, store.get('workItem', w.id) || w, { owner: v, updatedAt: stamp() })]);
+  const arr = store.state.docs.workItem || [];
+  nexts.forEach(([w, , d]) => { const i = arr.findIndex(x => x.id === w.id); if (i >= 0) arr[i] = { id: w.id, data: Object.assign({}, d, { id: w.id }) }; });
+  store.emit();
   let ok = 0;
-  for (const [w, v] of picks) {
-    try { await psave('workItem', w.id, Object.assign({}, store.get('workItem', w.id) || w, { owner: v, updatedAt: stamp() }), `Assigned “${w.title}” to ${pname(v)}`); ok++; } catch (e) { /* psave said why */ }
-  }
+  for (const [w, v, d] of nexts) { try { await psave('workItem', w.id, d, `Assigned “${w.title}” to ${pname(v)}`); ok++; } catch (e) { break; /* psave said why; the page shows the server's state again */ } }
   if (ok) toast(`${plural(ok, 'owner')} saved`);
 }
 /* My open tasks on a project, each with a big one-tap ✓. */
@@ -620,7 +639,7 @@ export async function psave(type, id, data, summary) {
        plan…"); say why in plain words and offer Change the plan with the same dates, instead of a bare error toast */
     if (e && e.status === 409 && /change the plan/i.test(String(e.message || '')) && (type === 'workItem' || type === 'project')) {
       const prj = type === 'project' ? id : data && data.projectId;
-      offerChangePlan(store.get('project', prj), type === 'workItem' ? data : null, String(e.message || '')).catch(() => {});
+      offerChangePlan(store.get('project', prj), type === 'workItem' ? data : null, String(e.message || ''), null, null, Object.assign({ type }, e.body || {}, type === 'project' ? { project: data } : {})).catch(() => {});
     } else toast(denied(e));
     if (e && typeof e === 'object') e.pmoHandled = true; throw e;
   }
@@ -653,18 +672,39 @@ export function deciderHTML(j) {
   return 'the sponsor (ask an Admin to set one)';
 }
 /* "This needs Change the plan": what happened, who approves, one button that opens the wizard with the same dates */
-export async function offerChangePlan(j, w, serverMsg, breach, many) {
+/* R16 (N1 #7): which guard refused a plain save: 'cost' (effort or cost over tolerance or the budget), 'window' (a launch
+   window after the deadline or on a day off), 'dependency' (a new dependency moves the task), else the deadline */
+export function refusalKind(body, msg) {
+  const b = body || {}, m = String(msg || (b && b.error) || '');
+  if (b.cost || /expected cost|cost, so|this cost|this effort/i.test(m)) return 'cost';
+  if (b.window || /launch window/i.test(m)) return 'window';
+  if (/now waits on|dependency|depends on/i.test(m)) return 'dependency';
+  if (/launch owner role/i.test(m)) return 'launchOwner';
+  return 'deadline';
+}
+const REFUSAL_WHY = {
+  cost: 'A change that raises the expected cost past the tolerance, or over the budget, goes through <b>Change the plan</b>',
+  window: 'A launch window after the deadline, or on a day off, goes through <b>Change the plan</b>',
+  dependency: 'A new dependency that pushes this task past the deadline goes through <b>Change the plan</b>',
+  launchOwner: 'Handing over the launch owner role goes through <b>Change the plan</b>',
+  deadline: 'A change that moves the finish past the deadline goes through <b>Change the plan</b>',
+};
+export async function offerChangePlan(j, w, serverMsg, breach, many, body) {
   if (!j) { toast(serverMsg || 'Use Change the plan.'); return; }
+  const kind = breach ? 'deadline' : refusalKind(body, serverMsg);
   if (many && many.breach) breach = { before: many.breach.finishBefore, after: many.breach.finishAfter, target: many.breach.target };
   try { await ensureChangeAssets(); } catch (e) { /* the wizard says so itself */ }
   const what = breach && (w || many) ? `${many ? esc(many.what || 'These moves') : `Moving “${esc(w.title)}”`} would move the expected finish from <b>${esc(fmt(breach.before))}</b> to <b>${esc(fmt(breach.after))}</b>, past the <b>${esc(fmt(breach.target))}</b> deadline.`
     : esc(serverMsg || 'This change would move the expected finish past the deadline.');
   const r = await modal({ title: 'This needs Change the plan', body: `<div data-deadline-refusal><p style="margin:0">${what}</p>
-      <p class="hint" style="margin:8px 0 0">Nothing was saved. A change that moves the finish past the deadline goes through <b>Change the plan</b>, so ${deciderHTML(j)} can approve it. You fill in why; we show the impact first.</p></div>`,
+      <p class="hint" style="margin:8px 0 0" data-refusal-kind="${esc(kind)}">Nothing was saved. ${REFUSAL_WHY[kind]}, so ${deciderHTML(j)} can approve it. You fill in why; we show the impact first.</p></div>`,
     actions: [{ id: 'change', label: 'Change the plan', primary: true }] });
   if (r.action !== 'change') return;
   const cur = w && w.id ? store.get('workItem', w.id) : null;
   if (many && many.dates) return openChangeWizard(j.id, { kinds: ['dates'], dates: many.dates });
+  if (kind === 'window') { const wv = body && body.project && body.project.cutover && String(body.project.cutover.window || ''); const m = /^(\d{4}-\d{2}-\d{2})\s*(.*)$/.exec(wv || ''); return openChangeWizard(j.id, { kinds: ['launchWindow'], lwDay: m ? m[1] : '', lwTime: m ? m[2] : '' }); }
+  if (kind === 'launchOwner') return openChangeWizard(j.id, { kinds: ['launchOwner'], launchOwner: body && body.project ? body.project.releaseManager || '' : '' });
+  if (kind === 'cost') return openChangeWizard(j.id, { kinds: ['work'], reason: '' });
   openChangeWizard(j.id, cur && cur.status !== 'done' ? { taskId: cur.id, start: w.start, due: w.due, kinds: ['dates'] } : { kinds: [w ? 'work' : 'deadline'] });
 }
 /* R10.1: the dated facts the status report's time window reads (local dates): created, assigned, started. */
@@ -1946,7 +1986,7 @@ export function reportText(j, d) {
   const facts = `Status: ${t.label}. ${t.finished || live ? 'Finished' : 'Expected'} ${t.total || live ? fmt(t.forecast) : 'not planned'} (deadline ${fmt(j.target)}). ${t.late ? esc0(t.lateText) : '0 late'}, ${live || !B.count ? '0 blocking' : B.text}.${!live && launchLeft(t).text ? ` Launch: ${launchLeft(t).text}.` : ''}${c.show ? ` Budget ${c.planned ? money(c.planned) : 'not set'}, spent ${money(c.actual)}, ${c.known ? 'expected cost ' + money(c.forecast) : (c.unknownText || 'Cost unknown: set rates').replace(/^C/, 'c')}.` : ''}${flags.length ? ' ' + flags.map(x => x.replace(/\.?$/, '.')).join(' ') : ''}`;
   const o = d.overall;
   const overall = o ? `\nOVERALL\n${o.needsPurpose ? 'Purpose: not written yet (add a one-line purpose in the project settings).' : `Purpose: ${o.purpose || o.description}`}\n` +
-    [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', o.concerns) : '';
+    [o.schedule, o.budget].filter(Boolean).map(x => '- ' + x).join('\n') + '\n' + sec('Common areas of concern', concernLines(d)) : '';
   const period = Array.isArray(d.sections) ? `\n${(d.periodHeading || 'THIS PERIOD').toUpperCase()}\n${d.periodSummary ? d.periodSummary + '\n' : ''}` +
     d.sections.map(x => x.items.length ? `${x.heading}\n` + x.items.map(i => '- ' + i).join('\n') : x.empty ? '- ' + x.empty : '').filter(Boolean).join('\n') + '\n' : '';
   return `${reportSubject(j, d)}${d.window ? ` (${windowWords(d.window)})` : ` (${fmt(today())})`}\n\n${facts}\n\n${txt(d.headline)}\n\n${txt(d.summary)}\n${overall}${sec('Highlights', d.highlights)}${sec('Risks', d.risks)}${sec('Asks', reportAsks(j, d))}${period}\nInformation: ${notLiveText(dataNotLive(j))}.`.trim();
@@ -1962,7 +2002,16 @@ export function approvalAsks(j) {
 }
 /* the report's asks: the engine's, plus every approval still to give that they don't already name */
 export function reportAsks(j, d) {
-  const base = Array.isArray(d && d.asks) ? d.asks.slice() : [];
+  let base = Array.isArray(d && d.asks) ? d.asks.slice() : [];
+  /* R16 (N3 #2, Karen 3): the asks that come from "who needs to act" (the server's first lines, summary.who top 8) use
+     the CURRENT owners: an owner picked after the report was generated is named, never "unassigned" or "Needs an
+     owner". The decisions after them (approvals, access requests) are kept as written. */
+  const sw = d && d.facts && d.facts.summary;
+  if (j && j.status !== 'live' && sw && sw.source === 'projectTruth' && Array.isArray(sw.who)) {
+    const nOld = Math.min(8, sw.who.filter(w => w && w.what).length, base.length);
+    const cur = truthOf(j).who.slice(0, 8).map(x => `${x.person ? pname(x.person) : (x.name && x.name !== '—' ? x.name : 'Nobody yet')}: ${x.action}`);
+    base = cur.concat(base.slice(nOld).filter(x => !cur.includes(String(txt(x)))));
+  }
   const said = base.map(x => String(txt(x)).toLowerCase());
   approvalAsks(j).forEach(a => { const bu = String(a.bu).toLowerCase(); if (!said.some(x => x.includes(bu) && /approv/.test(x))) base.push(a.text); });
   return base;
@@ -2015,20 +2064,40 @@ function periodHTML(d) {
     ${d.periodSummary ? `<p class="pmo-rep-p" data-rep-psum>${esc(d.periodSummary)}</p>` : ''}<div class="pmo-rep-period" data-rep-period>${secs}</div>`;
 }
 const overallAsOf = d => { const a = d && d.overall && d.overall.asOf; return a ? String(typeof a === 'object' ? a.label || '' : a) : ''; };
+/* R16 (N3 #2, Karen 6): a team concern says who in the team owns those tasks, so "Procurement team: 8 of the 13" adds up
+   to what each person owns ("Rosa Vega 6, Maya Chen 2"). The engine's own split (concern.people) when it has one; else
+   the engine's task list for that concern, by each task's owner. */
+export function concernLines(d) {
+  const o = d && d.overall; if (!o || !Array.isArray(o.concerns)) return [];
+  const raw = d.period && d.period.overall && Array.isArray(d.period.overall.concerns) ? d.period.overall.concerns : [];
+  return o.concerns.map((c, i) => {
+    const text = String(txt(c));
+    const r = raw.find(x => x && String(x.text || '') === text) || raw[i];
+    if (!r || r.dimension !== 'team' || /\(.+ \d+.*\)\s*$/.test(text)) return text;
+    let ppl = Array.isArray(r.people) ? r.people.map(x => ({ name: x.name || pname(x.id), n: +x.count || 0 })) : null;
+    if (!ppl && Array.isArray(r.items)) {
+      const by = new Map();
+      r.items.forEach(id => { const w = store.get('workItem', id); const k = w && w.owner && store.person(w.owner) ? w.owner : ''; by.set(k, (by.get(k) || 0) + 1); });
+      ppl = [...by.entries()].map(([k, n]) => ({ name: k ? pname(k) : 'no owner yet', n })).sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+    }
+    return ppl && ppl.length ? `${text} (${ppl.map(x => `${x.name} ${x.n}`).join(', ')})` : text;
+  });
+}
 /* R14 (PMO-8): a past range says which parts are as of the period end and which are as of today */
 export function asOfHeadHTML(d) {
   const a = d && d.asOf ? String(typeof d.asOf === 'object' ? d.asOf.label || '' : d.asOf) : '';
   if (!a || (d.headline && String(txt(d.headline)).includes(a))) return '';
   return `<div class="hint" data-rep-asof>Headline, risks and asks: ${esc(a)}.</div>`;
 }
-function overallHTML(j, o) {
+function overallHTML(j, o, d) {
   if (!o) return '';
   const owner = store.state.me === j.owner;
   const purpose = o.needsPurpose
     ? `<div class="pmo-rep-purpose missing" data-rep-purpose><b>Add a one-line purpose</b> so readers know why this project exists. ${owner ? '<button class="btn sm" data-settings>Edit the description</button>' : `<span class="hint">${esc(pname(j.owner))} (project manager) can add it in Settings.</span>`}</div>`
     : `<div class="pmo-rep-purpose" data-rep-purpose><span class="lbl">Purpose</span> ${esc(o.purpose || o.description)}</div>`;
   const lines = [o.schedule ? `<li data-rep-sched>${esc(o.schedule)}</li>` : '', o.budget ? `<li data-rep-budget class="${o.higherBudgetNeed ? 'warn' : ''}">${esc(o.budget)}</li>` : ''].join('');
-  const conc = o.concerns && o.concerns.length ? `<div class="pmo-rep-sec rk" data-rep-concerns><h4>Common areas of concern</h4><ul>${o.concerns.map(c => `<li>${esc(c)}</li>`).join('')}</ul></div>` : '';
+  const cl = concernLines(d);
+  const conc = cl.length ? `<div class="pmo-rep-sec rk" data-rep-concerns><h4>Common areas of concern</h4><ul>${cl.map(c => `<li>${esc(c)}</li>`).join('')}</ul></div>` : '';
   return `${purpose}${lines ? `<ul class="pmo-rep-overall" data-rep-overall>${lines}</ul>` : ''}${conc}`;
 }
 function reportPanelHTML(j, r) {
@@ -2049,7 +2118,7 @@ function reportPanelHTML(j, r) {
       <h3 class="pmo-rep-h">${esc(txt(d.headline) || j.name)}</h3>
       ${asOfHeadHTML(d)}
       <h4 class="pmo-rep-part">Overall${overallAsOf(d) ? ` <span class="hint" data-rep-asof-overall>(${esc(overallAsOf(d))})</span>` : ''}</h4>
-      ${overallHTML(j, d.overall)}
+      ${overallHTML(j, d.overall, d)}
       <div class="pmo-sline pmo-rep-facts" data-rep-facts>${overallAsOf(d) && overallAsOf(d) !== 'as of today' ? '<span class="hint" data-rep-facts-today>Today:</span>' : ''}${factsHTML(j, { cost: true })}</div>
       ${d.summary ? `<p class="pmo-rep-p">${esc(txt(d.summary))}</p>` : ''}
       <div class="pmo-rep-fact hint" data-rep-notlive>Information: ${esc(notLiveText(dataNotLive(j)))}.</div>
@@ -2071,28 +2140,34 @@ async function openReport(j, range) {
   try {
     const events = await reportEvents();
     const r = await store.api('/ai/status-report', Object.assign({ projectId: j.id, today: today(), events, tzOffsetMinutes: new Date().getTimezoneOffset() }, range.preset === 'custom' ? { preset: 'custom', from: range.from, to: range.to } : { preset: range.preset }));
+    /* R16 (N3 #3, PMO 7): opening or previewing a report records nothing; only Print/PDF (export) or Email draft
+       (send) does, through recordReport */
     reports[j.id] = { data: (r && (r.report || r)) || {}, range };
-    rememberReport(j, reports[j.id].data);
   }
   catch (e) { reports[j.id] = { error: e.message || 'service unavailable', range }; }
   rerender();
   requestAnimationFrame(() => { const el = document.querySelector('[data-prj-rep]'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
 }
-/* "Since last report" reads the project's reportLog; each report also keeps that day's expected finish (forecastLog),
-   so a later report can say how far the finish moved. Saved once per project per day. */
-async function rememberReport(j, d) {
-  const cur = store.get('project', j.id); if (!cur) return;
-  const log = Array.isArray(cur.reportLog) ? cur.reportLog : [];
-  if (log.some(x => x && x.date === today())) return;
-  const t = truthOf(cur);
-  const fl = (Array.isArray(cur.forecastLog) ? cur.forecastLog : []).filter(x => x && x.date !== today());
-  /* R13: keep the exact time too, so "since last report" can compare to the minute */
-  const at = new Date().toISOString();
-  /* R15 (M1 #6): reportLog and forecastLog are written by the server when the report is recorded; a client value is
-     ignored there, so they are only sent for older servers */
-  const next = Object.assign({}, cur, { lastReportAt: today(), lastReportAtTime: at, reportLog: log.concat([{ date: today(), at, preset: d.window ? d.window.preset : null }]).slice(-30),
-    forecastLog: t.forecast ? fl.concat([{ date: today(), finish: t.forecast }]).slice(-60) : fl });
-  try { await store.save('project', cur.id, next, `Generated a status report (${d.window ? d.window.short : fmt(today())})`); } catch (e) { /* the report still shows */ }
+/* "Since last report" reads the project's reportLog. R16 (N1 #3): the SERVER writes reportLog, lastReportAt and that
+   day's expected finish (forecastLog), and only when the project save carries report: {action: 'send'|'export', preset}
+   in the request body. A preview writes nothing. One entry per project per day (the server keeps the first). */
+export async function recordReport(j, d, action) {
+  if (store.state.offline || !store.state.ws) return false;
+  /* the server's copy (never a local one a refused save left behind), so the save changes nothing but the report log */
+  try { await store.load(); } catch (e) { return false; }
+  const cur = store.get('project', j.id); if (!cur) return false;
+  if ((cur.reportLog || []).some(x => x && x.date === today())) return false;
+  const preset = d && d.window ? d.window.preset || null : null;
+  const summary = `${action === 'send' ? 'Sent' : 'Exported'} a status report (${d && d.window ? d.window.short || windowWords(d.window) : fmt(today())})`;
+  /* store.save has no way to add a body field, so this one save is sent the way store.save sends it, plus `report`
+     (asked of the lead: a store.save option) */
+  try {
+    const res = await fetch(`/api/pmoflow/ws/${encodeURIComponent(store.state.ws)}/doc/project/${encodeURIComponent(cur.id)}`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ today: store.state.today || today(), data: cur, actor: store.state.me, summary, report: { action, preset } }) });
+    if (!res.ok) return false;
+    await store.load();
+    return true;
+  } catch (e) { return false; }
 }
 
 /* ---------------------------------------------------------------- "Why this date?" popover */
@@ -2297,17 +2372,35 @@ function readCustomFields(j, f, next) {
 }
 /* R6 time logging: the item's owner, the PM and the project team log hours against a work item. Actual cost = hours × day rate / 8. */
 export const canLogTime = (w, j) => !!w && !!j && (canEditWork(w, j) || (j.resources || []).includes(store.state.me));
+/* R16 (N3 #3, PMO: append-only hours). Logged hours are never removed or lowered: a mistake is fixed by a reversing
+   entry with a reason ("Correct hours", E.reverseEntry), and the totals are net of corrections (E.hoursTotals). */
+const corrLeft = (w, t) => { const used = (w.time || []).filter(x => x && x.correction && t.at && x.reverses === t.at).reduce((a, x) => a + Math.abs(+x.hours || 0), 0); return Math.max(0, Math.round(((+t.hours || 0) - used) * 100) / 100); };
+const hoursTotalText = w => { const r = eng('hoursTotals', null, docs(), w); return r && r.text ? r.text : fmtHours(hoursOf(w)); };
 async function logTime(j, w, err, v) {
   if (!canLogTime(w, j)) { toast('Only the project team can log time'); return; }
   v = v || { hours: '', date: today(), note: '' };
-  const entries = (w.time || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  w = store.get('workItem', w.id) || w;
+  /* the server stamps each entry (at); read them back once so a correction can name the entry it reverses */
+  if ((w.time || []).some(t => t && !t.at) && !store.state.offline) { try { await store.load(); } catch (e) { /* keep the local copy */ } w = store.get('workItem', w.id) || w; }
+  const all = (w.time || []).map((t, i) => ({ t, i })).filter(x => x.t && typeof x.t === 'object');
+  const entries = all.slice().sort((a, b) => String(b.t.date).localeCompare(String(a.t.date)) || String(b.t.at || '').localeCompare(String(a.t.at || '')));
+  const mine = x => x.t.by === store.state.me || isPM(j);
+  const row = ({ t, i }) => {
+    const corr = !!t.correction || +t.hours < 0;
+    const left = corr ? 0 : corrLeft(w, t);
+    const note = corr ? `Correction: “${t.reason || ''}”` : (t.note || '');
+    return `<tr data-time-row="${i}" ${corr ? 'data-time-correction class="pmo-tcorr"' : ''}><td class="pmo-nowrap">${esc(fmt(t.date))}</td><td class="pmo-nowrap">${av(t.by)} ${esc(pname(t.by).split(' ')[0])}</td><td class="pmo-num">${corr ? '−' + esc(fmtHours(Math.abs(+t.hours || 0))) : esc(fmtHours(+t.hours || 0))}</td><td>${esc(note)}</td>
+      <td class="pmo-nowrap">${!corr && left > 0 && t.at && mine({ t }) ? `<button type="button" class="btn sm" data-act="fix-${i}" aria-label="Correct the ${esc(fmtHours(+t.hours || 0))} logged on ${esc(fmt(t.date))}">Correct hours</button>` : ''}</td></tr>`;
+  };
   const body = `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
-    <p class="hint" style="margin:0"><b>${esc(w.title)}</b> · ${fmtEffort(effortOf(w))} planned effort (${fmtHours(effortOf(w) * 8)}) · <b data-time-total>${fmtHours(hoursOf(w))}</b> logged so far. Actual cost = hours × the person’s day rate ÷ 8.</p>
+    <p class="hint" style="margin:0"><b>${esc(w.title)}</b> · ${fmtEffort(effortOf(w))} planned effort (${fmtHours(effortOf(w) * 8)}) · <b data-time-total>${esc(hoursTotalText(w))}</b> logged so far. Actual cost = hours × the person’s day rate ÷ 8.</p>
     <div class="frow"><div class="field"><label for="lt-hours">Hours</label><input id="lt-hours" type="number" name="hours" min="0.25" max="24" step="0.25" value="${esc(v.hours)}" placeholder="e.g. 3" /></div>
       <div class="field"><label for="lt-date">Date</label><input id="lt-date" type="date" name="date" max="${esc(today())}" value="${esc(v.date)}" /></div></div>
     <div class="field"><label for="lt-note">Note</label><input id="lt-note" name="note" maxlength="140" value="${esc(v.note)}" placeholder="What was done" /></div>
-    ${entries.length ? `<div class="tbl-wrap"><table class="pmo-ttable" data-time-list><thead><tr><th>Date</th><th>Who</th><th class="pmo-num">Hours</th><th>Note</th></tr></thead><tbody>${entries.slice(0, 12).map(t => `<tr><td class="pmo-nowrap">${esc(fmt(t.date))}</td><td class="pmo-nowrap">${av(t.by)} ${esc(pname(t.by).split(' ')[0])}</td><td class="pmo-num">${esc(fmtHours(Number(t.hours) || 0))}</td><td>${esc(t.note || '')}</td></tr>`).join('')}</tbody></table></div>${entries.length > 12 ? `<div class="hint">+${entries.length - 12} older entries</div>` : ''}` : '<div class="hint">No time logged yet.</div>'}`;
+    ${entries.length ? `<div class="tbl-wrap"><table class="pmo-ttable" data-time-list><thead><tr><th>Date</th><th>Who</th><th class="pmo-num">Hours</th><th>Note</th><th aria-label="Correct"></th></tr></thead><tbody>${entries.slice(0, 12).map(row).join('')}</tbody></table></div>${entries.length > 12 ? `<div class="hint">+${entries.length - 12} older entries</div>` : ''}
+      <div class="hint" data-time-append>Logged hours stay on the record. To fix a mistake, use <b>Correct hours</b>: it adds a reversing entry with your reason.</div>` : '<div class="hint">No time logged yet.</div>'}`;
   const r = await modal({ title: 'Log time', body, actions: [{ id: 'log', label: 'Log time', primary: true }] });
+  if (/^fix-\d+$/.test(r.action)) { const x = all.find(y => y.i === +r.action.slice(4)); if (x) return correctHours(j, w, x.t); return; }
   if (r.action !== 'log') return;
   const f = r.form, h = Number(f.hours);
   const keep = { hours: f.hours, date: f.date, note: f.note };
@@ -2318,6 +2411,42 @@ async function logTime(j, w, err, v) {
   const entry = { by: store.state.me, date: f.date, hours: Math.round(h * 100) / 100, note: String(f.note || '').trim().slice(0, 140) };
   await psave('workItem', w.id, Object.assign({}, cur, { time: [...(cur.time || []), entry] }), `Logged ${fmtHours(entry.hours)} on “${w.title}” (${fmt(entry.date)})${entry.note ? ': ' + entry.note : ''}`);
   toast(`Logged ${fmtHours(entry.hours)}`);
+}
+/* "Correct hours": how many of this entry's hours to take back, and why. Saved as a new (negative) entry; nothing stored
+   is changed. The server refuses anything else (E.timeEntryProblem). */
+export async function correctHours(j, w, t, err, v) {
+  const left = corrLeft(store.get('workItem', w.id) || w, t);
+  if (!(left > 0)) { toast('Those hours are already fully corrected.'); return; }
+  v = v || { hours: String(left), reason: '' };
+  const body = `${err ? `<div class="banner" style="margin:0" role="alert">${esc(err)}</div>` : ''}
+    <p class="hint" style="margin:0">${esc(fmtHours(+t.hours || 0))} logged by ${esc(pname(t.by))} on ${esc(fmt(t.date))}${t.note ? ` (“${esc(t.note)}”)` : ''}. Up to ${esc(fmtHours(left))} can be taken back.</p>
+    <div class="field"><label for="ch-hours">Hours to take back</label><input id="ch-hours" type="number" name="hours" min="0.25" max="${esc(left)}" step="0.25" value="${esc(v.hours)}" /></div>
+    <div class="field"><label for="ch-reason">Why <small class="hint">required, shown in History</small></label><input id="ch-reason" name="reason" maxlength="200" value="${esc(v.reason)}" placeholder="e.g. Logged twice by mistake" /></div>
+    <div class="hint">The original entry stays. This adds “−hours on ${esc(fmt(today()))}” with your reason, and the totals and cost drop by that much.</div>`;
+  const r = await modal({ title: 'Correct hours', body, actions: [{ id: 'correct', label: 'Add the correction', primary: true }] });
+  if (r.action !== 'correct') return;
+  const h = Math.round(Number(r.form.hours) * 100) / 100, reason = String(r.form.reason || '').trim();
+  const keep = { hours: r.form.hours, reason };
+  if (!(h >= 0.25) || h > left) return correctHours(j, w, t, `Take back between 0.25 and ${fmtHours(left)}.`, keep);
+  if (!reason) return correctHours(j, w, t, 'Say why the hours are being corrected.', keep);
+  const cur = store.get('workItem', w.id) || w;
+  const E1 = window.PMOEngine;
+  const entry = E1 && typeof E1.reverseEntry === 'function' ? E1.reverseEntry(t, h, reason, store.state.me, today())
+    : { hours: -h, date: today(), reason, reverses: t.at || null, by: store.state.me, correction: true };
+  try {
+    await psave('workItem', w.id, Object.assign({}, cur, { time: [...(cur.time || []), entry] }), `Corrected hours on “${w.title}”: −${fmtHours(h)} (${reason})`);
+    toast(`Corrected: −${fmtHours(h)}`);
+  } catch (e) { /* psave said why */ }
+}
+/* R16 (N3 #6, Jordan 1): assigning a test to yourself is allowed, but say what follows before saving: whoever assigns a
+   test can't pass it (E.canPassTest's "assigner" rule) */
+export const SELF_TEST_WARN = 'You won’t be able to pass it yourself: whoever assigns a test can’t pass it. Pick someone else to run it.';
+export function bindSelfTest(root, ownerSel, kindSel) {
+  if (!root) return;
+  const o = root.querySelector(ownerSel), k = kindSel ? root.querySelector(kindSel) : null, box = root.querySelector('[data-self-test]');
+  if (!o || !box) return;
+  const upd = () => { box.hidden = !(o.value && o.value === store.state.me && (!k || k.value === 'test')); };
+  o.addEventListener('change', upd); if (k) k.addEventListener('change', upd); upd();
 }
 async function editWork(j, w, err) {
   const isNew = !w || !w.id;
@@ -2343,6 +2472,7 @@ async function editWork(j, w, err) {
     <div class="field"><label>Title</label><input name="title" value="${esc(w.title)}" maxlength="140" placeholder="e.g. Integrate screening API" /></div>
     <div class="frow"><div class="field"><label>Owner</label><select name="owner" data-wi-owner><option value="" ${ownerKnown ? '' : 'selected'}>${esc(w.ownerRole ? 'Needs an owner: ' + w.ownerRole : 'Needs an owner')}</option>${store.state.people.map(p => `<option value="${esc(p.id)}" ${p.id === w.owner ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select name="kind">${Object.entries(KIND_LBL).map(([k, l]) => `<option value="${k}" ${w.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+    <div class="pmo-selftest" data-self-test role="status" ${w.kind === 'test' && w.owner && w.owner === store.state.me ? '' : 'hidden'}>${esc(SELF_TEST_WARN)}</div>
     <div class="field"><label>Step it delivers</label>${stepOpts ? `<select name="step">${stepOpts}</select>` : '<div class="hint">Link a process first. Tasks attach to a step of the future process.</div>'}</div>
     <div class="frow"><div class="field"><label>Start</label><input type="date" name="start" value="${esc(w.start || '')}" data-dayoff /></div><div class="field"><label>Due</label><input type="date" name="due" value="${esc(w.due || '')}" data-dayoff /></div></div>
     ${daysOffSoonHTML(w.start && w.start > today() ? w.start : today())}
@@ -2362,6 +2492,7 @@ async function editWork(j, w, err) {
   ensureChangeAssets().catch(() => {});
   const pr = modal({ title: isNew ? 'Add work item' : 'Edit work item', body, actions: acts });
   bindDayOff(([...document.querySelectorAll('.overlay .modal .mb')].pop()));   /* R14 (PMO-11): days off marked as you pick */
+  bindSelfTest(([...document.querySelectorAll('.overlay .modal .mb')].pop()), 'select[data-wi-owner]', 'select[name="kind"]');
   const r = await pr;
   if (r.action === 'delete') return deleteWork(j, w);
   if (r.action !== 'save') return;
@@ -2439,6 +2570,15 @@ async function deleteWork(j, w) {
   toast('Work item deleted');
 }
 /* Status changes take a custom status id (or a raw idle|prog|done), store statusId + the engine mapping, and handle doneAt. */
+/* the engine's hold-clear warning (E.holdClearWarning), with the open work it names (unconfirmedDone(...).open) */
+export function holdWarning(w) {
+  const asDone = Object.assign({}, w, { status: 'done' });
+  const uc = eng('unconfirmedDone', null, docs(), asDone) || {};
+  const open = Array.isArray(uc.open) ? uc.open : [];
+  const t = eng('holdClearWarning', null, docs(), w);
+  const text = typeof t === 'string' ? t : (t && t.text) || uc.confirmText || '';
+  return { text: String(text || ''), open: text ? open : [] };
+}
 async function setStatus(j, id, statusKey) {
   const w = store.get('workItem', id); if (!w) return;
   const ss = statusesOf(j);
@@ -2447,6 +2587,18 @@ async function setStatus(j, id, statusKey) {
   const prevSt = statusOf(w, j);
   if (prevSt.id === st.id && w.status === st.maps) return;
   if (!canEditWork(w, j)) { toast(lockTitle(w, j)); rerender(); return; }
+  /* R16 (N3 #3 / N1 #8, PMO re-test 1): clearing a Jira/ADO hold to Done shows the same open-predecessor warning as the
+     project manager's confirm. Confirmed anyway, it still needs someone else to confirm it before it counts. */
+  if (st.maps === 'done' && w.status !== 'done' && w.syncHold && typeof w.syncHold === 'object') {
+    const warn = holdWarning(w);
+    if (warn.text) {
+      const r = await modal({ title: 'Clear the hold and mark it done?', body: `<div data-hold-warn><p style="margin:0">${esc(warn.text)}</p>
+        ${warn.open.length ? `<ul class="pmo-confirm-open">${warn.open.slice(0, 6).map(o => `<li data-hold-open-item="${esc(o.id)}">“${esc(o.title || 'a task')}”</li>`).join('')}</ul>` : ''}
+        <p class="hint" style="margin:6px 0 0">It won’t count as finished until someone other than you confirms it.</p></div>`,
+        actions: [{ id: 'clear', label: 'Mark done anyway', primary: true }] });
+      if (r.action !== 'clear') { rerender(); return; }
+    }
+  }
   const next = applyDone(w, Object.assign({}, w, { status: st.maps, statusId: st.id, updatedAt: stamp() }));
   await psave('workItem', id, next, `“${w.title}” moved to ${st.name} (was ${prevSt.name})${st.maps === 'done' && w.status !== 'done' ? ', finished ' + fmt(next.doneAt) : ''}`);
   if (st.maps === 'done' && w.status !== 'done') undoToast(`Done: “${w.title}”`, () => undoDone(j, w));
@@ -2827,11 +2979,37 @@ function roleFields(v, me) {
 }
 const budgetOf = v => { const n = Number(v); return v === '' || v == null || !isFinite(n) ? null : n; };
 
+/* R16 (N3 #1, Karen): the New project form starts on the process most recently created or edited (its server stamp,
+   updatedAt/createdAt; with no stamp yet, the one added last), never on the sample just because it is listed first */
+export function latestProcessId(procs) {
+  const arr = procs || store.list('process');
+  let best = null, bestKey = null;
+  arr.forEach((p, i) => {
+    const s = String(p.updatedAt || p.createdAt || '');
+    const key = [s, i];
+    if (!best || key[0] > bestKey[0] || (key[0] === bestKey[0] && i > bestKey[1])) { best = p; bestKey = key; }
+  });
+  return best ? best.id : '';
+}
+/* the same, from History first: the process with the newest create/update event (one request; the stamp order above
+   when History can't be read) */
+export async function latestProcessIdAsync(procs) {
+  const arr = procs || store.list('process');
+  try {
+    const evs = await store.events(null, 300);
+    const ids = new Set(arr.map(p => p.id));
+    const hit = (evs || []).filter(e => e && /^process:/.test(e.ref || '') && ids.has(e.ref.slice(8)) && !['delete', 'refused', 'notify', 'check'].includes(e.action))
+      .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))[0];
+    if (hit) return hit.ref.slice(8);
+  } catch (e) { /* History unavailable: stamps */ }
+  return latestProcessId(arr);
+}
 /* "+ New project" (R3/R5), used by home and portfolio. Creates the project and opens it. */
 export async function newProject(prefill, err) {
   const me = store.state.me;
   const procs = store.list('process');
-  const v = Object.assign({ name: '', desc: '', target: defaultTarget(), owner: me, releaseManager: '', program: '', budget: '', resources: me ? [me] : [], processes: [], from: procs.length ? procs[0].id : '' }, prefill || {});
+  const from0 = prefill && prefill.from !== undefined ? prefill.from : procs.length ? await latestProcessIdAsync(procs) : '';
+  const v = Object.assign({ name: '', desc: '', target: defaultTarget(), owner: me, releaseManager: '', program: '', budget: '', resources: me ? [me] : [], processes: [], from: from0 }, prefill || {});
   /* R7 Simple form: name, from which process, deadline. Project manager and launch owner default to me.
      Everything else sits under "More options" (open by default when advanced tools are on). */
   const body = `${err ? `<div class="banner" style="margin:0">${esc(err)}</div>` : ''}
@@ -2886,19 +3064,23 @@ async function editSettings(j, err, prefill) {
     <div class="field"><label for="ps-target">Deadline</label><input id="ps-target" type="date" name="target" value="${esc(v.target || '')}" ${locked ? 'readonly aria-readonly="true"' : ''} />${locked ? lockHint : ''}</div>
     <div class="frow"><div class="field"><label for="ps-pm">Project manager</label><input id="ps-pm" data-set-pm readonly aria-readonly="true" value="${esc(pname(cur0.owner))}" />
         <div class="hint" data-pm-locked>Handing this role to someone else is a plan change the sponsor approves: use <b>Hand over the role</b> below.</div></div>
-      <div class="field"><label for="pf-rm">Launch owner</label><select id="pf-rm" name="releaseManager"><option value="" ${v.releaseManager ? '' : 'selected'}>Same as the project manager</option>${peopleOpts(v.releaseManager, store.state.me)}</select><div class="hint">The only person who can go live or roll back.</div></div></div>
+      <div class="field"><label for="pf-rm">Launch owner</label>${locked ? `<input id="pf-rm" data-set-lo readonly aria-readonly="true" value="${esc(pname(relMgr(cur0)))}" />
+        <div class="hint" data-lo-locked>The only person who can go live or roll back. Handing this role over is a plan change the sponsor approves: use <b>Hand over the launch owner</b> below.</div>`
+        : `<select id="pf-rm" name="releaseManager"><option value="" ${v.releaseManager ? '' : 'selected'}>Same as the project manager</option>${peopleOpts(v.releaseManager, store.state.me)}</select><div class="hint">The only person who can go live or roll back.</div>`}</div></div>
     <div class="field"><label for="ps-sponsor">Sponsor</label><input id="ps-sponsor" data-set-sponsor readonly aria-readonly="true" value="${esc(sp0 ? pname(sp0) : 'Not set')}" />
       <div class="hint" data-sponsor-locked>Approves plan changes that move the deadline, push the finish past it, change the budget or hand over the project manager role.${sp0 ? '' : ' <b>Until a sponsor is set, an Admin approves them.</b>'} The project manager doesn’t choose the sponsor: an Admin sets it in <b>Admin › People › Project sponsors</b>.</div></div>
     ${pmoHtml}
     <div class="hint ${costOver(j) ? 'pmo-set-over' : ''}" data-set-fin>${fin.known ? `Expected cost ${esc(money(fin.forecast))}${fin.planned ? (costOver(j) ? ` · <b class="fail" data-set-over>${esc(money(fin.forecast - fin.planned))} over the ${esc(money(fin.planned))} budget</b>` : ` · within the ${esc(money(fin.planned))} budget`) : ''}` : esc(costUnknownText(j))} · actual ${esc(money(fin.actual))} so far (effort × each owner’s day rate; edit rates in Portfolio › Workload).</div>`;
-  const r = await modal({ title: 'Project settings', body, actions: [{ id: 'handover', label: 'Hand over the role' }, { id: 'save', label: 'Save settings', primary: true }] });
+  /* R16 (N1 #6, Jordan 3): once there is a plan, the launch owner also changes only through Change the plan */
+  const r = await modal({ title: 'Project settings', body, actions: [{ id: 'handover', label: 'Hand over the role' }].concat(locked ? [{ id: 'handover-lo', label: 'Hand over the launch owner' }] : []).concat([{ id: 'save', label: 'Save settings', primary: true }]) });
   if (r.action === 'handover') { openChangeWizard(j.id, { kinds: ['pm'] }); return; }
+  if (r.action === 'handover-lo') { openChangeWizard(j.id, { kinds: ['launchOwner'] }); return; }
   if (r.action !== 'save') return;
   const f = r.form;
   const cur = store.get('project', j.id) || j;
   /* R14 (PMO-S2): the sponsor never changes from here (the PM can't pick one, least of all himself).
      R15 (M1 #3): nor does the project manager: that is a plan change ("Hand over the role") */
-  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: cur.owner, releaseManager: f.releaseManager || '', sponsor: cur.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
+  const vals = { name: (f.name || '').trim(), desc: (f.desc || '').trim(), target: f.target, owner: cur.owner, releaseManager: locked ? (cur.releaseManager && cur.releaseManager !== cur.owner ? cur.releaseManager : '') : (f.releaseManager || ''), sponsor: cur.sponsor || '', program: (f.program || '').trim(), budget: f.budget };
   if (!vals.name) return editSettings(cur, 'Give the project a name.', vals);
   if (!vals.target) return editSettings(cur, 'Set a deadline.', vals);
   const bud = budgetOf(vals.budget);
@@ -3138,7 +3320,8 @@ export function bind(root, params) {
   root.querySelectorAll('[data-status]').forEach(el => el.addEventListener('change', () => setStatus(cur(), el.dataset.status, el.value)));
   root.querySelectorAll('tr[data-wid]:not(.pmo-ro) td:first-child').forEach(td => {
     td.style.cursor = 'pointer';
-    td.addEventListener('click', e => { if (e.target.closest('a')) return; editWork(cur(), store.get('workItem', td.parentElement.dataset.wid)); });
+    /* R16: a button inside the title cell ("Confirm it’s done", Why this date) does its own job, never also opens the form */
+    td.addEventListener('click', e => { if (e.target.closest('a, button, select, input')) return; editWork(cur(), store.get('workItem', td.parentElement.dataset.wid)); });
   });
   const tg = root.querySelector('[data-bl-toggle]'); if (tg) tg.addEventListener('change', () => { showBaseline = tg.checked; rerender(); });
   const bp = root.querySelector('[data-bl-pick]'); if (bp) bp.addEventListener('change', () => { blPick[j.id] = bp.value; rerender(); });
@@ -3191,7 +3374,7 @@ export function bind(root, params) {
   if (autoPlan === j.id) { autoPlan = null; setTimeout(() => firstPlan(cur()), 50); }
   on('[data-rep-regen]', () => openReport(cur()));
   on('[data-rep-close]', () => { delete reports[j.id]; rerender(); });
-  on('[data-rep-print]', () => window.print());
+  on('[data-rep-print]', () => { const rep = reports[j.id]; if (rep && rep.data) recordReport(cur(), rep.data, 'export'); window.print(); });
   /* R10.1: the report's period */
   on('[data-rep-preset]', el => openReport(cur(), { preset: el.dataset.repPreset }));
   bindPeriodPicker(root);
@@ -3200,7 +3383,7 @@ export function bind(root, params) {
     if (r) openReport(cur(), { preset: 'custom', from: r.from, to: r.to });
   });
   /* the mailto link must open the mail client, not be swallowed by the router */
-  root.querySelectorAll('[data-rep-mail]').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+  root.querySelectorAll('[data-rep-mail]').forEach(a => a.addEventListener('click', e => { e.stopPropagation(); const rep = reports[j.id]; if (rep && rep.data) recordReport(cur(), rep.data, 'send'); }));
   /* timeline: start scrolled so "today" is in view on narrow screens */
   const tl = root.querySelector('#pmoTl .tday');
   if (tl) { const box = root.querySelector('#pmoTl'); const lane = tl.parentElement; requestAnimationFrame(() => { const x = lane.offsetLeft + tl.offsetLeft - box.clientWidth / 2; if (x > 0 && box.scrollWidth > box.clientWidth) box.scrollLeft = x; }); }

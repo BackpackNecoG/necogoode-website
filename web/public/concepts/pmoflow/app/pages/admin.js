@@ -156,14 +156,30 @@ function peopleHTML() {
 
 /* R14: the server writes each sentence from the actual change; a person's own text is shown apart, as their note.
    Entries from before R14 kept the person's own text as the sentence: they say so. */
+/* R16 N4 #3 (render N1 #2): an hours entry's line carries the task's hours and dollars before and after, written by the
+   server ("total 28 hours ($3,500) → 25 hours ($3,125)"); History shows them on their own line so a cut stands out */
+const HOURS_RE = /(?:^|; )total (−?-?[\d.,]+ hours? \(\$[\d,]+\)) → (−?-?[\d.,]+ hours? \(\$[\d,]+\))/;
+function hoursLine(text) {
+  const m = HOURS_RE.exec(text); if (!m) return '';
+  const num = t => parseFloat(String(t).replace(/[^\d.-]/g, '')) || 0;
+  const down = num(m[2]) < num(m[1]);
+  return `<div class="hint adm-hours${down ? ' down' : ''}" data-entry-hours><span>Hours on this task:</span> <b data-hours-from>${esc(m[1])}</b> → <b data-hours-to>${esc(m[2])}</b>${down ? ' <span data-hours-down>(corrected down)</span>' : ''}</div>`;
+}
 function summaryCell(e) {
   const sm = String(e.summary || e.action || '');
   const note = e.note != null ? String(e.note) : null;
   const text = note != null ? sm.slice(0, Math.max(0, sm.length - note.length - 11)) : sm;
   if (e.refused) return `<span class="adm-refused" data-entry-refused>${esc(text)}</span><div class="hint">The server refused this, so nothing changed.</div>`;
-  return `${esc(text)}${note != null ? `<div class="hint" data-entry-note>Their note: “${esc(note)}”</div>` : ''}${e.written === 'client' ? '<div class="hint" data-entry-client>Older entry: worded by the person, not written from the change.</div>' : ''}`;
+  return `${esc(text)}${hoursLine(text)}${note != null ? `<div class="hint" data-entry-note>Their note: “${esc(note)}”</div>` : ''}${e.written === 'client' ? '<div class="hint" data-entry-client>Older entry: worded by the person, not written from the change.</div>' : ''}`;
 }
 
+/* R16 N4 #2: "Approves now" is the server's change routing (E.deadlineApprover for a change the project manager asks
+   for), the same person the change screen names */
+function approvesNowHTML(p) {
+  if (p.approvesNow === undefined) return p.sponsor ? esc(p.sponsorName) : p.effectiveName ? `${esc(p.effectiveName)} <span class="hint">(default)</span>` : '<span class="hint">Nobody yet</span>';
+  if (!p.approvesNow) return '<span class="hint">Nobody yet: name a sponsor</span>';
+  return `${esc(p.approvesNowName)} <span class="hint">${p.approvesNowRole === 'sponsor' ? '(the sponsor)' : '(an Admin, because no sponsor is set)'}</span>`;
+}
 /* ------------------------------------------------------------ project sponsors (R14 L4 #2) */
 /* An Admin who is not the project's manager sets its sponsor. The project manager is never the sponsor and never picks
    one; nobody appoints themselves. Without a named sponsor, the default approver stands in (shown as "default"). */
@@ -181,7 +197,7 @@ function sponsorsHTML() {
       ${opts.map(x => `<option value="${esc(x.id)}" ${x.id === p.sponsor ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
     return `<div class="adm-spon" data-sponsor-row="${esc(p.id)}"><div><b>${esc(p.name)}</b><div class="hint">Project manager: ${esc(p.ownerName || 'nobody')}</div></div>
       <div><label class="adm-spl" for="adm-sp-${esc(p.id)}">Sponsor</label>${sel.replace('<select ', `<select id="adm-sp-${esc(p.id)}" `)}${why ? `<div class="hint" data-sponsor-why>${esc(why)}</div>` : ''}</div>
-      <div><span class="adm-spl">Approves now</span><div data-sponsor-now>${p.sponsor ? esc(p.sponsorName) : p.effectiveName ? `${esc(p.effectiveName)} <span class="hint">(default)</span>` : '<span class="hint">Nobody yet</span>'}</div></div></div>`;
+      <div><span class="adm-spl">Approves now</span><div data-sponsor-now${p.approvesNow ? ` data-sponsor-now-id="${esc(p.approvesNow)}"` : ''}>${approvesNowHTML(p)}</div></div></div>`;
   }).join('');
   return `<div class="card" data-sponsors><h3>Project sponsors</h3>
     <div class="hint adm-sphint">The sponsor approves plan changes that move the deadline or the budget. An Admin sets them; a project’s manager can’t be its sponsor or choose one.</div>
@@ -356,10 +372,12 @@ function securityHTML() {
       ['Passing tests', 'You can pass only tests assigned to you or to no one. A test linked to an open problem can’t pass until the problem is fixed.'],
       ['Separate approvers', 'Nobody approves a team’s part if they recorded any test result for it or own steps in it. The project manager and the launch owner don’t approve teams’ parts.'],
       ['Two people for launch overrides', 'Launching outside the launch window, or with launch-day tasks still open, needs the project manager and a sponsor or approver, each with the extra sign-in check.'],
-      ['Department changes', 'Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it. In a workspace with one Admin, those changes apply at once and History says so. Each membership and approver keeps the date it started.'],
+      ['Department changes', 'Naming the first approver of a department that has none takes one Admin. With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check; the person it moves can’t confirm it. In a workspace with one Admin, those changes apply at once and History says so. Moving someone out of a department also ends their approving for it, in the same change. Each membership and approver keeps the date it started.'],
       ['Recent moves', 'Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.'],
       ['No Admin exemption', 'Admins follow every rule above. The server checks each one, not just the screen.'],
       ['Extra sign-in check', 'Approvals, going live and data-access grants ask for a second check. In the demo any 6 digits work.'],
+      ['Step-ups expire after 10 minutes', 'The server checks each extra sign-in check against its own clock and refuses one that is more than 10 minutes old or dated more than a minute in the future. Each refusal is recorded in History.'],
+      ['Signed in, you act as yourself', 'With hosted sign-in, the server takes who you are from the sign-in and makes each change as you; a change sent in someone else’s name is refused and recorded in History. Without sign-in, as in this demo, “Viewing as” still lets you act as anyone.'],
       ['Time-boxed data access', 'Access to real data is approved by its owner, expires, and closes automatically at launch.'],
       ['Statistics only', 'Data checks keep counts and patterns, never the values themselves.'],
       ['Every change recorded', 'History lists every change and who made it, including changes that came from Jira or Azure DevOps under that person’s identity there. It exports as CSV or JSON; both are signed and can be checked here, so an edited entry or name, entries cut from the end, or recomputed fingerprints fail the check.'],
@@ -447,9 +465,14 @@ export function bind(root, params) {
   let lastDept = null;
   const dop = op => async () => { lastDept = await deptOp(op); };
   const said = (wait, now) => () => (lastDept && lastDept.pending ? `Sent to a second Admin to confirm: ${wait}` : `${now} (applies to new work only)`);
-  on('[data-assign]', 'change', el => act(dop({ kind: 'assign', personId: el.dataset.assign, id: el.value || null }),
-    el.value ? said(`${pname(el.dataset.assign)} to ${dname(el.value)}`, `${pname(el.dataset.assign)} is now in ${dname(el.value)}`)
-      : said(`${pname(el.dataset.assign)} out of their department`, `${pname(el.dataset.assign)} has no department`)));
+  /* R16 N4 #1: leaving a department ends approving for it (the server does it in the same change and says so) */
+  const stops = (personId, toId) => {
+    const p = people().find(x => x.id === personId), from = p && p.department ? depts().find(d => d.name === p.department) : null;
+    return from && from.id !== toId && (from.approvers || []).includes(personId) ? `; ${pname(personId)} stops approving for ${from.name}` : '';
+  };
+  on('[data-assign]', 'change', el => { const tail = stops(el.dataset.assign, el.value || null); act(dop({ kind: 'assign', personId: el.dataset.assign, id: el.value || null }),
+    el.value ? said(`${pname(el.dataset.assign)} to ${dname(el.value)}${tail}`, `${pname(el.dataset.assign)} is now in ${dname(el.value)}${tail}`)
+      : said(`${pname(el.dataset.assign)} out of their department${tail}`, `${pname(el.dataset.assign)} has no department${tail}`)); });
   on('[data-dept-add-form]', 'submit', (el, e) => {
     e.preventDefault();
     const name = el.querySelector('[name=name]').value.trim();
@@ -480,7 +503,8 @@ export function bind(root, params) {
     e.preventDefault();
     const id = el.dataset.deptAssignForm, personId = el.querySelector('[name=personId]').value;
     if (!personId) { toast('Choose a person.'); return; }
-    act(dop({ kind: 'assign', personId, id }), said(`${pname(personId)} to ${dname(id)}`, `${pname(personId)} is now in ${dname(id)}`));
+    const tail = stops(personId, id);
+    act(dop({ kind: 'assign', personId, id }), said(`${pname(personId)} to ${dname(id)}${tail}`, `${pname(personId)} is now in ${dname(id)}${tail}`));
   });
   /* R14 (Jordan): a second Admin confirms a pending move with the extra sign-in check, or anyone Admin cancels it */
   on('[data-pend-confirm]', 'click', async el => {

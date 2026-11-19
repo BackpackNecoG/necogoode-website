@@ -225,7 +225,7 @@ The seed carries dated facts for this (business-day offsets): task `createdAt`/`
 | Expected finish | Dec 7 → Dec 9: moved 2 bd later | Dec 4 → Dec 7: moved 1 bd later |
 | Compare | 0 done this week vs 3 the week before | 3 done last week vs 2 the week before |
 
-**Overall** (projectTruth today): label "Some tasks late"; "Expected Dec 9, 14 business days before the Dec 30 deadline"; "Higher budget need expected: expected cost $48,847 against the $48,000 budget ($847 over)". **Common areas of concern:** "Banking (risk area): 4 of the 5 late or blocked tasks", "The “Capture banking details” step: 3 of the 5 late or blocked tasks", "IT team: 2 of the 5 late or blocked tasks".
+**Overall** (projectTruth today): label "Some tasks late"; "Expected Dec 9, 14 business days before the Dec 30 deadline"; "Higher budget need expected: expected cost $48,847 against the $48,000 budget ($847 over)". **Common areas of concern:** "Banking (risk area): 4 of the 5 tasks late or held up", "The “Capture banking details” step: 3 of the 5 tasks late or held up", "IT team: 2 of the 5 tasks late or held up" (R16 N1: wording only, in the header's unit; the counts are unchanged).
 
 **Since last report** = Mon Nov 16 – Tue Nov 17 (last report Fri Nov 13). Email subject: "Vendor Onboarding Modernization: status, week of Nov 16".
 

@@ -389,6 +389,38 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await page.setViewportSize({ width: 1440, height: 1000 }); await settle(200);
   await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
 
+  /* R16 (N1 #6, Jordan 3): the launch owner changes hands only through Change the plan, approved by the sponsor/Admin */
+  await page.goto(`${ROOT}/project/${PRJ}`); await page.waitForSelector('[data-settings]', { timeout: 30000 }); await settle(500);
+  await page.click('[data-settings]'); await page.waitForSelector('.overlay [data-set-pm]');
+  ok(await page.$eval('.overlay [data-set-lo]', el => el.readOnly) && !(await page.$('.overlay select[name="releaseManager"]')), 'R16: settings show the launch owner read-only on a planned project');
+  await page.click('.overlay [data-act="handover-lo"]'); await page.waitForSelector(wiz);
+  ok(await page.isChecked(`${wiz} input[name="kind"][value="launchOwner"]`), '“Hand over the launch owner” opens Change the plan on that hand-over');
+  await page.fill('#chg-reason', 'Leo runs launch day');
+  await next();
+  await page.selectOption(`${wiz} select[name="lo"]`, 'dk');
+  await next();
+  const v16 = await page.textContent('[data-chg-verdict]');
+  ok(/Needs approval from/.test(v16) && /launch owner changes \(.+ → Dev Kumar\)/.test(v16), 'the launch-owner hand-over needs approval: ' + v16);
+  await page.setViewportSize({ width: 390, height: 844 }); await settle(300);
+  ok(await noOverflow(), 'launch-owner hand-over preview: no horizontal overflow at 390');
+  await page.screenshot({ path: `${SHOTS}/r16-launch-owner-390.png` });
+  await page.setViewportSize({ width: 1366, height: 900 }); await settle(300);
+  await page.screenshot({ path: `${SHOTS}/r16-launch-owner-1366.png` });
+  await page.setViewportSize({ width: 1440, height: 1000 }); await settle(200);
+  await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
+  /* R16 (N1 #7, PMO re-test 10): the launch window moves here; a day off is refused, after the deadline needs approval */
+  await page.click('[data-chg-open]'); await page.waitForSelector(wiz);
+  await page.check(`${wiz} input[name="kind"][value="launchWindow"]`);
+  await page.fill('#chg-reason', 'Vendor freeze');
+  await next();
+  const tgt = await page.evaluate(async p => { const { store } = await import('/concepts/pmoflow/app/store.js'); return store.get('project', p).target; }, PRJ);
+  const late = await page.evaluate(t => PMOEngine.addBusinessDays(t, 3), tgt);
+  await page.fill(`${wiz} input[name="lwday"]`, late);
+  await next();
+  const v16b = await page.textContent('[data-chg-verdict]');
+  ok(/Needs approval/.test(v16b) && /launch window .+ is after the .+ deadline/.test(v16b), 'a launch window after the deadline needs approval: ' + v16b);
+  await page.click(`${wiz} [data-w="cancel"]`); await settle(200);
+
   ok(errors.length === 0, 'zero console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);

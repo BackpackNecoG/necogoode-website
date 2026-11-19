@@ -173,7 +173,7 @@ function editsListHTML(c) {
     const w = store.get('workItem', e.id) || {};
     const s0 = st ? st.from : w.start, s1 = st ? st.to : w.start;
     const started = !st && w.status && w.status !== 'idle';
-    return `“${esc(e.label || w.title || 'a task')}”: ${esc(fmt(s0))} – ${esc(fmt(e.from))} → <b>${esc(fmt(s1))} – ${esc(fmt(e.to))}</b> <small class="hint">(knock-on: ${started ? 'already started, so only the due date moves' : 'it waits on the moved work, same length'})</small>`;
+    return `“${esc(e.label || w.title || 'a task')}”: ${esc(fmt(s0))} – ${esc(fmt(e.from))} → <b>${esc(fmt(s1))} – ${esc(fmt(e.to))}</b> <small class="hint">(${e.waits === false ? 'moved: it is now expected to finish later' : `knock-on: ${started ? 'already started, so only the due date moves' : 'it waits on the moved work, same length'}`})</small>`;
   };
   return `<ul class="chg-edits" data-chg-edits>${shown.map(e => `<li class="${e.auto ? 'auto' : ''}" ${e.knock ? `data-chg-knock="${esc(e.id)}"` : ''}>${e.knock && e.field === 'due' ? knockLine(e) : esc(C().editText(e, store.state.docs, E()))}${e.auto && !e.knock ? ' <small class="hint">(automatic)</small>' : ''}</li>`).join('')}</ul>`;
 }
@@ -196,7 +196,7 @@ function entryHTML(c, open, here) {
   /* R13 #3: the requester never decides their own change */
   const canDecide = c.status === 'proposed' && c.requestedBy !== me && C().pendingApprovers(c).some(a => a.person === me);
   const wait = c.status === 'proposed' ? C().waitingText(c, store.state.docs) : '';
-  const tol = c.tolerance ? (c.tolerance.within ? '<span class="chip chg-ok">Within tolerance</span>' : `<span class="chip chg-over" title="${esc(c.tolerance.reasons.join(' '))}">Needed approval</span>`) : '';
+  const tol = c.tolerance ? (c.tolerance.within ? '<span class="chip chg-ok" data-chg-noappr>Within tolerance · no approval needed</span>' : `<span class="chip chg-over" title="${esc(c.tolerance.reasons.join(' '))}">Needed approval</span>`) : '';
   return `<details class="chg-entry" data-chg="${esc(c.id)}" ${open || openIds.has(c.id) ? 'open' : ''}>
     <summary><div class="chg-sum"><div class="chg-sum-t"><b data-chg-title>${esc(c.title)}</b>${statusBadge(c)}${c.linkedFrom ? '' : tol}${fromChip}${c.fromSync ? `<span class="chip chg-from" data-chg-sync>from ${esc(C().syncSourceText(c))}</span>` : ''}</div>
       <div class="chg-sum-s">“${esc(c.reason)}”${c.category ? ` · ${esc(catLabel(c.category))}` : ''} · ${esc(C().requesterText ? C().requesterText(c, store.state.docs) : pname(c.requestedBy))} · ${esc(fmtTime(c.requestedAt))}</div>
@@ -323,7 +323,7 @@ export async function openChangeWizard(projectId, preset) {
   const open = tasks.filter(w => w.status !== 'done');
   const S = {
     step: 0, kinds: new Set(preset.kinds || (preset.taskId ? ['dates'] : [])), reason: preset.reason || '', category: preset.category || '', title: '',
-    dates: {}, owners: {}, removes: new Set(), adds: [], picks: new Set((preset.suggestions || []).map(s => s.id)), budget: '', target: '', pm: preset.pm || '', shiftNote: '',
+    dates: {}, owners: {}, removes: new Set(), adds: [], picks: new Set((preset.suggestions || []).map(s => s.id)), budget: '', target: '', pm: preset.pm || '', lo: preset.launchOwner || '', lwDay: preset.lwDay || '', lwTime: preset.lwTime || '', shiftNote: '',
     errors: [], built: null, im: null, need: null, busy: false,
   };
   /* R14: several tasks' new dates at once (auto-schedule, a refused batch) */
@@ -362,6 +362,8 @@ export async function openChangeWizard(projectId, preset) {
       if (mb.querySelector('[name="budget"]')) S.budget = val('budget');
       if (mb.querySelector('[name="target"]')) S.target = val('target');
       if (mb.querySelector('[name="pm"]')) S.pm = val('pm');
+      if (mb.querySelector('[name="lo"]')) S.lo = val('lo');
+      if (mb.querySelector('[name="lwday"]')) { S.lwDay = val('lwday'); S.lwTime = val('lwtime'); }
     }
   }
   function editsOf() {
@@ -376,6 +378,8 @@ export async function openChangeWizard(projectId, preset) {
     if (S.kinds.has('budget') && S.budget !== '') ed.push({ op: 'set', type: 'project', id: projectId, field: 'budget', to: Number(S.budget) });
     if (S.kinds.has('deadline') && S.target) ed.push({ op: 'set', type: 'project', id: projectId, field: 'target', to: S.target });
     if (S.kinds.has('pm') && S.pm) ed.push({ op: 'set', type: 'project', id: projectId, field: 'owner', to: S.pm });
+    if (S.kinds.has('launchWindow') && S.lwDay) ed.push({ op: 'set', type: 'project', id: projectId, field: 'launchWindow', to: (S.lwDay + ' ' + String(S.lwTime || '').trim()).trim() });
+    if (S.kinds.has('launchOwner') && S.lo) ed.push({ op: 'set', type: 'project', id: projectId, field: 'releaseManager', to: S.lo });
     return ed;
   }
 
@@ -412,6 +416,25 @@ export async function openChangeWizard(projectId, preset) {
         <select id="chg-pm" name="pm"><option value="">Choose a person</option>${cands.map(p => `<option value="${esc(p.id)}" ${S.pm === p.id ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
         <div class="hint" data-pm-who>${esc(sp ? `${pname(sp)} (the sponsor) approves the hand-over.` : 'No sponsor is set, so an Admin approves the hand-over.')} ${esc(pname(j.owner))} stays on the team.</div></section>`);
     }
+    if (S.kinds.has('launchWindow')) {
+      /* R16 (N1 #7): the launch window moves only here: never onto a day off, and after the deadline the sponsor approves */
+      const cw = String((j.cutover && j.cutover.window) || '');
+      const m = /^(\d{4}-\d{2}-\d{2})\s*(.*)$/.exec(cw);
+      const d0 = S.lwDay || (m ? m[1] : ''), t0 = S.lwTime || (m ? m[2] : '');
+      parts.push(`<section class="chg-ed" data-ed="launchWindow"><h4>Move the launch window</h4><div class="frow"><div class="field"><label for="chg-lwday">Launch day <small class="hint">now ${esc(cw || 'not set')}</small></label><input id="chg-lwday" type="date" name="lwday" value="${esc(d0)}" data-dayoff /></div>
+        <div class="field"><label for="chg-lwtime">Hours</label><input id="chg-lwtime" name="lwtime" maxlength="60" value="${esc(t0)}" placeholder="e.g. 07:30–10:00" /></div></div>
+        <div class="hint" data-lw-who>A day off can’t be picked. A launch day after the ${esc(fmt(j.target))} deadline needs the sponsor’s approval.</div></section>`);
+    }
+    if (S.kinds.has('launchOwner')) {
+      /* R16 (N1 #6, Jordan 3): the launch owner (the only person who can go live or roll back) changes hands only through a
+         plan change the sponsor (or, with none set, an Admin) approves, never either launch owner */
+      const sp = C().sponsorOf(store.state.docs, j);
+      const lo = j.releaseManager || j.owner;
+      const cands = store.state.people.filter(p => p.id !== lo && p.id !== sp);
+      parts.push(`<section class="chg-ed" data-ed="launchOwner"><h4>Hand over the launch owner role</h4><div class="field"><label for="chg-lo">New launch owner <small class="hint">now ${esc(pname(lo))}</small></label>
+        <select id="chg-lo" name="lo"><option value="">Choose a person</option>${cands.map(p => `<option value="${esc(p.id)}" ${S.lo === p.id ? 'selected' : ''}>${esc(p.name)} — ${esc(p.role)}</option>`).join('')}</select></div>
+        <div class="hint" data-lo-who>The launch owner is the only person who can go live or roll back. ${esc(sp ? `${pname(sp)} (the sponsor) approves the hand-over.` : 'No sponsor is set, so an Admin approves the hand-over.')}</div></section>`);
+    }
     if (S.kinds.has('deadline')) parts.push(`<section class="chg-ed" data-ed="deadline"><h4>Change deadline</h4><div class="field"><label>New deadline <small class="hint">now ${esc(fmt(j.target))}</small></label><input type="date" name="target" value="${esc(S.target || j.target || '')}" data-dayoff /></div></section>`);
     return parts.join('') || '<div class="hint">Go back and pick what’s changing.</div>';
   }
@@ -420,7 +443,7 @@ export async function openChangeWizard(projectId, preset) {
     /* R13 #3: one name per person (with every role they decide in); the requester is never among them */
     const who = need.approvers.map(a => `${pname(a.person)} (${roleOf(a)})`);
     return `<p class="chg-sentence" data-chg-preview-sentence>${esc(im.sentence)}</p>
-      ${need.within ? '<div class="chg-verdict ok" data-chg-verdict="within">Within tolerance: it applies as soon as you confirm.</div>'
+      ${need.within ? '<div class="chg-verdict ok" data-chg-verdict="within">Within tolerance, so no approval is needed: it applies as soon as you confirm.</div>'
         : need.blocked ? `<div class="chg-verdict over" data-chg-verdict="blocked" role="alert"><b>${esc(need.blocked)}</b><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`
         : `<div class="chg-verdict over" data-chg-verdict="approval"><b>Needs approval from ${esc(joinAnd(who))}.</b> <span class="hint">You asked for it, so you don’t approve it yourself.</span><ul>${need.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>`}
       <h4>What changes</h4>${editsListHTML(S.built)}

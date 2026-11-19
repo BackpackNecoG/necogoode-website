@@ -39,8 +39,18 @@ export function routingRows(p) {
 export function deptApprovers(name) {
   const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase());
   if (!d) return { dept: null, people: [], named: false };
+  /* R16 (BPM): the engine's one list (E.departmentApprovers: named approvers still in the department, else its members) */
+  const one = eng('departmentApprovers', [docs(), d.name], null);
+  if (one && Array.isArray(one.names)) return { dept: d, people: one.names, named: one.source === 'named' };
   const named = (d.approvers || []).length > 0;
   return { dept: d, people: named ? d.approverNames || [] : (d.people || []).map(x => x.name), named };
+}
+/* R16 (BPM): the open projects that change this process, each with who can approve this department's part there
+   (E.partApprovers: the one list Launch shows, chosen approvers included, the PM and launch owner left out) */
+export function partsFor(pid, dept) {
+  if (!pid || !dept) return [];
+  return store.list('project', x => (x.processes || []).includes(pid) && x.status !== 'live' && x.status !== 'cancelled')
+    .map(prj => ({ prj, pa: eng('partApprovers', [docs(), prj, dept], null) })).filter(x => x.pa);
 }
 /* open invites that name a department (Admin's invite list rides along in the workspace settings doc) */
 const invitedTo = name => { const d = (eng('departments', [docs()], []) || []).find(x => String(x.name).toLowerCase() === String(name || '').toLowerCase()); const ws = store.get('workspace', 'settings'); return d && ws && Array.isArray(ws.invites) ? ws.invites.filter(i => i && i.departmentId === d.id).map(i => i.email) : []; };
@@ -49,20 +59,30 @@ const proposedFor = name => { const d = (eng('departments', [docs()], []) || [])
 export function approversHTML(rt, opts) {
   opts = opts || {};
   /* R14: the engine marks a department with nobody to approve (teamRouting noApprover, Launch's rule) */
-  const nobody = r => !!r.department && (r.noApprover === true || (r.noApprover == null && !deptApprovers(r.department).people.length));
-  const gaps = rt.teams.filter(r => !r.department || nobody(r)).length;
+  /* R16 (BPM): with the process id, a part counts as approvable exactly when Launch says so: in every open project that
+     changes this process somebody can approve it (a person chosen on Launch counts; the PM never does) */
+  const parts = r => opts.pid && r.department ? partsFor(opts.pid, r.department) : [];
+  const nobody = r => { if (!r.department) return false; const ps = parts(r); if (ps.length) return ps.some(x => !x.pa.eligible.length);
+    return r.noApprover === true || (r.noApprover == null && !deptApprovers(r.department).people.length); };
+  const unmappedN = rt.teams.filter(r => !r.department).length, nobodyN = rt.teams.filter(nobody).length;
+  const gaps = unmappedN + nobodyN;
+  const projNote = r => parts(r).filter(x => { const base = deptApprovers(r.department).people; return x.pa.names.join() !== base.join(); })
+    .map(x => `<div class="s d-apr-proj" data-apr-proj="${esc(x.prj.id)}">In ${esc(x.prj.name || 'a project')}: ${esc(x.pa.eligible.length ? x.pa.names.join(', ') + (x.pa.source === 'chosen' ? ' (chosen on Launch)' : '') + ' can approve' : 'nobody can approve yet' + (x.pa.notEligible.length ? ' (' + x.pa.notEligible.map(n => n.text.replace(/\.$/, '')).join('; ') + ')' : ''))}</div>`).join('');
   const row = r => {
     const empty = nobody(r), who = r.department ? deptApprovers(r.department) : null;
+    const pn = projNote(r);
     const sub = !r.department ? `<div class="s d-apr-ask" data-apr-ask>${esc(r.text || 'Choose who approves for ' + r.team)}</div>`
       : empty ? `<div class="s d-apr-ask" data-apr-nobody="${esc(r.department)}">Nobody in ${esc(r.department)} can approve this part yet.${proposedFor(r.department).length ? ` <span data-apr-proposed>${esc(proposedFor(r.department).join(', '))} ${proposedFor(r.department).length === 1 ? 'is' : 'are'} proposed and wait${proposedFor(r.department).length === 1 ? 's' : ''} for a second Admin to confirm.</span>` : ''}${invitedTo(r.department).length ? ` Invited: ${esc(invitedTo(r.department).join(', '))} (they can approve once they join).` : ''}${opts.editable ? ` <button type="button" class="is-linkbtn d-apr-name" data-apr-name="${esc(r.department)}">Name an approver</button>` : ''}</div>`
       : who && who.people.length ? `<div class="s d-apr-who" data-apr-who>${esc(who.named ? 'Approves: ' : 'Any of: ')}${esc(who.people.slice(0, 3).join(', '))}${who.people.length > 3 ? ` +${who.people.length - 3}` : ''}</div>` : '';
+    const subAll = sub + pn;
     return `<div class="row d-apr ${r.department && !empty ? '' : 'd-apr-gap'}" data-apr-team="${esc(r.team)}" data-apr-dept="${esc(r.department || '')}" ${empty ? 'data-apr-empty' : ''}>
-      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${sub}</div>
+      <div style="min-width:0"><div class="t">${esc(r.team)}</div>${subAll}</div>
       <div class="r">${opts.editable ? `<select class="d-sel" data-apr-sel="${esc(r.team)}" aria-label="Who approves for ${esc(r.team)}"><option value="" ${r.department ? '' : 'selected'}>Choose…</option>${rt.departments.map(d => `<option value="${esc(d)}" ${d === r.department ? 'selected' : ''}>${esc(d)}</option>`).join('')}<option value="${ADD_DEPT}">+ Add a department…</option></select>`
         : r.department ? `<span data-apr-shown>${esc(r.department)}</span>` : '<span class="hint">Not chosen</span>'}</div></div>`;
   };
   /* one sentence that agrees with Launch: a department nobody can approve for is a gap, never "has an approving department" */
-  const text = rt.text;
+  const text = !opts.pid || !rt.teams.length ? rt.text : gaps ? `${rt.teams.length} team${rt.teams.length === 1 ? '' : 's'} · ${[unmappedN ? `${unmappedN} need${unmappedN === 1 ? 's' : ''} an approving department` : '', nobodyN ? `${nobodyN} ha${nobodyN === 1 ? 's' : 've'} nobody to approve` : ''].filter(Boolean).join(' · ')}`
+    : `All ${rt.teams.length} team${rt.teams.length === 1 ? '' : 's'} have someone to approve`;
   return `<div class="${opts.inline ? 'is-apr' : 'card'}" data-approvers="${rt.teams.length}" data-apr-gaps="${gaps}">${opts.inline ? '<h4>Who approves each team’s part</h4>' : `<h3>Who approves each team’s part${gaps ? ` <span class="n d-apr-n">${gaps} to choose</span>` : ''}</h3>`}
     <div class="hint" style="margin:-2px 0 8px">Before launch, the department you pick signs off that team’s steps. Nothing is picked for you${opts.inline ? '; you can change it later on the process' : ''}.</div>
     ${rt.teams.map(row).join('') || '<div class="s">No teams named yet. Add a team to a step and it appears here.</div>'}${text && !opts.inline ? `<div class="hint" data-apr-text style="margin-top:6px">${esc(text)}</div>` : ''}
@@ -563,7 +583,13 @@ function gwChangeNote(n, ctx) {
     const PI = typeof window !== 'undefined' && window.PMOImport;
     const tha = PI && PI.thresholdOf ? PI.thresholdOf(a.title) : null, thn = PI && PI.thresholdOf ? PI.thresholdOf(n.title) : null;
     const money = v => '$' + Number(v).toLocaleString('en-US');
-    if (tha && thn && tha.amount !== thn.amount) lines.push(`threshold: was ${money(tha.amount)} → now ${money(thn.amount)}`);
+    /* R16 (BPM): every number the choice tests ("… and risk score 60 or below" → 65), not only the first amount */
+    const all = PI && PI.thresholdsOf ? [PI.thresholdsOf(a.title), PI.thresholdsOf(n.title)] : null;
+    if (all && all[0].length && all[1].length) {
+      const fmtN = x => x.money ? money(x.amount) : Number(x.amount).toLocaleString('en-US');
+      all[1].forEach((x, i) => { const y = all[0].find(z => z.subject === x.subject) || (all[0].length === all[1].length ? all[0][i] : null);
+        if (y && (y.amount !== x.amount || y.op !== x.op)) lines.push(`threshold${all[1].length > 1 ? ` (${x.subject})` : ''}: was ${fmtN(y)} → now ${fmtN(x)}`); });
+    } else if (tha && thn && tha.amount !== thn.amount) lines.push(`threshold: was ${money(tha.amount)} → now ${money(thn.amount)}`);
     if ((a.title || '') !== (n.title || '')) lines.push(`question: was “${a.title || ''}” → now “${n.title || ''}”`);
     const la = (a.branches || []).map(b => (b && b.label) || ''), ln = (n.branches || []).map(b => (b && b.label) || '');
     ln.forEach((l, i) => { if (la[i] != null && la[i] !== l) lines.push(`path: was “${la[i]}” → now “${l}”`); });
@@ -1191,10 +1217,88 @@ export function parseBpmn(text, people, me) {
   allNodes(list).forEach(n => isGw(n) && n.branches.forEach(b => { if (b.goto == null) delete b.goto; }));
   if (!trigger) list.unshift({ id: store.newId('n'), type: 'trigger', title: 'Process starts', owner: me, touches: [], data: [] });
   if (!list.length || list[list.length - 1].type !== 'end') list.push({ id: store.newId('n'), type: 'end', title: 'Process complete' });
-  const rawName = (proc.getAttribute('name') || doc.documentElement.getAttribute('name') || '').trim();
+  /* R16 (BPM): a file whose process has no name takes its pool's (the participant that points at the process) */
+  const pool = [...doc.getElementsByTagNameNS('*', 'participant')].find(pt => pt.getAttribute('processRef') === proc.getAttribute('id'));
+  const rawName = (proc.getAttribute('name') || (pool && pool.getAttribute('name')) || doc.documentElement.getAttribute('name') || '').trim();
+  /* R16 (BPM): a file with no data objects still names its information in the task names ("Pull risk score from credit
+     bureau"): proposed as new information on the first step that names it (never linked to workspace information) */
+  const PIm = typeof window !== 'undefined' ? window.PMOImport : null;
+  const produced = {}, inferred = new Set();
+  if (!fromPmo && !Object.keys(doName).length && PIm && PIm.taskInfo) {
+    flat(list).forEach(st => { if (!isStep(st) || st.type !== 'step') return;
+      PIm.taskInfo(st.title).forEach(t => { const k = t.name.toLowerCase(); const isNew = !newByName[k]; const id = resolveRef({ name: t.name });
+        if (id && !(st.data || []).includes(id)) st.data = (st.data || []).concat([id]);
+        if (id && isNew) inferred.add(id);
+        if (id && isNew && t.produced) produced[id] = st.id; }); });
+  }
   /* only data a node still references after the walk is created */
   const usedIds = new Set(allNodes(list).flatMap(n => [...(n.data || []), ...(n.subs || []).flatMap(s => s.data || [])]));
-  return { placed, name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, folded, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)) };
+  return { placed, name: rawName.replace(/\s*\((to-be|as-is[^)]*|future|today[^)]*|released[^)]*)\)\s*$/i, ''), desc: (docText(proc) || '').replace(/\s*Exported from PMOFlow,[^.]*\.\s*$/, '').trim(), nodes: list, steps: stepN, gateways: gwN, unknownLanes: [...unknownLanes], roles: laneRoles, dropped, folded, laneOwned: laneHit, extIds, newData: newData.filter(d => usedIds.has(d.id)).map(d => Object.assign(d, produced[d.id] ? { producedBy: produced[d.id] } : {}, inferred.has(d.id) ? { inferred: true } : {})) };
+}
+/* ---------- R16 N2 (Karen): "Do you already have these?" ----------
+   One screen, at import (Visio/BPMN) and at save (pasted procedure): each new piece of information gets one of three
+   answers, already filled in with the usual answer, so the visitor can just press the button:
+     have   "We have it"          the procedure runs today, so it is there (no setup task)
+     run    "Collected each run"  the vendor/customer sends it every time (never a setup task or a blocker)
+     notyet "Not yet"             a setup task ("Make X available") until someone makes it available
+   Information a step makes (the credit limit Credit sets) is "Made by step N": nobody collects it, nothing to answer. */
+export const HAVE_CHOICES = [['have', 'We have it'], ['run', 'Collected each run'], ['notyet', 'Not yet']];
+const HAVE_HINT = { have: 'Already there today', run: 'The vendor or customer sends it every time', notyet: 'Becomes a setup task' };
+export function haveListHTML(items) {
+  if (!(items || []).length) return '';
+  const rows = items.map((x, i) => x.choice === 'made'
+    ? `<li class="d-have-row made" data-have-row="${i}" data-have-choice="made"><div class="d-have-nm"><b>${esc(x.name)}</b><small>${esc(x.why || '')}</small></div><span class="chip d-have-made" data-have-made>${esc(x.madeText || 'Made by a step')}</span></li>`
+    : `<li class="d-have-row" data-have-row="${i}" data-have-choice="${esc(x.choice)}"><div class="d-have-nm"><b>${esc(x.name)}</b>${x.why ? `<small>${esc(x.why)}</small>` : ''}</div>
+      <div class="d-have-opts" role="radiogroup" aria-label="${esc(x.name)}">${HAVE_CHOICES.map(([k, l]) => `<label class="d-have-opt${x.choice === k ? ' on' : ''}" title="${esc(HAVE_HINT[k])}"><input type="radio" name="have-${i}" value="${k}" data-have="${i}" ${x.choice === k ? 'checked' : ''}><span>${esc(l)}</span></label>`).join('')}</div></li>`).join('');
+  return `<div class="d-have" data-have-list="${items.length}"><h4>Do you already have these?</h4>
+    <p class="hint" data-have-hint>We picked the usual answer for each one. Change any that’s wrong, or just carry on. Only “Not yet” becomes a setup task.</p>
+    <ul>${rows}</ul><div class="hint d-have-sum" data-have-sum>${esc(haveSummary(items))}</div></div>`;
+}
+/* the usual answer for each piece of information a diagram names: made by the step that makes it, collected each run
+   when the vendor (customer, …) sends it, else "We have it" (the import reads how the process works today) */
+export function haveDefaults(list, nodes) {
+  const PI = typeof window !== 'undefined' ? window.PMOImport : null;
+  const steps = flat(nodes).filter(isStep);
+  const all = steps.map(n => n.title).join('. ');
+  (list || []).forEach(d => {
+    if (d.choice) return;
+    const k = steps.findIndex(n => (n.data || []).includes(d.id) || (n.subs || []).some(x => (x.data || []).includes(d.id)));
+    const st = steps[k];
+    d.why = st ? `Used in step ${k + 1}: ${st.title}` : '';
+    if (d.producedBy && st) { const m = steps.findIndex(n => n.id === d.producedBy); d.choice = 'made'; d.madeText = `Made by step ${(m >= 0 ? m : k) + 1}`; return; }
+    const pr = PI && PI.perRunOf ? PI.perRunOf(d.name, st && st.ownerRole, st ? st.title : '', all) : null;
+    if (pr) { d.choice = 'run'; d.perRunText = pr.perRunText; return; }
+    d.choice = 'have';
+  });
+  return list;
+}
+/* R16 (BPM): "Made by step 6" for information a step produces, numbered on the map shown (a Future step keeps `from`) */
+export function madeLabel(x, nodes) {
+  const st = flat(nodes || []).filter(isStep); const k = st.findIndex(n => n.id === x.producedBy || n.from === x.producedBy);
+  return k >= 0 ? `Made by step ${k + 1}` : 'Made by a step';
+}
+export function haveSummary(items) {
+  const c = k => (items || []).filter(x => x.choice === k).length;
+  const bits = [c('have') && `${c('have')} we have`, c('run') && `${c('run')} collected each run`, c('made') && `${c('made')} made by a step`, c('notyet') && `${c('notyet')} not yet`].filter(Boolean);
+  return bits.length ? `${bits.join(' · ')}. ${c('notyet') ? `${c('notyet')} setup task${c('notyet') === 1 ? '' : 's'} will be suggested.` : 'No setup tasks needed.'}` : '';
+}
+/* live: the radios update their row and the summary without re-drawing the dialog */
+export function bindHaveList(root, items) {
+  root.querySelectorAll('[data-have]').forEach(r => r.onchange = () => {
+    const x = items[+r.dataset.have]; if (!x || !r.checked) return; x.choice = r.value;
+    const row = r.closest('[data-have-row]'); row.dataset.haveChoice = r.value;
+    row.querySelectorAll('.d-have-opt').forEach(l => l.classList.toggle('on', l.querySelector('input').checked));
+    const sum = root.querySelector('[data-have-sum]'); if (sum) sum.textContent = haveSummary(items);
+  });
+}
+export function readHaveList(root, items) { if (root) root.querySelectorAll('[data-have]:checked').forEach(r => { const x = items[+r.dataset.have]; if (x && x.choice !== 'made') x.choice = r.value; }); return items; }
+/* the saved fields for each answer (the engine reads avail/perRun; producedBy names the step that makes it) */
+export function haveFields(x, opts) {
+  opts = opts || {};
+  if (x.choice === 'made') return { avail: 'live', producedBy: opts.producedBy || undefined, source: x.madeText || 'Made by a step', note: `${x.madeText || 'Made by a step'} in this process, so nobody collects it and there is nothing to set up.` };
+  if (x.choice === 'run') return { avail: 'live', perRun: true, source: 'Collected each run', note: x.perRunText || 'Collected each time the process runs, so it is not a one-off setup task.' };
+  if (x.choice === 'notyet') return { avail: 'missing', source: '', note: `Marked “Not yet” when the process was ${opts.verb || 'saved'}: someone needs to make it available before launch.` };
+  return { avail: 'live', source: 'Already in use', haveAnsweredBy: store.state.me, note: `Marked “We have it” when the process was ${opts.verb || 'saved'}: today's process already uses it.` };
 }
 /* create the data elements an import references by name but this workspace does not have yet */
 /* R14 (BPM): its owner is whoever does the first step that uses it (the person, else the role), never the importer */
@@ -1204,7 +1308,10 @@ export async function createImportedData(list, fileName, nodes) {
     if (store.get('dataElement', d.id)) continue;
     const st = steps.find(n => (n.data || []).includes(d.id) || (n.subs || []).some(x => (x.data || []).includes(d.id)));
     const own = !st ? {} : String(st.ownerRole || '').trim() ? { ownerRole: st.ownerRole } : st.owner ? { owner: st.owner } : {};
-    await store.save('dataElement', d.id, Object.assign({ id: d.id, name: d.name }, own, { source: '', avail: 'missing', note: `Created by the import of ${fileName}.`, fields: [], samples: [], discovered: [] }), `Created information '${d.name}' from the import of ${fileName}`);
+    /* R16: the answer given on "Do you already have these?" (an item with no answer keeps the R14 "not available yet") */
+    const ans = d.choice ? haveFields(d, { producedBy: d.producedBy, verb: 'imported' }) : { source: '', avail: 'missing', note: `Created by the import of ${fileName}.` };
+    Object.keys(ans).forEach(k => ans[k] === undefined && delete ans[k]);
+    await store.save('dataElement', d.id, Object.assign({ id: d.id, name: d.name }, own, ans, { fields: [], samples: [], discovered: [] }), `Created information '${d.name}' from the import of ${fileName}${d.choice ? ` (${({ have: 'we have it', run: 'collected each run', notyet: 'not yet', made: (d.madeText || 'made by a step').toLowerCase() })[d.choice]})` : ''}`);
   }
 }
 
@@ -1305,7 +1412,9 @@ export function render(params) {
   /* R12 #7: the header counters describe the map being shown (Today counts Today's steps and information) */
   const kSteps = flat(view.nodes), kData = [...new Set(kSteps.flatMap(s => s.data || []))], kLive = kData.filter(d => availOf(d) === 'live').length;
   const kName = view.key === 'tobe' ? 'Future' : view.key === 'asis' ? 'Today' : view.key === 'compare' ? view.B.label : 'Released';
-  const kpis = adv ? `<div class="kpis" data-kpis="${esc(view.key)}"><div class="kpi" data-kpi-steps="${kSteps.length}"><b>${kSteps.length}</b><span>${esc(kName)} steps</span></div>${view.key === 'tobe' || mode === 'diff' ? `<div class="kpi" data-kpi-diff><b>${stepChangeCounts(p).new}+${stepChangeCounts(p).changed}</b><span>New + changed</span></div>` : ''}<div class="kpi" data-kpi-data="${kLive}/${kData.length}"><b>${kLive}/${kData.length}</b><span>Information available</span></div></div>` : '';
+  const kpis = adv ? `<div class="kpis" data-kpis="${esc(view.key)}"><div class="kpi" data-kpi-steps="${kSteps.length}"><b>${kSteps.length}</b><span>${esc(kName)} steps</span></div>${view.key === 'tobe' || mode === 'diff' ? (() => { const c = stepChangeCounts(p); const nw = c.new + c.choicesNew, ch = c.changed + c.choices;
+      /* R16 (BPM): changed choices count here too, the same as "What changed" (it was "0+0" beside 2 changed choices) */
+      return `<div class="kpi" data-kpi-diff data-kpi-new="${nw}" data-kpi-changed="${ch}" title="${esc(c.text || 'Nothing changed yet')}"><b>${nw}+${ch}</b><span>New + changed${c.choices || c.choicesNew ? ' (steps and choices)' : ''}</span></div>`; })() : ''}<div class="kpi" data-kpi-data="${kLive}/${kData.length}"><b>${kLive}/${kData.length}</b><span>Information available</span></div></div>` : '';
   /* phone: everything but the tabs collapses into one summary row so the map starts near the top */
   const vlabel = rel ? 'Released v' + rel.version : mode === 'compare' ? 'Compare' : tabOn('asis') ? 'Today' : tabOn('tobe') ? 'Future' : mode === 'diff' ? 'What changed' : mode === 'lanes' ? 'By person' : mode === 'raci' ? 'RACI' : 'Who’s affected';
   const vcount = flat(view.nodes).length;
@@ -1373,7 +1482,7 @@ export function render(params) {
     const x = dataEl(d) || {}; const u = usage(d, pid);
     return `<div class="row click d-hlrow ${hl === d ? 'hl-on' : ''}" data-hl="${esc(d)}" tabindex="0" role="button" aria-pressed="${hl === d}" aria-label="Highlight steps using ${esc(x.name || d)}"><span style="margin-top:3px">${effDot(d)}</span>
       <div><div class="t">${esc(x.name || d)}</div><div class="s" data-side-owner>${adv ? esc(x.source || 'Source not set') + ' · ' : ''}${esc(dataOwnerName(x))}</div></div>
-      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(x.perRun && effAvail(d) === 'live' ? 'perrun' : availInfo(d).key)}">${esc(x.perRun && effAvail(d) === 'live' ? 'Collected each run' : avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
+      <div class="r"><a href="${link('/data/' + d)}" data-link style="color:var(--accent)" data-avail="${esc(x.producedBy && effAvail(d) === 'live' ? 'made' : x.perRun && effAvail(d) === 'live' ? 'perrun' : availInfo(d).key)}">${esc(x.producedBy && effAvail(d) === 'live' ? madeLabel(x, view.nodes) : x.perRun && effAvail(d) === 'live' ? 'Collected each run' : avText(d))} ›</a>${effAvail(d) === 'live' && adv ? `<div>${evidenceTag(x, true)}</div>` : ''}${adv ? `<div class="s" data-usage="${u.tobe.length}/${u.asis.length}" title="Steps in this process that use it">${esc(usageText(u))}</div>` : ''}</div></div>`;
   }).join('');
   /* teams involved: the "what starts it" tags count too */
   /* R9 §13: "Teams involved" lists teams only; a system named as a team moves to "Systems touched" */
@@ -1382,7 +1491,22 @@ export function render(params) {
   [...allNodes(view.nodes).filter(n => n.type === 'trigger'), ...vsteps].forEach(s => (s.touches || []).forEach(t => { if (isSys(t)) systems[t] = (systems[t] || 0) + 1; }));
   /* R13 #9: "Teams involved" is the engine's team list, the same one the approver panel shows (teams only: never a
      system, a document or a generic actor), most steps first */
-  const teamsInv = (routingRows(p).teams || []).slice().sort((a, b) => b.steps.length - a.steps.length);
+  /* R16 (Karen): a team's count is the steps it does on the map shown (the map's "Who"), so the numbers equal the map;
+     steps it is only tagged on ("notifies Purchasing") are counted apart ("+2 involved") */
+  const sameT = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  const doerTeams = st => eng('stepTeams', [docs(), p, Object.assign({}, st, { touches: [] })], []) || [];
+  const tagTeams = st => eng('stepTeams', [docs(), p, st], []) || [];
+  const teamCounts = team => {
+    const does = vsteps.filter(st => doerTeams(st).some(t => sameT(t, team))).length;
+    /* "what starts it" is not a step anyone does, but a team named on it is involved (R7) */
+    const trig = allNodes(view.nodes).filter(n => n.type === 'trigger');
+    const also = vsteps.filter(st => !doerTeams(st).some(t => sameT(t, team)) && tagTeams(st).some(t => sameT(t, team))).length
+      + trig.filter(n => (n.touches || []).some(t => sameT(t, team))).length;
+    const pl = n => `${n} step${n === 1 ? '' : 's'}`;
+    return { does, also, text: does ? `${pl(does)}${also ? ` +${also} involved` : ''}` : also ? `involved in ${pl(also)}` : '',
+      title: `Does ${pl(does)}${also ? `; named on ${pl(also)} another team does` : ''}` };
+  };
+  const teamsInv = (routingRows(p).teams || []).slice().sort((a, b) => teamCounts(b.team).does - teamCounts(a.team).does || teamCounts(b.team).also - teamCounts(a.team).also);
   const linked = projectsFor(pid);
   const drafts = (p.drafts || []).slice().reverse();
   const versionsCard = rel || (!adv && !drafts.length) ? '' : `<div class="card" data-versions><h3>Saved versions <span class="n">${(p.drafts || []).length}/${MAX_DRAFTS}</span></h3>${drafts.length ? drafts.map(d => `<div class="row" data-draft="${esc(d.id)}"><div style="min-width:0"><div class="t">${esc(d.name)}</div><div class="s">${esc(pname(d.by))} · ${esc(fmtTime(d.at))} · ${flat(d.tobe).length} Future steps</div></div>
@@ -1394,8 +1518,8 @@ export function render(params) {
   const sideHTML = `${blockCard}
     <div class="card" data-side-data="${view.key}"><h3>Information <span class="n">${dl.length}</span></h3><div class="hint" style="margin:-4px 0 8px">What the ${esc(vname)} steps need. Tap one to highlight the steps that use it.</div>${dataRows || '<div class="s">Add information to steps and this list builds itself.</div>'}
       ${rel || !adv ? '' : '<div style="margin-top:10px"><button class="btn sm" data-newdata>+ New information</button></div>'}</div>
-    ${teamsInv.length || adv ? `<div class="card" data-touches="${teamsInv.length}"><h3>Teams involved</h3><div class="chips">${teamsInv.map(x => `<span class="chip touch" data-touch="${esc(x.team)}" title="${x.steps.length} step${x.steps.length === 1 ? '' : 's'}">${esc(x.team)}${x.steps.length ? ` · ${x.steps.length} step${x.steps.length === 1 ? '' : 's'}` : ''}</span>`).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
-    ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor })}
+    ${teamsInv.length || adv ? `<div class="card" data-touches="${teamsInv.length}"><h3>Teams involved</h3><div class="hint" style="margin:-4px 0 8px">Steps each team does on the ${esc(vname)} map</div><div class="chips">${teamsInv.map(x => { const c = teamCounts(x.team); return `<span class="chip touch" data-touch="${esc(x.team)}" data-touch-does="${c.does}" data-touch-also="${c.also}" title="${esc(c.title)}">${esc(x.team)}${c.text ? ` · ${esc(c.text)}` : ''}</span>`; }).join('') || '<span class="s">No teams added yet.</span>'}</div></div>` : ''}
+    ${rel || mode === 'compare' ? '' : approversHTML(routingRows(p), { editable: editor, pid })}
     ${Object.keys(systems).length ? `<div class="card" data-systems><h3>Systems touched</h3><div class="chips">${Object.entries(systems).sort((a, b) => b[1] - a[1]).map(([t, c]) => `<span class="chip d-syschip" data-system="${esc(t)}">${esc(t)} · ${c} step${c === 1 ? '' : 's'}</span>`).join('')}</div></div>` : ''}
     ${versionsCard}
     <div class="card"><h3>Used in projects <span class="n">${linked.length}</span></h3>${linked.map(j => `<div class="row click" data-go="/project/${esc(j.id)}"><div><div class="t">${esc(j.name)}</div><div class="s">Target ${esc(fmt(j.target))}${j.status === 'live' ? ' · launched' : ''}</div></div><div class="r" style="color:var(--accent)">Open ›</div></div>`).join('') || '<div class="s">Not in a project yet.</div>'}
@@ -1774,17 +1898,20 @@ const countBits = c => [`<span data-imp-steps="${c.steps}"><b>${c.steps}</b> ste
 async function importPreview(r, fileName, kind, name) {
   const c = importCounts(r.nodes);
   const steps = flat(r.nodes);
-  const res = await modal({
+  const pr = modal({
     title: `Import ${kind === 'vsdx' ? 'a Visio diagram' : 'a diagram file'}`,
     body: `<p style="margin:0">We read <b>${esc(fileName)}</b>. Check what we found, then import it as a new process. You can change anything afterwards.</p>
       <div class="field"><label for="d-imp-name">Process name</label><input id="d-imp-name" name="pname" data-imp-name value="${esc(name)}" autocomplete="off" /></div>
       <div class="d-impsum" data-impsum data-imp-kind="${esc(kind)}">${countBits(c)}</div>
       <div class="d-imprev" data-imp-preview><ol>${steps.slice(0, 12).map(n => `<li><b>${esc(n.title)}</b>${n.ownerRole ? ` <span class="chip is-role">${esc(n.ownerRole)}</span>` : n.owner ? ` <span class="chip">${esc(pname(n.owner))}</span>` : ' <span class="hint">nobody yet</span>'}${(n.data || []).length ? ` <span class="hint">· ${n.data.length} information</span>` : ''}</li>`).join('')}${steps.length > 12 ? `<li class="hint">and ${steps.length - 12} more</li>` : ''}</ol></div>
       ${c.roles.length ? `<div class="hint" data-imp-roles>Who does them (from the lanes): ${esc(c.roles.join(', '))}. These are roles; pick a person for each step whenever you like.</div>` : ''}
-      ${r.newData.length ? `<div class="hint" data-imp-newdata="${r.newData.length}">New information in this process: ${esc(r.newData.map(d => d.name).join(', '))}. It starts as “${UNCHECKED}”.</div>` : ''}
+      ${r.newData.length ? `<div class="hint" data-imp-newdata="${r.newData.length}">New information in this process: ${esc(r.newData.map(d => d.name).join(', '))}.</div>${haveListHTML(r.newData)}` : ''}
       ${foldedHTML(r.folded)}${droppedHTML(r.dropped)}`,
     actions: [{ id: 'import', label: 'Import as a new process', primary: true }],
   });
+  const ov = [...document.querySelectorAll('.overlay')].pop(); if (ov) bindHaveList(ov, r.newData);
+  const res = await pr;
+  readHaveList(res.root, r.newData);
   return res.action === 'import' ? { name: String(res.form.pname || '').trim() || name } : null;
 }
 async function readDiagram(file) {
@@ -1838,6 +1965,7 @@ async function importFile(file, pid, vis) {
     if (pid) { await importVersion(pid, r, file.name); return; }
     /* the Visio page name, else the name typed in "Map a process", else the file name */
     const guess = r.name || typedImportName || file.name.replace(/\.(bpmn|xml|vsdx)$/i, '') || 'Imported process';
+    haveDefaults(r.newData, r.nodes);
     const ok = await importPreview(r, file.name, r.kind, guess);
     if (!ok) return;
     typedImportName = '';
@@ -1904,6 +2032,9 @@ export function mergeImport(oldNodes, newNodes, laneOwned, extIds) {
 async function importVersion(pid, r, fileName) {
   const p0 = store.get('process', pid); if (!p0) return;
   if (!canEditProc(p0)) { toast(deniedMsg(p0)); return; }
+  /* R16: information guessed from task names is for a new process only; a new version keeps the map's own information */
+  const guessed = new Set((r.newData || []).filter(d => d.inferred).map(d => d.id));
+  if (guessed.size) { r.newData = r.newData.filter(d => !guessed.has(d.id)); allNodes(r.nodes).forEach(n => { if (n.data) n.data = n.data.filter(id => !guessed.has(id)); }); }
   const m = mergeImport(p0.tobe || [], r.nodes, r.laneOwned, r.extIds);
   const removedWork = store.list('workItem', w => w.pid === pid && m.removed.some(s => s.id === w.step));
   const room = (p0.drafts || []).length < MAX_DRAFTS;

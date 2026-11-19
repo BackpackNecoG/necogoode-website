@@ -861,3 +861,120 @@ test('R15 M3 #2: handing over the project manager role is a plan change the spon
   const evs = await store.listEvents(ws, { limit: 60 });
   assert.ok(evs.some(e => e.ref === 'project:' + PRJ && /Project manager Tom Alvarez → Leo Park/.test(e.summary)), 'History');
 });
+
+/* ================= R16 (stream N3) ================= */
+test('R16 N3 #3 (N1 #6, Jordan 3): handing over the launch owner role is a plan change the sponsor approves', async () => {
+  const docs = seedDocs();
+  const bad = C.buildChange({ projectId: PRJ, reason: 'x', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'releaseManager', to: 'mc' }] }, docs);
+  assert.ok(bad.errors.some(e => /Maya Chen is the sponsor/.test(e)), bad.errors.join(' | '));
+  const r = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'releaseManager', to: 'lp' }]);
+  assert.deepEqual(r.change.kinds, ['launchOwner']);
+  assert.equal(r.change.title, 'Hand the launch owner role to Leo Park');
+  const from = proj(docs).releaseManager || proj(docs).owner;
+  assert.equal(C.editText(r.change.edits[0], docs, E), `Launch owner ${C.personName ? C.personName(docs, from) : (docs.person.find(p => p.id === from) || {}).data.name} → Leo Park`);
+  assert.equal(r.im.launchOwner.moved, true);
+  assert.match(r.im.sentence, /hands the launch owner role from .+ to Leo Park/);
+  const need = C.needsApproval(r.change, r.im, docs, { requester: 'ta' });
+  assert.equal(need.within, false, 'never within tolerance');
+  assert.ok(need.reasons.some(x => /The launch owner changes/.test(x)), need.reasons.join(' | '));
+  assert.ok(need.approvers.some(a => a.person === 'mc' && rolesOf(a).includes('sponsor')), JSON.stringify(need.approvers));
+  assert.ok(!need.approvers.some(a => a.person === 'lp' || a.person === from), 'neither launch owner approves');
+  /* routes: proposed, the sponsor approves, the project's launch owner is the new one */
+  const ws = await newWs();
+  const p = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'ta', change: { projectId: PRJ, reason: 'Leo runs launch day', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'releaseManager', to: 'lp' }] } });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.equal(p.body.change.status, 'proposed');
+  for (const a of p.body.change.approvers) { const d = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: STEP() }); assert.equal(d.status, 200, JSON.stringify(d.body)); }
+  const after = proj(await docsOf(ws.id));
+  assert.equal(after.releaseManager, 'lp');
+  assert.ok(after.resources.includes('lp'));
+  const evs = await store.listEvents(ws, { limit: 60 });
+  assert.ok(evs.some(e => e.ref === 'project:' + PRJ && /Launch owner .+ → Leo Park/.test(e.summary)), 'History');
+});
+
+test('R16 N3 #3 (N1 #7, PMO bypass): a new dependency moves the dependent task to start after it', () => {
+  const docs = seedDocs();
+  /* an open, not-started task and another open task that finishes after it starts */
+  const ws = docs.workItem.map(d => d.data).filter(w => w.projectId === PRJ && w.status !== 'done' && w.start && w.due);
+  let pair = null;
+  for (const a of ws) for (const b of ws) if (!pair && a.id !== b.id && (!a.status || a.status === 'idle') && b.due >= a.start && !(a.deps || []).some(d => (d.id || d) === b.id) && !(b.deps || []).some(d => (d.id || d) === a.id) && !(E.dependents(docs, a.id) || []).includes(b.id)) pair = [a, b];
+  assert.ok(pair, 'the seed has a pair to link');
+  const [a, b] = pair;
+  const ch = C.withKnockOn(C.buildChange({ projectId: PRJ, reason: 'a waits on b', edits: [{ op: 'set', type: 'workItem', id: a.id, field: 'deps', to: (a.deps || []).concat([b.id]) }] }, docs).change, docs, TODAY);
+  const after = C.applyToDocs(docs, ch, '2099-01-01T00:00:00.000Z');
+  const a2 = task(after, a.id);
+  const bFinish = E.forecastAll(after, TODAY)[b.id].forecast;
+  assert.ok(a2.start > b.due || a2.start > bFinish || a2.start >= E.addBusinessDays(b.due, 1), `${a.id} starts ${a2.start}, after ${b.id} due ${b.due}`);
+  assert.equal(E.businessDaysBetween(a2.start, a2.due), E.businessDaysBetween(a.start, a.due), 'its length is kept');
+});
+
+test('R16 N3 #3 (N1 #7, PMO re-test 3): an effort edit that takes the expected cost over the budget needs the sponsor', () => {
+  const docs = seedDocs();
+  const t0 = E.projectTruth(docs, PRJ, TODAY);
+  const w = docs.workItem.map(d => d.data).find(x => x.projectId === PRJ && x.status !== 'done' && x.owner);
+  /* a budget just above today's expected cost, then one more day of effort */
+  const p = proj(docs); p.budget = { planned: Math.ceil(t0.cost.forecast) + 1 };
+  const r = preview(docs, [{ op: 'set', type: 'workItem', id: w.id, field: 'effortDays', to: (+w.effortDays || 1) + 1 }]);
+  assert.ok(r.im.cost.after > p.budget.planned, 'the cost goes over');
+  const need = C.needsApproval(r.change, r.im, docs, { requester: 'ta' });
+  assert.equal(need.within, false);
+  assert.ok(need.reasons.some(x => /goes over the \$[\d,]+ budget/.test(x)), need.reasons.join(' | '));
+  assert.ok(need.approvers.some(a => a.person === 'mc'), JSON.stringify(need.approvers));
+});
+
+test('R16 N3 #3 (N1 #7, PMO re-test 10): the launch window moves through Change the plan; never on a day off, after the deadline needs the sponsor', () => {
+  const docs = seedDocs();
+  const p = proj(docs);
+  const dec25 = p.target.slice(0, 4) + '-12-25';
+  const off = C.buildChange({ projectId: PRJ, reason: 'x', edits: [{ op: 'set', type: 'project', id: PRJ, field: 'launchWindow', to: dec25 + ' 07:30–10:00' }] }, docs);
+  assert.ok(off.errors.some(e => /day off/.test(e)), off.errors.join(' | '));
+  const late = E.addBusinessDays(p.target, 3);
+  const r = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'launchWindow', to: late + ' 07:30–10:00' }]);
+  assert.deepEqual(r.change.kinds, ['launchWindow']);
+  assert.equal(r.im.launchWindow.pastDeadline, true);
+  assert.equal(task(r.after, 'W1') ? proj(r.after).cutover.window : proj(r.after).cutover.window, late + ' 07:30–10:00');
+  const need = C.needsApproval(r.change, r.im, docs, { requester: 'ta' });
+  assert.equal(need.within, false);
+  assert.ok(need.reasons.some(x => /launch window .+ is after the .+ deadline/.test(x)), need.reasons.join(' | '));
+  assert.ok(need.approvers.some(a => a.person === 'mc'), JSON.stringify(need.approvers));
+  /* inside the deadline, on a business day: within tolerance */
+  const ok = E.addBusinessDays(p.target, -2);
+  const r2 = preview(docs, [{ op: 'set', type: 'project', id: PRJ, field: 'launchWindow', to: ok + ' 07:30–10:00' }]);
+  assert.equal(C.needsApproval(r2.change, r2.im, docs, { requester: 'ta' }).within, true);
+});
+
+test('R16 (N1 #1, via N4): approving a plan change refuses a stale or future step-up (one 10-minute rule, E.stepUpProblem)', async () => {
+  const ws = await newWs();
+  const docs0 = await docsOf(ws.id);
+  const w6 = task(docs0, 'W6');
+  const p = await call('POST', `workspaces/${ws.id}/changes`, { actor: 'lp', change: { projectId: PRJ, reason: 'Late vendor', edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(w6.due, 25) }] } });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  const a = p.body.change.approvers[0];
+  const at = ms => ({ method: 'simulated-mfa', at: new Date(Date.now() + ms).toISOString() });
+  const stale = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: at(-11 * 60000) });
+  assert.equal(stale.status, 403, JSON.stringify(stale.body));
+  assert.match(stale.body.error, /more than 10 minutes ago/);
+  const old = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: { method: 'simulated-mfa', at: '2020-01-01T00:00:00.000Z' } });
+  assert.equal(old.status, 403);
+  const fut = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: at(5 * 60000) });
+  assert.equal(fut.status, 403, JSON.stringify(fut.body));
+  const ok = await call('POST', `workspaces/${ws.id}/changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: at(-9 * 60000) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const mine = ok.body.change.approvers.find(x => x.person === a.person);
+  assert.ok(mine.stepUpAt && Math.abs(Date.parse(mine.stepUpAt) - Date.now()) < 60000, 'the server records its own time');
+});
+
+test('R16 (PMO disagreement 6): "knock-on: it waits on the moved work" only for tasks that wait on it through dependencies', () => {
+  const docs = seedDocs();
+  const w6 = task(docs, 'W6');
+  const ch = C.withKnockOn(C.buildChange({ projectId: PRJ, reason: 'x', edits: [{ op: 'set', type: 'workItem', id: 'W6', field: 'due', to: addBiz(w6.due, 25) }] }, docs).change, docs, TODAY);
+  const succ = {}; docs.workItem.forEach(d => (d.data.deps || []).forEach(x => { const id = x.id || x; (succ[id] = succ[id] || []).push(d.id); }));
+  const reach = new Set(); const go = id => (succ[id] || []).forEach(x => { if (!reach.has(x)) { reach.add(x); go(x); } }); go('W6');
+  const knocks = ch.edits.filter(e => e.knock);
+  assert.ok(knocks.length > 0, 'the move pushes other tasks');
+  knocks.forEach(e => {
+    assert.equal(e.waits, reach.has(e.id), e.id + ' waits=' + e.waits);
+    const t = C.editText(e, docs, E);
+    if (e.waits) assert.match(t, /knock-on: it waits on the moved work/); else assert.match(t, /moved: it is now expected to finish later/);
+  });
+});

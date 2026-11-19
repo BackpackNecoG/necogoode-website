@@ -48,3 +48,9 @@
 - **R14 re-review (77461a2):** demo 4/4, pilot 4/4 (Jordan moved to yes), contract 0/4. Consolidated in `market-review/r14/CONSOLIDATED-R14.md`. Non-code blockers now decide the contract; the founder was asked about a hosted Team plan, pulling the pen test forward, and recurring runs.
 - **R15 deployed:** live and verified on www.necogoode.com. Unit 398, e2e 2972 (design 963, pmo 659, release 357, consistency 455, change 119, buyer 181, connect 90, admin 148), lint clean. Re-review started against `/home/claude/pmoflow-r15-review`.
 - **Known and deliberate:** the seed still has one person logging 28 hours in a day, now flagged "more than 24 hours that day". Fixing the seed data would shift golden numbers across suites.
+
+## Founder ruling (Nov 18): separate sample-data findings from product findings
+- Reviewers tag every finding **[own data]**, **[sample data]** or **[deliberate attack]** (`market-review/REVIEW-BRIEF.md`). The pilot-readiness verdict rests on [own data] findings. Attacks are tracked separately as contract or security readiness.
+- **No more compatibility code for old seeded states.** A pilot starts with a clean workspace.
+- **Seed rebuild (after the R16 deploy):** regenerate the Northwind sample through the product's own actions under today's rules, so it can't hold states the rules forbid. Keep it small. Expect golden numbers to be re-baselined once.
+- **Deferred as low value:** the process page reading `partApprovers.invitedText`, so it uses the same invite wording as Launch.

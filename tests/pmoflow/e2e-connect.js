@@ -176,6 +176,40 @@ async function api(method, path, body) {
     await page.waitForFunction(() => /already in sync|updated/.test((document.querySelector('[data-cx-result]') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
     ok(/Finished before the work it depends on/.test(await page.textContent(`[data-cx-held="${waiting.id}"]`).catch(() => '')), 'still held after another sync');
     await shot('05b-finished-early');
+    /* R16 N4 #5 (PMO R15 re-test 1): clearing the hold goes through the same open-work warning as the PM confirm, and the
+       Done then waits for someone else to confirm it (no earned value) */
+    const setMe = id => page.evaluate(async v => { const { store } = await import('/concepts/pmoflow/app/store.js'); store.setMe(v); }, id);
+    if (waiting.data.owner !== 'mc') ok(!(await page.$(`[data-cx-clear-hold="${waiting.id}"]`)), 'someone the hold does not name sees no "Check and confirm"');
+    await setMe(waiting.data.owner);
+    await page.waitForSelector(`[data-cx-clear-hold="${waiting.id}"]`, { timeout: 10000 }).catch(() => {});
+    ok(await page.isVisible(`[data-cx-clear-hold="${waiting.id}"]`), `the owner (${ownerName}) gets "Check and confirm" on the held item`);
+    const heldDocs = (await api('GET', `ws/${ws}/state`)).body.docs;
+    const hw0 = heldDocs.workItem.find(d => d.id === waiting.id).data;
+    const want = typeof E.holdClearWarning === 'function' ? E.holdClearWarning(heldDocs, hw0) : E.unconfirmedDone(heldDocs, Object.assign({}, hw0, { status: 'done' })).confirmText;
+    await page.click(`[data-cx-clear-hold="${waiting.id}"]`);
+    await page.waitForSelector('.modal [data-cx-hold-warning]', { timeout: 8000 }).catch(() => {});
+    const warnTxt = (await page.textContent('.modal [data-cx-hold-warning] p').catch(() => '')).trim();
+    ok(!!want && warnTxt === want, 'the warning is the PM confirm’s own words: ' + warnTxt.slice(0, 120));
+    ok(await page.locator('.modal [data-confirm-open-item]').count() >= 1, 'the modal lists the open work it depends on');
+    await shot('05c-clear-hold-warning');
+    await page.setViewportSize({ width: 390, height: 844 }); await page.waitForTimeout(300);
+    ok(await overflow(), 'no horizontal overflow at 390 (clear-hold warning)');
+    await page.screenshot({ path: `${OUT}/05c-clear-hold-warning-390.png` });
+    await page.setViewportSize({ width: 1366, height: 900 }); await page.waitForTimeout(300);
+    await page.click('.modal [data-act="confirm"]');
+    await page.waitForFunction(id => !document.querySelector(`[data-cx-held="${id}"]`), waiting.id, { timeout: 15000 }).catch(() => {});
+    const cd = (await api('GET', `ws/${ws}/state`)).body.docs;
+    const cw = cd.workItem.find(d => d.id === waiting.id).data;
+    ok(cw.status === 'done' && !cw.syncHold && cw.doneBy === waiting.data.owner && !cw.confirmedBy, 'Done by its owner, the hold flag gone, not confirmed');
+    ok(E.unconfirmedDone(cd, waiting.id).flag === true, 'with its predecessor still open it earns nothing until someone else confirms it');
+    ok(!(await page.$(`[data-cx-held="${waiting.id}"]`)), 'the connections page no longer shows it held');
+    const hevs = (await api('GET', `ws/${ws}/events?limit=10`)).body.events;
+    ok(hevs.some(e => e.action === 'sync-hold-cleared' && e.actor === waiting.data.owner && /counts only once someone else confirms it$/.test(e.summary)), 'History says who cleared it and that it waits for a second person');
+    await setMe('mc'); await page.waitForTimeout(600);
+    /* put the task back the way the later steps expect it (reopened in Jira) */
+    await page.selectOption(`[data-cx-simstatus="${wkey}"]`, 'In Progress');
+    await page.waitForFunction(k => !/Done/.test((document.querySelector(`[data-cx-item="${k}"] [data-cx-pmo]`) || {}).textContent || 'Done'), wkey, { timeout: 20000 }).catch(() => {});
+    ok((await api('GET', `ws/${ws}/state`)).body.docs.workItem.find(d => d.id === waiting.id).data.status !== 'done', 'reopened in Jira: the task is open again in PMOFlow');
   }
 
   console.log('4. sync log, signed intents, replay protection');

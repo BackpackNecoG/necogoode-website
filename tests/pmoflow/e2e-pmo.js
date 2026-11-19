@@ -872,8 +872,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R7 link process / save plan: hidden for non-PM', await page.locator('.pmo-actions [data-link-proc]').count() === 0 && await page.locator('[data-baseline]').count() === 0);
   await asPersona('Project Manager');
   await page.click('[data-settings]'); await modalOpen();
-  check('R5 settings modal: PM, release manager, program, budget fields', /* R15 (M1 #3): the PM is shown read-only; handing it over is a plan change */ await page.locator('.overlay [data-set-pm][readonly]').count() === 1 && await page.locator('.overlay select[name="owner"]').count() === 0 && await page.locator('.overlay [data-act="handover"]').count() === 1 && await page.locator('.overlay select[name="releaseManager"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
-  await page.selectOption('.overlay select[name="releaseManager"]', 'lp');
+  check('R5 settings modal: PM, release manager, program, budget fields', /* R15 (M1 #3): the PM is shown read-only; handing it over is a plan change */ await page.locator('.overlay [data-set-pm][readonly]').count() === 1 && await page.locator('.overlay select[name="owner"]').count() === 0 && await page.locator('.overlay [data-act="handover"]').count() === 1 && await page.locator('.overlay input[name="program"]').count() === 1 && await page.locator('.overlay input[name="budget"]').count() === 1);
+  /* R16 (N1 #6, Jordan 3): CHANGED ASSERTION. On a planned project the launch owner is read-only in Settings (it was a
+     select); handing it over is a plan change the sponsor approves. The rest of this flow hands it to Leo through that
+     plan change (proposed by Tom, approved by its approvers) instead of the select, so the later checks are unchanged. */
+  check('R16 settings: the launch owner is read-only once planned, with "Hand over the launch owner"', await page.locator('.overlay select[name="releaseManager"]').count() === 0 && await page.locator('.overlay [data-set-lo][readonly]').count() === 1 && await page.locator('.overlay [data-act="handover-lo"]').count() === 1 && /plan change the sponsor approves/.test(await page.locator('.overlay [data-lo-locked]').innerText()));
   /* R13: once the project has a plan, Settings shows the deadline and budget read-only; they move only through "Change the plan" (sponsor approval) */
   check('R13 settings: deadline and budget are read-only once planned, with a pointer to Change the plan',
     await page.locator('.overlay input[name="budget"][readonly]').count() === 1 && await page.locator('.overlay input[name="target"][readonly]').count() === 1 &&
@@ -881,6 +884,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const vmB = await getDoc('project', PRJ);
   await page.fill('.overlay input[name="program"]', 'Finance Operations Modernization');
   await act('save'); await settle();
+  const lo16 = await page.evaluate(async ([u, prj, tom]) => { const { store } = await import(u);
+    const api = (path, body) => fetch(`/api/pmoflow/workspaces/${store.state.ws}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async r => ({ status: r.status, body: await r.json().catch(() => null) }));
+    const p = await api('changes', { actor: tom, change: { projectId: prj, reason: 'Leo runs launch day', edits: [{ op: 'set', type: 'project', id: prj, field: 'releaseManager', to: 'lp' }] } });
+    if (p.status !== 200) return { p };
+    const out = { status: p.body.change.status, approvers: p.body.change.approvers.map(a => a.person) };
+    for (const a of p.body.change.approvers) await api(`changes/${p.body.change.id}/decide`, { actor: a.person, decision: 'approve', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+    await store.load(); return out; }, [STORE, PRJ, tomId]);
+  check('R16 launch owner: handing it over is a proposed plan change with approvers (never Tom or Leo)', lo16.status === 'proposed' && lo16.approvers.length > 0 && !lo16.approvers.includes(tomId) && !lo16.approvers.includes('lp'), lo16);
+  await page.reload(); await page.waitForSelector('[data-role-rm]'); await settle();
   const vm2 = await getDoc('project', PRJ);
   check('R5 settings: release manager + program saved; deadline and budget unchanged', vm2.releaseManager === 'lp' && vm2.program === 'Finance Operations Modernization' && vm2.owner === tomId &&
     vm2.target === vmB.target && JSON.stringify(vm2.budget || null) === JSON.stringify(vmB.budget || null), { rm: vm2.releaseManager, b: vm2.budget });
@@ -1299,6 +1311,27 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('R6 log time: entry {by, date, hours, note} appended', t1.length === t0.length + 1 && t1[t1.length - 1].by === tom6 && t1[t1.length - 1].hours === 3.5 && t1[t1.length - 1].date === todayStr && t1[t1.length - 1].note === 'Vendor call', t1);
   check('R6 work row shows hours logged', /3\.5h logged|\d+(\.\d)?h logged/.test(await page.innerText(`tr[data-wid="${mv6}"] [data-hours]`)));
   check('R6 history: time logged', /Logged 3\.5h on ["“].+["”]|hours logged: 3\.5 hours/.test(await feedText()));
+  /* R16 (N3 #3, PMO: append-only hours): a mistake is fixed by a reversing entry with a reason, never by removing hours */
+  {
+    await prjGo('?mode=work', 'table.pmo-work');
+    await page.click(`[data-log-time="${mv6}"]`); await modalOpen();
+    check('R16 hours: the hours list says entries stay and offers "Correct hours"', await page.locator('.overlay [data-act^="fix-"]').count() > 0 && /stay on the record/.test(await page.innerText('.overlay [data-time-append]')));
+    const totBefore = await page.innerText('.overlay [data-time-total]');
+    check('R16 hours: the total shows hours and dollars (E.hoursTotals)', /hours? \(\$[\d,]+\)/.test(totBefore), totBefore);
+    const idx16 = await page.evaluate(() => { const rows = [...document.querySelectorAll('.overlay tr[data-time-row]')]; const r = rows.find(x => /Vendor call/.test(x.textContent) && x.querySelector('[data-act^="fix-"]')); return r ? r.dataset.timeRow : null; });
+    await page.click(`.overlay [data-act="fix-${idx16}"]`); await page.waitForSelector('.overlay input[name="reason"]');
+    await page.fill('.overlay input[name="hours"]', '1.5'); await page.fill('.overlay input[name="reason"]', '');
+    await page.click('.overlay [data-act="correct"]'); await page.waitForSelector('.overlay .banner');
+    check('R16 hours: a correction needs a reason', /Say why/.test(await page.innerText('.overlay .banner')));
+    await page.fill('.overlay input[name="reason"]', 'Logged the call twice'); await act('correct'); await settle(); await sleep(400);
+    const t16 = (await getDoc('workItem', mv6)).time;
+    const corr = t16.filter(x => x.correction);
+    check('R16 hours: the correction is a new −1.5 h entry with the reason; every earlier entry is unchanged', t16.length === t1.length + 1 && corr.length === 1 && corr[0].hours === -1.5 && corr[0].reason === 'Logged the call twice' && JSON.stringify(t16.slice(0, t1.length).map(x => [x.hours, x.date, x.note])) === JSON.stringify(t1.map(x => [x.hours, x.date, x.note])), t16);
+    check('R16 history: the correction is in History', /Corrected hours on .+−1\.5h \(Logged the call twice\)|hours corrected: −1\.5 hours/.test(await feedText()), (await feedText()).slice(0, 300));
+    await page.click(`[data-log-time="${mv6}"]`); await modalOpen();
+    check('R16 hours: the list shows the correction row with its reason', /Correction: “Logged the call twice”/.test(await page.innerText('.overlay [data-time-correction]')) && /−1\.5h/.test(await page.innerText('.overlay [data-time-correction]')));
+    await act('cancel');
+  }
   const ev6 = await E5('earnedValue', PRJ, todayStr);
   check('R6/R8 header: SPI, CPI from earnedValue; ONE cost forecast (projectTruth), no separate EAC', (await page.innerText('[data-hev] [data-ev-spi] b')) === (ev6.SPI == null ? '—' : ev6.SPI.toFixed(2)) && (await page.innerText('[data-hev] [data-ev-cpi] b')) === (ev6.CPI == null ? '—' : ev6.CPI.toFixed(2)) && (await (async () => { const c6 = (await E5('projectTruth', PRJ, todayStr)).cost; /* R14: unknown without rates */
       return c6.forecast == null ? /Cost unknown/.test(await page.innerText('[data-hfin]')) : (await page.innerText('[data-hfin] [data-t="cost"]')).replace(/\D/g, '') === String(Math.round(c6.forecast)); })()) && await page.locator('[data-ev-eac]').count() === 0, ev6);
@@ -2165,6 +2198,210 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return { asked: asked.map(a => ({ bu: a.bu, name: store.person(a.approver).name })), asks, rc }; }, [STORE, P6]);
     check('R15 #6: every approval still to give is an ask', r6.asked.every(a => r6.asks.some(t => t.includes(a.bu) && /approv/i.test(t))), r6);
     check('R15 #6: and its approver is on the email list', r6.asked.every(a => r6.rc.includes(a.name)), r6);
+  }
+  /* ================= R16 (stream N3): setup ease, report, portfolio, phone tabs, self-assign ================= */
+  console.log('R16 N3: newest process, bulk owners, report asks/record, Kickoff variance, tabs, self-assign');
+  {
+    await sp.setViewportSize({ width: 1366, height: 900 });
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
+    await sAs('Project Manager');
+    const me16 = await sp.evaluate(async u => (await import(u)).store.state.me, STORE);
+    /* #1 Karen: New project starts on the process just made (not the sample listed first) */
+    const pid16 = await sp.evaluate(async u => { const { store } = await import(u); const src = store.get('process', 'invoice-approval'); const id = store.newId('proc');
+      await store.save('process', id, Object.assign(JSON.parse(JSON.stringify(src)), { id, name: 'Supplier setup R16', owner: store.state.me, released: [] }), 'E2E R16: a new process'); return id; }, STORE);
+    await sGo('/', '[data-new-project]');
+    await sp.locator('[data-new-project]').first().click(); await sp.waitForSelector('.overlay select[name="from"]');
+    const from16 = await sp.$eval('.overlay select[name="from"]', s => ({ v: s.value, opts: [...s.options].map(o => o.textContent) }));
+    check('R16 #1: New project defaults to the process just created', from16.v === pid16, from16);
+    check('R16 #1: the process dropdown shows each process’s change counts', from16.opts.some(t => /\(\d+ (new|changed)/.test(t)), from16.opts);
+    await sAct('cancel');
+    /* a project with unowned tasks from Karen's role-typed SOP (R14 block above): the owner picker */
+    const K16 = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine;
+      const p = store.list('project').find(j => { const row = (E.projectTruth(store.state.docs, j.id, store.state.today).who || []).find(x => x.ref === 'owners:' + j.id); return row && (row.items || []).length >= 2; }); return p ? p.id : null; }, STORE);
+    check('R16 #1: a project has 2+ unowned tasks to assign', !!K16, K16);
+    if (K16) {
+      /* make sure two unowned tasks share a team (role) so the bulk control has something to do */
+      await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine;
+        const row = E.projectTruth(store.state.docs, prj, store.state.today).who.find(x => x.ref === 'owners:' + prj);
+        const ws = row.items.map(id => store.get('workItem', id));
+        if (!ws.some((w, i) => w.ownerRole && ws.some((v, k) => k !== i && v.ownerRole === w.ownerRole)))
+          for (const w of ws.slice(0, 2)) await store.save('workItem', w.id, Object.assign({}, w, { ownerRole: 'Purchasing' }), 'E2E R16: a team'); }, [STORE, K16]);
+      await sGo(`/project/${K16}`, '[data-pick-owners]');
+      const rowText = await sp.innerText('[data-pick-owners]');
+      await sp.click('[data-pick-owners]'); await sp.waitForSelector('.overlay [data-owner-picker]');
+      const n16 = await sp.locator('.overlay [data-owner-task]').count();
+      const title16 = await sp.innerText('.overlay .modal h2');
+      const rowN = +((rowText.match(/Choose owners for (\d+)/) || [])[1] || -1);
+      check('R16 #1 (Karen 4): "Choose owners for N tasks" = the picker’s title = its list', rowN === n16 && title16 === `Choose owners for ${n16} tasks`, { rowN, n16, title16 });
+      const bulk = await sp.$$eval('.overlay [data-owner-bulk-team]', els => els.map(e => ({ team: e.dataset.ownerBulkTeam, t: e.textContent.replace(/\s+/g, ' ').trim() })));
+      check('R16 #1 (Rule #1): one control per team: "Give all N <team> tasks to …"', bulk.length > 0 && bulk.every(b => /^Give all \d+ .+ tasks to/.test(b.t)), bulk);
+      await sp.locator('.overlay .modal').screenshot({ path: `${SHOTS}/s-60-r16-bulk-owners-1366.png` });
+      const team = bulk[0] && bulk[0].team;
+      await sp.selectOption('.overlay [data-owner-bulk-sel="0"]', 'rv');
+      const filled = await sp.evaluate(t => [...document.querySelectorAll('.overlay [data-owner-task]')].filter(r => r.dataset.ownerRole === t).map(r => r.querySelector('select').value), team);
+      check('R16 #1: picking Rosa fills every task of that team', filled.length >= 2 && filled.every(v => v === 'rv'), filled);
+      await sp.setViewportSize({ width: 390, height: 844 }); await sp.waitForTimeout(250);
+      check('R16 #1 @390: bulk owner picker, no horizontal overflow', await sNoOverflow());
+      await sp.screenshot({ path: `${SHOTS}/s-61-r16-bulk-owners-390.png` });
+      await sp.setViewportSize({ width: 1366, height: 900 });
+      await sp.click('.overlay [data-act="save"]'); await sp.waitForSelector('.overlay', { state: 'detached', timeout: 15000 });
+      /* every owner lands at once: the count is right immediately, not after a trickle of saves */
+      const now16 = await sp.evaluate(async ([u, prj, ids]) => { const { store } = await import(u); const E = window.PMOEngine; const row = E.projectTruth(store.state.docs, prj, store.state.today).who.find(x => x.ref === 'owners:' + prj);
+        return { left: row ? row.items.length : 0 }; }, [STORE, K16]);
+      check('R16 #1 (Karen 3/4): right after saving, the count drops by every task given out', now16.left === n16 - filled.length, { now16, n16, filled: filled.length });
+      await sSettle(); await sleep(800);
+      const srv16 = await sp.evaluate(async ([u, prj, t]) => { const { store } = await import(u); await store.load(); return store.list('workItem', w => w.projectId === prj && w.ownerRole === t && w.status !== 'done').map(w => w.owner); }, [STORE, K16, team]);
+      check('R16 #1: the server has Rosa on every task of that team', srv16.length >= 2 && srv16.every(o => o === 'rv'), srv16);
+      /* #2 Karen 3: report asks use the current owners, also for an owner picked after the report was generated */
+      await sGo(`/project/${K16}`, '[data-report]');
+      const log0 = await sp.evaluate(async ([u, prj]) => ((await import(u)).store.get('project', prj).reportLog || []).length, [STORE, K16]);
+      await sp.click('[data-report]'); await sp.waitForSelector('[data-prj-rep] [data-rep-body]', { timeout: 30000 }); await sSettle();
+      const log1 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); await store.load(); return (store.get('project', prj).reportLog || []).length; }, [STORE, K16]);
+      check('R16 #3 (PMO 7): opening the report preview records nothing', log1 === log0, { log0, log1 });
+      const asks16 = async () => sp.$$eval('[data-prj-rep] .pmo-rep-sec.ak li', els => els.map(e => e.textContent));
+      const left16 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); const E = window.PMOEngine; const row = E.projectTruth(store.state.docs, prj, store.state.today).who.find(x => x.ref === 'owners:' + prj); return row ? row.items.slice() : []; }, [STORE, K16]);
+      if (left16.length) {
+        await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const w = store.get('workItem', id); await store.save('workItem', id, Object.assign({}, w, { owner: 'ar' }), 'E2E R16: one more owner'); }, [STORE, left16[0]]);
+        await sSettle();
+        const a = await asks16();
+        const want = left16.length - 1;
+        check('R16 #2 (Karen 3): after one more owner, the open report’s asks use the current owners', want ? a.some(t => t.includes(`Choose owners for ${want} task`)) : !a.some(t => /Choose owners/.test(t)), { a, want });
+      }
+      const a2 = await asks16();
+      check('R16 #2: no ask says "unassigned"', !a2.some(t => /unassigned/i.test(t)), a2);
+      /* sending (Email draft) records it; the server writes the log */
+      await sp.evaluate(() => { const a = document.querySelector('[data-rep-mail]'); a.addEventListener('click', e => e.preventDefault(), { once: true }); a.click(); });
+      await sleep(1500);
+      const log2 = await sp.evaluate(async ([u, prj]) => { const { store } = await import(u); await store.load(); const p = store.get('project', prj); return { n: (p.reportLog || []).length, last: (p.reportLog || []).slice(-1)[0] || null, at: p.lastReportAt || null }; }, [STORE, K16]);
+      check('R16 #3 (PMO 7): Email draft records one sent report (server-written log)', log2.n === log0 + 1 && log2.last && log2.last.action === 'send' && !!log2.at, log2);
+    }
+    /* #2 Karen 6: a team concern adds up to what each person owns */
+    const cl = await sp.evaluate(async ([pj, u]) => { const m = await import(pj); const { store } = await import(u);
+      const ws = store.list('workItem', w => w.projectId === 'vendor-modernization' && w.owner).slice(0, 3);
+      return m.concernLines({ overall: { concerns: ['Procurement team: 3 of the 5 late or blocked tasks'] }, period: { overall: { concerns: [{ dimension: 'team', text: 'Procurement team: 3 of the 5 late or blocked tasks', items: ws.map(w => w.id) }] } } }); }, [ROOT + '/app/pages/project.js', STORE]);
+    const nums = ((cl[0] || '').match(/\(([^)]*)\)$/) || [, ''])[1].split(', ').map(x => +(x.match(/(\d+)$/) || [0, 0])[1]);
+    check('R16 #2 (Karen 6): "Procurement team: 3 of 5" names who owns them, and the split adds up to 3', /\(.+ \d+(, .+ \d+)*\)$/.test(cl[0] || '') && nums.reduce((x, y) => x + y, 0) === 3, cl);
+    /* #4 PMO 5: the variance compares with the Kickoff plan by default, even after a plan change saved automatic ones */
+    const auto16 = await sp.evaluate(async u => { const { store } = await import(u); const prj = 'vendor-modernization';
+      if ((store.get('project', prj).baselines || []).some(b => b.auto)) return 'had';
+      /* a real plan change (an owner swap) saves the automatic before/after plans */
+      const api = (path, body) => fetch(`/api/pmoflow/workspaces/${store.state.ws}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async r => ({ status: r.status, body: await r.json().catch(() => null) }));
+      const w = store.list('workItem', x => x.projectId === prj && x.status !== 'done' && x.owner && x.owner !== 'ar')[0];
+      const pc = await api('changes', { actor: store.state.me, change: { projectId: prj, reason: 'E2E R16: cover a holiday', edits: [{ op: 'set', type: 'workItem', id: w.id, field: 'owner', to: 'ar' }] } });
+      if (pc.status !== 200) return pc;
+      const c = pc.body.change;
+      if (c.status === 'proposed' && !(c.approvers || []).length) await api(`changes/${c.id}/apply`, { actor: store.state.me });
+      for (const a of c.approvers || []) await api(`changes/${c.id}/decide`, { actor: a.person, decision: 'approve', stepUp: { method: 'simulated-mfa', at: new Date().toISOString() } });
+      await store.load(); return (store.get('project', prj).baselines || []).filter(b => b.auto).length; }, STORE);
+    check('R16 #4: a plan change saved automatic plans', auto16 === 'had' || auto16 >= 2, auto16);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE);
+    await sGo('/portfolio', '[data-bl-id]');
+    const blSel = await sp.evaluate(() => { const s = document.querySelector('[data-bl-id]'); return s.options[s.selectedIndex].textContent; });
+    check('R16 #4 (PMO 5): "Changes since the saved plan" defaults to the Kickoff plan', /Kickoff/.test(blSel), blSel);
+    const vr = await sp.$$eval('[data-var-start]', els => els.map(e => { const f = e.parentElement.querySelector('[data-var-forecast]'); return [e.dataset.varStart, f ? f.dataset.varForecast : '']; }));
+    check('R16 #10 (PMO 9): a variance row’s start is never after its expected finish', vr.every(([a, f]) => !f || a <= f), vr);
+    /* R16 (N1 #7): a plain effort edit the cost guard refuses explains itself and opens Change the plan */
+    await sGo('/project/vendor-modernization', '.hdr');
+    await sp.evaluate(async ([u, pj]) => { const { store } = await import(u); const m = await import(pj);
+      const w = store.list('workItem', x => x.projectId === 'vendor-modernization' && x.status !== 'done' && x.owner)[0];
+      m.psave('workItem', w.id, Object.assign({}, w, { effortDays: (+w.effortDays || 1) + 4 }), 'E2E R16: more effort').catch(() => {}); }, [STORE, ROOT + '/app/pages/project.js']);
+    const rk = await sp.waitForSelector('.overlay [data-refusal-kind]', { timeout: 10000 }).then(e => e.getAttribute('data-refusal-kind')).catch(() => null);
+    check('R16 (N1 #7): a refused effort/cost edit says why (cost or deadline) and offers Change the plan', ['cost', 'deadline'].includes(rk) && await sp.locator('.overlay [data-act="change"]').count() === 1, rk);
+    if (rk === 'cost') check('R16: the cost refusal names the budget', /budget|expected cost/.test(await sp.innerText('.overlay [data-deadline-refusal]')));
+    if (rk) await sAct('cancel');
+    for (let i = sErr.length - 1; i >= 0; i--) if (/status of 409/.test(sErr[i])) sErr.splice(i, 1); /* the browser logs the intentional 409 */
+    /* #4 PMO 9: "1 done, not confirmed" clears once someone else confirms it */
+    const Wr = await sp.evaluate(async u => { const { store } = await import(u); const E = window.PMOEngine; const me = store.state.me; const diag = [];
+      const tryDone = async w => {
+        const nd = Object.assign({}, w, { status: 'done', doneAt: store.state.today }); delete nd.confirmedBy; delete nd.confirmedAt; delete nd.syncHold;
+        store.setMe(w.owner);
+        try { await store.save('workItem', w.id, nd, 'E2E R16: done with open work before it'); } catch (e) { diag.push(w.id + ': ' + e.message); return false; } finally { store.setMe(me); }
+        await store.load(); const x = store.get('workItem', w.id); const uc = x && E.unconfirmedDone(store.state.docs, x);
+        diag.push(w.id + ': ' + (x && x.status) + ' flag=' + (uc && uc.flag) + ' doer=' + (uc && uc.doer));
+        return !!(x && x.status === 'done' && uc && uc.flag && uc.doer !== me);
+      };
+      const open = () => store.list('workItem', w => w.projectId === 'vendor-modernization' && w.status !== 'done');
+      const idx = () => Object.fromEntries(store.list('workItem').map(w => [w.id, w]));
+      for (const w of open().filter(w => w.owner && w.owner !== me && (w.deps || []).some(d => { const p = idx()[d.id || d]; return p && p.status !== 'done'; }))) if (await tryDone(w)) return { id: w.id, diag };
+      /* earlier steps finished the seed's chains: link an open task to open work due before it starts, then finish it */
+      const os = open().filter(w => w.start && w.due);
+      for (const w of os.filter(x => x.owner && x.owner !== me)) {
+        const y = os.find(v => v.id !== w.id && v.due < w.start && !(v.deps || []).some(d => (d.id || d) === w.id)); if (!y) continue;
+        try { await store.save('workItem', w.id, Object.assign({}, w, { deps: (w.deps || []).concat([y.id]) }), 'E2E R16: waits on open work'); } catch (e) { diag.push('dep ' + w.id + ': ' + e.message); continue; }
+        await store.load(); if (await tryDone(store.get('workItem', w.id))) return { id: w.id, diag };
+      }
+      return { id: null, diag }; }, STORE);
+    const W = Wr.id;
+    if (!W) console.log('    (R16 #4 diag)', JSON.stringify(Wr.diag).slice(0, 600));
+    if (W) {
+      await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
+      await sGo('/portfolio', '[data-pcard]');
+      const ucN = () => sp.evaluate(() => { const c = document.querySelector('[data-pcard="vendor-modernization"] [data-t="unconfirmed"] b'); return c ? +c.textContent : 0; });
+      const before = await ucN();
+      await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE);
+      await sGo('/project/vendor-modernization?mode=work', 'table.pmo-work, [data-wid]');
+      const btnW = await sp.waitForSelector(`[data-confirm-done="${W}"]`, { timeout: 10000 }).then(() => true).catch(() => false);
+      check('R16 #4: the project manager sees "Confirm it’s done" on that task', btnW, { W, url: sp.url() });
+      if (btnW) { await sp.click(`[data-confirm-done="${W}"]`); await sleep(500);
+        check('R16: "Confirm it’s done" in the work table opens only the confirm, not the task form too', !(await sp.evaluate(() => [...document.querySelectorAll('.overlay h2')].some(h => /Edit work item/.test(h.textContent))))); }
+      if (await sp.waitForSelector('.overlay [data-act="confirm"]', { timeout: 3000 }).then(() => true).catch(() => false)) await sp.evaluate(() => document.querySelector('.overlay [data-act="confirm"]').click());
+      /* a row click can also open the task form under it: close whatever is left */
+      await sp.evaluate(() => document.querySelectorAll('.overlay').forEach(o => { const c = o.querySelector('[data-act="cancel"]'); if (c) c.click(); }));
+      await sSettle(); await sleep(500);
+      await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
+      await sGo('/portfolio', '[data-pcard]');
+      const after = await ucN();
+      const eng16 = await sp.evaluate(async ([u, id]) => { const { store } = await import(u); const t = window.PMOEngine.projectTruth(store.state.docs, 'vendor-modernization', store.state.today); return { n: t.unconfirmed.count, has: JSON.stringify(t.unconfirmed.items).includes('"' + id + '"') }; }, [STORE, W]);
+      check('R16 #4 (PMO 9): "done, not confirmed" drops by one on the portfolio once confirmed (and matches the engine)', before > 0 && after === before - 1 && after === eng16.n && !eng16.has, { before, after, eng16 });
+
+    } else check('R16 #4: the seed has a task with open work before it', false);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
+    /* #5 Jordan 9: project tabs at least 32px tall at 390 */
+    await sp.setViewportSize({ width: 390, height: 844 });
+    await sGo('/project/vendor-modernization', '.pmo-tabs a');
+    const tabH = await sp.$$eval('.pmo-tabs a', els => els.map(e => Math.round(e.getBoundingClientRect().height)));
+    check('R16 #5 (Jordan 9): project tabs are at least 32px tall at 390', tabH.length > 0 && tabH.every(h => h >= 32), tabH);
+    await sShot('62-r16-project-tabs-390', false);
+    await sp.setViewportSize({ width: 1366, height: 900 });
+    /* #6 Jordan 1: assigning a test to yourself warns before saving */
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(true), STORE);
+    await sGo('/project/vendor-modernization?mode=work', '[data-add-work], [data-new-work], [data-edit-work]');
+    const editBtn = await sp.$('[data-edit-work]');
+    if (editBtn) {
+      await editBtn.click(); await sp.waitForSelector('.overlay select[data-wi-owner]');
+      await sp.selectOption('.overlay select[name="kind"]', 'test');
+      await sp.selectOption('.overlay select[data-wi-owner]', me16);
+      check('R16 #6 (Jordan 1): a test assigned to yourself says "You won’t be able to pass it yourself"', await sp.isVisible('.overlay [data-self-test]') && /You won’t be able to pass it yourself/.test(await sp.innerText('.overlay [data-self-test]')));
+      const other = await sp.evaluate(me => [...document.querySelectorAll('.overlay select[data-wi-owner] option')].map(o => o.value).find(v => v && v !== me), me16);
+      await sp.selectOption('.overlay select[data-wi-owner]', other);
+      check('R16 #6: assigned to someone else, no warning', !(await sp.isVisible('.overlay [data-self-test]')));
+      await sAct('cancel');
+    } else check('R16 #6: a task to edit', false);
+    /* #3 (N1 #8, PMO re-test 1): clearing a Jira hold with a tick shows the open-predecessor warning first */
+    const Hx = await sp.evaluate(async u => { const { store } = await import(u); const ws = store.list('workItem', w => w.projectId === 'vendor-modernization'); const idx = Object.fromEntries(ws.map(w => [w.id, w]));
+      let w = ws.find(w => w.status !== 'done' && (w.deps || []).some(d => idx[d.id || d] && idx[d.id || d].status !== 'done'));
+      if (!w) { /* earlier steps finished the seed's chains: in the local copy, make one open task wait on another */
+        const op = ws.filter(x => x.status !== 'done'); if (op.length < 2) return null;
+        const d0 = store.state.docs.workItem.find(x => x.id === op[0].id); d0.data = Object.assign({}, d0.data, { deps: (d0.data.deps || []).concat([op[1].id]) }); w = d0.data; window.__r16dep = op[1].id; }
+      if (!w) return null;
+      /* the hold as the sync writes it (local copy only: the page decides from it) */
+      const d = store.state.docs.workItem.find(x => x.id === w.id); d.data = Object.assign({}, d.data, { syncHold: { tool: 'Jira', key: 'VOM-16', reason: 'Done in Jira while the work before it is open', confirmBy: store.state.me } }); store.emit();
+      return [w.id, window.__r16dep || null]; }, STORE).then(x => x || [null, null]);
+    const [H, Hdep] = Hx;
+    if (H) {
+      await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
+      await sp.goto(ROOT + '/project/vendor-modernization?mode=work'); await sp.waitForSelector('[data-wid]', { timeout: 20000 }); await sSettle();
+      await sp.evaluate(async ([u, id, dep]) => { const { store } = await import(u); const d = store.state.docs.workItem.find(x => x.id === id); d.data = Object.assign({}, d.data, dep ? { deps: (d.data.deps || []).concat([dep]) } : {}, { syncHold: { tool: 'Jira', key: 'VOM-16', reason: 'Done in Jira while the work before it is open', confirmBy: store.state.me } }); store.emit(); }, [STORE, H, Hdep]);
+      await sp.waitForSelector(`[data-done="${H}"]`, { timeout: 8000 }).catch(() => {});
+      await sp.click(`[data-done="${H}"]`, { timeout: 8000 }).catch(() => {});
+      const shown = await sp.waitForSelector('.overlay [data-hold-warn]', { timeout: 5000 }).then(() => true).catch(() => false);
+      const txt = shown ? await sp.innerText('.overlay [data-hold-warn]') : '';
+      check('R16 #3 (PMO re-test 1): clearing a Jira hold warns about the open work it depends on', shown && /still open/.test(txt) && await sp.locator('.overlay [data-hold-open-item]').count() > 0, txt);
+      if (shown) await sAct('cancel');
+      check('R16 #3: cancelled, the task is not done', (await sp.evaluate(async ([u, id]) => (await import(u)).store.get('workItem', id).status, [STORE, H])) !== 'done');
+      await sp.evaluate(async u => (await import(u)).store.load(), STORE);
+    } else check('R16 #3: a task with open work before it', false);
+    await sp.evaluate(async u => (await import(u)).store.setAdvanced(false), STORE);
   }
   check('R7 simple: zero page/console errors', sErr.length === 0, sErr.slice(0, 5));
   await sctx.close();

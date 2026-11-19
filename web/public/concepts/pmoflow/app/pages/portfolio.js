@@ -2,7 +2,7 @@
    Projects RAG table, workload, risk register, baseline variance, AI status report. */
 import { store } from '../store.js';
 import { esc, fmt, link, av, pname, modal, toast } from '../ui.js';
-import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML, costKnown, costOver, costUnknownHTML, pointNav } from './project.js';
+import { isSimple, summaryOf, summaryHTML, summaryPill, whoActs, whoName, whoLineHTML, blockerWho, RAG_LBL, eng, docs, today, projectStats, rag, ragBadge, RAG_RULE, rerender, feedHTML, bindFeed, finishInfo, BUG, gateInfo, newProject, psave, premove, relMgr, financials, money, rateOf, DEFAULT_RATE, projectBurn, burnChart, earnedValue, fmtIdx, idxCls, downloadCSV, statusesOf, reportText, truthOf, bufferText, factsHTML, costHTML, periodPickerHTML, bindPeriodPicker, readCustomRange, launchLeft, reportEvents, reportSubject, windowWords, blockingCount, blockingInfo, lateOf, statusName, evFlagsHTML, costKnown, costOver, costUnknownHTML, pointNav, recordReport } from './project.js';
 
 const LV = ['low', 'med', 'high'];
 const LV_LBL = { low: 'Low', med: 'Medium', high: 'High' };
@@ -295,12 +295,18 @@ async function deleteRisk(r) {
 }
 
 /* ---------------------------------------------------------------- baseline variance */
+export function kickoffBaseline(bls) {
+  const arr = (bls || []).filter(Boolean);
+  return arr.find(b => /kick-?off/i.test(String(b.label || ''))) || arr.find(b => !b.auto && !b.changeId) || arr[0] || null;
+}
 function varianceHTML(projects) {
   const withBl = projects.filter(p => (p.baselines || []).length);
   if (!withBl.length) return `<div class="card"><h3>Changes since the saved plan</h3><div class="empty">No saved plans yet. Open a project and use “Save plan” to keep a copy of its dates, then compare here.</div></div>`;
   const j = withBl.find(p => p.id === st.blPrj) || withBl[0];
   const bls = j.baselines;
-  const bl = bls.find(b => b.id === st.blId) || bls[bls.length - 1];
+  /* R16 (N3 #4, PMO 5): unless one is picked, compare with the Kickoff plan (the first plan saved by hand), never the
+     latest automatic snapshot a plan change saved (which shows 0 days moved) */
+  const bl = bls.find(b => b.id === st.blId) || kickoffBaseline(bls);
   const raw = eng('baselineVariance', [], docs(), j.id, bl.id, today()) || [];
   const rows = Array.isArray(raw) ? raw : (raw.items || raw.rows || []);
   /* Headline = project finish − latest baseline due (engine R2 projectSlipDays); never a sum of item slips. */
@@ -322,8 +328,8 @@ function varianceHTML(projects) {
       <select class="pmo-sel" data-bl-id aria-label="Saved plan">${bls.map(b => `<option value="${esc(b.id)}" ${b.id === bl.id ? 'selected' : ''}>${esc(b.label || 'Saved plan')} · ${esc(fmt(b.at))}</option>`).join('')}</select></div>
     <div class="pmo-var-kpis"><div class="kpi" data-proj-slip><b class="${projSlip > 0 ? 'fail' : projSlip < 0 ? 'pass' : ''}">${esc(bd(projSlip))}</b><span>Finish moved (vs saved plan)</span></div><div class="kpi"><b>${rows.filter(r => r.varianceDays > 0).length}/${rows.length}</b><span>Items later than plan</span></div><div class="kpi"><b>${worstItem ? esc(bd(worstItem)) : '0d'}</b><span>Worst single item</span></div></div>
     <div class="hint" style="margin:-4px 0 8px">Item slips overlap through dependencies, so they are not added up. The headline is how far the project’s finish has moved.</div>
-    ${rows.length ? `<div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Task</th><th>Planned due</th><th>Expected</th><th>Moved</th></tr></thead><tbody>
-      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap">${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap">${esc(fmt(r.forecast))}</td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${esc(bd(r.varianceDays || 0))}</span>` : '<span class="pmo-var">added after the plan was saved</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This saved plan has no tasks that still exist.</div>'}</div>`;
+    ${rows.length ? `<div class="tbl-wrap"><table class="pmo-vtable"><thead><tr><th>Task</th><th>Planned (start – due)</th><th>Expected (start – finish)</th><th>Moved</th></tr></thead><tbody>
+      ${worst.map(r => `<tr><td>${esc(wt(r.workId))}</td><td class="pmo-nowrap" data-var-planned>${r.plannedStart ? esc(fmt(r.plannedStart)) + ' – ' : ''}${esc(fmt(r.plannedDue))}</td><td class="pmo-nowrap" data-var-expected>${r.start ? `<span data-var-start="${esc(r.start)}">${esc(fmt(r.start))}</span> – ` : ''}<span data-var-forecast="${esc(r.forecast || '')}">${esc(fmt(r.forecast))}</span></td><td class="pmo-nowrap">${r.plannedDue ? `<span class="pmo-var ${r.varianceDays > 0 ? 'up' : r.varianceDays < 0 ? 'down' : ''}">${esc(bd(r.varianceDays || 0))}</span>` : '<span class="pmo-var">added after the plan was saved</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">This saved plan has no tasks that still exist.</div>'}</div>`;
 }
 
 /* ---------------------------------------------------------------- status report */
@@ -474,9 +480,12 @@ export function bind(root) {
   on('[data-copy-rep]', async () => {
     const sel = root.querySelector('[data-rep-prj]'); const j = store.get('project', sel && sel.value); const rep = j && reports[j.id];
     if (!rep || !rep.data) return;
-    toast((await copyText(reportText(j, rep.data))) ? 'Report copied' : 'Copy failed: select the text and copy manually');
+    const ok = await copyText(reportText(j, rep.data));
+    toast(ok ? 'Report copied' : 'Copy failed: select the text and copy manually');
+    if (ok) recordReport(j, rep.data, 'send');   /* R16 (N1 #3): a copied report is a sent one; a preview records nothing */
   });
   on('[data-print-pf-rep]', () => {
+    { const sel = root.querySelector('[data-rep-prj]'); const j = store.get('project', sel && sel.value); const rep = j && reports[j.id]; if (rep && rep.data) recordReport(j, rep.data, 'export'); }
     document.body.classList.add('pmo-print-pf');
     const done = () => { document.body.classList.remove('pmo-print-pf'); window.removeEventListener('afterprint', done); };
     window.addEventListener('afterprint', done);

@@ -295,6 +295,20 @@ async function browserChecks(browser) {
     /With two or more Admins, moving someone between departments or changing a department’s existing approvers is proposed by one Admin and confirmed by another with the extra sign-in check/.test(sec) &&
     /In a workspace with one Admin, those changes apply at once and History says so/.test(sec) &&
     sec.includes('Someone moved into a department, or made an approver, after its testing or approval started can’t pass its tests or approve it.'));
+  /* R16 N4 #4 (PMO top 1, N1 #1 as built): hosted sign-in binds each change to the signed-in person, and step-ups expire after
+     10 minutes. Stated exactly, tagged In place, with the open demo's limit, and nothing beyond it. */
+  const li = async sel => (await page.locator(sel).first().textContent().catch(() => '')).replace(/\s+/g, ' ').trim();
+  const bind = await li('#signin li:has-text("binds actions")');
+  check('security: identity binding stated exactly as built', bind === 'In place Hosted sign-in binds actions to the signed-in person. When you sign in with Microsoft on the hosted site, the server takes who you are from the sign-in and makes each change as you. A change sent in someone else’s name is refused and recorded in History. The open demo has no sign-in, so its “Viewing as” switcher still lets you act as anyone.', bind);
+  const fresh = await li('#access li:has-text("expire after")');
+  check('security: step-up expiry stated exactly as built (10 minutes, server clock, future refused)', fresh === 'In place Step-ups expire after 10 minutes. The server checks each one against its own clock and refuses a check that is more than 10 minutes old or dated more than a minute in the future. Each refusal is recorded in History.', fresh);
+  const minutes = [...sec.matchAll(/(\d+)[- ]minutes?/g)].map(m => +m[1]);
+  check('security: the only time limits stated are the 10-minute step-up and the 5-minute sync expiry', minutes.length > 0 && minutes.every(n => n === 10 || n === 5), minutes);
+  check('security: no claim beyond the build (device-bound tokens, binding in the open demo, every request signed in)',
+    !/(tokens?|sessions?) (are|is) (now )?bound to (a|the|your) device/i.test(sec) && /not yet bound to a device/.test(sec) &&
+    !/(demo|sandbox)[^.]{0,60}binds/i.test(sec) && !/\b(every|all) (request|visitor)s?[^.]{0,40}signed in\b/i.test(sec), sec.slice(0, 120));
+  check('security: SCIM appears only as Planned', await page.$$eval('main li', ls => ls.filter(l => /SCIM/.test(l.textContent)).every(l => l.querySelector('.tag.planned'))));
+  check('security: department moves end the approver right, stated as built', /Moving someone out of a department also ends their approving for it, in the same change\./.test(sec));
   check('security: pilot and escrow terms are not invented', !/escrow[^.]{0,80}\b(free|included|at no cost)\b/i.test(sec) && !/\bSLA\b[^.]{0,40}\b99\.\d+%/.test(sec));
   check('security: "Request our security packet" goes to the demo form with topic=security', await page.locator('a[href="/pmoflow/demo?topic=security"]').count() >= 1);
   await page.goto(ORIGIN + '/pmoflow/demo?topic=security');
@@ -335,6 +349,8 @@ async function browserChecks(browser) {
   await page.goto(ORIGIN + '/pmoflow/pricing');
   const pilotTxt = (await page.innerText('.card.pilot')).replace(/\s+/g, ' ');
   check('pricing: the pilot says who does the setup, as the offer states it', /We set up PMOFlow for your team, connected to your tools if you want/.test(pilotTxt) && /credited to your first year/.test(pilotTxt), pilotTxt);
+  check('pricing: the pilot price and its credit come only from pricing.json ($2,500, 90 days, credited to year one)', pricing.pilot.price === 2500 && pricing.pilot.days === 90 &&
+    pilotTxt.includes(money(pricing.pilot.price)) && !/\$\s?\d[\d,]*/.test(pilotTxt.replace(money(pricing.pilot.price), '').replace(/\$\d+ per paid seat/g, '')), pilotTxt);
   check('pricing: the pilot names one process and 90 days', /one process/.test(pilotTxt) && /90 days/.test(pilotTxt), pilotTxt);
   const site = ['index', 'pricing', 'security', 'compare', 'demo'].map(n => fs.readFileSync(path.join(PUBLIC, 'pmoflow', n + '.html'), 'utf8').replace(/<[^>]+>/g, ' ')).join(' ').replace(/\s+/g, ' ');
   const invented = site.match(/\b(one|a single|single) (setup |onboarding )?call\b|money[- ]back|guarantee\w*|\bfree pilot\b|pilot[^.]{0,40}\bfree\b|\brefund\w*/gi);

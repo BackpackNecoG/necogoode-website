@@ -432,7 +432,10 @@ test('workload, baselineVariance, suggestWorkFromDiff', () => {
   assert.equal(wl.find(r => r.person === 'lp').late, 1);
   assert.deepEqual(E.workload(docs, TODAY), wl);           // projectId optional
   const bv = E.baselineVariance(docs, PRJ, 'b1', TODAY);
-  assert.deepEqual(bv.find(r => r.workId === 'W6'), { workId: 'W6', plannedDue: '2026-11-03', forecast: '2026-11-11', varianceDays: 8 });
+  /* R16 N1 #10 adds start/plannedStart to each row (so done never shows before start); the R2 fields are unchanged */
+  const w6r = bv.find(r => r.workId === 'W6');
+  assert.deepEqual({ workId: w6r.workId, plannedDue: w6r.plannedDue, forecast: w6r.forecast, varianceDays: w6r.varianceDays }, { workId: 'W6', plannedDue: '2026-11-03', forecast: '2026-11-11', varianceDays: 8 });
+  assert.ok(!w6r.start || w6r.start <= w6r.forecast);
   assert.equal(bv.find(r => r.workId === 'W10').varianceDays, 11);   // R4: business-day forecast Dec 1
   assert.equal(bv.find(r => r.workId === 'W1').plannedDue, null);
   const sug = E.suggestWorkFromDiff(docs, PRJ);
@@ -1851,11 +1854,13 @@ test('R7 specFromProfile: types, required, bounds; generateTests uses observed m
   const prof = E.profileCsv('Amount,Qty,Paid on,Branch code,Payee,Memo\n12.50,3,2026-01-05,0012,Ana Li,a\n1200.00,10,2026-02-01,0099,Bo Chen,\n', {});
   const f = E.specFromProfile(prof);
   const by = n => f.find(x => x.name === n);
-  assert.deepEqual(by('Amount'), { name: 'Amount', type: 'currency', required: true, origin: 'profile', min: 12.5, max: 1200, format: 'currency', rule: 'Required' });
-  assert.equal(by('Qty').type, 'number'); assert.deepEqual([by('Qty').min, by('Qty').max], [3, 10]);
+  /* R16 N1 #9 (BPM, supersedes R7 "all from observed values"): a min/max is never taken from the sample; the sample's
+     range is kept as information (observedMin/observedMax), so nothing valid outside it is rejected */
+  assert.deepEqual(by('Amount'), { name: 'Amount', type: 'currency', required: true, origin: 'profile', observedMin: 12.5, observedMax: 1200, format: 'currency', rule: 'Required' });
+  assert.equal(by('Qty').type, 'number'); assert.deepEqual([by('Qty').min, by('Qty').max, by('Qty').observedMin, by('Qty').observedMax], [undefined, undefined, 3, 10]);
   assert.equal(by('Paid on').type, 'date');
   assert.equal(by('Branch code').type, 'digits'); assert.equal(by('Branch code').length, 4); assert.equal(by('Branch code').format, '4 digits');
-  assert.equal(by('Payee').type, 'text'); assert.deepEqual([by('Payee').min, by('Payee').max], [6, 7]);
+  assert.equal(by('Payee').type, 'text'); assert.deepEqual([by('Payee').min, by('Payee').max, by('Payee').observedMinLen, by('Payee').observedMaxLen], [undefined, undefined, 6, 7]);
   assert.equal(by('Memo').required, false); assert.equal(by('Memo').rule, '');
   assert.deepEqual(E.specFromProfile({ columns: prof }), f);       // a profile doc works too
   assert.deepEqual(E.specFromProfile(null), []);
@@ -1864,7 +1869,7 @@ test('R7 specFromProfile: types, required, bounds; generateTests uses observed m
   const cases = GT(de, prof);
   cases.filter(c => !c.context).forEach(c => assert.equal(E.validate(E.fieldSpec(f.find(x => x.name === c.field)), c.input) ? 'accept' : 'reject', c.expect, c.field + ' ' + c.note));
   assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '12.50' && c.expect === 'accept'));
-  assert.ok(cases.some(c => c.field === 'Amount' && c.kind === 'boundary' && c.input === '1200.01' && c.expect === 'reject'));
+  assert.ok(!cases.some(c => c.field === 'Amount' && c.input === '1200.01' && c.expect === 'reject'), 'a value just above the sample\'s largest is not rejected');
   // no spec bounds: observed min/max still become boundary cases (profile origin)
   const loose = GT({ id: 'DY', fields: [{ name: 'Qty', type: 'number' }] }, prof);
   assert.ok(loose.some(c => c.kind === 'boundary' && c.origin === 'profile' && c.input === '3' && /Smallest value seen/.test(c.note)));
@@ -2609,7 +2614,7 @@ test('R11 golden numbers (docs/pmoflow/GOLDEN-NUMBERS.md) at seed day 0', () => 
   assert.equal(v.testing.perBU.Compliance.notChangedText, 'Not tested because this project does not change them: Vendor legal name & Tax ID, Certificate of insurance and Vendor risk tier.');
   assert.equal(v.who.length, 7);
   assert.deepEqual([v.blocking.count, v.blocking.holdsUp, v.blocking.text], [1, 5, '1 blocking (holds up 5 tasks)']);
-  assert.deepEqual([v.lateness.W6.text, v.lateness.W6.dueText, v.lateness.W7.dueText], ['Late by 6 business days', 'was due Nov 16', 'due Nov 23']);
+  assert.deepEqual([v.lateness.W6.text, v.lateness.W6.dueText, v.lateness.W7.dueText], ['1 business day past due; expected to finish 6 business days late', 'was due Nov 16', 'due Nov 23']);   /* R16 N1 #10 one wording */
   assert.deepEqual([v.grants.waiting, v.grants.open], [1, 1]);
   assert.deepEqual(v.approvals.map(a => [a.bu, a.ready, a.approver]), [['Accounts Payable', false, 'nb'], ['Compliance', true, 'do'], ['IT', false, 'sk'], ['Procurement', false, 'rv'], ['Treasury', false, 'gw']]);
   // R11 §2 seed: every team has an eligible approver (its department head) who does none of its steps and recorded none
@@ -2721,7 +2726,7 @@ test('R11 §4 plan sanity: 10-day cap, late-on-arrival warning, role owners, rea
 test('R11 §5/§6/§9: one lateness per task, one blocking definition, EV hygiene, Jira done-before-dependencies', () => {
   const d = SEED.seed(GOLD_DAY).docs;
   const t = E.projectTruth(d, PRJ, GOLD_DAY);
-  Object.values(t.lateness).forEach(l => { assert.ok(l.days > 0); assert.equal(l.text, 'Late by ' + l.days + ' business day' + (l.days === 1 ? '' : 's')); if (l.due >= GOLD_DAY) assert.doesNotMatch(l.dueText, /was due/); });
+  Object.values(t.lateness).forEach(l => { assert.ok(l.days > 0); assert.ok(l.text === 'Expected to finish ' + l.days + ' business day' + (l.days === 1 ? '' : 's') + ' late' || l.text === l.pastDueDays + ' business day' + (l.pastDueDays === 1 ? '' : 's') + ' past due; expected to finish ' + l.days + ' business day' + (l.days === 1 ? '' : 's') + ' late', l.text);   /* R16 N1 #10 */ if (l.due >= GOLD_DAY) assert.doesNotMatch(l.dueText, /was due/); });
   assert.equal(t.blocking.count, t.blocking.items.length);
   assert.ok(t.blocking.items.every(b => b.held > 0));
   // a Jira "Done" on a task whose predecessor is open
@@ -2856,7 +2861,7 @@ test('R10 "Not checked yet": imported information (avail unchecked) is never "We
     const c = E.periodReport(d, PRJ, { preset: 'this-week' }, RDAY).overall.concerns;
     assert.deepEqual(c.map(x => [x.dimension, x.key, x.count, x.of]),
       [['category', 'Banking', 4, 5], ['step', 'vendor-onboarding/s3', 3, 5], ['team', 'IT', 2, 5]]);
-    assert.equal(c[0].text, 'Banking (risk area): 4 of the 5 late or blocked tasks');
+    assert.equal(c[0].text, 'Banking (risk area): 4 of the 5 tasks late or held up');   /* R16 N1 #10: the header's unit ("tasks late or held up") */
     // fewer than two late or blocked tasks: no areas of concern
     assert.deepEqual(E.periodReport(tiny(), 'tp', { preset: 'this-week' }, RDAY).overall.concerns, []);
   });
@@ -3974,4 +3979,349 @@ test('R15 #8/#9/#10 unconfirmed Done is not finished; one late-or-blocked count 
   // a launched project is 100% done
   const d3 = SEED.seed(GOLD_DAY).docs; d3.project.find(p => p.id === PRJ).data.status = 'live';
   assert.equal(E.projectTruth(d3, PRJ, GOLD_DAY).pctDone, 100);
+});
+
+/* ------------------------------------------------------------------ R16 N1 */
+const r16apply = (d, r) => {
+  const put = (type, patches) => d[type].map(e => { const p = (patches || []).find(x => x.id === e.id); return p ? { id: e.id, data: Object.assign({}, e.data, p) } : e; });
+  return Object.assign({}, withDepts(d, r.departments), { person: put('person', r.people), process: put('process', r.processes), project: put('project', r.projects) });
+};
+
+test('R16 #1 step-ups expire after 10 minutes and are never in the future; a hosted sign-in maps to one person', () => {
+  const now = '2026-11-18T15:00:00.000Z';
+  assert.equal(E.STEP_UP_MAX_MINUTES, 10);
+  assert.equal(E.stepUpProblem('2026-11-18T14:51:00.000Z', now), null);
+  assert.equal(E.stepUpProblem({ at: '2026-11-18T14:51:00.000Z' }, now), null);
+  assert.equal(E.stepUpProblem('2026-11-18T14:49:59.000Z', now).kind, 'stale');
+  assert.equal(E.stepUpProblem('2020-01-01T00:00:00.000Z', now).kind, 'stale');
+  assert.equal(E.stepUpProblem('2026-11-18T15:00:30.000Z', now), null, 'under a minute of clock difference is allowed');
+  assert.equal(E.stepUpProblem('2026-11-18T15:05:00.000Z', now).kind, 'future');
+  assert.equal(E.stepUpProblem(undefined, now).kind, 'missing');
+  const d = SEED.seed(GOLD_DAY).docs;
+  d.person.find(p => p.id === 'ar').data.email = 'Ana.Ruiz@northwind.example';
+  d.person.find(p => p.id === 'ta').data.principalId = 'u-123';
+  assert.equal(E.personForPrincipal(d, { userDetails: 'ana.ruiz@northwind.example' }), 'ar');
+  assert.equal(E.personForPrincipal(d, { userId: 'u-123', userDetails: 'other@x.example' }), 'ta');
+  assert.equal(E.personForPrincipal(d, { userDetails: 'nobody@x.example' }), null);
+});
+
+test('R16 #2 hours are append-only: removals and reductions are problems; a correction is a reversing entry with a reason; totals net', () => {
+  const t0 = [{ by: 'lp', date: '2026-11-16', hours: 6, at: '2026-11-16T20:00:00Z' }, { by: 'lp', date: '2026-11-17', hours: 4, at: '2026-11-17T20:00:00Z' }];
+  assert.equal(E.timeEntryProblem(t0, t0.concat([{ by: 'lp', date: '2026-11-18', hours: 2 }])), null);
+  assert.equal(E.timeEntryProblem(t0, t0.slice(1)).kind, 'removed');
+  assert.equal(E.timeEntryProblem(t0, [Object.assign({}, t0[0], { hours: 3 }), t0[1]]).kind, 'removed');
+  assert.equal(E.timeEntryProblem(t0, t0.map(t => Object.assign({}, t, { at: undefined }))), null, 'server stamps are not part of an entry');
+  assert.equal(E.timeEntryProblem(t0, t0.concat([{ by: 'lp', date: '2026-11-18', hours: -3 }])).kind, 'no-reason');
+  const c = E.reverseEntry(t0[0], 3, 'Double-logged', 'lp', '2026-11-18');
+  assert.deepEqual([c.hours, c.reason, c.reverses, c.correction], [-3, 'Double-logged', t0[0].at, true]);
+  assert.equal(E.timeEntryProblem(t0, t0.concat([c])), null);
+  assert.equal(E.timeEntryProblem(t0, t0.concat([E.reverseEntry(t0[0], 20, 'x', 'lp', '2026-11-18')])).kind, 'below-zero');
+  assert.equal(E.timeEntryText(c), '−3 hours on Nov 18 (correction: “Double-logged”)');
+  const d = SEED.seed(GOLD_DAY).docs;
+  const w = { id: 'WX', owner: 'lp', time: t0.concat([c]) };
+  const tot = E.hoursTotals(d, w);
+  assert.equal(tot.hours, 7);
+  assert.match(tot.text, /^7 hours \(\$[\d,]+\)$/);
+});
+
+test('R16 #2 a past period never changes after the fact: a correction or backdated entry logged later is left out', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const prj = d.project.find(p => p.id === PRJ).data;
+  const w = d.workItem.map(x => x.data).find(x => x.projectId === PRJ && Array.isArray(x.time) && x.time.length);
+  const from = '2026-11-09', to = '2026-11-13';
+  const before = E.periodReport(d, PRJ, { preset: 'custom', from, to }, GOLD_DAY);
+  w.time = w.time.concat([{ by: w.owner, date: '2026-11-10', hours: 40, at: GOLD_DAY + 'T15:00:00.000Z', backdated: true },
+    Object.assign(E.reverseEntry(w.time[0], 1, 'fix', w.owner, '2026-11-11'), { at: GOLD_DAY + 'T15:01:00.000Z' })]);
+  const after = E.periodReport(d, PRJ, { preset: 'custom', from, to }, GOLD_DAY);
+  assert.deepEqual(JSON.stringify(after.overall && after.overall.budget), JSON.stringify(before.overall && before.overall.budget));
+  void prj;
+});
+
+test('R16 #4 a move out of a department ends approver rights and reopens their approvals before launch; a joiner is told why', () => {
+  let d = SEED.seed(GOLD_DAY).docs;
+  const AR = 'access-review-automation';
+  const ok0 = E.readiness(d, AR, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.ok(ok0.sectionStatus.find(x => x.bu === 'IT').approved, 'Sam approved IT');
+  // Sam moves to Treasury: IT no longer names him, his IT approval reopens with the reason
+  const r = E.departmentEdit(d, { kind: 'assign', personId: 'sk', id: 'dept-treasury', at: GOLD_DAY + 'T15:00:00.000Z' });
+  assert.ok(r.ok, r.error);
+  assert.deepEqual(r.departments.find(x => x.name === 'IT').approvers, []);
+  assert.ok(r.departments.find(x => x.name === 'IT').approverRemoved.sk);
+  assert.deepEqual(r.people.find(p => p.id === 'sk').leftDepartments, [{ bu: 'IT', at: GOLD_DAY + 'T15:00:00.000Z' }]);
+  d = r16apply(d, r);
+  assert.ok(!/Sam Keller/.test(E.departmentApprovers(d, 'IT').text), E.departmentApprovers(d, 'IT').text);
+  const so = E.readiness(d, AR, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.equal(so.sectionStatus.find(x => x.bu === 'IT').approved, false);
+  assert.deepEqual(so.reopened.map(x => [x.bu, x.person, x.reason]), [['IT', 'sk', 'Sam Keller moved out of IT, so their approval no longer counts']]);
+  assert.match(so.detail, /IT reopened: Sam Keller moved out of IT/);
+  const st = E.approverStatus(d, AR, 'IT', 'sk');
+  assert.equal(st.eligible, false); assert.match(st.you, /^You moved out of IT, so you no longer approve its part/);
+  // even when an older settings doc still names him (a legacy move), "Approves: Sam" is not shown
+  const legacy = withDepts(d, wsSettings(d).departments.map(x => x.name === 'IT' ? Object.assign({}, x, { approvers: ['sk'] }) : x));
+  assert.ok(!/Sam Keller/.test(E.departmentApprovers(legacy, 'IT').text));
+  // a launched project keeps its record
+  const live = JSON.parse(JSON.stringify(d)); live.project.find(p => p.id === AR).data.status = 'live';
+  const lso = E.readiness(live, AR, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.deepEqual(lso ? lso.reopened || [] : [], [], 'a launched project (frozen readiness) reopens nothing');
+  // removal as approver: dated, and the approval reopens too
+  let d2 = SEED.seed(GOLD_DAY).docs;
+  const r2 = E.departmentEdit(d2, { kind: 'approvers', id: 'dept-it', approvers: ['dk'], at: GOLD_DAY + 'T15:00:00.000Z' });
+  d2 = r16apply(d2, r2);
+  assert.match(E.readiness(d2, AR, GOLD_DAY).checks.find(c => c.id === 'bu-signoff').reopened[0].reason, /Sam Keller is no longer an approver for IT/);
+  // a joiner after testing started is told why, in plain words
+  let d3 = SEED.seed(GOLD_DAY).docs;
+  d3 = r16apply(d3, E.departmentEdit(d3, { kind: 'approvers', id: 'dept-compliance', approvers: [], at: GOLD_DAY + 'T14:00:00.000Z' }));   /* members approve */
+  const r3 = E.departmentEdit(d3, { kind: 'assign', personId: 'gw', id: 'dept-compliance', at: GOLD_DAY + 'T15:00:00.000Z' });
+  d3 = r16apply(d3, r3);
+  const runsAt = d3.testRun.map(x => x.data).filter(x => x.projectId === PRJ && x.at).map(x => x.at).sort()[0];
+  assert.ok(runsAt && runsAt < GOLD_DAY + 'T15:00:00.000Z');
+  const js = E.approverStatus(d3, PRJ, 'Compliance', 'gw');
+  assert.equal(js.rule, 'recent-move');
+  assert.match(js.you, /^You joined Compliance after its testing started, so you can’t approve its part\. Ask Dave Ortiz\.$/);
+});
+
+test('R16 #5 no phantom part after a hand-over: the former PM\'s launch tasks add no part; nothing to sign is never asked', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const p = d.project.find(x => x.id === PRJ).data;
+  const before = E.readiness(d, PRJ, GOLD_DAY).checks.find(c => c.id === 'bu-signoff').sections;
+  assert.ok(!before.includes('PMO'));
+  // Tom hands the PM and launch owner roles to Maya (an applied plan change); his launch-day task stays his
+  p.owner = 'mc'; p.releaseManager = 'mc';
+  d.planChange = (d.planChange || []).concat([{ id: 'pc-r16', data: { id: 'pc-r16', projectId: PRJ, status: 'applied', appliedAt: GOLD_DAY + 'T15:00:00Z',
+    edits: [{ op: 'set', type: 'project', id: PRJ, field: 'owner', from: 'ta', to: 'mc' }, { op: 'set', type: 'project', id: PRJ, field: 'releaseManager', from: 'ta', to: 'mc' }] } }]);
+  assert.deepEqual(E.formerLeads(d, p), ['ta']);
+  const so = E.readiness(d, PRJ, GOLD_DAY).checks.find(c => c.id === 'bu-signoff');
+  assert.ok(!so.sections.includes('PMO'), 'no PMO part: ' + so.sections.join(','));
+  assert.equal(E.partHasWork(d, PRJ, 'PMO'), false);
+  assert.equal(E.buReady(d, PRJ, 'PMO').needed, false);
+  assert.ok(!E.approvalAsks(d, PRJ, GOLD_DAY).some(a => a.bu === 'PMO'));
+  // an approval of it never counts
+  d.approval.push({ id: 'AP-pmo', data: { id: 'AP-pmo', projectId: PRJ, bu: 'PMO', approver: 'ps', decision: 'approved', at: GOLD_DAY + 'T16:00:00Z', stepUp: true } });
+  assert.ok(!E.readiness(d, PRJ, GOLD_DAY).checks.find(c => c.id === 'bu-signoff').sectionStatus.some(x => x.bu === 'PMO'));
+});
+
+test('R16 #6 hand-over approvals never route to an Admin who became Admin after the project started; another Admin instead', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const ws = d.workspace.find(x => x.id === 'settings').data;
+  const start = E.projectStartedAt(d, PRJ);
+  assert.ok(start && start < GOLD_DAY + 'T00:00:00.000Z', start);
+  const first = E.deadlineApprover(d, PRJ, 'ta');
+  assert.equal(first.role, 'admin');
+  // that Admin became Admin 20 minutes ago: someone else is asked
+  ws.roleSince = Object.assign({}, ws.roleSince, { [first.person]: GOLD_DAY + 'T15:00:00.000Z' });
+  assert.equal(E.newerThanProject(d, d.project.find(x => x.id === PRJ).data, first.person), true);
+  const next = E.deadlineApprover(d, PRJ, 'ta');
+  assert.notEqual(next.person, first.person);
+  // nobody older: nobody is chosen, and the sentence says why
+  E.adminsOf(d).forEach(id => { ws.roleSince[id] = GOLD_DAY + 'T15:00:00.000Z'; });
+  const none = E.deadlineApprover(d, PRJ, 'ta');
+  assert.equal(none.person, null); assert.match(none.text, /after this project started/);
+});
+
+test('R16 #7/#8 launch window guard, dependency shift, cost over budget; clearing a Jira hold warns and keeps it out of EV', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const p = d.project.find(x => x.id === PRJ).data;   /* deadline Wed Dec 30 */
+  assert.equal(E.launchWindowGuard(d, PRJ, '2026-12-25 07:30').kind, 'day-off');
+  assert.match(E.launchWindowGuard(d, PRJ, '2026-12-25').text, /Fri Dec 25, Christmas Day/);
+  assert.equal(E.launchWindowGuard(d, PRJ, '2027-01-15 07:30').kind, 'after-deadline');
+  assert.equal(E.launchWindowGuard(d, PRJ, '2026-12-29 07:30–10:00'), null);
+  // W11 (idle, no deps) waits on W8 (in progress): it starts the business day after W8 is expected to finish
+  const w11 = d.workItem.find(x => x.id === 'W11').data;
+  const fc = E.forecastAll(d, GOLD_DAY);
+  const sh = E.dependencyShift(d, w11, ['W8'], GOLD_DAY);
+  assert.equal(sh.moved, true);
+  assert.equal(sh.start, E.addBusinessDays(fc.W8.forecast, 1));
+  assert.equal(E.businessDaysBetween(sh.start, sh.due), E.businessDaysBetween(w11.start, w11.due));
+  assert.match(sh.text, /now waits for “.*”, so it starts /);
+  assert.equal(E.dependencyShift(d, w11, [], GOLD_DAY).moved, false);
+  assert.equal(E.dependencyShift(d, d.workItem.find(x => x.id === 'W8').data, ['W12'], GOLD_DAY).moved, false, 'work in progress keeps its start');
+  // cost over budget, even under the 5% step
+  const after = JSON.parse(JSON.stringify(d));
+  const est = E.projectTruth(d, PRJ, GOLD_DAY).cost.estimate;   /* $45,300 of work against the $48,000 budget */
+  after.workItem.find(x => x.id === 'W11').data.cost = Math.ceil(p.budget.planned - est + 100);   /* +$2,800: 6%, over the budget */
+  const cb = E.costBreach(d, after, PRJ, GOLD_DAY);
+  assert.ok(cb && cb.overBudget, JSON.stringify(cb)); assert.match(cb.text, /over the \$48,000 budget/);
+  // a Jira hold on W7 (it waits on W6, still open): clearing it warns like the PM confirm, and earns nothing until confirmed
+  const w7 = d.workItem.find(x => x.id === 'W7').data;
+  w7.syncHold = { kind: 'order', reason: 'Done in Jira while W6 is open', confirmBy: 'dk', tool: 'Jira', key: 'NW-7' };
+  assert.equal(E.holdClearWarning(d, w7), E.unconfirmedDone(d, Object.assign({}, w7, { status: 'done', syncHold: undefined })).confirmText);
+  assert.match(E.holdClearWarning(d, 'W7'), /It depends on “.*”, which is still open\. Confirm “.*” is done anyway\?/);
+  const cleared = JSON.parse(JSON.stringify(d));
+  const c7 = cleared.workItem.find(x => x.id === 'W7').data; delete c7.syncHold; c7.status = 'done'; c7.doneBy = 'dk'; c7.time = [{ by: 'dk', date: GOLD_DAY, hours: 8 }];
+  assert.equal(E.unconfirmedDone(cleared, 'W7').flag, true);
+  const ev0 = E.earnedValue(d, PRJ, GOLD_DAY), ev1 = E.earnedValue(cleared, PRJ, GOLD_DAY);
+  assert.equal(ev1.EV != null ? ev1.EV : ev1.ev, ev0.EV != null ? ev0.EV : ev0.ev, 'a cleared hold with an open predecessor stays out of EV');
+});
+
+test('R16 #7 PMO repro: with the expected cost already over budget, an effort edit 4 → 5 days is a plan change', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  assert.ok(E.projectTruth(d, PRJ, GOLD_DAY).cost.overBudget, 'the seed is $847 over');
+  const after = JSON.parse(JSON.stringify(d));
+  after.workItem.find(x => x.id === 'W7').data.effortDays = 5;
+  const cb = E.costBreach(d, after, PRJ, GOLD_DAY);
+  assert.ok(cb && cb.overBudget && cb.pct < E.COST_TOLERANCE_PCT, JSON.stringify(cb));
+  assert.match(cb.text, /^This raises the expected cost from \$48,847 to \$[\d,]+, over the \$48,000 budget\.$/);
+});
+
+test('R16 #9 BPM fourth round: boundary tests at every changed threshold on the gateway scripts; warnings become tests with the right counts; no sample min/max', () => {
+  const I = require(path.join(ROOT, 'api', 'shared', 'pmoflow-import.js'));
+  const sop = fs.readFileSync(path.join(ROOT, 'tests', 'pmoflow', 'fixtures', 'r15-credit-sop.txt'), 'utf8');
+  const csv = fs.readFileSync(path.join(ROOT, 'tests', 'pmoflow', 'fixtures', 'r15-credit-sample.csv'), 'utf8');
+  const r = I.parseSop(sop);
+  const d = SEED.seed(GOLD_DAY).docs;
+  // information from the import, each with its own column of the sample
+  const col = { 'Customer name': 'customer_name', 'Account number': 'account_number', 'Requested limit': 'requested_limit', 'Bank account': 'bank_account', 'Risk score': 'risk_score' };
+  const rows = E.parseCsv(csv); const hdr = rows[0];
+  const idOf = {};
+  r.newData.forEach((nd, i) => {
+    const id = 'DC' + i; idOf[nd.name] = id;
+    d.dataElement.push({ id, data: { id, name: nd.name, avail: 'live', fields: [] } });
+    if (col[nd.name]) {
+      const j = hdr.indexOf(col[nd.name]);
+      const one = rows.map(x => x[j] == null ? '' : /[",]/.test(x[j]) ? '"' + String(x[j]).replace(/"/g, '""') + '"' : x[j]).join('\n');
+      d.profile.push({ id: 'PF' + i, data: { id: 'PF' + i, dataId: id, at: GOLD_DAY + 'T10:00:00Z', columns: E.profileCsv(one, { context: nd.name }), rows: 10 } });
+    }
+  });
+  const withData = ns => ns.map(n => { const o = Object.assign({}, n); const nd = r.newData.filter(x => (x.steps || []).includes(n.id)); if (nd.length) o.data = nd.map(x => idOf[x.name]); if (n.branches) o.branches = n.branches.map(b => Object.assign({}, b, { nodes: withData(b.nodes || []) })); return o; });
+  const asis = withData(r.nodes);
+  // the BPM's to-be: auto-approve up to $75,000 and a risk score of 65; the Controller above $200,000
+  const tobe = JSON.parse(JSON.stringify(asis)).map(n => Object.assign(n, { from: n.id }));
+  const g1 = tobe.find(n => n.id === 'd6'), g2 = tobe.find(n => n.id === 'd9');
+  g1.title = 'Requested limit is $75,000 or less and the risk score is 65 or below?'; g1.threshold = Object.assign({}, g1.threshold, { amount: 75000 });
+  g2.title = 'Requested limit over $200,000?'; g2.threshold = Object.assign({}, g2.threshold, { amount: 200000 });
+  d.process.push({ id: 'credit16', data: { id: 'credit16', name: 'Credit limit request', owner: 'mc', resources: [], version: 1, released: [], asis, tobe } });
+  d.project.push({ id: 'p16', data: { id: 'p16', name: 'Credit limits', owner: 'ta', processes: ['credit16'], status: 'active', target: E.addBusinessDays(GOLD_DAY, 40) } });
+  // the conditions of the changed choices
+  assert.deepEqual(E.gatewayConditions(g1).map(c => [c.subject, c.op, c.amount]), [['Requested limit', '<=', 75000], ['risk score', '<=', 65]]);
+  const all = E.generateProjectTests(d, 'p16');
+  const casesOf = name => ((all.find(x => x.dataId === idOf[name]) || {}).cases || []);
+  const path_ = t => (/takes the “(\w+)” path/.exec(t.note) || [])[1];
+  const lim = casesOf('Requested limit').filter(t => t.kind === 'boundary' && t.threshold);
+  assert.deepEqual(lim.map(t => [t.input, path_(t)]), [['75000.00', 'Yes'], ['75000.01', 'No'], ['200000.00', 'No'], ['200000.01', 'Yes']]);
+  // the unchanged risk score feeds the changed choice: 65 / 66 boundary tests
+  assert.ok(E.changedInformation(d, 'p16').some(x => x.dataId === idOf['Risk score'] && x.reason === 'decision'));
+  const risk = casesOf('Risk score');
+  assert.deepEqual(risk.filter(t => t.threshold).map(t => [t.input, path_(t)]), [['65', 'Yes'], ['66', 'No']]);
+  // no min/max from the sample: 29 is never rejected, and nothing says "Minimum value 30"
+  assert.ok(!risk.some(t => t.input === '29' && t.expect === 'reject'), JSON.stringify(risk.map(t => [t.input, t.expect, t.note])));
+  assert.ok(!all.some(x => x.cases.some(t => /Minimum value 30|Just below minimum/.test(t.note) && x.dataId === idOf['Risk score'])));
+  // warnings become tests, with the sample's counts (7 in 3 groups), on unchanged information too
+  const nameT = casesOf('Customer name').find(t => t.signal === 'near-duplicate');
+  assert.ok(nameT, 'near-duplicate names get a test'); assert.match(nameT.note, /7 records in 3 groups/);
+  assert.ok(casesOf('Bank account').some(t => t.signal === 'shared-account'), 'the shared bank account gets a test');
+  assert.ok(casesOf('Account number').some(t => t.signal === 'unique'), 'the account number (all different) gets a uniqueness test');
+  // never "observed in the extract: leading zero" when no value starts with 0
+  assert.ok(!all.some(x => x.cases.some(t => /observed in the extract: leading zero/i.test(t.note))));
+  // the masked example matches the rule (6 characters, 2 capital letters and 4 digits)
+  assert.equal(E.maskValue('NW1001'), 'XX9999');
+  assert.equal(E.maskValue('Acme Corp'), 'Xxxx Xxxx', 'names still never show their length');
+  // the boundary values are on the gateway scripts too
+  const scr = E.generateUatScripts(d, 'p16').filter(x => x.step === 'd6');
+  const yes = scr.find(x => / → Yes$/.test(x.title)), no = scr.find(x => / → No$/.test(x.title));
+  assert.deepEqual(yes.boundaries.map(b => b.input), ['75000.00', '65']);
+  assert.deepEqual(no.boundaries.map(b => b.input), ['75000.01', '66']);
+  assert.ok(yes.steps.some(st => st.boundary && /Requested limit \$75,000\.00/.test(st.action)), JSON.stringify(yes.steps));
+  assert.match(no.when, /try Requested limit \$75,000\.01 \(with the other conditions met\) and Risk score 66/);
+});
+
+test('R16 #10 counts: late wording, unconfirmed clears on confirm, no done-before-start, within tolerance is "no approval needed", one past finish', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  // late wording: past due and expected lateness in one sentence
+  assert.equal(E.lateInfo(d, 'W6', GOLD_DAY).text, '1 business day past due; expected to finish 6 business days late');
+  // unconfirmed clears when someone else confirms
+  const d1 = R14set(d, 'W7', { status: 'done', doneAt: GOLD_DAY, doneBy: 'dk' });
+  assert.equal(E.projectTruth(d1, PRJ, GOLD_DAY).unconfirmed.count, 1);
+  const d2 = R14set(d1, 'W7', { confirmedBy: 'ta' });
+  assert.equal(E.projectTruth(d2, PRJ, GOLD_DAY).unconfirmed.count, 0);
+  assert.ok(!E.readiness(d2, PRJ, GOLD_DAY).checks.find(c => c.id === 'work-done').unconfirmed.includes('W7'));
+  // the variance never shows a task done before it started
+  const bl = d.project.find(p => p.id === PRJ).data.baselines[0];
+  const d3 = R14set(d, 'W7', { status: 'done', doneAt: E.addBusinessDays(GOLD_DAY, -3), doneBy: 'dk', confirmedBy: 'ta' });
+  const row = E.baselineVariance(d3, PRJ, bl.id, GOLD_DAY).find(r => r.workId === 'W7');
+  assert.ok(row.start <= row.forecast, JSON.stringify(row));
+  // a change applied within tolerance with nobody deciding: "no approval needed"
+  const d4 = SEED.seed(GOLD_DAY).docs;
+  d4.planChange = (d4.planChange || []).concat([{ id: 'pc-tol', data: { id: 'pc-tol', projectId: PRJ, title: 'Move the test deposit', status: 'applied', at: GOLD_DAY + 'T09:00:00Z', appliedAt: GOLD_DAY + 'T09:05:00Z', tolerance: { within: true }, approvers: [], edits: [] } }]);
+  const pr = E.periodReport(d4, PRJ, { preset: 'this-week' }, GOLD_DAY);
+  const pc = pr.planChanges.find(c => c.id === 'pc-tol');
+  assert.match(pc.text, /no approval needed/); assert.doesNotMatch(pc.text, /approved/);
+  // a past range: the headline's expected finish and the change line agree (from the forecast log)
+  const past = E.periodReport(d, PRJ, { preset: 'custom', from: '2026-11-02', to: '2026-11-06' }, GOLD_DAY);
+  assert.ok(past.slipText.includes(E.fmtDay(past.overall.forecastFinish)), past.slipText + ' / ' + past.overall.forecastFinish);
+  // this week and the last two weeks read the forecast log: from = the entry before the window
+  const fl = d.project.find(p => p.id === PRJ).data.forecastLog;
+  ['this-week', 'last-2-weeks'].forEach(k => {
+    const r = E.periodReport(d, PRJ, { preset: k }, GOLD_DAY);
+    const before = fl.filter(x => x.date < r.window.from).pop();
+    assert.equal(r.forecastFinishThen, before.finish, k);
+    assert.equal(r.forecastFinishEnd, E.projectTruth(d, PRJ, GOLD_DAY).forecastFinish, k);
+  });
+});
+
+test('R16 N2 follow-up #1: diffProcess lists non-money and compound threshold changes (risk score 60 → 65)', () => {
+  const gw = (title, amount) => ({ id: 'g', type: 'decision', title, threshold: { subject: 'requested limit', op: '<=', amount, compound: true }, branches: [{ label: 'Yes', nodes: [] }, { label: 'No', nodes: [] }] });
+  const p = { asis: [gw('Requested limit is $50,000 or less and the risk score is 60 or below?', 50000)], tobe: [Object.assign(gw('Requested limit is $50,000 or less and the risk score is 65 or below?', 50000), { from: 'g' })] };
+  const ch = E.diffProcess(p).changes.g || [];
+  assert.ok(ch.some(x => /^Threshold for risk score: at most 60 → at most 65$/.test(x)), JSON.stringify(ch));
+  assert.ok(!ch.some(x => /requested limit/i.test(x) && /Threshold/.test(x)), 'the unchanged limit is not listed');
+  // the single money case keeps its words
+  const q = { asis: [{ id: 'h', type: 'decision', title: 'Requested limit over $250,000?', threshold: { subject: 'requested limit', op: '>', amount: 250000 }, branches: [] }],
+    tobe: [{ id: 'h', from: 'h', type: 'decision', title: 'Requested limit over $300,000?', threshold: { subject: 'requested limit', op: '>', amount: 300000 }, branches: [] }] };
+  assert.ok((E.diffProcess(q).changes.h || []).includes('Threshold over $250,000 → over $300,000'));
+  // an imported inclusive op ('<=') is read as "at most"
+  assert.deepEqual(E.gatewayConditions({ title: 'Amount $10,000 or less?', threshold: { subject: 'amount', op: '<=', amount: 10000 } }).map(c => c.op), ['<=']);
+});
+
+test('R16 N2 follow-up #2: teamRouting counts Launch-chosen approvers and leaves out the PM, so it says what Launch says', () => {
+  const d = r15Credit();
+  const settings = d.workspace.find(w => w.id === 'settings').data;
+  settings.departments = settings.departments.map(x => x.name === 'Accounts Receivable' ? Object.assign({}, x, { approvers: [] }) : x);   /* no approvers, no members */
+  let tr = E.teamRouting(d, 'credit');
+  assert.ok(tr.noApprover.includes('AR Specialist'), JSON.stringify(tr.noApprover));
+  // Launch has a chosen approver for the part: the process page agrees
+  d.project.find(p => p.id === 'pcr').data.approvers = { 'Accounts Receivable': 'ar' };
+  assert.ok(E.partApprovers(d, 'pcr', 'Accounts Receivable').eligible.includes('ar'));
+  tr = E.teamRouting(d, 'credit');
+  assert.ok(!tr.noApprover.includes('AR Specialist'), JSON.stringify(tr.noApprover));
+  // the PM is never an approver: a department whose only possible approver is the PM has nobody, on both pages
+  d.project.find(p => p.id === 'pcr').data.approvers = { 'Accounts Receivable': 'ta' };
+  settings.departments = settings.departments.map(x => x.name === 'Accounts Receivable' ? Object.assign({}, x, { approvers: ['ta'] }) : x);
+  assert.deepEqual(E.partApprovers(d, 'pcr', 'Accounts Receivable').eligible, []);
+  tr = E.teamRouting(d, 'credit');
+  assert.ok(tr.noApprover.includes('AR Specialist'), JSON.stringify(tr));
+  assert.match(tr.text, /ha(s|ve) nobody to approve/);
+});
+
+test('R16 N2 follow-up #3: an approver invited by email shows on Launch: "Invited: <email> (can approve once they join)"', () => {
+  const d = r15Credit();
+  const settings = d.workspace.find(w => w.id === 'settings').data;
+  settings.departments = settings.departments.map(x => x.name === 'Accounts Receivable' ? Object.assign({}, x, { approvers: [] }) : x);
+  settings.invites = [{ id: 'inv1', email: 'jordan.lee@northwind.example', role: 'approver', departmentId: 'dept-ar', by: 'ta', at: GOLD_DAY + 'T10:00:00Z' }];
+  assert.deepEqual(E.departmentInvites(d, 'Accounts Receivable').map(i => i.email), ['jordan.lee@northwind.example']);
+  const pa = E.partApprovers(d, 'pcr', 'Accounts Receivable');
+  assert.deepEqual(pa.invited, ['jordan.lee@northwind.example']);
+  assert.equal(pa.invitedText, 'Invited: jordan.lee@northwind.example (can approve once they join)');
+  assert.match(pa.text, /Invited: jordan\.lee@northwind\.example \(can approve once they join\)/);
+});
+
+test('R16 N2 follow-up #4: the profile line keeps one wording before and after Add tests (BPM disagreement 4)', () => {
+  const csv = fs.readFileSync(path.join(ROOT, 'tests', 'pmoflow', 'fixtures', 'r15-credit-sample.csv'), 'utf8');
+  const prof = E.profileCsv(csv).filter(c => c.name === 'risk_score');   /* 10 rows, 1 empty, one 101 */
+  const before = E.profileLines({ id: 'DR', name: 'Risk score', fields: [] }, prof)[0].text;
+  const after = E.profileLines({ id: 'DR', name: 'Risk score', fields: E.specFromProfile(prof) }, prof)[0].text;
+  assert.match(before, /1 is empty/); assert.match(after, /1 is empty/);
+  assert.doesNotMatch(after, /9 don't match/);
+  // only the real outlier (101, a score is 0–100) is counted against the rule; the sample's range is never the rule
+  assert.match(after, /1 doesn't match the pattern/);
+});
+
+test('R16 N3 follow-up #4: the no-hours check on a Done counts corrections in the net total', () => {
+  const d = SEED.seed(GOLD_DAY).docs;
+  const e = E.reverseEntry({ at: GOLD_DAY + 'T09:00:00Z' }, 6, 'Logged on the wrong task', 'dk', GOLD_DAY);
+  const d1 = R14set(d, 'W11', { status: 'done', doneAt: GOLD_DAY, doneBy: 'dk', confirmedBy: 'dk', time: [{ by: 'dk', date: GOLD_DAY, hours: 6, at: GOLD_DAY + 'T09:00:00Z' }, e] });
+  assert.ok(E.unconfirmedDone(d1, 'W11').reasons.includes('no-hours'), 'net 0 hours: still "Done with no hours logged"');
+  const ev = E.earnedValue(d1, PRJ, GOLD_DAY);
+  assert.ok((ev.doneNoHours || (ev.flags || []).flatMap(f => f.items || [])).includes('W11'), JSON.stringify(ev.flags || ev.doneNoHours));
+  const d2 = R14set(d, 'W11', { status: 'done', doneAt: GOLD_DAY, doneBy: 'dk', time: [{ by: 'dk', date: GOLD_DAY, hours: 6 }, Object.assign({}, e, { hours: -2 })] });
+  assert.ok(!E.unconfirmedDone(d2, 'W11').reasons.includes('no-hours'), '4 net hours count');
 });

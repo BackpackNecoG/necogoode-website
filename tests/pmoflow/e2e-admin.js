@@ -104,6 +104,15 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   ok(await toastSays(/Dave Ortiz is now the sponsor of Vendor Onboarding Modernization/), 'sponsor change confirmed');
   await settle(900);
   ok(/Dave Ortiz/.test(await page.textContent('[data-sponsor-row="vendor-modernization"] [data-sponsor-now]')), 'the sponsor shows as Dave Ortiz');
+  /* R16 N4 #2 (PMO R15 disagreement 2): "Approves now" is the change routing, E.deadlineApprover for the PM's request */
+  {
+    const rows = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js'); const E = window.PMOEngine;
+      return [...document.querySelectorAll('[data-sponsor-row]')].map(r => { const id = r.dataset.sponsorRow, pj = store.get('project', id);
+        return { id, shown: (r.querySelector('[data-sponsor-now]') || {}).dataset.sponsorNowId || null, text: r.querySelector('[data-sponsor-now]').textContent, want: E.deadlineApprover(store.state.docs, id, pj.owner).person }; }); });
+    ok(rows.length > 0 && rows.every(r => r.shown === r.want), '"Approves now" equals E.deadlineApprover on every project: ' + rows.map(r => r.id + '=' + r.shown + '/' + r.want).join(', '));
+    ok(!rows.some(r => /Nobody yet/.test(r.text) && r.want), 'never "Nobody yet" while the change screen names someone');
+    ok(rows.filter(r => r.id !== 'vendor-modernization').every(r => /an Admin, because no sponsor is set/.test(r.text) || /the sponsor/.test(r.text) || /Nobody yet/.test(r.text)), 'each row says why that person approves');
+  }
   await setMe('ta'); await settle(900);
   ok(await page.$eval('[data-sponsor="vendor-modernization"]', el => el.disabled) && /You manage this project/.test(await page.textContent('[data-sponsor-row="vendor-modernization"]')), 'the project manager (an Admin) cannot pick the sponsor, and is told why');
   /* from outside the browser, so the expected 403 is not a console error */
@@ -209,6 +218,25 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
   await confirmAs('ta', 'Move Ana Ruiz from Credit');
   ok(await toastSays(/Confirmed: Move Ana Ruiz from Credit and Collections to Accounts Payable/), 'moved back once a second Admin confirms');
   await settle(900);
+  /* R16 N4 #1 (Jordan R15 re-test 2): moving an approver out of their department ends approving for it, through the same
+     second-Admin confirm, and Departments never shows "IT approves: Sam Keller" afterwards */
+  await setMe('mc'); await settle(900);
+  await open('/admin/departments');
+  ok(/Sam Keller/.test(await page.textContent('[data-dept-name="IT"] [data-dept-approvers-list]')), 'seed: IT approves: Sam Keller');
+  await page.selectOption('[data-dept-name="Procurement"] [data-dept-assign-form] select', 'sk');
+  await page.click('[data-dept-name="Procurement"] [data-dept-assign-form] button[type=submit]');
+  ok(await toastSays(/Sent to a second Admin to confirm: Sam Keller to Procurement; Sam Keller stops approving for IT/), 'the proposal says the move ends his IT approval');
+  await page.waitForSelector('[data-pending-depts] [data-pending]:has-text("Move Sam Keller")', { timeout: 8000 }).catch(() => {});
+  ok(/Move Sam Keller from IT to Procurement; Sam Keller stops approving for IT/.test(await page.textContent('[data-pending-depts]').catch(() => '')), 'the waiting change says it too');
+  await settle(900);
+  ok(/Sam Keller/.test(await page.textContent('[data-dept-name="IT"] [data-dept-approvers-list]')), 'nothing changes until confirmed');
+  await confirmAs('ta', 'Move Sam Keller');
+  ok(await toastSays(/Confirmed: Move Sam Keller from IT to Procurement; Sam Keller stops approving for IT/), 'a second Admin confirms it with the extra sign-in check');
+  await page.waitForFunction(() => !/Sam Keller/.test((document.querySelector('[data-dept-name="IT"] .adm-dwho') || {}).textContent || 'Sam Keller'), null, { timeout: 8000 }).catch(() => {});
+  ok(!/Sam Keller/.test(await page.textContent('[data-dept-name="IT"] .adm-dwho')), 'IT no longer says "Approves: Sam Keller"');
+  ok(!(await engDepts()).find(d => d.name === 'IT').approvers.includes('sk'), 'engine: Sam is not an IT approver');
+  await shotBoth('departments-moveout');
+  await setMe('mc'); await settle(900);
   await setMe('mc'); await settle(900);
   await open('/admin/people');
   /* invite with a department */
@@ -271,8 +299,27 @@ function ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } el
       body: JSON.stringify({ actor: 'do', summary: 'Viewed', data: Object.assign({}, w7, { title: 'Changed by an approver' }) }) });
     ok(rr.status >= 400, `the server refuses the write (${rr.status})`);
   }
+  /* R16 N4 #3 (render N1 #2): log hours on W12, then correct some with a reversing entry; History shows hours and dollars */
+  const hoursSeen = await page.evaluate(async () => { const { store } = await import('/concepts/pmoflow/app/store.js');
+    const E = window.PMOEngine; const day = store.state.today;
+    const put = async (data, summary) => { const r = await fetch(`/api/pmoflow/ws/${store.state.ws}/doc/workItem/W12`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ actor: data.owner, summary, data }) }); return r.json(); };
+    let w = (await (await fetch(`/api/pmoflow/ws/${store.state.ws}/state`)).json()).docs.workItem.find(d => d.id === 'W12').data;
+    const a = await put(Object.assign({}, w, { time: (w.time || []).concat([{ by: w.owner, date: day, hours: 3, note: 'E2E R16' }]) }), 'Logged hours');
+    w = a.doc ? a.doc.data : w;
+    const mine = (w.time || []).filter(t => t.note === 'E2E R16').pop();
+    const rev = E.reverseEntry(mine, 1, 'double-logged', w.owner, day);
+    const b = await put(Object.assign({}, w, { time: (w.time || []).concat([rev]) }), 'Corrected hours');
+    return { logged: a.event && a.event.summary, corrected: b.event && b.event.summary, total: E.hoursTotals(store.state.docs, b.doc ? b.doc.data : w).text };
+  });
+  ok(/total .+ hours? \(\$[\d,]+\) → .+ hours? \(\$[\d,]+\)/.test(hoursSeen.corrected || ''), 'the server writes hours and dollars on the correction: ' + (hoursSeen.corrected || '').slice(0, 160));
   await open('/admin/history');
   await page.waitForSelector('[data-verify]');
+  {
+    const rowsH = await page.$$eval('[data-entry-hours]', els => els.map(e => ({ t: e.textContent.replace(/\s+/g, ' ').trim(), down: !!e.querySelector('[data-hours-down]') })));
+    ok(rowsH.length >= 2 && rowsH.every(r => /^Hours on this task: .+ hours? \(\$[\d,]+\) → .+ hours? \(\$[\d,]+\)/.test(r.t)), 'History shows hours and dollars before → after on each hours entry: ' + rowsH.map(r => r.t).join(' | ').slice(0, 200));
+    ok(rowsH.some(r => r.down && /corrected down/.test(r.t)) && rowsH.some(r => !r.down), 'a correction is marked "corrected down"; a logged entry is not');
+  }
   ok(await page.getAttribute('[data-verify]', 'data-verify') === 'ok', 'chain verifies with a refused entry in it');
   const refusedTxt = await page.$$eval('[data-entry-refused]', els => els.map(e => e.textContent));
   ok(refusedTxt.length >= 1 && refusedTxt.every(t => /^Refused: /.test(t)) && !refusedTxt.some(t => /Viewed/.test(t)), 'History labels the refused write "Refused: …" (server-written)');

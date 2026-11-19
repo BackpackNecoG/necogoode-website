@@ -487,6 +487,47 @@
     });
     return res;
   }
+  /* R16 N4 #5 (PMO R15 re-test 1): the person a hold names clears an out-of-order Done in PMOFlow. It goes through the
+     same open-predecessor warning as the project manager's confirm (the engine's holdClearWarning, which is
+     unconfirmedDone(...).confirmText), and it never stands in for that confirm: the task becomes Done by that person,
+     with no confirmedBy, so while work it depends on is still open it earns nothing until someone else confirms it.
+     Only an 'order' hold is cleared here: a problem closes when its retest passes and information counts when its owner
+     confirms it, each on its own page. opts: {engine, today: 'YYYY-MM-DD', now: ISO}.
+     → {ok, error, warning ('' when nothing is open), open: [{id, title}], data: the work item to save} */
+  function clearHold(docs, workItemId, by, opts) {
+    opts = opts || {};
+    var eng = opts.engine || null;
+    var w0 = list(docs, 'workItem').find(function (x) { return x && x.id === workItemId; });
+    var nameOf = function (id) { var p = list(docs, 'person').find(function (x) { return x && x.id === id; }); return p ? (p.name || 'someone') : 'someone'; };
+    var no = function (error) { return { ok: false, error: error, warning: '', open: [], data: null }; };
+    if (!w0) return no('That task no longer exists.');
+    var h = w0.syncHold, title = '“' + (w0.title || 'untitled task') + '”';
+    if (!h || typeof h !== 'object' || w0.status === 'done') return no(title + ' isn’t held, so there is nothing to clear.');
+    if (h.kind === 'problem') return no(title + ' is a problem: it closes when its retest passes, on Testing.');
+    if (h.kind === 'information') return no(title + ' makes information available: its owner confirms the information on its page.');
+    if (!h.confirmBy) return no('Nobody owns ' + title + ' yet, so nobody can confirm it. Give the task an owner first.');
+    if (!by || by !== h.confirmBy) return no(nameOf(h.confirmBy) + ' confirms ' + title + ' (its owner), so ' + (by ? nameOf(by) : 'you') + ' can’t clear the hold.');
+    var probe = clone(w0); probe.status = 'done'; delete probe.syncHold;
+    var warning = '', open = [];
+    if (eng && typeof eng.holdClearWarning === 'function') warning = str(eng.holdClearWarning(docs, w0));
+    var uc = eng && typeof eng.unconfirmedDone === 'function' ? eng.unconfirmedDone(docs, probe) : null;
+    if (uc && Array.isArray(uc.open)) open = uc.open.map(function (o) { return { id: o.id, title: o.title }; });
+    if (!eng || typeof eng.holdClearWarning !== 'function') warning = uc ? str(uc.confirmText) : '';
+    if (!uc) {   /* no engine: the open predecessors as this module sees them */
+      var all = list(docs, 'workItem'), projects = list(docs, 'project');
+      open = depIdsOf(w0).map(function (id) { return all.find(function (x) { return x.id === id; }); }).filter(function (p) {
+        return p && !doneLike(projects.find(function (x) { return x.id === p.projectId; }) || null, p.status); }).map(function (p) { return { id: p.id, title: p.title || 'untitled task' }; });
+      warning = open.length ? 'It depends on ' + open.map(function (o) { return '“' + o.title + '”'; }).join(', ') + ', which ' + (open.length === 1 ? 'is' : 'are') + ' still open. Confirm ' + title + ' is done anyway?' : '';
+    }
+    var today = str(opts.today || opts.now || new Date().toISOString()).slice(0, 10);
+    var isDay = function (d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d); };
+    var data = probe;
+    delete data.statusId; delete data.confirmedBy; delete data.confirmedAt;
+    data.doneBy = by;
+    data.doneAt = isDay(w0.firstDoneAt) ? w0.firstDoneAt : today;
+    data.holdCleared = { by: by, at: opts.now || new Date().toISOString(), kind: h.kind, tool: h.tool || null, key: h.key || null, open: open.map(function (o) { return o.id; }) };
+    return { ok: true, error: null, warning: warning, open: open, data: data };
+  }
   function setField(w, f, v, docs, conn, today) {
     if (f === 'title') w.title = v;
     else if (f === 'description') { if (v) w.note = v; else delete w.note; }
@@ -707,7 +748,7 @@
     toolStatus: toolStatus, pmoStatus: pmoStatus, toolStatuses: toolStatuses,
     projectItems: projectItems, pmoRecord: pmoRecord, outFields: outFields, inFields: inFields, keyOf: keyOf, workItemOfKey: workItemOfKey,
     payloadFor: payloadFor, newIntent: newIntent, computeOutbound: computeOutbound, computeLinks: computeLinks, pullIntent: pullIntent, recordResult: recordResult,
-    applyInbound: applyInbound,
+    applyInbound: applyInbound, clearHold: clearHold,
     simNew: simNew, simExecute: simExecute, simEdit: simEdit,
     describeRequest: describeRequest, jiraPullBody: jiraPullBody, adoPullQuery: adoPullQuery, adoPullFields: adoPullFields,
     noticeFor: noticeFor, teamsCard: teamsCard, graphMail: graphMail, notifyIntents: notifyIntents,

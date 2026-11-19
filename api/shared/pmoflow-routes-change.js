@@ -30,11 +30,17 @@ const newId = p => p + '-' + Date.now().toString(36) + crypto.randomBytes(3).toS
 /* R12 #4: approving a plan change needs the extra sign-in check (simulated MFA, reported by the client). Only the time
    and method are kept. null when the body carries none. */
 const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+/* R16 (N1 #1, via N4): ONE step-up rule for every route: the stamp must be within the last 10 minutes of server time and
+   not in the future (E.stepUpProblem). Returns {at, method} for a fresh check, {problem} for a stale or future one,
+   null when there is none. The server's own time is recorded (stepUpAt). */
 function stepUpOf(body, at) {
   const s = body && isObj(body.stepUp) ? body.stepUp : null;
   if (!s || typeof s.method !== 'string' || !s.method) return null;
-  const t = typeof s.at === 'string' && isFinite(Date.parse(s.at)) && Math.abs(Date.parse(s.at) - Date.parse(at)) < 15 * 60000 ? new Date(Date.parse(s.at)).toISOString() : at;
-  return { at: t, method: 'simulated-mfa' };
+  const E = engine();
+  const pr = E && typeof E.stepUpProblem === 'function' ? E.stepUpProblem(s.at, at)
+    : (typeof s.at === 'string' && isFinite(Date.parse(s.at)) && Date.parse(s.at) <= Date.parse(at) + 60000 && Date.parse(at) - Date.parse(s.at) <= 10 * 60000 ? null : { text: 'The extra sign-in check was more than 10 minutes ago. Do it again.' });
+  if (pr) return { problem: pr.text || STEPUP_NEEDED };
+  return { at, method: 'simulated-mfa' };
 }
 const STEPUP_NEEDED = 'Approving a plan change needs the extra sign-in check. Approve again and complete the check.';
 
@@ -95,10 +101,11 @@ function taskSummary(mine, docs, E) {
   const add = mine.find(x => x.op === 'add');
   if (add) return 'Created work item ' + C.editText(add, docs, E).replace(/^Added /, '');
   const label = (mine[0] && mine[0].label) || 'a task';
-  const pre = '“' + label + '”: ', KNOCK = ' (knock-on: it waits on the moved work)';
-  const knock = mine.some(x => x.knock);
-  const parts = mine.map(x => { let t = C.editText(x, docs, E); if (t.startsWith(pre)) t = t.slice(pre.length); return t.endsWith(KNOCK) ? t.slice(0, -KNOCK.length) : t; });
-  return 'Updated work item “' + label + '”: ' + parts.join('; ') + (knock ? KNOCK : '');
+  const pre = '“' + label + '”: ', KNOCK = ' (knock-on: it waits on the moved work)', LATER = ' (moved: it is now expected to finish later)';
+  /* R16: "knock-on" only for a task that waits on the moved work; one that only finishes later says that instead */
+  const knock = mine.some(x => x.knock && x.waits !== false), later = !knock && mine.some(x => x.knock && x.waits === false);
+  const parts = mine.map(x => { let t = C.editText(x, docs, E); if (t.startsWith(pre)) t = t.slice(pre.length); return t.endsWith(KNOCK) ? t.slice(0, -KNOCK.length) : t.endsWith(LATER) ? t.slice(0, -LATER.length) : t; });
+  return 'Updated work item “' + label + '”: ' + parts.join('; ') + (knock ? KNOCK : later ? LATER : '');
 }
 
 /* Apply: write every edit through the doc store, two Saved plans, the log entry, notifications. */
@@ -279,6 +286,7 @@ async function handle({ method, seg, body, req, store, send, fail, dayInput, cli
     const at = new Date().toISOString();
     const su = stepUpOf(body, at);
     if (decision === 'approve' && !su) { fail(403, STEPUP_NEEDED); return true; }
+    if (decision === 'approve' && su.problem) { fail(403, su.problem); return true; }
     const next = JSON.parse(JSON.stringify(change));
     next.approvers.forEach(a => { if (a.person === actor && !a.decision) Object.assign(a, { decision: decision === 'approve' ? 'approved' : 'rejected', at, note }, su && decision === 'approve' ? { stepUp: true, stepUpAt: su.at } : {}); });
     if (decision === 'reject') {

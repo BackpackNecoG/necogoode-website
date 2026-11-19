@@ -36,6 +36,7 @@
     return x.replace(/\s+([,.;:?!])/g, '$1').replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').replace(/\s{2,}/g, ' ').replace(/^[\s,;:-]+|[\s,;:-]+$/g, '').trim();
   }
   const plural = (n, w, pl) => `${n} ${n === 1 ? w : (pl || w + 's')}`;
+  const singularKey = k => String(k).replace(/([a-z]{3}[^s\W])s$/, '$1');
   const ndKey = name => 'nd-' + String(name).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
 
   /* ---------------------------------------------------------------- vocabulary */
@@ -112,7 +113,13 @@
     const t = squash(text);
     /* "HR Manager (Pat Lee) updates the record" */
     const rn = /^(?:the\s+)?((?:[A-Za-z][\w&/-]*\s+){0,3}[A-Za-z][\w&/-]*)\s*\(([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,2})\)\s+(\S+)\s*(.*)$/.exec(t);
-    if (rn && roleWords(rn[1].split(/\s+/))) {
+    /* R16 (Karen): "Karen (Operations Director) approves too": the name first, the role in brackets */
+    const nr = /^([A-Z][a-z'’-]+(?:\s+[A-Z][\w'’-]+){0,2})\s*\(([^()]{2,40})\)\s+(\S+)\s*(.*)$/.exec(t);
+    if (nr && looksName(nr[1]) && looksRole(nr[2])) {
+      const v = verbBase(nr[3]) || (isBase(nr[3]) ? nr[3].toLowerCase() : null);
+      if (v) return { actor: canonRole(nr[2]), name: nr[1], action: imperative(v, nr[4]) };
+    }
+    if (rn && roleWords(rn[1].split(/\s+/)) && !(looksName(rn[1]) && looksRole(rn[2]))) {
       let v = verbBase(rn[3]) || (isBase(rn[3]) ? rn[3].toLowerCase() : null), rest = rn[4];
       /* R15: "Controller (Sam Wu) must sign off …" */
       if (!v && MODAL.test(rn[3])) {
@@ -454,13 +461,31 @@
       const amount = Number(o[2].replace(/,/g, '')) * (/k/i.test(o[3] || '') ? 1000 : /m/i.test(o[3] || '') ? 1e6 : 1);
       if (!isFinite(amount)) return null;
       const subject = squash(o[1]).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/\s+(?:is|are)$/, '') || 'amount';
-      return { subject, op: /^(less|below|under|lower|fewer)$/i.test(o[4]) ? '<' : '>', amount };
+      /* R16 (N1 ask): "X or less" includes X */
+      return { subject, op: /^(less|below|under|lower|fewer)$/i.test(o[4]) ? '<=' : '>=', amount };
     }
     const m = THRESH_RE.exec(String(title || '')); if (!m) return null;
     const amount = Number(m[3].replace(/,/g, '')) * (/k/i.test(m[4] || '') ? 1000 : /m/i.test(m[4] || '') ? 1e6 : 1);
     if (!isFinite(amount)) return null;
     const subject = squash(m[1]).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/\s+(?:is|are)$/, '') || 'amount';
     return { subject, op: /^(under|below|less than|at most|up to|no more than)$/i.test(m[2]) ? '<' : '>', amount };
+  }
+  /* R16 (BPM): every number a choice tests, money or not: "Requested limit $50,000 or less and risk score 60 or below?" ->
+     [{subject:'requested limit', op:'<', amount:50000, money:true}, {subject:'risk score', op:'<', amount:60, money:false}],
+     so a change of the risk score alone (60 -> 65) is a threshold change too */
+  function thresholdsOf(title) {
+    const t = String(title || '').replace(/\?\s*$/, '');
+    const parts = t.split(/\s*(?:,\s*)?\b(?:and|or)\b\s+(?!(?:less|below|under|lower|fewer|more|above|over|greater|higher)\b)/i);
+    const out = [];
+    const num = (v, k) => Number(String(v).replace(/,/g, '')) * (/k/i.test(k || '') ? 1000 : /m/i.test(k || '') ? 1e6 : 1);
+    const subj = x => squash(x).toLowerCase().replace(/^(?:if|when|the|a|an)\s+/g, '').replace(/^(?:the|a|an)\s+/, '').replace(/\s+(?:is|are)$/, '');
+    parts.forEach(pt => {
+      const a = /^(.*?)\s*(?:\b(?:is|are)\s+)?(\$)?\s?([\d,]+(?:\.\d+)?)\s*([kKmM])?\s*(?:points?\s+)?or\s+(less|below|under|lower|fewer|more|above|over|greater|higher)\b/i.exec(pt);
+      const b = !a && /^(.*?)\s*\b(?:is\s+|are\s+)?(above|over|exceeds?|exceeding|greater than|more than|at least|under|below|less than|at most|up to|no more than)\s+(\$)?\s?([\d,]+(?:\.\d+)?)\s*([kKmM])?\b/i.exec(pt);
+      if (a && isFinite(num(a[3], a[4]))) out.push({ subject: subj(a[1]) || 'amount', op: /^(less|below|under|lower|fewer)$/i.test(a[5]) ? '<' : '>', amount: num(a[3], a[4]), money: !!a[2] });
+      else if (b && isFinite(num(b[4], b[5]))) out.push({ subject: subj(b[1]) || 'amount', op: /^(under|below|less than|at most|up to|no more than)$/i.test(b[2]) ? '<' : '>', amount: num(b[4], b[5]), money: !!b[3] });
+    });
+    return out;
   }
   /* R15: "limit $50,000 or less and risk score 60 or below": a second condition, so the No path is NOT "over $50,000" */
   function compoundCond(title) {
@@ -469,12 +494,14 @@
   }
   /* two thresholds on the same thing that no value can meet together ("under $50k" and "above $250,000") */
   function thresholdsDisjoint(a, b) {
-    if (!a || !b || a.op === b.op) return false;
+    const dir = op => String(op || '').charAt(0);
+    if (!a || !b || dir(a.op) === dir(b.op)) return false;
     const stem = s => String(s || '').split(/\s+/).filter(w => w.length >= 4).map(w => w.replace(/(ies)$/, 'y').replace(/s$/, ''));
     const sa = stem(a.subject), sb = stem(b.subject);
     if (!(a.subject === b.subject || sa.some(w => sb.includes(w)) || a.subject === 'amount' || b.subject === 'amount')) return false;
-    const lo = a.op === '<' ? a : b, hi = a.op === '<' ? b : a;
-    return hi.amount >= lo.amount;
+    const lo = dir(a.op) === '<' ? a : b, hi = dir(a.op) === '<' ? b : a;
+    /* "<= X" and ">= X" can both hold at exactly X */
+    return lo.op === '<=' && hi.op === '>=' ? hi.amount > lo.amount : hi.amount >= lo.amount;
   }
   /* R14 (Karen 9): documents a counterparty sends on every run (a W-9, a certificate of insurance) are collected each
      time the process runs; they are never a one-off "make it available" setup task */
@@ -484,15 +511,54 @@
   const DOCLIKE = /(^[A-Z]{1,3}-\d|\b(forms?|certificates?|letters?|invoices?|receipts?|statements?|licen[cs]es?|permits?|ids?|passports?|contracts?|agreements?|applications?|quotes?|quotations?|proofs?|copy|copies|documents?|packets?)\b)/i;
   /* R15 (Karen): details of the vendor (customer, …) the run is about: its routing numbers, tax ID, bank account and credit
      limit are written down for each vendor, never made available once */
-  const PER_RUN_FIELD = /\b(routing(?:\s+and\s+account)?\s+numbers?|account\s+numbers?|bank\s+accounts?(?:\s+(?:numbers?|details))?|bank\s+details|tax\s+ids?|tins?|eins?|credit\s+limits?|remittance\s+address(?:es)?|ibans?|swift(?:\s+codes?)?|sort\s+codes?)$/i;
+  /* R16 (Karen): legal names and the party's own name are per-vendor fields too ("Vendor legal name", "Customer name") */
+  const PER_RUN_FIELD = /\b(routing(?:\s+and\s+account)?\s+numbers?|account\s+numbers?|bank\s+accounts?(?:\s+(?:numbers?|details))?|bank\s+details|tax\s+ids?|tins?|eins?|credit\s+limits?|remittance\s+address(?:es)?|ibans?|swift(?:\s+codes?)?|sort\s+codes?|legal\s+names?|(?:vendor|supplier|customer|client|contractor|applicant|candidate|member|patient|student|carrier|tenant|broker)\s+names?)$/i;
+  /* R16 (BPM): an identity field of the party is never "produced" by a step, even when a step "sets up" or "records" it */
+  const IDENTITY_FIELD = /\b(routing|account\s+numbers?|bank|tax\s+ids?|tins?|eins?|legal\s+names?|ibans?|swift|sort\s+codes?|remittance)\b/i;
+  const CONTAINER = /\b(forms?|records?|logs?|lists?|registers?|files?|folders?|databases?|sheets?|spreadsheets?|reports?|systems?|masters?|portals?|letters?|packets?|documents?|certificates?)$/i;
+  const OUTPUT_VERB = '(?:sets?|records?|updates?|calculates?|computes?|assigns?|generates?|issues?|creates?|determines?|produces?|decides?|approves?)';
+  /* R16 (BPM): information a step makes ("Credit runs a credit check and sets a credit limit", "AR updates the credit limit
+     in the ERP") is produced by that step: nobody collects it or has it beforehand */
+  function outputOf(name, line) {
+    const nm = squash(name); if (!nm || IDENTITY_FIELD.test(nm)) return false;
+    const esc = nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    /* a form, log, list or record a step updates already exists ("updates the employee exit form"): only a step that
+       creates, generates or issues one makes it */
+    const verbs = CONTAINER.test(nm) ? '(?:creates?|generates?|issues?|produces?)' : OUTPUT_VERB;
+    return new RegExp('\\b' + verbs + '\\s+(?:(?:a|an|the|its|their|his|her|our|new|final|approved|revised)\\s+)*' + esc + '\\b(?!\\s+(?:request|form|application)s?\\b)', 'i').test(String(line || ''));
+  }
+  /* R16 (Karen): the default answer to "Do you already have these?": 'made' (a step produces it), 'run' (collected each
+     time the process runs), else 'have' (the procedure runs today, so the information is already there). 'notyet' is
+     only ever the visitor's own answer. */
+  /* R16 (BPM): the information a diagram's task names ("Pull risk score from credit bureau", "Update credit limit in ERP")
+     when the file has no data objects: [{name, produced}] (produced: the task makes it) */
+  function taskInfo(title) {
+    const t = squash(title); if (!t) return [];
+    const w = t.split(' '); const v = w[0].toLowerCase();
+    const third = /(s|sh|ch|x|z)$/.test(v) ? v + 'es' : /[^aeiou]y$/.test(v) ? v.slice(0, -1) + 'ies' : v + 's';
+    const line = 'Someone ' + [third].concat(w.slice(1)).join(' ');
+    const out = [];
+    infoPhrases(line).forEach(nm => {
+      let ws = squash(nm).split(' ');
+      while (ws.length > 1 && /^(updates?|enters?|records?|sets?|creates?|reviews?|approves?|checks?|sends?|pulls?|submits?|files?|auto-approves?)$/i.test(ws[0])) ws = ws.slice(1);
+      if (ws.length < 2 && !/^[A-Z]{1,3}-\d/.test(ws[0] || '')) return;
+      const name = ws.join(' '); const nice = name.charAt(0).toUpperCase() + name.slice(1);
+      if (!out.some(x => x.name.toLowerCase() === nice.toLowerCase())) out.push({ name: nice, produced: outputOf(nice, line) });
+    });
+    return out;
+  }
+  function haveChoice(p) { return !p ? 'have' : p.producedBy ? 'made' : p.perRun ? 'run' : 'have'; }
   const PARTY_WORD = /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire|member|patient|student|carrier|tenant|broker)s?\b/i;
   function perRunOf(name, actor, line, ctxText) {
     const a = squash(actor).toLowerCase();
     const ext = EXTERNAL.test(a) ? a : '';
     const from = EXTERNAL_IN.exec(String(line || ''));
     let party = ext || (from ? from[1].toLowerCase() : '');
-    const field = PER_RUN_FIELD.test(String(name || '')) && (() => { const pw = PARTY_WORD.exec(String(name)) || PARTY_WORD.exec(String(line || '')); if (pw && !party) party = pw[1].toLowerCase(); return !!(party || /^W-\d/i.test(name)); })();
-    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)) || field)) return null;
+    /* R16 (Karen): a per-vendor field is per run in any procedure about a vendor (customer, …), whichever line names it, so
+       "Routing number" and "Routing numbers" are classified the same way */
+    const field = PER_RUN_FIELD.test(String(name || '')) && (() => { const pw = PARTY_WORD.exec(String(name)) || PARTY_WORD.exec(String(line || '')) || PARTY_WORD.exec(String(ctxText || '')); if (pw && !party) party = pw[1].toLowerCase(); return !!(party || /^W-\d/i.test(name)); })();
+    /* R16: everything a step takes in "from the customer" (or that the vendor sends) arrives with each run */
+    if (!(PER_RUN_NAME.test(name) || (party && DOCLIKE.test(name)) || field || party)) return null;
     const p = party || ((EXTERNAL_IN.exec(ctxText || '') || /\b(vendor|supplier|customer|client|contractor|applicant|candidate|new hire)s?\b/i.exec(ctxText || '') || [])[1] || '').toLowerCase();
     return { perRun: true, perRunText: `Collected ${p ? `from the ${p.replace(/s$/, '')} ` : ''}each time the process runs, so it is not a one-off setup task.` };
   }
@@ -552,11 +618,15 @@
     const propose = (name, line, node) => {
       name = tidy(name); if (!name || name.length > 60 || SYS_RE.test(name)) return;
       const key = ndKey(name);
-      let p = newData.find(x => x.key === key);
-      if (!p) { if (newData.length >= 25) return; p = { key, name, reason: `Mentioned in "${clip(line, 80)}".`, steps: [] }; newData.push(p); }
+      /* R16 (Karen): "Routing number" and "Routing numbers" are one piece of information */
+      const one = singularKey(key);
+      let p = newData.find(x => x.key === key || singularKey(x.key) === one);
+      if (!p) { if (newData.length >= 25) return; p = { key, name, reason: `Mentioned in "${clip(line, 80)}".`, steps: [] }; newData.push(p);
+        /* R16 (BPM): first named as something this step makes: produced by the step, not collected */
+        if (node && node.id && node.type === 'step' && outputOf(name, line)) p.producedBy = node.id; }
       if (node && node.id && !p.steps.includes(node.id)) p.steps.push(node.id);
       if (node) { const nd = node.newData || (node.newData = []); if (!nd.some(x => x.key === key)) nd.push({ key, name: p.name }); }
-      if (!p.perRun) { const pr = perRunOf(p.name, node && node.ownerRole, line, text); if (pr) Object.assign(p, pr); }
+      if (!p.perRun && !p.producedBy) { const pr = perRunOf(p.name, node && node.ownerRole, line, text); if (pr) Object.assign(p, pr); }
     };
 
     /* one clause -> a step (or a wait) */
@@ -587,7 +657,11 @@
         const pb = /\b(?:is|are|gets?|will be)\s+\w+(?:ed|en)\b.*?\bby\s+(?:the\s+)?([A-Za-z][\w&-]*(?:\s+[A-Za-z][\w&-]*){0,2})\s*$/i.exec(t);
         if (pb && roleWords(pb[1].split(' '))) n.ownerRole = canonRole(pb[1]);
       }
-      if (ownerTxt) {
+      /* R16 (Karen): "Karen (Operations Director) approves too" is the Operations director, with Karen named, the same
+         reading as "Controller (Sam Wu)" (roleAndName) */
+      const rnOwn = ownerTxt && /\(/.test(ownerTxt) ? roleAndName(ownerTxt) : null;
+      if (rnOwn && rnOwn.role && rnOwn.name) { n.ownerRole = rnOwn.role; n.named = rnOwn.name; }
+      else if (ownerTxt) {
         const o = canonRole(ownerTxt);
         if (o && roleWords(o.split(' ')) || /^[A-Z][a-z]+(\s+[A-Z][\w'-]+){1,2}$/.test(ownerTxt.trim())) n.ownerRole = o;
       }
@@ -1193,6 +1267,9 @@
       const roleText = x => { const rn = roleAndName(x); return rn.role ? (rn.name ? `${rn.role} (${rn.name})` : rn.role) : ''; };
       const rt = /^([A-Za-z][\w&/' -]{1,40}?(?:\s*\([^()]{1,40}\))?):\s+(\S.*)$/.exec(text);
       if (rt && (looksRole(rt[1].replace(/\s*\([^()]*\)$/, '')) || looksRole(rt[1]))) { role = roleText(rt[1].trim()); text = rt[2]; }
+      /* R16 (BPM): "Controller sign-off (Controller (Sam Wu))": the brackets hold "Role (Name)" */
+      const tn = !role && /^(\S.*?\S)\s*\(([^()]{2,40}\s*\([^()]{1,40}\))\)$/.exec(text);
+      if (tn && roleAndName(tn[2]).role) { role = roleText(tn[2]); text = tn[1]; }
       const tr = !role && /^(\S.*?\S)\s*\(([^()]{2,40})\)$/.exec(text);
       if (tr && looksRole(tr[2])) { role = roleText(tr[2]); text = tr[1]; }
       /* R12: a 1-D shape (it has a begin and an end point) is a connector whatever its master is called */
@@ -1389,6 +1466,6 @@ ${dos.join('\n')}${dos.length ? '\n' : ''}${flows.join('\n')}
     return { id: t.id, name: t.name, desc: t.desc, trigger: t.trigger, nodes, newData, teams, notes: '', source: 'template' };
   }
 
-  return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn, roleAndName, thresholdOf, thresholdsDisjoint, perRunOf,
+  return { parseSop, sopRules, sopLines, linesText, escalationOf, endRejectPath, systemIn, SYSTEMS, NUM_RE: NUM, deriveName, splitActor, infoPhrases, teamsIn, durationInfo, countNodes, unzip, parseXml, parseVsdx, vsdxBpmn, roleAndName, thresholdOf, thresholdsOf, thresholdsDisjoint, perRunOf, outputOf, haveChoice, taskInfo,
     RACI_ROLES, raciOf, raciEmpty, raciText, raciIn, actorAliases, actorKey, raciRowsOf, TEMPLATES, templateDraft, isTeam, verbBase, _all: all, _textOf: textOf };
 });

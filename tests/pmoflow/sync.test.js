@@ -730,7 +730,12 @@ test('R14 L4 #1 (route): the tool date past the deadline becomes a proposed plan
     assert.equal((docs2.planChange || []).filter(d => d.data.source === 'sync').length, 1, 'no duplicate request');
     assert.match(s2.body.connection.log.find(e => e.op === 'plan-change').detail, /already waiting/);
     /* a date inside the deadline is simply put back */
-    const s3 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: '2026-11-25', actor: pm });
+    /* lead: never a hardcoded day — the seed follows the clock, so pick a date that differs from W7's due and stays inside the deadline */
+    const w7 = docs2.workItem.find(d => d.id === 'W7').data, prjDl = docs2.project.find(d => d.id === w7.projectId).data.target;
+    const nextDay = iso => { const t = new Date(iso + 'T12:00:00Z'); do { t.setUTCDate(t.getUTCDate() + 1); } while ([0, 6].includes(t.getUTCDay())); return t.toISOString().slice(0, 10); };
+    const inside = nextDay(w7.due);
+    assert.ok(!prjDl || inside <= prjDl, 'the test date stays inside the deadline: ' + inside + ' vs ' + prjDl);
+    const s3 = await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key: keyOf('W7'), due: inside, actor: pm });
     assert.equal(s3.body.summary.ignored, 1);
     assert.equal(s3.body.summary.planChanges || 0, 0);
   } finally {
@@ -798,6 +803,79 @@ test('R15: the first sync says how many dependency links the plan has (6), on ho
     assert.equal(put.status, 200, JSON.stringify(put.body));
     const again = await call('POST', `workspaces/${ws}/connections/${r.body.connection.id}/sync`, { actor: owner });
     assert.equal(again.body.summary.links, 1); assert.match(again.body.sentence, /(^| · )1 dependency link set in Jira($| · )/);
+  } finally {
+    await store.deleteWorkspace(ws).catch(() => {});
+    if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;
+  }
+});
+
+/* ---------- R16 N4 #5 (PMO R15 re-test 1): clearing a held Jira item routes through the open-predecessor warning ---------- */
+test('R16: clearHold gives the engine’s open-predecessor warning, clears the flag, and leaves the Done unconfirmed (out of EV)', () => {
+  const { docs, conn } = fresh('jira');
+  sync(docs, conn);
+  S.simEdit(conn.sim, S.keyOf(conn, 'W8'), { status: 'Done' }, clock());
+  sync(docs, conn);
+  assert.equal(wi(docs, 'W8').syncHold.kind, 'order');
+  /* only the person the hold names confirms it */
+  let r = S.clearHold(docs, 'W8', 'ta', { engine: E, today: DAY });
+  assert.equal(r.ok, false); assert.match(r.error, /Dev Kumar confirms/);
+  r = S.clearHold(docs, 'W8', 'dk', { engine: E, today: DAY });
+  assert.equal(r.ok, true, r.error);
+  const want = typeof E.holdClearWarning === 'function' ? E.holdClearWarning(docs, wi(docs, 'W8')) : E.unconfirmedDone(docs, Object.assign({}, wi(docs, 'W8'), { status: 'done' })).confirmText;
+  assert.ok(want, 'the fixture has an open predecessor');
+  assert.equal(r.warning, want, 'the same words as the PM confirm');
+  assert.deepEqual(r.open.map(o => o.id), ['W6']);
+  assert.equal(r.data.status, 'done'); assert.equal(r.data.syncHold, undefined);
+  assert.equal(r.data.doneBy, 'dk'); assert.equal(r.data.doneAt, DAY); assert.ok(!r.data.confirmedBy, 'not confirmed by the doer');
+  assert.equal(r.data.holdCleared.by, 'dk'); assert.equal(r.data.holdCleared.kind, 'order'); assert.equal(r.data.holdCleared.key, S.keyOf(conn, 'W8'));
+  /* applied: the task is Done but unconfirmed, so it earns nothing until someone else confirms it */
+  const after = JSON.parse(JSON.stringify(docs)); after.workItem.find(d => d.id === 'W8').data = r.data;
+  const uc = E.unconfirmedDone(after, 'W8');
+  assert.equal(uc.flag, true); assert.ok(uc.reasons.includes('open-predecessor'));
+  /* the next sync keeps PMOFlow's Done and does not hold it again (the tool already says Done) */
+  const { res } = sync(after, conn);
+  assert.equal(res.held.length, 0, JSON.stringify(res.held));
+  assert.equal(wi(after, 'W8').status, 'done'); assert.equal(wi(after, 'W8').syncHold, undefined);
+  /* nothing open: no warning */
+  const d2 = JSON.parse(JSON.stringify(docs)); setWi(d2, 'W6', { status: 'done', doneAt: DAY });
+  assert.equal(S.clearHold(d2, 'W8', 'dk', { engine: E, today: DAY }).warning, '');
+  /* only an out-of-order hold is cleared here: problems close on a passed retest, information on its owner's confirm */
+  setWi(docs, 'W7', { syncHold: { kind: 'problem', confirmBy: 'lp', reason: 'x' }, status: 'review' });
+  r = S.clearHold(docs, 'W7', 'lp', { engine: E, today: DAY });
+  assert.equal(r.ok, false); assert.match(r.error, /retest/);
+  assert.equal(S.clearHold(docs, 'W11', 'dk', { engine: E, today: DAY }).ok, false, 'not held');
+});
+
+test('R16 (route): clear-hold asks first when work is still open, and History says the Done waits for someone else', async () => {
+  const saved = process.env.EMCEE_STORAGE_CONNECTION; delete process.env.EMCEE_STORAGE_CONNECTION;
+  const fn = require(path.join(ROOT, 'api', 'pmoflow', 'index.js'));
+  const store = require(path.join(ROOT, 'api', 'shared', 'pmoflow-store.js'));
+  const ws = (await store.createWorkspace('sync-r16-' + Date.now(), {})).id;
+  const call = async (method, p, body) => { const ctx = { res: null, log: Object.assign(() => {}, { error() {}, warn() {}, info() {} }) };
+    await fn(ctx, { method, url: '/api/pmoflow/' + p, headers: { 'x-forwarded-for': '10.9.9.8' }, params: { path: p }, query: {}, body }); return ctx.res; };
+  try {
+    const st0 = (await call('GET', `ws/${ws}/state`)).body.docs;
+    const pm = st0.project.find(d => d.id === PRJ).data.owner;
+    const c = (await call('POST', `workspaces/${ws}/connections`, { projectId: PRJ, tool: 'jira', site: 'northwind.atlassian.net', projectKey: 'VOM', actor: pm })).body.connection;
+    const key = Object.keys(c.sim.items).find(k => c.sim.items[k].pmoId === 'W8');
+    await call('POST', `workspaces/${ws}/connections/${c.id}/sim`, { key, status: 'Done', by: 'dan.kim@northwind.example', actor: pm });
+    let r = await call('POST', `workspaces/${ws}/connections/${c.id}/clear-hold`, { workItemId: 'W8', actor: pm });
+    assert.equal(r.status, 403, 'the PM is not who confirms it'); assert.match(r.body.error, /Dev Kumar confirms/);
+    r = await call('POST', `workspaces/${ws}/connections/${c.id}/clear-hold`, { workItemId: 'W8', actor: 'dk' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.needsConfirm, true, 'open work: asks first, changes nothing');
+    assert.match(r.body.warning, /still open\. Confirm “.+” is done anyway\?$/);
+    let w8 = (await call('GET', `ws/${ws}/state`)).body.docs.workItem.find(d => d.id === 'W8').data;
+    assert.equal(w8.status, 'review'); assert.ok(w8.syncHold);
+    r = await call('POST', `workspaces/${ws}/connections/${c.id}/clear-hold`, { workItemId: 'W8', actor: 'dk', confirmOpen: true });
+    assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(r.body.cleared, true);
+    const docs = (await call('GET', `ws/${ws}/state`)).body.docs;
+    w8 = docs.workItem.find(d => d.id === 'W8').data;
+    assert.equal(w8.status, 'done'); assert.equal(w8.syncHold, undefined); assert.equal(w8.doneBy, 'dk');
+    assert.equal(E.unconfirmedDone(docs, 'W8').flag, true, 'out of EV until someone else confirms it');
+    const evs = (await call('GET', `ws/${ws}/events`)).body.events;
+    assert.ok(evs.some(e => e.actor === 'dk' && /^Cleared the Jira hold on “.+” \(VOM-\d+\): marked Done while “.+” is still open, so it counts only once someone else confirms it$/.test(e.summary)),
+      evs.slice(0, 5).map(e => e.summary).join(' | '));
   } finally {
     await store.deleteWorkspace(ws).catch(() => {});
     if (saved !== undefined) process.env.EMCEE_STORAGE_CONNECTION = saved;

@@ -642,3 +642,31 @@ details.is-data:not([open]) > .is-pop{display:none}
 .d-brow .d-goto-sel{max-width:100%;min-width:0}
 /* R15: a long step title in the paste preview grows to show all of it (it was cut off at 390 px) */
 .is-draft textarea.is-title{field-sizing:content;min-height:2.8em}
+/* R16 N2 (Karen): "Do you already have these?" — one list, three answers per item, already filled in */
+.d-have{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:10px 0;background:#fff}
+.d-have h4{margin:0 0 2px;font-size:15px}
+.d-have > .hint{margin:0 0 8px;font-size:12.5px}
+.d-have ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;max-height:min(46vh,420px);overflow:auto}
+.d-have-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;padding:7px 0;border-top:1px solid var(--line)}
+.d-have-row:first-child{border-top:0}
+.d-have-nm{min-width:0}
+.d-have-nm b{display:block;font-size:13.5px;overflow-wrap:anywhere}
+.d-have-nm small{display:block;color:var(--ink2);font-size:11.5px;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-have-opts{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fff}
+.d-have-opt{display:inline-flex;align-items:center;cursor:pointer;margin:0}
+.d-have-opt + .d-have-opt{border-left:1px solid var(--line)}
+.d-have-opt input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.d-have-opt span{display:inline-flex;align-items:center;min-height:34px;padding:0 10px;font-size:12.5px;color:var(--ink2);white-space:nowrap}
+.d-have-opt.on span{background:var(--accent);color:#fff;font-weight:600}
+.d-have-row[data-have-choice="notyet"] .d-have-opt.on span{background:#b91c1c}
+.d-have-opt input:focus-visible + span{outline:2px solid var(--accent);outline-offset:-2px}
+.d-have-made{background:#ecfdf5;color:#047857;white-space:nowrap}
+.d-have-sum{margin-top:8px;font-size:12.5px;color:var(--ink)}
+.is-made{color:#047857}
+@media (max-width:640px){
+  .d-have-row{grid-template-columns:minmax(0,1fr)}
+  .d-have-opts{width:100%}
+  .d-have-opt{flex:1 1 0;min-width:0}
+  .d-have-opt span{width:100%;justify-content:center;padding:0 4px;white-space:normal;text-align:center;line-height:1.15;font-size:12px}
+  .d-have ul{max-height:none}
+}

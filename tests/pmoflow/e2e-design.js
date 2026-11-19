@@ -146,6 +146,19 @@ async function r11(browser, ip, errors) {
     /* the preview's information owner is what gets saved */
     const ownersPreview = await page.$$eval('[data-nd-owner]', els => els.map(e => e.getAttribute('data-nd-owner')));
     const pidK = await saveDraft('Karen vendor setup');
+    /* R16 (Karen): the save now asks "Do you already have these?" and records the answer, so pasted information no longer
+       starts "Not checked yet". That state still exists (information saved before R16, or not yet confirmed), and the
+       one-label-per-state checks below still cover it: the e2e turns the "We have it" answers back into "Not checked
+       yet" through the API, the state they had before R16, and checks the labels exactly as before. */
+    const st16 = await state();
+    const p16 = st16.docs.process.find(d => d.id === pidK).data;
+    const mine16 = st16.docs.dataElement.map(d => d.data).filter(d => flat(p16.asis).some(s => (s.data || []).includes(d.id)));
+    ok(mine16.filter(d => !d.perRun).every(d => d.avail === 'live' && d.source === 'Already in use'), 'R16: the save recorded "We have it" for the information that is not collected each run');
+    for (const d of mine16.filter(x => !x.perRun)) {
+      const r = await page.evaluate(async ([id, data]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/dataElement/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, actor: 'mc', summary: 'e2e: information as saved before R16 (not checked yet)' }) })).status,
+        [d.id, Object.assign({}, d, { avail: 'unchecked', source: '', haveAnsweredBy: undefined })]);
+      if (r !== 200) ok(false, 'set back to "Not checked yet": ' + r);
+    }
     const stK = await state();
     const pK = stK.docs.process.find(d => d.id === pidK).data;
     const mine = stK.docs.dataElement.map(d => d.data).filter(d => /pasted procedure/.test(JSON.stringify(stK.events ? '' : '')) || true).filter(d => flat(pK.asis).some(s => (s.data || []).includes(d.id)));
@@ -1022,7 +1035,11 @@ async function r15(browser, errors) {
     const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
     ok(nds.filter(n => /insurance|coi/i.test(n)).length === 1, 'one certificate of insurance: ' + nds.join(', '));
     const runs = await page.$$eval('[data-nd]', els => els.filter(e => e.querySelector('[data-perrun]')).map(e => e.querySelector('[data-nd-name]').value));
-    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].every(n => runs.includes(n)), 'routing numbers, tax ID, bank account and credit limit read "Collected each run": ' + runs.join(', '));
+    /* R16 (BPM): "Credit records the credit limit": the limit is made by that step, so it reads "Made by step 6", not
+       "Collected each run" (the R16 contract moved it; the three per-vendor fields are unchanged) */
+    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account'].every(n => runs.includes(n)) && !runs.includes('Credit limit'), 'routing numbers, tax ID and bank account read "Collected each run": ' + runs.join(', '));
+    const madeV = await page.$$eval('[data-nd]', els => els.filter(e => e.querySelector('[data-made]')).map(e => e.querySelector('[data-nd-name]').value + ': ' + e.querySelector('[data-made]').textContent));
+    ok(madeV.length === 1 && /^Credit limit: ⚙ Made by step 6/.test(madeV[0]), 'the credit limit reads "Made by step 6": ' + madeV.join(', '));
     ok(!runs.includes('Supplier list'), 'the approved supplier list is not per run');
     const vt = await page.$$eval('.is-draft textarea.is-title', els => els.map(e => e.value));
     ok(vt.includes('Verify the bank letter by calling the bank at a number we look up ourselves, not the number on the letter'), 'AP\'s check is its own step');
@@ -1049,7 +1066,8 @@ async function r15(browser, errors) {
     const pidV = await saveDraft('Northwind vendor onboarding (R15)');
     st = await state();
     const byName = n => (st.docs.dataElement.find(d => d.data.name === n) || {}).data || {};
-    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account', 'Credit limit'].every(n => byName(n).perRun === true), 'saved as collected each run');
+    ok(['Routing numbers', 'W-9 tax ID', 'Vendor bank account'].every(n => byName(n).perRun === true), 'saved as collected each run');
+    ok(!byName('Credit limit').perRun && !!byName('Credit limit').producedBy, 'R16: the credit limit is saved as made by its step');
     void pidV;
 
     console.log('# R15 BPM 3/4: the data page never says "all match" while a warning stands');
@@ -1086,6 +1104,196 @@ async function r15(browser, errors) {
   await ctx.close();
 }
 
+/* ---------------------------------------------------------------- R16 N2: the R15 reviewers' repros
+   (market-review/r15 karen.md, expert-bpm.md). Fixtures: tests/pmoflow/fixtures/r15-* and r15-karen-sop.txt (fictional). */
+async function r16(browser, errors) {
+  const ip = `198.51.100.${(Math.random() * 250 | 0) + 1}`;
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push('r16 pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('r16 console: ' + m.text()); });
+  const shot = async name => page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  const settle = () => page.waitForLoadState('networkidle').catch(() => {});
+  const nav = async path => { await page.goto(BASE + path); await page.waitForSelector('#app .hdr, #app .card', { timeout: 20000 }); await settle(); };
+  const act = id => page.click(`.overlay [data-act="${id}"]`);
+  const state = () => page.evaluate(async () => (await fetch('/api/pmoflow/ws/' + localStorage.getItem('pmoflow.ws') + '/state')).json());
+  const putDoc = (type, id, data, summary) => page.evaluate(async ([type, id, data, summary]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/doc/${type}/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, actor: 'mc', summary }) })).status, [type, id, data, summary]);
+  const overflow = async label => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); ok(r.sw <= r.iw + 1, `${label}: no horizontal overflow (${r.sw} <= ${r.iw})`); };
+  const paste = async text => {
+    await nav('/import'); await page.fill('[data-sop]', text); await page.dispatchEvent('[data-sop]', 'input');
+    await page.click('[data-draft]'); await page.waitForSelector('.is-draft', { timeout: 20000 }); await settle();
+  };
+  const engIn = (fn, arg) => page.evaluate(([src, arg]) => import('/concepts/pmoflow/app/store.js').then(m => (new Function('E', 'docs', 'arg', src))(window.PMOEngine, m.store.state.docs, arg)), [fn, arg]);
+  const procData = (st, pid) => { const p = st.docs.process.find(d => d.id === pid).data; const ids = new Set(); allNodes(p.asis).forEach(n => (n.data || []).forEach(i => ids.add(i))); return { p, des: st.docs.dataElement.filter(d => ids.has(d.id)).map(d => d.data) }; };
+  try {
+    await nav('/'); await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+
+    console.log('# R16 Karen top 3: "Do you already have these?" on one screen, sensible answers already filled in');
+    await paste(FIX15('r15-karen-sop.txt'));
+    const nds = await page.$$eval('[data-nd-name]', els => els.map(e => e.value));
+    ok(nds.filter(n => /^routing numbers?$/i.test(n)).length === 1, '"Routing number" and "Routing numbers" are one item: ' + nds.join(', '));
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-have-list]');
+    const rows = await page.$$eval('.overlay [data-have-row]', els => els.map(e => [e.querySelector('b').textContent, e.dataset.haveChoice, (e.querySelector('[data-have-made]') || {}).textContent || '']));
+    const choiceOf = n => (rows.find(r => r[0] === n) || [])[1];
+    ok(/Do you already have these\?/.test(await page.textContent('.overlay [data-have-list] h4')), 'the save screen asks "Do you already have these?"');
+    ok(['W-9', 'Certificate of insurance', 'Bank letter', 'Tax ID', 'Vendor legal name', 'Routing number', 'Account number', 'Vendor bank account'].every(n => choiceOf(n) === 'run'), 'per-vendor fields default to "Collected each run": ' + JSON.stringify(rows));
+    const cl = rows.find(r => r[0] === 'Credit limit');
+    ok(cl && cl[1] === 'made' && /^Made by step 6$/.test(cl[2]) && !(await page.$('.overlay [data-have-row][data-have-choice="made"] input')), 'the credit limit Credit sets is "Made by step 6" with nothing to answer: ' + JSON.stringify(cl));
+    ok(!rows.some(r => r[1] === 'notyet') && rows.filter(r => r[1] === 'have').length === 6, 'nothing defaults to "Not yet"; the rest default to "We have it"');
+    ok(/No setup tasks needed/.test(await page.textContent('.overlay [data-have-sum]')), 'the summary says no setup tasks: ' + await page.textContent('.overlay [data-have-sum]'));
+    ok(/creates 15 pieces of information/.test(await page.textContent('.overlay [data-create-data]')), 'the dialog says how many pieces it creates');
+    await page.screenshot({ path: `${OUT}/r16-have-1366.png` });
+    /* change one answer: the summary follows at once */
+    await page.click('.overlay [data-have-row]:has(b:text-is("Delivery schedule")) .d-have-opt:has(input[value="notyet"])');
+    ok(/1 not yet\. 1 setup task will be suggested/.test(await page.textContent('.overlay [data-have-sum]')), 'changing one to "Not yet" says one setup task: ' + await page.textContent('.overlay [data-have-sum]'));
+    await page.fill('.overlay [data-pname]', 'Northwind vendor onboarding (R16)');
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]);
+    await page.waitForSelector('#canvas', { timeout: 20000 }); await settle();
+    const kpid = page.url().match(/process\/([^?/]+)/)[1];
+    let st = await state();
+    const K = procData(st, kpid); const by = n => K.des.find(d => d.name === n) || {};
+    ok(by('Routing number').perRun === true && by('Vendor legal name').perRun === true && by('Account number').perRun === true, 'saved: per-vendor fields are collected each run');
+    ok(by('Vendor request log').avail === 'live' && !by('Vendor request log').perRun && by('Vendor request log').source === 'Already in use', 'saved: "We have it" is available, not "Not checked yet"');
+    ok(by('Delivery schedule').avail === 'missing', 'saved: "Not yet" is not available yet');
+    const step6 = flat(K.p.asis).filter(n => n.type === 'step' || ['wait', 'message', 'subprocess'].includes(n.type))[5];
+    ok(by('Credit limit').producedBy === step6.id && !by('Credit limit').perRun, 'saved: the credit limit is made by step 6 ("' + step6.title + '")');
+    const states = await engIn(`return arg.map(id => [docs.dataElement.find(d => d.id === id).data.name, E.availLabel(docs, id).label]);`, K.des.map(d => d.id));
+    const notYet = states.filter(x => x[1] !== 'We have it');
+    ok(notYet.length === 1 && notYet[0][0] === 'Delivery schedule', 'only the item answered "Not yet" is not available (no 9 silent setup tasks): ' + JSON.stringify(notYet));
+    const side = await page.$$eval('[data-side-data] [data-avail]', els => els.map(e => e.textContent.replace(' ›', '').trim()));
+    ok(side.includes('Made by step 6') && side.filter(x => x === 'Collected each run').length === 8, 'the process page says "Made by step 6" and "Collected each run": ' + side.join(', '));
+    console.log('# R16 Karen 9: "Teams involved" counts the steps each team does on the map');
+    const touch = await page.$$eval('[data-touch]', els => els.map(e => [e.dataset.touch, +e.dataset.touchDoes, +e.dataset.touchAlso, e.textContent]));
+    const mapDoes = team => flat(K.p.asis).filter(n => String(n.ownerRole || '').toLowerCase() === team.toLowerCase()).length;
+    const pur = touch.find(t => t[0] === 'Purchasing');
+    ok(pur && pur[1] === mapDoes('Purchasing') && pur[1] === 3 && /3 steps \+2 involved/.test(pur[3]), 'Purchasing: 3 steps on the map (+2 it is named on): ' + JSON.stringify(pur));
+    ok(touch.filter(t => ['AP', 'Credit', 'Treasury'].includes(t[0])).every(t => t[1] === mapDoes(t[0])), 'every team\'s count is its steps on the map: ' + JSON.stringify(touch));
+    const ops = touch.find(t => t[0] === 'Operations');
+    ok(ops && ops[1] === 2, '"Karen (Operations Director) approves too" is an Operations step: ' + JSON.stringify(ops));
+    await shot('r16-karen-process');
+    const credit = by('Credit limit');
+    const cid = K.des.find(d => d.name === 'Credit limit');
+    await nav(`/data/${st.docs.dataElement.find(d => d.data === cid || (d.data.name === 'Credit limit' && d.data.producedBy === credit.producedBy)).id}`);
+    ok(/Made by step 6 of Northwind vendor onboarding \(R16\)/.test(await page.textContent('[data-made]').catch(() => '')) && !(await page.$('.hdr [data-perrun]')), 'the data page says "Made by step 6", never "Collected each run"');
+    ok(/We have it|Available/.test(await page.textContent('.hdr [data-avail]')), 'and it is available');
+
+    console.log('# R16 BPM: BPMN takes the pool name and names its information; Visio "(Controller (Sam Wu))"');
+    await nav('/import');
+    await page.setInputFiles('.hdr-side [data-bpmn-file]', require('path').join(__dirname, 'fixtures', 'r15-credit.bpmn'));
+    await page.waitForSelector('.overlay [data-impsum]', { timeout: 15000 });
+    ok(await page.inputValue('.overlay [data-imp-name]') === 'Credit Limit Request', 'the BPMN process name comes from its pool: ' + await page.inputValue('.overlay [data-imp-name]'));
+    const brow = await page.$$eval('.overlay [data-have-row]', els => els.map(e => [e.querySelector('b').textContent, e.dataset.haveChoice]));
+    ok(brow.some(r => r[0] === 'Risk score') && brow.some(r => r[0] === 'Credit limit request') && (brow.find(r => r[0] === 'Credit limit') || [])[1] === 'made', 'information named in the task names, the credit limit made by its step: ' + JSON.stringify(brow));
+    await page.screenshot({ path: `${OUT}/r16-bpmn-preview.png` });
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('import')]); await settle();
+    const bpid = page.url().match(/process\/([^?/]+)/)[1];
+    st = await state();
+    const Bp = procData(st, bpid);
+    ok(Bp.p.name === 'Credit Limit Request' && Bp.des.length === brow.length && Bp.des.some(d => d.name === 'Risk score' && d.avail === 'live'), 'saved with its name and its information: ' + Bp.des.map(d => d.name + ':' + d.avail).join(', '));
+    const ctl = flat(Bp.p.asis).find(n => /Controller sign-off/.test(n.title));
+    ok(ctl && ctl.ownerRole === 'Controller' && /Sam Wu/.test(ctl.note || ''), 'the Controller lane is the Controller role with Sam Wu named');
+    await nav(`/process/${bpid}?mode=raci`);
+    const raciB = await page.evaluate(() => { const hs = [...document.querySelectorAll('[data-raci-colh]')].map(h => h.textContent.trim()); return [...document.querySelectorAll('[data-raci-row]')].map(r => ({ t: r.querySelector('th').textContent.replace(/^\d+/, '').trim(), cells: [...r.querySelectorAll('td')].map((td, i) => [hs[i], td.dataset.raciVal]).filter(x => x[1]) })); });
+    const sRow = raciB.find(r => /Controller sign-off/.test(r.t));
+    ok(sRow && sRow.cells.some(([h, v]) => /Controller/.test(h) && /A/.test(v)), 'RACI: the Controller is A on the sign-off after the $250,000 threshold (BPMN import): ' + JSON.stringify(sRow));
+    await nav('/import');
+    await page.setInputFiles('.hdr-side [data-bpmn-file]', require('path').join(__dirname, 'fixtures', 'r15-credit.vsdx'));
+    await page.waitForSelector('.overlay [data-imp-preview]', { timeout: 15000 });
+    const vrows = await page.$$eval('.overlay [data-imp-preview] li', els => els.map(e => e.textContent.trim()));
+    ok(vrows.some(t => /^Controller sign-off\s+Controller$/.test(t)), 'Visio "Controller sign-off (Controller (Sam Wu))" is done by the Controller, never "nobody yet": ' + vrows.join(' | '));
+    await act('cancel');
+
+    console.log('# R16 BPM 1: the process page and Launch agree on who can approve');
+    await paste(FIX15('r15-credit-sop.txt'));
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-pname]');
+    await page.fill('.overlay [data-pname]', 'Northwind credit limit (R16)');
+    await Promise.all([page.waitForURL(/\/process\//, { timeout: 30000 }), act('create')]); await settle();
+    const cpid = page.url().match(/process\/([^?/]+)/)[1];
+    st = await state();
+    const C = procData(st, cpid);
+    const cby = n => C.des.find(d => d.name === n) || {};
+    ok(cby('Customer name').perRun && cby('Account number').perRun && cby('Bank account').perRun && cby('Credit limit').producedBy, 'credit: customer fields are collected each run, the credit limit is made by a step');
+    /* a project changes this process; a person chosen on Launch for one part counts on the process page too */
+    const teams = await page.$$eval('[data-apr-team]', els => els.map(e => [e.dataset.aprTeam, e.dataset.aprDept]));
+    /* each team approved by a workspace department (PMO has no named approver: its members approve) */
+    const addSales = await page.evaluate(async () => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/departments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actor: 'mc', op: { kind: 'add', name: 'Sales', approvers: [] } }) })).status);
+    ok(addSales === 200, 'a Sales department with nobody in it yet: ' + addSales);
+    st = await state();
+    const pc = st.docs.process.find(d => d.id === cpid).data;
+    ok(await putDoc('process', cpid, Object.assign({}, pc, { teamDepartments: { Sales: 'Sales', AR: 'Accounts Payable', Credit: 'Treasury', Controller: 'Compliance' } }), 'R16 test: who approves each team') === 200, 'each team gets an approving department');
+    const prj = { id: 'prj-r16-n2', name: 'Credit limit change (R16)', owner: 'mc', processes: [cpid], status: 'active', start: '2026-11-18', due: '2027-02-26' };
+    ok(await putDoc('project', prj.id, prj, 'R16 test project') === 200, 'a project changes the credit process');
+    await nav(`/release/${prj.id}`);
+    const launchGaps = async () => (await page.$$eval('#app', els => (els[0].innerText.match(/Needs someone to approve/g) || []).length));
+    const lg0 = await launchGaps();
+    await nav(`/process/${cpid}`);
+    const pg0 = +(await page.getAttribute('[data-approvers]', 'data-apr-gaps'));
+    ok(pg0 === lg0, `the process page counts the same parts as Launch: ${pg0} vs ${lg0} (${JSON.stringify(teams)})`);
+    const prjDoc = (await state()).docs.project.find(d => d.id === prj.id).data;
+    const gapBu = await engIn(`const p = docs.project.find(d => d.id === arg).data; const r = E.readiness ? null : null; return (E.teamRouting(docs, Object.assign({}, docs.process.find(d => d.id === p.processes[0]).data)).teams || []).filter(t => t.department).map(t => t.department).find(bu => !E.partApprovers(docs, p, bu).eligible.length) || null;`, prj.id);
+    if (gapBu) {
+      ok(await putDoc('project', prj.id, Object.assign({}, prjDoc, { approvers: { [gapBu]: 'ps' } }), 'R16 test: Priya chosen on Launch') === 200, `Priya Shah chosen on Launch for ${gapBu}`);
+      await nav(`/release/${prj.id}`); const lg1 = await launchGaps();
+      await nav(`/process/${cpid}`);
+      const pg1 = +(await page.getAttribute('[data-approvers]', 'data-apr-gaps'));
+      const note = await page.textContent(`[data-apr-proj="${prj.id}"]`).catch(() => '');
+      ok(pg1 === lg1 && pg1 === pg0 - 1, `after the choice both say ${lg1} (process page ${pg1})`);
+      ok(/Priya Shah \(chosen on Launch\) can approve/.test(note), 'the process page names who Launch will ask: ' + note);
+      await shot('r16-approvers');
+    } else ok(false, 'a part with nobody to approve was expected in the credit project');
+
+    console.log('# R16 BPM 2/4: changed choices count in the header; the risk-score threshold change is a threshold change');
+    await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '1'));
+    st = await state();
+    const p0 = st.docs.process.find(d => d.id === cpid).data;
+    let k = 0; const idm = {};
+    const fork = ns => ns.map(n => { const c = JSON.parse(JSON.stringify(n)); c.id = 'g' + (++k) + '-' + n.id; idm[n.id] = c.id; if (n.type !== 'trigger' && n.type !== 'end') c.from = n.id; if (c.branches) c.branches = n.branches.map(b => Object.assign({}, b, { nodes: fork(b.nodes || []) })); return c; });
+    const tobe = fork(p0.asis);
+    allNodes(tobe).forEach(n => (n.branches || []).forEach(b => { if (b.goto) b.goto = idm[b.goto] || b.goto; }));
+    const auto = allNodes(tobe).find(n => n.type === 'decision' && /risk score/.test(n.title || ''));
+    ok(!!auto && /\b60\b/.test(auto.title), 'the auto-approve choice tests the risk score: ' + (auto && auto.title));
+    auto.title = auto.title.replace(/\b60\b/, '65');
+    ok(await putDoc('process', cpid, Object.assign({}, p0, { tobe }), 'R16 test: risk score 60 → 65') === 200, 'Future map saved with the risk score raised to 65');
+    await nav(`/process/${cpid}?mode=diff`);
+    const was = (await page.textContent(`[data-gw-was="${auto.id}"]`).catch(() => '')) || '';
+    ok(/threshold \(risk score\): was 60 → now 65/.test(was), 'the choice lists the risk score change as a threshold change: ' + was);
+    const kc = await page.$eval('[data-kpi-diff]', e => [+e.dataset.kpiNew, +e.dataset.kpiChanged, e.textContent]).catch(() => [0, 0, '']);
+    ok(kc[1] >= 1, 'the "New + changed" header counts the changed choice (was "0+0"): ' + kc[2]);
+    await shot('r16-diff-risk');
+    await page.evaluate(() => localStorage.setItem('pmoflow.advanced', '0'));
+
+    console.log('# R16 BPM 5: the data page never says the sample matches beside a warning');
+    const bank = st.docs.dataElement.find(d => d.data.name === 'Bank account' && C.des.some(x => x === d.data || (x.name === 'Bank account')));
+    const bankId = C.des.find(d => d.name === 'Bank account') && st.docs.dataElement.filter(d => d.data.name === 'Bank account').pop().id;
+    void bank;
+    const pst = await page.evaluate(async ([id, csv]) => (await fetch(`/api/pmoflow/ws/${localStorage.getItem('pmoflow.ws')}/profile/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ csv, actor: 'mc' }) })).status, [bankId, FIX15('r15-credit-sample.csv')]);
+    ok(pst === 200, 'sample uploaded on Bank account');
+    await nav(`/data/${bankId}`);
+    const bl = await page.$$eval('[data-profline]', els => els.map(e => e.textContent.trim()));
+    const bline = bl.find(l => /bank_account/.test(l)) || '';
+    ok(/shared or fraudulent/.test(bline) && !/match/.test(bline) && (bline.match(/shared or fraudulent/g) || []).length === 1, 'bank_account warns once, never "matches": ' + bline);
+    ok(!/matches the rules|all match the rules/.test(await page.textContent('#app')), 'nowhere on the page says the sample matches the rules');
+    const chips = await page.$$eval('.hdr .res .chip', els => els.map(e => e.textContent.trim()));
+    ok(chips.filter(c => /Collected each run/.test(c)).length === 1, 'the header says "Collected each run" once: ' + chips.join(' | '));
+    await shot('r16-data-bank');
+
+    console.log('# R16 at 390 px');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await paste(FIX15('r15-karen-sop.txt'));
+    await page.click('[data-create]'); await page.waitForSelector('.overlay [data-have-list]');
+    await overflow('R16 "Do you already have these?" @390');
+    const tap = await page.$$eval('.overlay .d-have-opt', els => Math.min(...els.map(e => e.getBoundingClientRect().height)));
+    ok(tap >= 32, 'each answer is at least 32px tall on a phone: ' + tap);
+    await page.screenshot({ path: `${OUT}/r16-have-390.png` }); await act('cancel');
+    await nav(`/process/${kpid}`); await overflow('R16 process @390'); await shot('r16-phone-process');
+    await nav(`/data/${bankId}`); await overflow('R16 data @390'); await shot('r16-phone-data');
+  } catch (e) {
+    fail++; failures.push('r16 exception: ' + e.message.split('\n')[0]); console.log('  FAIL r16 exception: ' + e.stack.split('\n').slice(0, 4).join('\n'));
+    await page.screenshot({ path: `${OUT}/r16-failure.png`, fullPage: true }).catch(() => {});
+  }
+  await ctx.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   /* each run gets its own test client IP so the 5-sandboxes-per-IP-per-day limit does not block repeat runs on the dev server */
@@ -1093,6 +1301,7 @@ async function r15(browser, errors) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: { 'x-forwarded-for': ip }, acceptDownloads: true });
   const page = await ctx.newPage();
   const errors = [];
+  if (process.env.ONLY_R16 === '1') { await r16(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R15 === '1') { await r15(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R14 === '1') { await r14(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
   if (process.env.ONLY_R13 === '1') { await r13(browser, errors); ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : '')); await browser.close(); console.log(`\n${pass} passed, ${fail} failed`); if (fail) { console.log('Failures:\n - ' + failures.join('\n - ')); process.exit(1); } return; }
@@ -1241,8 +1450,11 @@ async function r15(browser, errors) {
     ok(sawMiss || sawAmber, `seed shows at least one data warning (missing ${sawMiss}, examples ${sawAmber})`);
     /* R9 §13: the KPI counts steps only, so "new + changed" never exceeds the step count */
     const dsp = ENG.diffProcess(seedP), sfl = flat(seedP.tobe);
-    const cs0 = ENG.changeSummary(seedP), sum = { new: cs0.added, changed: cs0.changed };
-    ok((await page.textContent('[data-kpi-diff] b')).trim() === `${sum.new}+${sum.changed}`, `R9: KPI new+changed steps = diffProcess ${sum.new}+${sum.changed} (of ${sfl.length} steps)`);
+    /* R16 (BPM): the header also counts changed and new choices, as "What changed" does (it read "0+0" beside 2 changed
+       choices). The step part is unchanged: changeSummary's added/changed steps; the choices come from diffProcess. */
+    const cs0 = ENG.changeSummary(seedP), gw0 = allNodes(seedP.tobe).filter(n => n.type === 'decision');
+    const sum = { new: cs0.added + gw0.filter(g => dsp.nodes[g.id] === 'new').length, changed: cs0.changed + gw0.filter(g => dsp.nodes[g.id] === 'changed').length };
+    ok((await page.textContent('[data-kpi-diff] b')).trim() === `${sum.new}+${sum.changed}`, `R9: KPI new+changed = diffProcess ${sum.new}+${sum.changed} (steps ${cs0.added}+${cs0.changed} of ${sfl.length}, plus choices)`);
 
     console.log('# swimlanes: gateways in their own row, lanes fit or scroll inside the canvas');
     await nav(`/process/${pid}?mode=lanes`);
@@ -1352,7 +1564,9 @@ async function r15(browser, errors) {
     await page.fill('.overlay input[name=touches]', 'Kickoff Desk');
     await saving(() => act('save'));
     ok((await getProc(newPid)).asis[0].title === 'Requester submits a purchase request', 'R5: trigger title saved');
-    ok(await page.isVisible('[data-touches] [data-touch="Kickoff Desk"]:has-text("· 1")'), 'R7: "what starts it" teams count in "Teams involved"');
+    /* R16 (Karen): "Teams involved" counts the steps a team does on the map; a team named only on "what starts it" still
+       counts, as involved ("· involved in 1 step"; it was "· 1 step") */
+    ok(await page.isVisible('[data-touches] [data-touch="Kickoff Desk"][data-touch-also="1"]:has-text("· involved in 1 step")'), 'R7: "what starts it" teams count in "Teams involved"');
     ok(await page.isVisible('[data-addstep]:has-text("+ Add a step")'), 'R7: Today editing shows one big "+ Add a step" button');
     await shot('process-new-asis'); await iconCheck('edit Today');
     await page.click('.d-modes [data-mode="tobe"]'); await page.waitForURL(/mode=edit&v=tobe/);
@@ -2687,7 +2901,7 @@ async function r15(browser, errors) {
       ok(offAll.some(n => n.type === 'end' && /request rejected/i.test(n.title)) && offAll.filter(n => n.type === 'step').some(n => n.system === 'ServiceNow') && offAll.some(n => !n.owner && n.ownerRole === 'HR Manager' && /Maya Chen/.test(n.note || '') && /exit form/i.test(n.title)) && !offAll.some(n => n.owner === 'mc'), 'R9 §9 / R10: the saved map keeps the "Stop: request rejected" end, the system and the role (the name stays in the note)');
       const exitDe = des.find(d => /employee exit form/i.test(d.name)), reqDe = des.find(d => /access request form/i.test(d.name));
       /* R11 G2 §4: the saved owner is the owner the preview showed (the step's role), never the importer */
-      ok(exitDe && exitDe.ownerRole === 'HR Manager' && !exitDe.owner && reqDe && reqDe.ownerRole === 'Clerk' && !reqDe.owner && exitDe.avail === 'unchecked' && D.ndOwners.includes(exitDe.ownerRole) && D.ndOwners.includes(reqDe.ownerRole), 'R11 G2 §4: saved information owner = the preview’s owner (HR Manager, Clerk), never the importer, and it starts "Not checked yet"');
+      ok(exitDe && exitDe.ownerRole === 'HR Manager' && !exitDe.owner && reqDe && reqDe.ownerRole === 'Clerk' && !reqDe.owner && exitDe.avail === 'live' && exitDe.source === 'Already in use' && D.ndOwners.includes(exitDe.ownerRole) && D.ndOwners.includes(reqDe.ownerRole), 'R11 G2 §4: saved information owner = the preview’s owner (HR Manager, Clerk), never the importer; R16: it starts as the answer to "Do you already have these?" (the default "We have it"), no longer "Not checked yet"');
       if (reqDe) { await nav(`/data/${reqDe.id}`); const ow = (await page.textContent('.hdr .res')).replace(/\s+/g, ' '); ok(/Clerk/.test(ow) && !/—|None\b/.test(ow), 'R9 §8: the data page shows the role as owner, never "—": ' + ow.slice(0, 80)); }
       await nav(`/process/${offPid}?mode=asis`); await shot('r9-import-saved-map');
       ok(await page.isVisible('#canvas .node.end:has-text("Stop: request rejected")'), 'R9 §9: the map draws the rejected path ending');
@@ -2743,7 +2957,7 @@ async function r15(browser, errors) {
       const vp = await getProc(vPid); const S10 = await state(); const des = S10.docs.dataElement.map(d => d.data);
       const used = [...new Set(allNodes(vp.asis).flatMap(n => n.data || []))];
       const seedBank = des.find(d => d.name === 'Bank remittance details');
-      ok(used.length > 0 && !used.includes(seedBank && seedBank.id) && used.every(id => { const d = des.find(x => x.id === id) || {}; return d.perRun ? d.avail === 'live' : d.avail === 'unchecked'; }), `R10 §2: ${used.length} pieces of information created fresh in this process, none from the seed, each "Not checked yet" (R14: documents the vendor sends each run are "Collected each run")`);
+      ok(used.length > 0 && !used.includes(seedBank && seedBank.id) && used.every(id => { const d = des.find(x => x.id === id) || {}; return d.perRun || d.producedBy ? d.avail === 'live' : d.avail === 'live' && d.source === 'Already in use'; }), `R10 §2: ${used.length} pieces of information created fresh in this process, none from the seed, each with its answer to "Do you already have these?" (R16: the default "We have it" replaced "Not checked yet"; R14: documents the vendor sends each run are "Collected each run")`);
       ok(!flat(vp.asis).some(n => n.owner && n.owner !== me) && flat(vp.asis).filter(n => n.ownerRole).length >= 8, 'R10 §2: owners come only from the text (roles), never a seed person');
       ok(!/\d+\s+steps?/.test(vp.desc || ''), 'R10: the saved description has no step count');
       ok(await page.isVisible('[data-touches] [data-touch="Procurement"]') && await page.isVisible('[data-touches] [data-touch="Treasury"]'), 'R10: "Teams involved" on the saved process lists the teams from the text');
@@ -2751,6 +2965,11 @@ async function r15(browser, errors) {
       const bank = des.find(d => d.name === 'Vendor master record' && used.includes(d.id)) || des.find(d => !d.perRun && used.includes(d.id));
       ok(!!(des.find(d => d.name === 'Bank details' && used.includes(d.id)) || {}).perRun, 'R15: the vendor\'s bank details are collected each run');
       if (bank) {
+        await nav(`/data/${bank.id}`);
+        ok(/We have it/.test(await page.textContent('.hdr')) && !/Connected/.test(await page.textContent('.hdr')), 'R16: pasted information reads the answer given ("We have it"), never "Connected"');
+        /* R16: "Not checked yet" (information saved before R16) still reads that way and its owner can still confirm it */
+        const bankDoc = (await state()).docs.dataElement.find(d => d.id === bank.id).data;
+        ok(await putDoc('dataElement', bank.id, Object.assign({}, bankDoc, { avail: 'unchecked', source: '', haveAnsweredBy: undefined }), 'e2e: information as saved before R16') === 200, 'fixture: set back to "Not checked yet"');
         await nav(`/data/${bank.id}`);
         ok(/Not checked yet/.test(await page.textContent('#app')) && !/Connected/.test(await page.textContent('.hdr')) && await page.isVisible('[data-unchecked] [data-confirm-live]'), 'R10: pasted information reads "Not checked yet" (never "Connected") and its owner can confirm it');
         await shot('r10-data-unchecked');
@@ -2970,6 +3189,7 @@ async function r15(browser, errors) {
   if (process.env.SKIP_R13 !== '1') await r13(browser, errors);
   if (process.env.SKIP_R14 !== '1') await r14(browser, errors);
   if (process.env.SKIP_R15 !== '1') await r15(browser, errors);
+  if (process.env.SKIP_R16 !== '1') await r16(browser, errors);
   ok(errors.length === 0, 'zero page/console errors' + (errors.length ? ': ' + errors.slice(0, 5).join(' | ') : ''));
   await browser.close();
   console.log(`\n${pass} passed, ${fail} failed`);

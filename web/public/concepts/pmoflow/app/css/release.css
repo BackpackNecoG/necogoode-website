@@ -798,3 +798,7 @@ a.rs-part-link .btn,a.rs-part-link .rl-go{align-self:flex-start}
   .rl-page :is(p, li, .hint, small, td, span) > a:not(.btn) { display: inline; line-height: inherit; min-height: 0; padding-block: 9px; }
   .rl-page summary { display: flex; align-items: center; }
 }
+
+/* R16 (Karen r15): "Waiting on:" one line per kind */
+.rs-wait-lines { margin: 2px 0 0; padding-left: 18px; }
+.rs-wait-lines li { margin: 0; }

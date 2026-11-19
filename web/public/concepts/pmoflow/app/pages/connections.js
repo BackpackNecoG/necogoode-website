@@ -187,7 +187,7 @@ function logHTML(c) {
    names who confirms it; shown while PMOFlow has not finished the task itself. */
 function heldNote(c, wid, it, w) {
   if (!wid || !w || w.status === 'done') return null;
-  if (w.syncHold && w.syncHold.reason) return { text: w.syncHold.reason, confirmBy: w.syncHold.confirmBy || null };
+  if (w.syncHold && w.syncHold.reason) return { text: w.syncHold.reason, confirmBy: w.syncHold.confirmBy || null, kind: w.syncHold.kind || null };
   const sync = S();
   if (sync.pmoStatus(c, it.status) !== 'done') return null;
   const h = (c.log || []).find(e => e.op === 'held' && e.workItemId === wid);
@@ -196,7 +196,10 @@ function heldNote(c, wid, it, w) {
 function holdOwnerHTML(wid, h) {
   if (h.fromLog && !h.confirmBy) return '';
   const p = h.confirmBy ? store.person(h.confirmBy) : null;
-  return p ? `<div class="s cx-hold-owner" data-cx-hold-owner="${esc(wid)}">${av(p.id)}<span>Waiting for <b>${esc(p.name)}</b> to confirm it in PMOFlow</span></div>`
+  /* R16 N4 #5: the person the hold names checks and confirms an out-of-order Done here, through the same open-work warning
+     as the project manager's confirm */
+  const mine = p && !h.fromLog && h.kind === 'order' && store.state.me === p.id;
+  return p ? `<div class="s cx-hold-owner" data-cx-hold-owner="${esc(wid)}">${av(p.id)}<span>${mine ? 'Waiting for <b>you</b> to confirm it in PMOFlow' : `Waiting for <b>${esc(p.name)}</b> to confirm it in PMOFlow`}</span>${mine ? ` <button type="button" class="btn sm" data-cx-clear-hold="${esc(wid)}">Check and confirm</button>` : ''}</div>`
     : `<div class="s cx-hold-owner none" data-cx-hold-owner="${esc(wid)}">Needs an owner to confirm it</div>`;
 }
 /* R14 L4 #1: a due date set in the tool that is waiting in Change the plan (never applied by sync) */
@@ -369,6 +372,26 @@ export function bind(root) {
       ui.result = Object.assign({ cid: c.id, title: `${inp.dataset.cxSimdue} due date set to ${fmt(inp.value)} in ${T}.` }, r);
       toast(r.summary && r.summary.planChanges ? 'Past the deadline: sent to Change the plan for approval' : 'Change came back from ' + T);
     } catch (e) { ui.result = { cid: c.id, error: e.message }; }
+    await store.load();
+  });
+  root.querySelectorAll('[data-cx-clear-hold]').forEach(b => b.onclick = async () => {
+    const c = conns().find(x => x.id === ui.sel); const wid = b.dataset.cxClearHold; if (!c) return;
+    const w = store.get('workItem', wid); if (!w) return;
+    /* the same check the server makes, so the warning shows before anything is sent */
+    const pre = S().clearHold(store.state.docs, wid, store.state.me, { engine: window.PMOEngine, today: store.state.today });
+    if (!pre.ok) { toast(pre.error); return; }
+    if (pre.warning) {
+      const r = await modal({ title: 'Confirm it’s done?', body: `<div data-confirm-open data-cx-hold-warning><p style="margin:0">${esc(pre.warning)}</p>
+        <ul class="pmo-confirm-open">${pre.open.slice(0, 6).map(o => `<li data-confirm-open-item="${esc(o.id)}">“${esc(o.title)}”</li>`).join('')}</ul>
+        <p class="hint" style="margin:6px 0 0">It becomes Done by you. While ${pre.open.length === 1 ? 'that task is' : 'those tasks are'} still open it counts only once someone else confirms it.</p></div>`,
+        actions: [{ id: 'confirm', label: 'Confirm anyway', primary: true }] });
+      if (r.action !== 'confirm') return;
+    }
+    try {
+      const r = await cx('POST', `/${encodeURIComponent(c.id)}/clear-hold`, { workItemId: wid, confirmOpen: !!pre.warning });
+      if (r.needsConfirm) { toast('Work it depends on is still open. Check it and confirm again.'); }
+      else { ui.result = { cid: c.id, title: 'Hold cleared.', sentence: r.sentence }; toast(`Confirmed: “${w.title}”`); }
+    } catch (e) { toast(e.message); return; }
     await store.load();
   });
   root.querySelectorAll('details[data-cx-tech]').forEach(dt => dt.ontoggle = () => { if (dt.open) ui.openLog.add(dt.dataset.cxTech); else ui.openLog.delete(dt.dataset.cxTech); });
