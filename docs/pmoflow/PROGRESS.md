@@ -54,3 +54,5 @@
 - **No more compatibility code for old seeded states.** A pilot starts with a clean workspace.
 - **Seed rebuild (after the R16 deploy):** regenerate the Northwind sample through the product's own actions under today's rules, so it can't hold states the rules forbid. Keep it small. Expect golden numbers to be re-baselined once.
 - **Deferred as low value:** the process page reading `partApprovers.invitedText`, so it uses the same invite wording as Launch.
+- **R16 deployed:** 7683c02, live and verified. Unit 438, e2e 3097 (design 1013, pmo 694, release 359, consistency 455, change 124, buyer 188, connect 100, admin 164), lint clean. This is the first review run with tagged findings: [own data], [sample data] or [deliberate attack].
+- **Test fix:** sync test "R14 L4 #1 (route)" hardcoded a date that collided with a clock-relative seed on Nov 19. It now picks its date from W7's due date.
